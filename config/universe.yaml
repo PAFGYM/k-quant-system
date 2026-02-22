@@ -1,0 +1,101 @@
+# K-Quant Universe Configuration v2.0
+
+market:
+  exchange: KRX
+  markets:
+    - KOSPI
+    - KOSDAQ
+
+universe:
+  name: "K-Quant Pro"
+  description: "Korean stock & ETF universe for multi-strategy analysis"
+
+  # ── 개별 우량주 (40종목) ──────────────────────────────────────────
+  stocks:
+    - { code: "005930", name: "삼성전자", market: KOSPI, sector: "반도체" }
+    - { code: "000660", name: "SK하이닉스", market: KOSPI, sector: "반도체" }
+    - { code: "005380", name: "현대차", market: KOSPI, sector: "자동차" }
+    - { code: "000270", name: "기아", market: KOSPI, sector: "자동차" }
+    - { code: "005490", name: "POSCO홀딩스", market: KOSPI, sector: "철강" }
+    - { code: "207940", name: "삼성바이오로직스", market: KOSPI, sector: "바이오" }
+    - { code: "373220", name: "LG에너지솔루션", market: KOSPI, sector: "2차전지" }
+    - { code: "068270", name: "셀트리온", market: KOSPI, sector: "바이오" }
+    - { code: "105560", name: "KB금융", market: KOSPI, sector: "금융" }
+    - { code: "055550", name: "신한지주", market: KOSPI, sector: "금융" }
+    - { code: "086790", name: "하나금융지주", market: KOSPI, sector: "금융" }
+    - { code: "006400", name: "삼성SDI", market: KOSPI, sector: "2차전지" }
+    - { code: "051910", name: "LG화학", market: KOSPI, sector: "화학" }
+    - { code: "012330", name: "현대모비스", market: KOSPI, sector: "자동차부품" }
+    - { code: "035420", name: "NAVER", market: KOSPI, sector: "IT" }
+    - { code: "035720", name: "카카오", market: KOSPI, sector: "IT" }
+    - { code: "028260", name: "삼성물산", market: KOSPI, sector: "건설" }
+    - { code: "012450", name: "한화에어로스페이스", market: KOSPI, sector: "방산" }
+    - { code: "329180", name: "HD한국조선해양", market: KOSPI, sector: "조선" }
+    - { code: "329660", name: "HD현대중공업", market: KOSPI, sector: "조선" }
+    - { code: "096770", name: "SK이노베이션", market: KOSPI, sector: "에너지" }
+    - { code: "017670", name: "SK텔레콤", market: KOSPI, sector: "통신" }
+    - { code: "030200", name: "KT", market: KOSPI, sector: "통신" }
+    - { code: "066570", name: "LG전자", market: KOSPI, sector: "전자" }
+    - { code: "032830", name: "삼성생명", market: KOSPI, sector: "보험" }
+    - { code: "000720", name: "현대건설", market: KOSPI, sector: "건설" }
+    - { code: "003490", name: "대한항공", market: KOSPI, sector: "항공" }
+    - { code: "097950", name: "CJ제일제당", market: KOSPI, sector: "식품" }
+    - { code: "090430", name: "아모레퍼시픽", market: KOSPI, sector: "화장품" }
+    - { code: "051900", name: "LG생활건강", market: KOSPI, sector: "생활용품" }
+    - { code: "036570", name: "엔씨소프트", market: KOSPI, sector: "게임" }
+    - { code: "259960", name: "크래프톤", market: KOSPI, sector: "게임" }
+    - { code: "263750", name: "펄어비스", market: KOSPI, sector: "게임" }
+    - { code: "323410", name: "카카오뱅크", market: KOSPI, sector: "핀테크" }
+    - { code: "034020", name: "두산에너빌리티", market: KOSPI, sector: "에너지" }
+    - { code: "009540", name: "한화솔루션", market: KOSPI, sector: "신재생" }
+    - { code: "326030", name: "SK바이오팜", market: KOSPI, sector: "바이오" }
+    - { code: "028300", name: "HLB", market: KOSDAQ, sector: "바이오" }
+    - { code: "196170", name: "알테오젠", market: KOSDAQ, sector: "바이오" }
+    - { code: "247540", name: "에코프로비엠", market: KOSDAQ, sector: "2차전지" }
+
+  # ── ETF ───────────────────────────────────────────────────────────
+
+  # 코스피200 ETF
+  etf_index:
+    - { code: "069500", name: "KODEX 200", market: KOSPI, category: "index" }
+    - { code: "102110", name: "TIGER 200", market: KOSPI, category: "index" }
+    - { code: "122630", name: "KODEX 레버리지", market: KOSPI, category: "leverage" }
+    - { code: "114800", name: "KODEX 인버스", market: KOSPI, category: "inverse" }
+    - { code: "252670", name: "KODEX 200선물인버스2X", market: KOSPI, category: "inverse" }
+
+  # 섹터 ETF
+  etf_sector:
+    - { code: "091160", name: "KODEX 반도체", market: KOSPI, category: "sector", sector: "반도체" }
+    - { code: "305540", name: "TIGER 2차전지테마", market: KOSPI, category: "sector", sector: "2차전지" }
+    - { code: "244580", name: "KODEX 바이오", market: KOSPI, category: "sector", sector: "바이오" }
+    - { code: "462900", name: "TIGER AI반도체핵심공정", market: KOSPI, category: "sector", sector: "반도체" }
+
+  # 해외/원자재 ETF
+  etf_global:
+    - { code: "360750", name: "TIGER 미국S&P500", market: KOSPI, category: "global", region: "US" }
+    - { code: "133690", name: "TIGER 미국나스닥100", market: KOSPI, category: "global", region: "US" }
+    - { code: "132030", name: "KODEX 골드선물", market: KOSPI, category: "commodity", region: "global" }
+    - { code: "130680", name: "TIGER 원유선물Enhanced", market: KOSPI, category: "commodity", region: "global" }
+
+  # 배당/장기 ETF
+  etf_dividend:
+    - { code: "211560", name: "TIGER 배당성장", market: KOSPI, category: "dividend" }
+    - { code: "290080", name: "KODEX 배당가치", market: KOSPI, category: "dividend" }
+
+  # Legacy alias (backward compat)
+  tickers:
+    - { code: "005930", name: "삼성전자", market: KOSPI }
+    - { code: "000660", name: "SK하이닉스", market: KOSPI }
+    - { code: "373220", name: "LG에너지솔루션", market: KOSPI }
+    - { code: "207940", name: "삼성바이오로직스", market: KOSPI }
+    - { code: "005380", name: "현대차", market: KOSPI }
+    - { code: "006400", name: "삼성SDI", market: KOSPI }
+    - { code: "035420", name: "NAVER", market: KOSPI }
+    - { code: "035720", name: "카카오", market: KOSPI }
+    - { code: "051910", name: "LG화학", market: KOSPI }
+    - { code: "068270", name: "셀트리온", market: KOSPI }
+
+filters:
+  min_market_cap_krw: 1000000000000  # 1조
+  min_avg_volume: 100000
+  min_avg_value_krw: 3000000000  # 30억

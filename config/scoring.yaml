@@ -1,0 +1,61 @@
+# K-Quant Scoring Configuration
+# Each category weight must sum to 1.0
+
+weights:
+  macro: 0.10
+  flow: 0.30
+  fundamental: 0.30
+  technical: 0.20
+  risk: 0.10
+
+thresholds:
+  # Technical
+  rsi_oversold: 30
+  rsi_overbought: 70
+  bb_lower_pct: 0.2
+  bb_upper_pct: 0.8
+  macd_signal_threshold: 0.0
+
+  # Fundamental
+  debt_ratio_max: 200
+  per_max: 30
+  per_min: 5
+  roe_min: 8.0
+  consensus_target_pct: 10.0
+
+  # Flow
+  foreign_net_buy_days: 3
+  institution_net_buy_days: 3
+  min_avg_value_krw: 3000000000  # 30억
+
+  # Macro
+  vix_high: 25
+  vix_low: 15
+  usdkrw_high: 1350
+  usdkrw_low: 1250
+
+  # Risk
+  max_drawdown_pct: 20
+  beta_max: 1.5
+
+# Decision thresholds
+buy_threshold: 70
+watch_threshold: 55
+
+# Sell reason classifier thresholds
+sell_reason:
+  macro_risk_off:
+    spx_drop_pct: -1.2
+    vix_spike_pct: 10.0
+    usdkrw_spike_pct: 0.6
+    broad_sell_pct: 70.0
+  flow_mechanical:
+    program_ratio_pct: 25.0
+    sector_corr: 0.7
+    basis_pct: -0.3
+  idiosyncratic:
+    consensus_drop_pct: -5.0
+  technical_sell:
+    near_high_pct: 95.0
+    volume_multiplier: 2.5
+    disparity_pct: 110.0

@@ -1,0 +1,206 @@
+# ========================================
+# K-Quant 시장 이벤트 통합 캘린더 2026
+# 정치 + 세금 + 기관 + 계절성 + 외인
+# ========================================
+
+yearly_patterns:
+  # --- 1월: 새해 효과 + 윈도드레싱 후 반등 ---
+  - name: "1월 효과 (January Effect)"
+    start_month: 1
+    start_day: 2
+    end_month: 1
+    end_day: 31
+    type: "seasonality"
+    effect: "bullish"
+    description: "연말 세금 매도 후 재매수, 기관 새해 포트폴리오 구성"
+    mechanism: "12월 대주주 회피 매도 물량 소화 + 기관 신규 자금 집행"
+    adjustments:
+      momentum_weight: 1.2
+      cash_min_pct: 10
+
+  # --- 2~4월: 선거 전 정책 부양기 ---
+  - name: "6월 선거 전 부양기"
+    start_month: 2
+    start_day: 1
+    end_month: 4
+    end_day: 30
+    type: "political"
+    effect: "bullish"
+    description: "정부 정책 부양 최고조, 공약 이행 가속"
+    mechanism: "여당 지지율 관리 위해 증시 우호 정책 집중"
+    adjustments:
+      momentum_weight: 1.5
+      breakout_weight: 1.3
+      cash_min_pct: 5
+      leverage_etf_ok: true
+      profit_target_pct: 8
+
+  # --- 5월: Sell in May + 선거 직전 불확실성 ---
+  - name: "5월 경계기 (Sell in May + 선거 직전)"
+    start_month: 5
+    start_day: 1
+    end_month: 5
+    end_day: 31
+    type: "seasonality_political"
+    effect: "cautious"
+    description: "Sell in May 글로벌 패턴 + 선거 불확실성 겹침"
+    mechanism: |
+      1) 글로벌 헤지펀드 리밸런싱 (5~6월)
+      2) 선거 결과 불확실성으로 기관 관망
+      3) 외인 차익실현 가능성
+    adjustments:
+      momentum_weight: 0.7
+      cash_min_pct: 25
+      leverage_etf_ok: false
+      profit_target_pct: 5
+
+  # --- 6월: 선거일 전후 ---
+  - name: "6월 선거 (D-day 전후)"
+    start_month: 6
+    start_day: 1
+    end_month: 6
+    end_day: 30
+    type: "political"
+    effect: "volatile"
+    description: "선거 결과에 따라 급등/급락"
+    mechanism: |
+      선거 전: 여론조사 따라 테마주 급등락
+      선거 당일~+2일: 결과 반영 갭
+      선거 후: 승자 테마 급등, 패자 테마 급락
+    adjustments:
+      cash_min_pct: 30
+      leverage_etf_ok: false
+      stop_loss_tight: true
+
+  # --- 7~8월: 선거 후 정책 방향 확인 + 여름 약세 ---
+  - name: "여름 약세 + 선거 후 관망"
+    start_month: 7
+    start_day: 1
+    end_month: 8
+    end_day: 31
+    type: "seasonality_political"
+    effect: "neutral"
+    description: "여름 거래량 감소 + 선거 후 정책 관망"
+    mechanism: "휴가 시즌 거래량 20~30% 감소, 기관 여름 포트폴리오 축소"
+    adjustments:
+      momentum_weight: 0.8
+      cash_min_pct: 20
+
+  # --- 9~10월: 실적 시즌 + 미국 중간선거 변동성 ---
+  - name: "3분기 실적 시즌"
+    start_month: 9
+    start_day: 1
+    end_month: 10
+    end_day: 31
+    type: "earnings"
+    effect: "mixed"
+    description: "실적 서프라이즈 종목 급등, 미달 종목 급락"
+    mechanism: "기관 실적 프리뷰 매매 + 미국 중간선거(11/3) 접근"
+    adjustments:
+      earnings_bonus: 10
+      cash_min_pct: 15
+
+  # --- 11월 초~중: 미국 중간선거 변동성 ---
+  - name: "미국 중간선거 변동성"
+    start_month: 11
+    start_day: 1
+    end_month: 11
+    end_day: 15
+    type: "global_political"
+    effect: "volatile"
+    description: "미국 정치 불확실성 -> 글로벌 변동성 확대"
+    adjustments:
+      cash_min_pct: 20
+      leverage_etf_ok: false
+
+  # --- 11월 중~12월 중: 연말 랠리 (산타 랠리) ---
+  - name: "연말 랠리 (Santa Rally)"
+    start_month: 11
+    start_day: 15
+    end_month: 12
+    end_day: 15
+    type: "seasonality"
+    effect: "bullish"
+    description: "연말 보너스 자금 유입 + 기관 윈도드레싱"
+    mechanism: |
+      1) 기관 연말 실적 맞추기 위해 수익 좋은 종목 추가 매수 (윈도드레싱)
+      2) 개인 보너스/성과급 투자 유입
+      3) 외인 연말 포트폴리오 리밸런싱
+    adjustments:
+      momentum_weight: 1.3
+      cash_min_pct: 10
+
+  # --- 12월 15~26: 대주주 양도세 회피 매도 시즌 ---
+  - name: "대주주 양도세 회피 매도"
+    start_month: 12
+    start_day: 15
+    end_month: 12
+    end_day: 28
+    type: "tax"
+    effect: "bearish_selective"
+    description: "종목당 50억+ 보유자 연말 매도 폭탄"
+    mechanism: |
+      12월 말일 기준 대주주 판정 (종목당 50억원 이상)
+      결제 T+2로 마지막 매도일은 보통 12/26~27
+      주로 중소형주, 코스닥 고가 종목에 집중
+      대형주는 상대적으로 영향 적음
+    adjustments:
+      kosdaq_small_penalty: -10
+      cash_min_pct: 20
+
+  # --- 12월 27~31: 기관 윈도드레싱 마무리 ---
+  - name: "기관 윈도드레싱 마감"
+    start_month: 12
+    start_day: 27
+    end_month: 12
+    end_day: 31
+    type: "institutional"
+    effect: "mixed"
+    description: "기관 연말 성적표 꾸미기 마지막 매수"
+    mechanism: |
+      금융사/투자사 연간 운용보고서 마감:
+      연기금/보험사: 12/20 전후 대부분 마감
+      자산운용사: 12/28~29 최종 마감
+      증권사 자기매매: 12/30 최종 마감
+    adjustments:
+      large_cap_bonus: 5
+
+# ========================================
+# 2026 특별 이벤트 (연간 정책)
+# ========================================
+annual_policies:
+  - name: "밸류업 정책 연간"
+    year: 2026
+    effect: "bullish_sector"
+    description: "자사주 소각 의무화, 배당 확대, 연기금 코스닥 편입 5%"
+    target_sectors: ["금융", "지주", "자동차", "보험"]
+    adjustments:
+      sector_bonus: 10
+
+  - name: "코스닥 3000 정책"
+    year: 2026
+    effect: "bullish_kosdaq"
+    description: "정부 코스닥 활성화, AI/우주/에너지 IPO 확대"
+    adjustments:
+      kosdaq_bonus: 5
+
+  - name: "코리아 디스카운트 해소"
+    year: 2026
+    effect: "bullish_value"
+    description: "PBR 1배 이하 저평가 기업 리레이팅"
+    target_criteria: "pbr_under_1"
+    adjustments:
+      value_bonus: 5
+
+# 2026 주도 섹터 정의
+leading_sectors:
+  tier1:  # +5점
+    - "반도체"
+    - "중공업/방산"
+    - "바이오"
+    - "금융"
+    - "에너지/전력"
+  tier2:  # +2점
+    - "자동차"
+    - "미디어/엔터"
+    - "소프트웨어"

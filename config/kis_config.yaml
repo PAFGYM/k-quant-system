@@ -1,0 +1,17 @@
+# KIS OpenAPI Configuration
+# 한국투자증권 Open API 연동 설정
+# 값을 입력한 후 봇을 재시작하거나 /setup_kis 명령어로 설정
+
+kis:
+  hts_id: ""           # 한투 HTS 아이디
+  app_key: ""          # KIS Developers에서 발급
+  app_secret: ""       # KIS Developers에서 발급
+  account: ""          # 계좌번호 (00000000-01 형식)
+  mode: "virtual"      # virtual(모의) 또는 real(실전)
+
+# 자동매매 안전장치
+safety:
+  max_order_pct: 15       # 1회 최대 주문: 총 자산의 15%
+  max_daily_orders: 10    # 일일 최대 주문 횟수
+  daily_loss_limit_pct: -3  # 일일 손실 한도 (%)
+  require_confirmation: true  # 모든 주문에 확인 버튼 필수

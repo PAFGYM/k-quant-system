@@ -1,0 +1,59 @@
+# K-Quant v3.0 User Investment Goal Configuration
+
+goal:
+  current_asset: 175000000      # 1.75억
+  target_asset: 3000000000      # 30억
+  growth_needed: 17             # 약 17배
+  target_years: 3               # 3년 이내
+  annual_return_needed: 200     # 연 200%+ 필요
+  risk_tolerance: "aggressive"  # 공격적
+  style: "concentrated_momentum" # 집중 + 모멘텀
+
+milestones:
+  year_1:
+    year: 2026
+    start: 175000000
+    target: 525000000
+    multiplier: 3
+    strategy: "정책 부양 + 2차전지/반도체 집중"
+    monthly_target_pct: 12
+    quarterly:
+      Q1: { start: 175000000, target: 300000000 }
+      Q2: { start: 300000000, target: 450000000 }
+      Q3: { start: 450000000, target: 500000000 }
+      Q4: { start: 500000000, target: 525000000 }
+
+  year_2:
+    year: 2027
+    start: 525000000
+    target: 1500000000
+    multiplier: 3
+    strategy: "대형 테마 초기 진입 + 레버리지"
+
+  year_3:
+    year: 2028
+    start: 1500000000
+    target: 3000000000
+    multiplier: 2
+    strategy: "안정적 복리 + 일부 공격"
+
+portfolio_rules:
+  max_positions: 5              # 최대 보유 종목 5개 (집중)
+  max_single_pct: 50            # 1종목 최대 50%
+  max_leverage_pct: 30          # 레버리지 ETF 최대 30%
+  min_cash_pct: 5               # 최소 현금 5%
+  min_score_to_buy: 120         # 확신도 120점+ 종목만 매수
+
+  stop_loss_single: -10         # 단일 종목 -10% 절반 손절
+  stop_loss_portfolio: -15      # 전체 -15% 전종목 50% 현금화
+  stop_loss_leverage: -7        # 레버리지 ETF -7% 전량 손절
+  daily_loss_halt: -5           # 일일 -5% 추가 매매 중단
+
+scoring_override:
+  tenbagger_bonus: 20           # 텐배거 조건 충족 시 +20점
+  profit_target_pct: 15         # 기본 익절 +15%
+  trailing_stop_pct: 10         # 고점 -10%
+  momentum_weight: 2.0          # 모멘텀 가중치 2배
+  breakout_weight: 1.5          # 돌파 가중치 1.5배
+  bounce_min_drop: -15          # 반등 전략: -15% 이상 하락만
+  ml_min_probability: 70        # ML 70%+ 만 추천

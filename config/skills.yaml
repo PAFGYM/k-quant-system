@@ -1,0 +1,28 @@
+# K-Quant Skills / MCP Server Configuration
+# Enable after installing each skill/MCP server
+
+skills:
+  korea_stock_mcp:
+    path: ~/projects/korea-stock-mcp
+    enabled: false
+    description: "KOSPI/KOSDAQ 실시간 + DART"
+
+  backtesting_skill:
+    path: ~/.claude/skills/backtesting-trading-strategies
+    enabled: false
+    description: "8가지 전략 백테스트"
+
+  financial_modeling:
+    path: ~/.claude/skills/creating-financial-models
+    enabled: false
+    description: "DCF/재무모델"
+
+  trading_skills:
+    path: ~/projects/claude-trading-skills
+    enabled: false
+    description: "매크로/섹터/기관추적"
+
+  alpha_vantage_mcp:
+    api_key_env: ALPHA_VANTAGE_KEY
+    enabled: false
+    description: "실시간 주가/기술적 지표"

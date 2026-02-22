@@ -1,0 +1,25 @@
+# K-Quant v2.5 User Preference (auto-updated by weekly learning)
+
+strategy_weights:
+  A: 15   # 단기반등
+  B: 10   # ETF레버리지
+  C: 20   # 장기우량주
+  D: 10   # 섹터로테이션
+  E: 15   # 글로벌분산
+  F: 10   # 모멘텀
+  G: 5    # 돌파
+  cash: 15
+
+user_behavior:
+  execution_rate: 0
+  stop_compliance: 100
+
+diagnosis_learning:
+  solution_execution_rate: 0
+  solution_effectiveness_rate: 0
+  avg_alpha_change: 0
+  preferred_solution_types: []
+  last_diagnosis_grade: ""
+  diagnosis_count: 0
+
+last_updated: "2026-02-22"
