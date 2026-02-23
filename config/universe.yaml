@@ -53,6 +53,26 @@ universe:
     - { code: "196170", name: "알테오젠", market: KOSDAQ, sector: "바이오" }
     - { code: "247540", name: "에코프로비엠", market: KOSDAQ, sector: "2차전지" }
     - { code: "086520", name: "에코프로", market: KOSDAQ, sector: "2차전지" }
+    # v3.6 추가 종목 (인기/거래량 상위)
+    - { code: "003670", name: "포스코퓨처엠", market: KOSPI, sector: "2차전지" }
+    - { code: "042700", name: "한미반도체", market: KOSDAQ, sector: "반도체" }
+    - { code: "000100", name: "유한양행", market: KOSPI, sector: "바이오" }
+    - { code: "018260", name: "삼성에스디에스", market: KOSPI, sector: "IT" }
+    - { code: "010950", name: "S-Oil", market: KOSPI, sector: "에너지" }
+    - { code: "009150", name: "삼성전기", market: KOSPI, sector: "전자" }
+    - { code: "033780", name: "KT&G", market: KOSPI, sector: "담배" }
+    - { code: "011200", name: "HMM", market: KOSPI, sector: "해운" }
+    - { code: "377300", name: "카카오페이", market: KOSPI, sector: "핀테크" }
+    - { code: "361610", name: "SK아이이테크놀로지", market: KOSPI, sector: "2차전지" }
+    - { code: "047050", name: "포스코인터내셔널", market: KOSPI, sector: "무역" }
+    - { code: "010130", name: "고려아연", market: KOSPI, sector: "비철금속" }
+    - { code: "302440", name: "SK바이오사이언스", market: KOSPI, sector: "바이오" }
+    - { code: "003550", name: "LG", market: KOSPI, sector: "지주" }
+    - { code: "251270", name: "넷마블", market: KOSPI, sector: "게임" }
+    - { code: "352820", name: "하이브", market: KOSPI, sector: "엔터" }
+    - { code: "041510", name: "에스엠", market: KOSDAQ, sector: "엔터" }
+    - { code: "122870", name: "와이지엔터테인먼트", market: KOSPI, sector: "엔터" }
+    - { code: "112040", name: "위메이드", market: KOSDAQ, sector: "게임" }
 
   # ── ETF ───────────────────────────────────────────────────────────
 

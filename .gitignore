@@ -1,6 +1,9 @@
 # Environment & Secrets
 .env
+.env.*
 *.env.*
+config/kis_config.yaml
+.bot.pid
 
 # Python
 __pycache__/

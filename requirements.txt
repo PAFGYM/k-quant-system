@@ -1,4 +1,4 @@
-# K-Quant v3.5 PRO
+# K-Quant v3.6 PRO — Multi-AI + Real-time
 python-telegram-bot[job-queue]>=20.7
 apscheduler>=3.10
 requests>=2.31
@@ -8,7 +8,10 @@ numpy>=1.24,<2.0
 pandas>=2.0
 scikit-learn>=1.3
 lightgbm>=4.0
+# AI Providers
 anthropic>=0.18
+openai>=1.0
+# Data
 finance-datareader>=0.9
 opendartreader>=0.2
 openpyxl>=3.1
@@ -20,5 +23,11 @@ pyyaml>=6.0
 python-dotenv>=1.0
 pyarrow>=14.0
 yfinance>=0.2.30
+# Real-time WebSocket
+websockets>=12.0
+# Report
+reportlab>=4.0
+matplotlib>=3.8
+# Test
 pytest>=7.0
 pytest-asyncio>=0.21

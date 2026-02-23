@@ -1,4 +1,4 @@
-"""Telegram bot with multi-strategy system v3.5 - ML, sentiment, KIS, screenshot."""
+"""Telegram bot with multi-strategy system v3.6 — Multi-AI + Real-time + Security."""
 
 from __future__ import annotations
 
@@ -237,21 +237,34 @@ except ImportError:
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
+# v3.6 imports
+from kstock.bot.ai_router import AIRouter
+from kstock.ingest.kis_websocket import KISWebSocket
+from kstock.core.security import startup_security_check, security_audit, mask_key
+
 KST = timezone(timedelta(hours=9))
 
+# ── v3.6 메인 메뉴 (5행 핵심 + 더보기) ──────────────────────────────────────
 MAIN_MENU = ReplyKeyboardMarkup(
     [
-        ["\U0001f4d6 사용법 가이드", "\U0001f4f8 계좌분석"],
-        ["\U0001f514 알림 설정", "\U0001f4ac AI에게 질문"],
-        ["\u2699\ufe0f 최적화", "\U0001f4cb 증권사 리포트"],
-        ["\U0001f4e1 KIS설정", "\U0001f4ca 재무 진단"],
-        ["\U0001f3af 30억 목표", "\u26a1 스윙 기회"],
-        ["\U0001f30d 시장현황", "\U0001f3af 전략별 보기"],
-        ["\U0001f4c8 추천 성과", "\U0001f4c5 주간 보고서"],
-        ["\U0001f680 미래기술", "\U0001f4ca 공매도"],
-        ["\U0001f4ca 멀티분석", "\U0001f525 급등주"],
+        ["\U0001f4ca 분석", "\U0001f4b0 잔고"],
+        ["\U0001f4c8 시황", "\U0001f514 알림"],
+        ["\U0001f4ac AI질문", "\u2699\ufe0f 더보기"],
+    ],
+    resize_keyboard=True,
+)
+
+# 더보기 서브메뉴
+MORE_MENU = ReplyKeyboardMarkup(
+    [
+        ["\U0001f4f8 계좌분석", "\U0001f3af 전략별 보기"],
+        ["\U0001f525 급등주", "\u26a1 스윙 기회"],
+        ["\U0001f4ca 멀티분석", "\U0001f4e1 KIS설정"],
+        ["\U0001f4cb 리포트", "\U0001f4c5 주간 보고서"],
         ["\u2b50 즐겨찾기", "\U0001f575\ufe0f 매집탐지"],
-        ["\U0001f4b0 잔고", "\U0001f6e0 관리자"],
+        ["\U0001f680 미래기술", "\U0001f4ca 공매도"],
+        ["\U0001f3af 30억 목표", "\U0001f4ca 재무 진단"],
+        ["\U0001f6e0 관리자", "\U0001f519 메인으로"],
     ],
     resize_keyboard=True,
 )
@@ -302,9 +315,12 @@ class ScanResult:
 
 
 class KQuantBot:
-    """Telegram bot for K-Quant system v3.5."""
+    """Telegram bot for K-Quant system v3.6 — Multi-AI + Real-time."""
 
     def __init__(self) -> None:
+        # v3.6: 보안 검증
+        startup_security_check()
+
         self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         self._start_time = datetime.now(KST)
@@ -338,6 +354,10 @@ class KQuantBot:
         # Phase 8: 실시간 시장 감지 + 매도 계획
         self.market_pulse = MarketPulse()
         self.sell_planner = SellPlanner()
+        # v3.6: Multi-AI Router
+        self.ai = AIRouter()
+        # v3.6: KIS WebSocket (실시간 호가)
+        self.ws = KISWebSocket()
 
     def build_app(self) -> Application:
         app = (
@@ -839,33 +859,39 @@ class KQuantBot:
         self._persist_chat_id(update)
         text = update.message.text
         handlers = {
-            # Left column (utility / settings)
+            # ── v3.6 메인 메뉴 (5행 핵심) ──
+            "\U0001f4ca 분석": self._menu_analysis_hub,
+            "\U0001f4b0 잔고": self._menu_balance,
+            "\U0001f4c8 시황": self._menu_market_status,
+            "\U0001f514 알림": self._menu_notification_settings,
+            "\U0001f4ac AI질문": self._menu_ai_chat,
+            "\u2699\ufe0f 더보기": self._menu_more,
+            "\U0001f519 메인으로": self._menu_back_to_main,
+            # ── 더보기 서브메뉴 항목들 ──
+            "\U0001f4f8 계좌분석": self._menu_account_analysis,
+            "\U0001f3af 전략별 보기": self._menu_strategy_view,
+            "\U0001f525 급등주": self._menu_surge,
+            "\u26a1 스윙 기회": self._menu_swing,
+            "\U0001f4ca 멀티분석": self._menu_multi_agent,
+            "\U0001f4e1 KIS설정": self._menu_kis_setup,
+            "\U0001f4cb 리포트": self._menu_reports,
+            "\U0001f4c5 주간 보고서": self._menu_weekly_report,
+            "\u2b50 즐겨찾기": self._menu_favorites,
+            "\U0001f575\ufe0f 매집탐지": self._menu_accumulation,
+            "\U0001f680 미래기술": self._menu_future_tech,
+            "\U0001f4ca 공매도": self._menu_short,
+            "\U0001f3af 30억 목표": self._menu_goal,
+            "\U0001f4ca 재무 진단": self._menu_financial,
+            "\U0001f6e0 관리자": self._menu_admin,
+            # ── 이전 메뉴 하위호환 ──
             "\U0001f4d6 사용법 가이드": self._menu_usage_guide,
             "\U0001f514 알림 설정": self._menu_notification_settings,
             "\u2699\ufe0f 최적화": self._menu_optimize,
-            "\U0001f4e1 KIS설정": self._menu_kis_setup,
-            "\U0001f3af 30억 목표": self._menu_goal,
             "\U0001f30d 시장현황": self._menu_market_status,
             "\U0001f4c8 추천 성과": self._menu_reco_performance,
-            # Right column (investing features)
-            "\U0001f4f8 계좌분석": self._menu_account_analysis,
             "\U0001f4ac AI에게 질문": self._menu_ai_chat,
             "\U0001f4cb 증권사 리포트": self._menu_reports,
-            "\U0001f4ca 재무 진단": self._menu_financial,
-            "\u26a1 스윙 기회": self._menu_swing,
-            "\U0001f3af 전략별 보기": self._menu_strategy_view,
-            "\U0001f4c5 주간 보고서": self._menu_weekly_report,
-            "\U0001f680 미래기술": self._menu_future_tech,
-            "\U0001f4ca 공매도": self._menu_short,
-            # Phase 7 menus
-            "\U0001f4ca 멀티분석": self._menu_multi_agent,
-            "\U0001f525 급등주": self._menu_surge,
-            "\U0001f575\ufe0f 매집탐지": self._menu_accumulation,
-            "\u2b50 즐겨찾기": self._menu_favorites,
-            "\U0001f4b0 잔고": self._menu_balance,
             "\U0001f916 에이전트": self._menu_agent_chat,
-            "\U0001f6e0 관리자": self._menu_admin,
-            # Legacy keys (backward compat)
             "\U0001f514 실시간 알림": self._menu_alerts,
             "\U0001f4ca 오늘의 추천종목": self._menu_recommendations,
             "\U0001f4bc 내 포트폴리오": self._menu_portfolio,
@@ -1297,6 +1323,9 @@ class KQuantBot:
                 "agent": self._action_agent,
                 "goto": self._action_goto,
                 "adm": self._handle_admin_callback,
+                # v3.6 신규
+                "ai": self._action_ai_status,
+                "orderbook": self._action_orderbook,
             }
             handler = dispatch.get(action)
             if handler:
@@ -6672,9 +6701,13 @@ class KQuantBot:
             [
                 InlineKeyboardButton("\U0001f4a1 업데이트 요청", callback_data="adm:request"),
             ],
+            [
+                InlineKeyboardButton("\U0001f512 보안 감사", callback_data="adm:security"),
+                InlineKeyboardButton("\U0001f916 AI 상태", callback_data="ai:status"),
+            ],
         ]
         await update.message.reply_text(
-            "\U0001f6e0 관리자 모드\n\n"
+            "\U0001f6e0 관리자 모드 (v3.6)\n\n"
             "아래 버튼을 눌러주세요.\n"
             "오류 신고 시 메시지나 스크린샷을\n"
             "바로 보내면 됩니다!",
@@ -6714,6 +6747,11 @@ class KQuantBot:
                 "Claude Code에서 확인 후 구현합니다."
             )
 
+        elif subcmd == "security":
+            # v3.6: 보안 감사
+            audit_result = security_audit()
+            await query.edit_message_text(audit_result)
+
         elif subcmd == "status":
             holdings = self.db.get_active_holdings()
             chat_count = 0
@@ -6724,11 +6762,20 @@ class KQuantBot:
             uptime = datetime.now(KST) - self._start_time
             hours = uptime.seconds // 3600
             mins = (uptime.seconds % 3600) // 60
+
+            # v3.6: AI + WebSocket 상태 추가
+            ai_available = [n for n, p in self.ai.providers.items() if p.available]
+            ai_text = ", ".join(ai_available) if ai_available else "없음"
+            ws_text = "연결" if self.ws.is_connected else "미연결"
+            ws_subs = len(self.ws.get_subscriptions())
+
             await query.edit_message_text(
-                f"\U0001f4ca 봇 상태\n\n"
+                f"\U0001f4ca 봇 상태 (v3.6)\n\n"
                 f"\u2705 가동: {hours}시간 {mins}분\n"
                 f"\U0001f4b0 보유종목: {len(holdings)}개\n"
                 f"\U0001f916 AI 채팅: {chat_count}회/50\n"
+                f"\U0001f9e0 AI 엔진: {ai_text}\n"
+                f"\U0001f4e1 WebSocket: {ws_text} ({ws_subs}종목)\n"
                 f"\U0001f310 KIS: {'연결' if self.kis_broker.connected else '미연결'}\n"
                 f"\U0001f4c5 날짜: {datetime.now(KST).strftime('%m/%d %H:%M')}"
             )
@@ -7120,6 +7167,128 @@ class KQuantBot:
     ) -> None:
         """잔고 조회 메뉴."""
         await self.cmd_balance(update, context)
+
+    # ── v3.6 신규 메뉴 핸들러 ────────────────────────────────────────
+
+    async def _menu_more(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """더보기 메뉴 표시."""
+        await update.message.reply_text(
+            "\u2699\ufe0f 더보기 메뉴\n원하는 기능을 선택하세요:",
+            reply_markup=MORE_MENU,
+        )
+
+    async def _menu_back_to_main(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """메인 메뉴로 복귀."""
+        await update.message.reply_text(
+            "\U0001f3e0 메인 메뉴로 돌아왔습니다.",
+            reply_markup=MAIN_MENU,
+        )
+
+    async def _menu_analysis_hub(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """분석 허브 — 종목명 입력 또는 빠른 분석 선택."""
+        buttons = [
+            [
+                InlineKeyboardButton("\U0001f4ca 멀티분석", callback_data="quick_q:multi"),
+                InlineKeyboardButton("\U0001f525 급등주", callback_data="quick_q:surge"),
+            ],
+            [
+                InlineKeyboardButton("\u26a1 스윙기회", callback_data="quick_q:swing"),
+                InlineKeyboardButton("\U0001f3af 매수추천", callback_data="quick_q:buy_pick"),
+            ],
+            [
+                InlineKeyboardButton("\U0001f4ca 호가조회", callback_data="orderbook:select"),
+                InlineKeyboardButton("\U0001f916 AI상태", callback_data="ai:status"),
+            ],
+        ]
+        await update.message.reply_text(
+            "\U0001f4ca 분석 허브\n\n"
+            "종목명을 직접 입력하거나\n"
+            "아래 버튼으로 빠른 분석을 시작하세요:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _action_ai_status(self, query, context, payload: str) -> None:
+        """AI 엔진 상태 표시."""
+        status = self.ai.get_status()
+        routing = self.ai.get_routing_table()
+        ws_status = self.ws.get_status()
+        text = f"{status}\n\n{routing}\n\n\U0001f4e1 실시간: {ws_status}"
+        await query.edit_message_text(text)
+
+    async def _action_orderbook(self, query, context, payload: str) -> None:
+        """호가 조회 액션."""
+        if payload == "select":
+            # 보유종목 목록에서 선택
+            holdings = await self._load_holdings_with_fallback()
+            if not holdings:
+                await query.edit_message_text(
+                    "\U0001f4ca 호가를 조회할 보유종목이 없습니다.\n종목코드를 직접 입력해주세요."
+                )
+                return
+            buttons = []
+            for h in holdings[:6]:
+                ticker = h.get("ticker", "")
+                name = h.get("name", ticker)
+                if ticker:
+                    buttons.append([InlineKeyboardButton(
+                        f"\U0001f4ca {name}",
+                        callback_data=f"orderbook:{ticker}",
+                    )])
+            await query.edit_message_text(
+                "\U0001f4ca 호가 조회할 종목을 선택하세요:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        else:
+            # 특정 종목 호가 조회
+            ticker = payload
+            name = ticker
+            for item in self.all_tickers:
+                if item["code"] == ticker:
+                    name = item["name"]
+                    break
+
+            await query.edit_message_text(f"\U0001f4ca {name} 호가 조회 중...")
+
+            orderbook = None
+            # WebSocket 데이터 우선
+            if self.ws.is_connected:
+                orderbook = self.ws.get_orderbook(ticker)
+
+            # REST fallback
+            if not orderbook:
+                try:
+                    orderbook = await self.ws.get_orderbook_rest(ticker)
+                except Exception as e:
+                    logger.warning("Orderbook REST failed: %s", e)
+
+            if orderbook:
+                text = orderbook.format_display(name)
+                await query.message.reply_text(text)
+            else:
+                # 시뮬레이션 호가 (데이터 없을 때)
+                try:
+                    price = await self._get_price(ticker)
+                    if price > 0:
+                        text = (
+                            f"\U0001f4ca {name} 호가 (추정)\n"
+                            f"{'─' * 25}\n"
+                            f"\U0001f534 매도 1호가: {price * 1.001:>12,.0f}원\n"
+                            f"\U0001f7e2 매수 1호가: {price * 0.999:>12,.0f}원\n"
+                            f"{'─' * 25}\n"
+                            f"현재가: {price:,.0f}원\n\n"
+                            "\u26a0\ufe0f 실시간 호가는 KIS WebSocket 연결 시 지원됩니다."
+                        )
+                    else:
+                        text = f"\u26a0\ufe0f {name} 호가 데이터를 조회할 수 없습니다."
+                except Exception:
+                    text = f"\u26a0\ufe0f {name} 호가 조회 실패"
+                await query.message.reply_text(text)
 
     # ── 즐겨찾기 메뉴 ──────────────────────────────────────────────
 
