@@ -251,7 +251,7 @@ MAIN_MENU = ReplyKeyboardMarkup(
         ["\U0001f680 미래기술", "\U0001f4ca 공매도"],
         ["\U0001f4ca 멀티분석", "\U0001f525 급등주"],
         ["\u2b50 즐겨찾기", "\U0001f575\ufe0f 매집탐지"],
-        ["\U0001f4b0 잔고", "\U0001f916 에이전트"],
+        ["\U0001f4b0 잔고", "\U0001f6e0 관리자"],
     ],
     resize_keyboard=True,
 )
@@ -653,6 +653,14 @@ class KQuantBot:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle screenshot image messages for account analysis."""
+        # 관리자 모드: 오류 스크린샷 접수
+        admin_mode = context.user_data.get("admin_mode")
+        if admin_mode:
+            context.user_data.pop("admin_mode", None)
+            caption = update.message.caption or "이미지 첨부"
+            await self._save_admin_report(update, admin_mode, caption, has_image=True)
+            return
+
         if not self.anthropic_key:
             await update.message.reply_text(
                 "\u26a0\ufe0f Anthropic API 키가 설정되지 않았습니다.",
@@ -851,6 +859,7 @@ class KQuantBot:
             "\u2b50 즐겨찾기": self._menu_favorites,
             "\U0001f4b0 잔고": self._menu_balance,
             "\U0001f916 에이전트": self._menu_agent_chat,
+            "\U0001f6e0 관리자": self._menu_admin,
             # Legacy keys (backward compat)
             "\U0001f514 실시간 알림": self._menu_alerts,
             "\U0001f4ca 오늘의 추천종목": self._menu_recommendations,
@@ -882,6 +891,13 @@ class KQuantBot:
                 else:
                     context.user_data.pop("awaiting_stock_add", None)
                     # 종목 못 찾으면 일반 처리로 진행
+
+            # 0-0.5. 관리자 모드: 오류 신고 / 업데이트 요청
+            admin_mode = context.user_data.get("admin_mode")
+            if admin_mode:
+                context.user_data.pop("admin_mode", None)
+                await self._save_admin_report(update, admin_mode, text)
+                return
 
             # 0-1. KIS 설정 단계별 입력 상태
             kis_setup = context.user_data.get("kis_setup")
@@ -1275,6 +1291,7 @@ class KQuantBot:
                 "fav": self._action_favorites,
                 "agent": self._action_agent,
                 "goto": self._action_goto,
+                "adm": self._handle_admin_callback,
             }
             handler = dispatch.get(action)
             if handler:
@@ -6503,6 +6520,154 @@ class KQuantBot:
             await update.message.reply_text(
                 "\u26a0\ufe0f 매집 탐지 중 오류가 발생했습니다.", reply_markup=MAIN_MENU,
             )
+
+    async def _menu_admin(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """🛠 관리자 메뉴 버튼 — 인라인 버튼으로 관리 기능 제공."""
+        buttons = [
+            [
+                InlineKeyboardButton("\U0001f41b 오류 신고", callback_data="adm:bug"),
+                InlineKeyboardButton("\U0001f4ca 봇 상태", callback_data="adm:status"),
+            ],
+            [
+                InlineKeyboardButton("\U0001f4cb 보유종목 DB", callback_data="adm:holdings"),
+                InlineKeyboardButton("\U0001f6a8 에러 로그", callback_data="adm:logs"),
+            ],
+            [
+                InlineKeyboardButton("\U0001f4a1 업데이트 요청", callback_data="adm:request"),
+            ],
+        ]
+        await update.message.reply_text(
+            "\U0001f6e0 관리자 모드\n\n"
+            "아래 버튼을 눌러주세요.\n"
+            "오류 신고 시 메시지나 스크린샷을\n"
+            "바로 보내면 됩니다!",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _handle_admin_callback(
+        self, query, context, payload: str
+    ) -> None:
+        """관리자 콜백 핸들러."""
+        import json as _json
+
+        admin_log_path = Path("data/admin_reports.jsonl")
+        admin_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        subcmd = payload.split(":")[0] if payload else ""
+
+        if subcmd == "bug":
+            # 오류 신고 모드 진입 — 다음 메시지/이미지를 버그로 기록
+            context.user_data["admin_mode"] = "bug_report"
+            await query.edit_message_text(
+                "\U0001f41b 오류 신고 모드\n\n"
+                "아래 내용을 보내주세요:\n"
+                "  \U0001f4dd 텍스트로 오류 설명\n"
+                "  \U0001f4f7 오류 화면 스크린샷\n\n"
+                "보내시면 자동으로 기록됩니다.\n"
+                "Claude Code에서 바로 확인 후 수정!"
+            )
+
+        elif subcmd == "request":
+            # 업데이트 요청 모드
+            context.user_data["admin_mode"] = "update_request"
+            await query.edit_message_text(
+                "\U0001f4a1 업데이트 요청 모드\n\n"
+                "원하는 기능이나 개선사항을\n"
+                "메시지로 보내주세요!\n\n"
+                "Claude Code에서 확인 후 구현합니다."
+            )
+
+        elif subcmd == "status":
+            holdings = self.db.get_active_holdings()
+            chat_count = 0
+            try:
+                chat_count = self.db.get_chat_usage(_today())
+            except Exception:
+                pass
+            uptime = datetime.now(KST) - self._start_time
+            hours = uptime.seconds // 3600
+            mins = (uptime.seconds % 3600) // 60
+            await query.edit_message_text(
+                f"\U0001f4ca 봇 상태\n\n"
+                f"\u2705 가동: {hours}시간 {mins}분\n"
+                f"\U0001f4b0 보유종목: {len(holdings)}개\n"
+                f"\U0001f916 AI 채팅: {chat_count}회/50\n"
+                f"\U0001f310 KIS: {'연결' if self.kis_broker.connected else '미연결'}\n"
+                f"\U0001f4c5 날짜: {datetime.now(KST).strftime('%m/%d %H:%M')}"
+            )
+
+        elif subcmd == "holdings":
+            holdings = self.db.get_active_holdings()
+            if not holdings:
+                await query.edit_message_text(
+                    "\U0001f4ad DB에 보유종목 없음\n잔고 스크린샷을 보내주세요!"
+                )
+                return
+            lines = [f"\U0001f4ca 보유종목 ({len(holdings)}개)\n"]
+            for h in holdings[:10]:
+                pnl = h.get("pnl_pct", 0)
+                e = "\U0001f4c8" if pnl >= 0 else "\U0001f4c9"
+                lines.append(
+                    f"{e} {h.get('name', '')} {pnl:+.1f}%"
+                )
+            await query.edit_message_text("\n".join(lines))
+
+        elif subcmd == "logs":
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["tail", "-50", "bot.log"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                errors = [
+                    l.strip()[-90:]
+                    for l in result.stdout.splitlines()
+                    if "ERROR" in l
+                ][-8:]
+                if errors:
+                    await query.edit_message_text(
+                        "\U0001f6a8 최근 에러\n\n" + "\n\n".join(errors)
+                    )
+                else:
+                    await query.edit_message_text("\u2705 에러 없음!")
+            except Exception as e:
+                await query.edit_message_text(f"\u26a0\ufe0f 로그 확인 실패: {e}")
+
+    async def _save_admin_report(
+        self, update: Update, report_type: str, text: str, has_image: bool = False,
+    ) -> None:
+        """관리자 리포트를 파일에 저장 (Claude Code 모니터링용)."""
+        import json as _json
+        admin_log_path = Path("data/admin_reports.jsonl")
+        admin_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        report = {
+            "type": report_type,
+            "message": text,
+            "has_image": has_image,
+            "timestamp": datetime.now(KST).isoformat(),
+            "status": "open",
+        }
+
+        # 이미지가 있으면 파일 ID 기록
+        if has_image and update.message.photo:
+            report["photo_file_id"] = update.message.photo[-1].file_id
+
+        with open(admin_log_path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(report, ensure_ascii=False) + "\n")
+
+        type_label = "\U0001f41b 오류 신고" if report_type == "bug_report" else "\U0001f4a1 업데이트 요청"
+        await update.message.reply_text(
+            f"{type_label} 접수 완료!\n\n"
+            f"\U0001f4dd {text[:200]}\n"
+            f"\U0001f4f7 이미지: {'있음' if has_image else '없음'}\n"
+            f"\u23f0 {datetime.now(KST).strftime('%H:%M:%S')}\n\n"
+            f"Claude Code에서 확인 후\n"
+            f"즉시 수정/반영됩니다!",
+            reply_markup=MAIN_MENU,
+        )
 
     async def cmd_admin(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
