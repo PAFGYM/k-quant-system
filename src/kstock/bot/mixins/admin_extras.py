@@ -617,16 +617,26 @@ class AdminExtrasMixin:
     ) -> None:
         """⭐ 즐겨찾기 — watchlist 종목 표시 + 빠른 액션."""
         watchlist = self.db.get_watchlist()
+
+        # [v3.6.2] 비어있으면 보유종목 자동 등록
         if not watchlist:
-            buttons = [
-                [InlineKeyboardButton("🎯 전략별 보기", callback_data="goto:strategy")],
-                [InlineKeyboardButton("📈 추천 성과", callback_data="goto:reco")],
-            ]
+            holdings = await self._load_holdings_with_fallback()
+            for h in holdings:
+                ticker = h.get("ticker", "")
+                name = h.get("name", "")
+                if ticker and name:
+                    try:
+                        self.db.add_watchlist(ticker, name)
+                    except Exception:
+                        pass
+            watchlist = self.db.get_watchlist()
+
+        if not watchlist:
             await update.message.reply_text(
                 "⭐ 즐겨찾기가 비어있습니다.\n\n"
-                "추천 종목에서 ⭐ 버튼을 누르면 즐겨찾기에 등록됩니다.\n"
-                "또는 종목명을 입력하면 자동으로 추가할 수 있습니다.",
-                reply_markup=InlineKeyboardMarkup(buttons),
+                "종목명을 입력하면 자동으로 추가할 수 있습니다.\n"
+                "예: 삼성전자",
+                reply_markup=MAIN_MENU,
             )
             return
 
