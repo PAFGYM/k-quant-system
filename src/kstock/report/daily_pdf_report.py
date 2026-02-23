@@ -29,7 +29,7 @@ try:
     from reportlab.lib.units import mm
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Table,
-        TableStyle, Spacer, PageBreak,
+        TableStyle, Spacer, PageBreak, Image,
     )
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.pdfbase import pdfmetrics
@@ -45,23 +45,56 @@ try:
 except ImportError:
     HAS_ANTHROPIC = False
 
+try:
+    import matplotlib
+    matplotlib.use("Agg")  # headless 모드
+    import matplotlib.pyplot as plt
+    import matplotlib.font_manager as fm
+    # 한글 폰트 설정
+    _kr_fonts = [
+        "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+    ]
+    for _fp in _kr_fonts:
+        if Path(_fp).exists():
+            fm.fontManager.addfont(_fp)
+            plt.rcParams["font.family"] = fm.FontProperties(fname=_fp).get_name()
+            break
+    plt.rcParams["axes.unicode_minus"] = False
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
 
 def _register_korean_font() -> str:
     """시스템 한글 폰트 등록. 등록된 폰트명 반환."""
     if not HAS_REPORTLAB:
         return "Helvetica"
 
+    # 1순위: TTF 파일 (reportlab이 확실히 지원)
+    # 2순위: TTC (subfontIndex 필요, PostScript outline 미지원 가능)
     font_paths = [
-        ("/System/Library/Fonts/AppleSDGothicNeo.ttc", "Korean"),
-        ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", "Korean"),
-        ("/usr/share/fonts/nanum/NanumGothic.ttf", "Korean"),
+        # macOS TTF (가장 안정적)
+        ("/System/Library/Fonts/Supplemental/AppleGothic.ttf", "Korean", None),
+        # Linux NanumGothic
+        ("/usr/share/fonts/truetype/nanum/NanumGothic.ttf", "Korean", None),
+        ("/usr/share/fonts/nanum/NanumGothic.ttf", "Korean", None),
+        # macOS TTC (subfontIndex로 시도)
+        ("/System/Library/Fonts/AppleSDGothicNeo.ttc", "Korean", 0),
     ]
-    for path, name in font_paths:
+    for entry in font_paths:
+        path, name = entry[0], entry[1]
+        sub_idx = entry[2] if len(entry) > 2 else None
         if Path(path).exists():
             try:
-                pdfmetrics.registerFont(TTFont(name, path))
+                if sub_idx is not None:
+                    pdfmetrics.registerFont(TTFont(name, path, subfontIndex=sub_idx))
+                else:
+                    pdfmetrics.registerFont(TTFont(name, path))
+                logger.info("한글 폰트 등록 성공: %s (%s)", name, path)
                 return name
-            except Exception:
+            except Exception as e:
+                logger.debug("폰트 등록 실패 %s: %s", path, e)
                 continue
 
     logger.warning("한글 폰트 없음. 기본 폰트 사용.")
@@ -109,13 +142,14 @@ def _create_styles(font_name: str) -> dict:
     return custom_styles
 
 
-def _table_style():
-    """표준 테이블 스타일."""
+def _table_style(font_name: str = "Korean"):
+    """표준 테이블 스타일 (한글 폰트 적용)."""
     if not HAS_REPORTLAB:
         return None
     return TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a1a2e")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, -1), font_name),
         ("FONTSIZE", (0, 0), (-1, -1), 8),
         ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
@@ -124,6 +158,84 @@ def _table_style():
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ])
+
+
+def _generate_portfolio_pnl_chart(holdings: list[dict]) -> str | None:
+    """보유종목 수익률 바 차트 생성 → 임시 PNG 파일 경로 반환."""
+    if not HAS_MATPLOTLIB or not holdings:
+        return None
+    try:
+        import tempfile
+        names = [h.get("name", "")[:6] for h in holdings[:10]]
+        pnls = [h.get("pnl_pct", 0) for h in holdings[:10]]
+        bar_colors = ["#2ecc71" if p >= 0 else "#e74c3c" for p in pnls]
+
+        fig, ax = plt.subplots(figsize=(6, 2.5))
+        bars = ax.barh(names, pnls, color=bar_colors, height=0.6)
+        ax.axvline(x=0, color="#333", linewidth=0.8)
+        for bar, pnl in zip(bars, pnls):
+            ax.text(
+                bar.get_width() + (0.3 if pnl >= 0 else -0.3),
+                bar.get_y() + bar.get_height() / 2,
+                f"{pnl:+.1f}%", va="center",
+                fontsize=8, fontweight="bold",
+                color="#2ecc71" if pnl >= 0 else "#e74c3c",
+            )
+        ax.set_xlabel("수익률 (%)", fontsize=9)
+        ax.set_title("보유종목 수익률", fontsize=11, fontweight="bold")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        plt.tight_layout()
+
+        fp = os.path.join(tempfile.mkdtemp(), "pnl_chart.png")
+        fig.savefig(fp, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return fp
+    except Exception as e:
+        logger.debug("PnL chart failed: %s", e)
+        return None
+
+
+def _generate_market_gauge_chart(macro) -> str | None:
+    """글로벌 시장 지표 게이지 차트 생성 → 임시 PNG 파일 경로 반환."""
+    if not HAS_MATPLOTLIB:
+        return None
+    try:
+        import tempfile
+        indicators = {
+            "S&P500": macro.spx_change_pct,
+            "나스닥": macro.nasdaq_change_pct,
+            "VIX": -macro.vix_change_pct,  # VIX 하락 = 좋음
+            "USD/KRW": -macro.usdkrw_change_pct,  # 원화 강세 = 좋음
+            "BTC": macro.btc_change_pct,
+            "Gold": macro.gold_change_pct,
+        }
+        names = list(indicators.keys())
+        values = list(indicators.values())
+        bar_colors = ["#2ecc71" if v >= 0 else "#e74c3c" for v in values]
+
+        fig, ax = plt.subplots(figsize=(6, 2.2))
+        bars = ax.bar(names, values, color=bar_colors, width=0.6)
+        ax.axhline(y=0, color="#333", linewidth=0.8)
+        for bar, val in zip(bars, values):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + (0.1 if val >= 0 else -0.15),
+                f"{val:+.1f}%", ha="center", fontsize=7, fontweight="bold",
+            )
+        ax.set_title("글로벌 시장 등락", fontsize=11, fontweight="bold")
+        ax.set_ylabel("등락률 (%)", fontsize=8)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        plt.tight_layout()
+
+        fp = os.path.join(tempfile.mkdtemp(), "market_gauge.png")
+        fig.savefig(fp, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return fp
+    except Exception as e:
+        logger.debug("Market gauge chart failed: %s", e)
+        return None
 
 
 async def generate_daily_pdf(
@@ -223,8 +335,14 @@ async def generate_daily_pdf(
         index_data,
         colWidths=[25 * mm, 30 * mm, 22 * mm, 22 * mm],
     )
-    idx_table.setStyle(_table_style())
+    idx_table.setStyle(_table_style(font_name))
     elements.append(idx_table)
+
+    # 글로벌 시장 등락 차트
+    market_chart = _generate_market_gauge_chart(macro)
+    if market_chart and HAS_REPORTLAB:
+        elements.append(Spacer(1, 3 * mm))
+        elements.append(Image(market_chart, width=160 * mm, height=60 * mm))
 
     # === 2페이지: 심층 시장 분석 ===
     elements.append(PageBreak())
@@ -295,8 +413,14 @@ async def generate_daily_pdf(
             h_rows,
             colWidths=[25 * mm, 22 * mm, 22 * mm, 18 * mm, 15 * mm, 18 * mm],
         )
-        ht.setStyle(_table_style())
+        ht.setStyle(_table_style(font_name))
         elements.append(ht)
+
+        # 보유종목 수익률 차트
+        pnl_chart = _generate_portfolio_pnl_chart(holdings)
+        if pnl_chart and HAS_REPORTLAB:
+            elements.append(Spacer(1, 3 * mm))
+            elements.append(Image(pnl_chart, width=160 * mm, height=65 * mm))
     else:
         elements.append(Paragraph("보유종목 없음", styles["body"]))
 
@@ -342,7 +466,7 @@ async def generate_daily_pdf(
             sp_rows,
             colWidths=[25 * mm, 15 * mm, 22 * mm, 22 * mm, 40 * mm],
         )
-        spt.setStyle(_table_style())
+        spt.setStyle(_table_style(font_name))
         elements.append(spt)
     else:
         elements.append(Paragraph("매도 계획 없음", styles["body"]))

@@ -3594,7 +3594,8 @@ class KQuantBot:
                 "allocations": regime_result.allocations,
             }
 
-            briefing_text = await self._generate_claude_briefing(macro, regime_mode)
+            # 보유종목별 투자 기간 판단 포함 브리핑 생성
+            briefing_text = await self._generate_morning_briefing_v2(macro, regime_mode)
             if briefing_text:
                 msg = format_claude_briefing(briefing_text)
             else:
@@ -3606,6 +3607,86 @@ class KQuantBot:
         except Exception as e:
             logger.error("Morning briefing failed: %s", e)
             self.db.upsert_job_run("morning_briefing", _today(), status="error", message=str(e))
+
+    async def _generate_morning_briefing_v2(
+        self, macro: MacroSnapshot, regime_mode: dict
+    ) -> str | None:
+        """보유종목별 투자 기간(단기/중기/장기)에 따른 보유/매도 판단 포함 브리핑."""
+        if not self.anthropic_key:
+            return None
+        try:
+            import httpx
+
+            # 보유종목 정보 수집
+            holdings = self.db.get_active_holdings()
+            holdings_text = ""
+            if holdings:
+                for h in holdings:
+                    ticker = h.get("ticker", "")
+                    name = h.get("name", ticker)
+                    buy_price = h.get("buy_price", 0)
+                    current_price = h.get("current_price", 0)
+                    pnl_pct = h.get("pnl_pct", 0)
+                    horizon = h.get("horizon", "swing")
+                    qty = h.get("quantity", 0)
+                    holdings_text += (
+                        f"  {name}({ticker}): "
+                        f"매수가 {buy_price:,.0f}원, 현재가 {current_price:,.0f}원, "
+                        f"수익률 {pnl_pct:+.1f}%, 수량 {qty}주, "
+                        f"투자시계 {horizon}\n"
+                    )
+            else:
+                holdings_text = "  보유종목 없음\n"
+
+            prompt = (
+                f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
+                f"[시장 데이터]\n"
+                f"VIX={macro.vix:.1f}({macro.vix_change_pct:+.1f}%), "
+                f"S&P500={macro.spx_change_pct:+.2f}%, "
+                f"나스닥={macro.nasdaq_change_pct:+.2f}%, "
+                f"환율={macro.usdkrw:,.0f}원({macro.usdkrw_change_pct:+.2f}%), "
+                f"BTC=${macro.btc_price:,.0f}({macro.btc_change_pct:+.1f}%), "
+                f"금=${macro.gold_price:,.0f}({macro.gold_change_pct:+.1f}%), "
+                f"레짐={macro.regime}, 모드={regime_mode.get('label', '')}\n\n"
+                f"[보유종목]\n{holdings_text}\n"
+                f"아래 형식으로 작성해주세요:\n\n"
+                f"1) 시장 요약 (3줄 이내)\n"
+                f"2) 보유종목별 판단 — 각 종목마다:\n"
+                f"   - 종목명 + 수익률\n"
+                f"   - 투자시계(단기/스윙/중기/장기)에 맞는 판단\n"
+                f"   - 판단: 보유유지/추가매수/일부익절/전량매도/손절 중 택1\n"
+                f"   - 구체적 이유 1줄\n"
+                f"   - 목표가, 손절가 제시\n"
+                f"3) 오늘 주목할 이벤트/섹터 (2줄)\n\n"
+                f"투자시계별 기준:\n"
+                f"- 단기(scalp): 1~3일, 수익 3~5% 목표\n"
+                f"- 스윙(swing): 1~2주, 수익 8~15% 목표\n"
+                f"- 중기(mid): 1~3개월, 수익 15~30% 목표\n"
+                f"- 장기(long): 3개월+, 수익 30~100% 목표\n\n"
+                f"볼드(**) 사용 금지. 이모지로 가독성 확보. 한 문장 최대 25자."
+            )
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": self.anthropic_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_tokens": 1200,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["content"][0]["text"]
+                logger.warning("Morning v2 Claude API returned %d", resp.status_code)
+        except Exception as e:
+            logger.warning("Morning v2 briefing failed: %s, falling back", e)
+        # fallback to simple briefing
+        return await self._generate_claude_briefing(macro, regime_mode)
 
     async def job_intraday_monitor(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self.chat_id:
@@ -3625,9 +3706,103 @@ class KQuantBot:
             for r in results:
                 await self._check_and_send_alerts(context.bot, r, macro)
             await self._check_holdings(context.bot)
+
+            # 장중 급등 종목 감지 + 장기 우량주 추천
+            await self._check_surge_and_longterm(context.bot, results, macro)
+
             logger.info("Intraday monitor: %d stocks scanned", len(results))
         except Exception as e:
             logger.error("Intraday monitor error: %s", e, exc_info=True)
+
+    async def _check_surge_and_longterm(
+        self, bot, results: list, macro: MacroSnapshot
+    ) -> None:
+        """장중 급등 종목 감지 + 장기 보유 적합 종목 추천."""
+        surge_stocks = []
+        longterm_picks = []
+
+        for r in results:
+            info = r.info
+            change_pct = getattr(info, "change_pct", 0)
+            score = r.score
+
+            # 급등 감지: 당일 +5% 이상 상승
+            if change_pct >= 5.0:
+                if not self.db.has_recent_alert(r.ticker, "surge", hours=8):
+                    surge_stocks.append(r)
+
+            # 장기 우량주: 점수 65+ & 펀더멘탈 높음 & RSI 과매도 아님
+            if (score.composite >= 65
+                    and score.fundamental >= 0.7
+                    and r.tech.rsi >= 30):
+                if not self.db.has_recent_alert(r.ticker, "longterm_pick", hours=72):
+                    longterm_picks.append(r)
+
+        # 급등 알림 (상위 3개)
+        if surge_stocks:
+            surge_stocks.sort(
+                key=lambda x: getattr(x.info, "change_pct", 0), reverse=True,
+            )
+            lines = ["\U0001f525 장중 급등 종목 감지\n"]
+            for s in surge_stocks[:3]:
+                chg = getattr(s.info, "change_pct", 0)
+                price = getattr(s.info, "current_price", 0)
+                lines.append(
+                    f"\U0001f4c8 {s.name} ({s.ticker})\n"
+                    f"  {price:,.0f}원 | +{chg:.1f}%\n"
+                    f"  점수 {s.score.composite:.0f}점 | {s.score.signal}"
+                )
+                self.db.insert_alert(s.ticker, "surge", f"급등 +{chg:.1f}%")
+            buttons = []
+            for s in surge_stocks[:3]:
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"\u2b50 {s.name} 즐겨찾기",
+                        callback_data=f"fav:add:{s.ticker}:{s.name}",
+                    ),
+                    InlineKeyboardButton(
+                        f"\U0001f50d 상세",
+                        callback_data=f"detail:{s.ticker}",
+                    ),
+                ])
+            await bot.send_message(
+                chat_id=self.chat_id,
+                text="\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+            )
+
+        # 장기 보유 추천 (상위 2개, 하루 1회)
+        if longterm_picks:
+            longterm_picks.sort(
+                key=lambda x: x.score.composite, reverse=True,
+            )
+            lines = ["\U0001f48e 장기 보유 적합 종목\n"]
+            for lp in longterm_picks[:2]:
+                price = getattr(lp.info, "current_price", 0)
+                lines.append(
+                    f"\u2705 {lp.name} ({lp.ticker})\n"
+                    f"  {price:,.0f}원 | 점수 {lp.score.composite:.0f}점\n"
+                    f"  펀더멘탈 {lp.score.fundamental:.0%} | "
+                    f"RSI {lp.tech.rsi:.0f}"
+                )
+                self.db.insert_alert(lp.ticker, "longterm_pick", f"장기추천 {lp.score.composite:.0f}점")
+            buttons = []
+            for lp in longterm_picks[:2]:
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"\u2b50 즐겨찾기 추가",
+                        callback_data=f"fav:add:{lp.ticker}:{lp.name}",
+                    ),
+                    InlineKeyboardButton(
+                        f"\U0001f4ca 멀티분석",
+                        callback_data=f"multi:{lp.ticker}",
+                    ),
+                ])
+            await bot.send_message(
+                chat_id=self.chat_id,
+                text="\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+            )
 
     async def job_eod_report(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self.chat_id:
