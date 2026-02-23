@@ -726,10 +726,10 @@ class SchedulerMixin:
                     f"4. 환율/금리/원자재 시그널\n"
                     f"   - 원화 방향 + 수출주 영향\n"
                     f"   - 국채 금리 → 성장주/가치주 영향\n\n"
-                    f"5. 오늘 주호님 체크리스트\n"
-                    f"   - 장 시작 전 확인할 것\n"
-                    f"   - 보유종목 중 주의할 종목\n"
-                    f"   - 매매 타이밍 제안\n"
+                    f"5. 오늘 주호님 참고 포인트\n"
+                    f"   - 장 시작 전 확인할 지표/이벤트\n"
+                    f"   - 보유종목 관련 섹터 영향 (매도 지시 금지, 정보만 제공)\n"
+                    f"   - 주시할 가격대/지지선 (참고용)\n"
                 )
 
                 response = await client.messages.create(
@@ -738,17 +738,25 @@ class SchedulerMixin:
                     temperature=0.3,
                     system=(
                         "너는 한국 주식 전문 애널리스트 QuantBot이다. "
-                        "주호님 전용 비서. 매일 아침 7시에 새벽 미국 시장 분석을 전달한다. "
+                        "주호님 전용 비서. 매일 아침 7시에 새벽 미국 시장 분석을 전달한다.\n\n"
+                        "[절대 규칙]\n"
+                        "1. 매도/매수 지시 절대 금지. '매도하세요', '팔아라', '전량 매도', "
+                        "'무조건 매도', '시초가에 매도' 같은 표현 금지.\n"
+                        "2. 장기투자 종목에 시장 하락을 이유로 매도 권유 절대 금지. "
+                        "'잘 버티고 계세요', '장기 관점에서 문제없습니다' 식으로 안심.\n"
+                        "3. 공포 유발 표현 금지: '긴급', '심각', '무조건', '1초도 망설이지 마세요', "
+                        "'알람 맞춰두세요', '날리면 안 됩니다'.\n"
+                        "4. 분석만 하라. 행동 지시가 아닌 정보 전달.\n\n"
+                        "[형식 규칙]\n"
                         "볼드(**) 사용 금지. 이모지로 구분. "
                         "구체적 수치 필수. 추상적 표현 금지. "
-                        "한국 시장 영향에 초점을 맞춰라."
+                        "한국 시장 영향에 초점."
                     ),
                     messages=[{"role": "user", "content": prompt}],
                 )
-                analysis = response.content[0].text.strip().replace("**", "")
-                import re
-                analysis = re.sub(r'\n{3,}', '\n\n', analysis)
-                analysis = analysis.replace("###", "").replace("##", "").replace("# ", "")
+                # [v3.6.6] 코드 기반 매도 지시 필터링 적용
+                from kstock.bot.chat_handler import _sanitize_response
+                analysis = _sanitize_response(response.content[0].text.strip())
 
                 msg = (
                     f"🇺🇸 미국 시장 프리마켓 브리핑\n"

@@ -169,44 +169,50 @@ def generate_hold_solution(holding: dict, hold_type: str) -> dict:
         "focus_points": config["focus"],
     }
 
-    # 수익 구간
-    if pnl >= config["profit_target"]:
-        result["action"] = "익절 실행"
-        result["urgency"] = "high"
+    # [v3.6.6] 장기투자 종목은 매도/익절 판단을 하지 않음
+    if hold_type == "long_term":
+        result["action"] = "장기 홀딩"
+        result["urgency"] = "low"
+        if pnl > 0:
+            result["reason"] = (
+                f"{name} 수익 {pnl:+.1f}%, 장기투자 종목이므로 계속 보유."
+            )
+            result["detail"] = "펀더멘털과 산업 성장성 중심으로 분기별 점검."
+        else:
+            result["reason"] = (
+                f"{name} 손실 {pnl:+.1f}%, 장기투자 관점에서 단기 변동 무시."
+            )
+            result["detail"] = "분기 실적과 산업 구조 변화만 체크. 단기 노이즈 무시."
+
+    # 수익 구간 (단타/스윙/포지션만)
+    elif pnl >= config["profit_target"]:
+        result["action"] = "목표 도달 — 트레일링 스탑 설정 권장"
+        result["urgency"] = "medium"
         result["reason"] = (
             f"{name} 수익률 {pnl:+.1f}%로 "
             f"{hold_type} 목표({config['profit_target']}%)를 달성했습니다."
         )
-        if hold_type in ("scalp", "swing"):
-            result["detail"] = "전량 매도 후 다음 기회를 노리세요."
-        else:
-            result["detail"] = "50% 익절 후 나머지는 트레일링 스탑으로 관리하세요."
+        result["detail"] = "트레일링 스탑으로 수익을 보호하면서 추가 상승 여지를 남기세요."
 
     # 손절 구간
     elif pnl <= config["stop_loss"]:
-        result["action"] = "손절 검토"
-        result["urgency"] = "high"
+        result["action"] = "손절 라인 점검"
+        result["urgency"] = "medium"
         result["reason"] = (
             f"{name} 손실 {pnl:+.1f}%로 "
-            f"{hold_type} 손절선({config['stop_loss']}%)에 도달했습니다."
+            f"{hold_type} 손절선({config['stop_loss']}%)에 근접했습니다."
         )
-        if hold_type in ("scalp", "swing"):
-            result["detail"] = "즉시 손절하세요. 반등 기대는 금물."
-        else:
-            result["detail"] = "펀더멘털이 변하지 않았다면 물타기 검토. 변했다면 손절."
+        result["detail"] = "펀더멘털 변화 여부를 확인하고 판단하세요."
 
     # 보유기간 초과 (단타/스윙)
     elif days > config["max_days"] and hold_type in ("scalp", "swing"):
-        result["action"] = "보유기간 초과"
+        result["action"] = "보유기간 초과 — 점검 필요"
         result["urgency"] = "medium"
         result["reason"] = (
             f"{name} 보유 {days}일, "
             f"{hold_type} 권장 기간({config['max_days']}일) 초과."
         )
-        if pnl > 0:
-            result["detail"] = "수익 중이니 익절하고 새 종목으로 회전하세요."
-        else:
-            result["detail"] = "기간 대비 수익이 없습니다. 기회비용을 고려해 정리하세요."
+        result["detail"] = "보유 전략을 재점검하세요."
 
     # 정상 보유
     else:

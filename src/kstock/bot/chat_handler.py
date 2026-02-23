@@ -1,4 +1,4 @@
-"""AI chat handler for K-Quant v3.5 - Claude API integration.
+"""AI chat handler for K-Quant v3.6.6 - Claude API integration.
 
 Handles free-form user questions via the Anthropic Claude API.
 Maintains daily usage limits, conversation history via ChatMemory,
@@ -12,12 +12,14 @@ Rules:
 - "주호님" personalized greeting
 - CFA/CAIA 수준 전문 분석가 관점
 - Direct action instructions (not vague)
+- [v3.6.6] AI 응답에서 매도 지시 자동 필터링
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
@@ -28,13 +30,73 @@ USER_NAME = "주호님"
 # Daily limit for AI chat questions
 DEFAULT_DAILY_LIMIT = 50
 
+# [v3.6.6] 매도 지시 / 공포 유발 키워드 필터
+_SELL_PATTERNS = [
+    r'무조건\s*매도',
+    r'전량\s*매도',
+    r'즉시\s*매도',
+    r'시초가\s*매도',
+    r'시초가에\s*매도',
+    r'매도\s*주문\s*필수',
+    r'1초도\s*망설이지',
+    r'알람\s*맞춰',
+    r'날리면\s*안\s*됩니다',
+    r'절대\s*날리',
+    r'이거\s*심각합니다',
+    r'긴급\s*전략',
+    r'긴급\s*익절',
+    r'긴급\s*매도',
+]
+_SELL_RE = re.compile('|'.join(_SELL_PATTERNS), re.IGNORECASE)
+
+
+def _sanitize_response(answer: str) -> str:
+    """[v3.6.6] AI 응답에서 매도 지시 및 공포 유발 표현을 필터링.
+
+    프롬프트 가드레일을 보강하는 코드 기반 안전장치.
+    매도 지시가 발견되면 해당 섹션을 부드러운 표현으로 대체.
+    """
+    # Markdown 정리
+    answer = answer.replace("**", "")
+    answer = answer.replace("###", "").replace("##", "").replace("# ", "")
+    answer = re.sub(r'\n{3,}', '\n\n', answer)
+
+    # 매도 지시 키워드 필터링
+    if _SELL_RE.search(answer):
+        logger.warning("🚫 AI 응답에서 매도 지시 감지! 필터링 적용.")
+        # 문제되는 표현들을 부드럽게 교체
+        replacements = {
+            '무조건 매도': '상황 점검 필요',
+            '전량 매도': '포지션 점검 검토',
+            '즉시 매도': '상황 모니터링',
+            '시초가에 매도': '시초가 확인 후 판단',
+            '시초가 매도': '시초가 확인 후 판단',
+            '매도 주문 필수': '시장 상황 주시',
+            '1초도 망설이지 마세요': '차분하게 판단하세요',
+            '절대 날리면 안 됩니다': '장기 관점에서 차분하게 대응하세요',
+            '이거 심각합니다': '주의 깊게 살펴보세요',
+            '긴급 전략': '참고 포인트',
+            '긴급 익절': '수익 점검',
+            '긴급 매도': '상황 점검',
+        }
+        for bad, good in replacements.items():
+            answer = answer.replace(bad, good)
+            # 느낌표 뒤에 붙는 경우도 처리
+            answer = answer.replace(bad + '!', good)
+
+    # 길이 제한
+    if len(answer) > 4000:
+        answer = answer[:3997] + "..."
+
+    return answer
+
 
 async def handle_ai_question(question: str, context: dict, db, chat_memory) -> str:
     """Process a user question via Claude API.
 
     Builds a system prompt from live portfolio/market context, appends
     conversation history, and sends the question to Claude. The response
-    is sanitized (no ** bold) and saved to chat memory.
+    is sanitized (no ** bold, no sell orders) and saved to chat memory.
 
     Args:
         question: User's free-form question text.
@@ -45,7 +107,7 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory) -> s
         chat_memory: ChatMemory instance for conversation history.
 
     Returns:
-        AI response text (Korean, no ** bold, max ~500 chars).
+        AI response text (Korean, no ** bold, max ~4000 chars).
         On error, returns a user-friendly Korean error message.
     """
     # Validate API key
@@ -127,17 +189,8 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory) -> s
             "잠시 후 다시 시도해주세요."
         )
 
-    # Sanitize: remove all ** bold markers and clean up formatting
-    answer = answer.replace("**", "")
-    answer = answer.replace("###", "").replace("##", "").replace("# ", "")
-
-    # 3줄 이상 연속 빈 줄 → 2줄로 정리
-    import re
-    answer = re.sub(r'\n{3,}', '\n\n', answer)
-
-    # Truncate if excessively long (safety net)
-    if len(answer) > 4000:
-        answer = answer[:3997] + "..."
+    # [v3.6.6] 코드 기반 응답 검증 + 매도 지시 필터링
+    answer = _sanitize_response(answer)
 
     # Save to conversation memory and increment daily usage
     chat_memory.add("user", question)

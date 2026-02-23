@@ -31,29 +31,43 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 [현재 시간]
 {current_time}
 
-[절대 규칙 — 반드시 지켜라]
-1. 매도/매수 지시를 절대 하지 마라. "매도하세요", "팔아라", "전량 매도", "시초가에 매도" 같은 표현 금지.
-2. 보유종목의 유형(단타/스윙/장기 등)은 아래 데이터에 명시되어 있다. 장기투자 종목에 매도를 권유하지 마라.
-3. 위에 명시된 [현재 시간]의 시장 개장 상태를 그대로 사용하라. 절대 임의로 판단하지 마라.
-   → "개장 중"이라고 되어 있으면 "개장 중"이다. "마감"이라고 되어 있으면 "마감"이다.
-   → "프리마켓", "장 시작 전" 등 위 데이터에 없는 표현을 임의로 만들지 마라.
-4. 참고용 분석이지 투자 지시가 아니다. "~검토해보세요", "~고려해볼 만합니다" 식으로.
-5. 수익이 큰 종목에 "긴급", "당부", "놓치면 안 된다", "꼭 확정하세요" 같은 공포 유발 표현 금지.
-6. 숫자 근거를 제시하라. 목표가, 손절가, 비중%, 기간을 명시.
-7. 이유를 반드시 달아라. "왜"가 없는 조언은 금지.
-8. 시장 데이터는 전일 종가 기준이다.
+[절대 규칙 — 반드시 지켜라 — 이 규칙을 어기면 안 된다]
+1. 매도/매수 지시를 절대 하지 마라.
+   금지 표현: "매도하세요", "팔아라", "전량 매도", "시초가에 매도",
+   "무조건 매도", "즉시 매도", "정리하세요", "팔아야", "놓치지 마세요"
+2. 장기투자 종목에 시장 변동(나스닥 하락, VIX 상승 등)을 이유로 매도를 절대 권유하지 마라.
+   장기투자 종목은 분기 실적, 산업 구조 변화만 판단 기준이다. 일일 시장 변동은 무시하라.
+3. 아래 [보유 종목 + 맞춤 솔루션]의 "판단" 항목은 참고 정보일 뿐이다.
+   이것을 "매도 지시"로 변환하거나 증폭하지 마라.
+4. 위에 명시된 [현재 시간]의 시장 개장 상태를 그대로 사용하라. 절대 임의로 판단하지 마라.
+   → "개장 중"이면 "개장 중", "마감"이면 "마감"이다.
+   → "프리마켓", "장 시작 전" 등 위 데이터에 없는 표현을 만들지 마라.
+5. 참고용 분석이지 투자 지시가 아니다. "~검토해보세요", "~고려해볼 만합니다" 식으로.
+6. 공포 유발 표현 절대 금지:
+   "긴급", "당부", "놓치면 안 된다", "꼭 확정하세요",
+   "심각합니다", "1초도 망설이지 마세요", "알람 맞춰두세요",
+   "날리면 안 됩니다", "큰일이야", "무조건"
+7. 숫자 근거를 제시하라. 목표가, 손절가, 비중%, 기간을 명시.
+8. 이유를 반드시 달아라. "왜"가 없는 조언은 금지.
+9. 시장 데이터는 전일 종가 기준이다.
+10. 시장이 하락해도 장기투자 종목은 "잘 버티고 계세요", "장기 관점에서 문제없습니다" 식으로 안심시켜라.
 
 [분석 프레임워크]
 종목 질문 시 반드시 3가지 분석:
 - 기술적: RSI, MACD, 이동평균선(5/20/60/120일), 볼린저밴드, 거래량
 - 펀더멘털: PER, PBR, ROE, 매출성장률, 영업이익률, 부채비율
 - 수급: 외인/기관 순매수, 공매도 잔고, 프로그램 매매
+- 서사 vs 숫자 괴리: 뉴스/테마 노출 빈도 vs 실제 매출/이익 변화 비교
+  → 과대평가 신호: 뉴스 많은데 실적 변화 없음
+  → 과소평가 신호: 뉴스 없는데 실적 조용히 개선 중
 
 시장 질문 시:
 - 글로벌 매크로 환경 (미국 금리, 달러, 유가, 반도체 사이클)
+- 유동성 방향: 장단기 금리차(10Y-2Y), 달러인덱스 변화율, VIX 추세
 - 한국 시장 특수 요인 (환율, 외인 동향, 정책)
 - 섹터 로테이션 관점
-- 구체적 전략 제시 (어떤 섹터, 어떤 종목, 비중)
+- 거시 시나리오별 확률 (연착륙/경기침체/스태그플레이션/금리인하 등)
+- 구체적 관심 포인트 제시 (어떤 섹터, 어떤 가격대에서 관심)
 
 [응답 형식 - 모바일 텔레그램 최적화]
 - 볼드(별표 두개) 절대 사용 금지
@@ -107,12 +121,21 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 🎯 목표: 82,000원 (+11%)
 🔴 손절: 70,000원 (-5%)
 
+[붕괴 리스크 점검 — 종목 분석 시 필수 체크]
+아래 항목 중 2개 이상 해당하면 경고 표시:
+→ 영업현금흐름 적자 (영업활동으로 돈을 못 벌고 있음)
+→ 이자보상배율 < 1.5배 (이자 갚기도 빠듯)
+→ 단기차입금 비율 > 30% (급한 빚이 많음)
+→ 부채비율 > 200% (재무 취약)
+→ 3분기 연속 영업이익 감소 (실적 하락 추세)
+
 [핵심 지시]
 - 위 데이터를 항상 참조하여 {user_name} 맞춤 조언을 제공하라.
 - 보유종목별 "맞춤 솔루션"의 보유유형(단타/스윙/포지션/장기)에 맞게 답변하라.
-- 단타 종목에는 즉각적이고 구체적인 행동을, 장기 종목에는 펀더멘털 중심 판단을.
-- 레버리지/신용 종목은 특히 손절 타이밍에 민감하게 대응하라.
-- 투자 성향 데이터를 참고하되, 항상 수익 극대화 관점에서 조언하라.
+- 장기투자 종목: 펀더멘털과 산업 성장성 중심. 시장 일일 변동으로 매도 권유 절대 금지.
+- 단타/스윙 종목: 기술적 지표와 수급 중심으로 타이밍 조언. 단, 매도 "지시"가 아닌 "검토 제안".
+- 레버리지/신용 종목은 만기 관리에 주의를 환기.
+- 투자 성향 데이터를 참고하되, {user_name}의 자산을 보호하는 관점에서 조언하라.
 - 데이터가 없는 항목은 일반론으로 대체하되, 있는 데이터는 반드시 활용하라.'''
 
 
@@ -233,6 +256,9 @@ def get_portfolio_context(db) -> str:
 def get_market_context(macro_snapshot: dict | None = None) -> str:
     """Format market data context from a macro snapshot dict.
 
+    [v3.6.6] 유동성 방향 감지 지표 추가:
+    - 장단기 금리차 (10Y-2Y), 유동성 방향 신호
+
     Args:
         macro_snapshot: Dict with keys from MacroClient snapshot.
 
@@ -250,6 +276,7 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
     btc = macro_snapshot.get("btc_price")
     gold = macro_snapshot.get("gold_price")
     us10y = macro_snapshot.get("us10y")
+    us2y = macro_snapshot.get("us2y")
     dxy = macro_snapshot.get("dxy")
     fg = macro_snapshot.get("fear_greed")
 
@@ -273,6 +300,19 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
     if fg is not None:
         label = "극도공포" if fg < 25 else "공포" if fg < 45 else "중립" if fg < 55 else "탐욕" if fg < 75 else "극도탐욕"
         lines.append(f"공포탐욕지수: {fg:.0f}점 ({label})")
+
+    # [v3.6.6] 유동성 방향 감지: 장단기 금리차
+    if us10y is not None and us2y is not None and us10y > 0 and us2y > 0:
+        spread = us10y - us2y
+        if spread < 0:
+            spread_signal = "역전 (경기침체 경고)"
+        elif spread < 0.5:
+            spread_signal = "축소 (긴축적)"
+        elif spread < 1.5:
+            spread_signal = "정상"
+        else:
+            spread_signal = "확대 (완화적)"
+        lines.append(f"장단기 금리차(10Y-2Y): {spread:+.2f}%p ({spread_signal})")
 
     return "\n".join(lines) if lines else "시장 데이터 없음"
 
@@ -370,15 +410,15 @@ def get_report_context(db, limit: int = 3) -> str:
 def get_financial_context(db) -> str:
     """Get financial summary for portfolio holdings from DB.
 
-    Reads holdings tickers and fetches their financials (PER, PBR, ROE,
-    debt ratio) from the financials table.
+    [v3.6.6] 붕괴 리스크 지표 추가:
+    - 영업현금흐름, 이자보상배율, 단기차입금비율
 
     Args:
         db: SQLiteStore instance with get_active_holdings() and
             get_financials() methods.
 
     Returns:
-        Financial summary string, or placeholder message.
+        Financial summary string with collapse risk indicators.
     """
     try:
         holdings = db.get_active_holdings()
@@ -394,10 +434,32 @@ def get_financial_context(db) -> str:
                 pbr = fin.get("pbr", 0)
                 roe = fin.get("roe", 0)
                 debt = fin.get("debt_ratio", 0)
-                lines.append(
+                # 기본 지표
+                line = (
                     f"- {name}: PER {per:.1f}, PBR {pbr:.2f}, "
                     f"ROE {roe:.1f}%, 부채비율 {debt:.0f}%"
                 )
+                # [v3.6.6] 붕괴 리스크 지표 (DB에 있으면 표시)
+                risk_flags: list[str] = []
+                ocf = fin.get("operating_cash_flow")
+                icr = fin.get("interest_coverage_ratio")
+                short_debt = fin.get("short_term_debt_ratio")
+                op_margin_trend = fin.get("op_margin_trend")  # 3분기 추세
+
+                if ocf is not None and ocf < 0:
+                    risk_flags.append("⚠영업CF적자")
+                if icr is not None and icr < 1.5:
+                    risk_flags.append(f"⚠이자보상{icr:.1f}x")
+                if short_debt is not None and short_debt > 30:
+                    risk_flags.append(f"⚠단기차입{short_debt:.0f}%")
+                if debt > 200:
+                    risk_flags.append("⚠고부채")
+                if op_margin_trend is not None and op_margin_trend < 0:
+                    risk_flags.append("⚠영업이익↓")
+
+                if risk_flags:
+                    line += f" | 리스크: {', '.join(risk_flags)}"
+                lines.append(line)
             else:
                 lines.append(f"- {name}: 재무 데이터 미수집")
         return "\n".join(lines) if lines else "보유 종목 재무 데이터 없음"
@@ -502,6 +564,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                 "btc_price": getattr(snap, "btc_price", 0),
                 "gold_price": getattr(snap, "gold_price", 0),
                 "us10y": getattr(snap, "us10y", 0),
+                "us2y": getattr(snap, "us2y", 0),  # [v3.6.6] 유동성 감지
                 "dxy": getattr(snap, "dxy", 0),
                 "fear_greed": getattr(snap, "fear_greed_score", 50),
             }
