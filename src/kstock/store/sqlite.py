@@ -793,6 +793,18 @@ class SQLiteStore:
                     )
                 except sqlite3.OperationalError:
                     pass
+            # Migrate: add quantity/eval_amount to holdings table (v3.5.1)
+            for col, sql in [
+                ("quantity", "ALTER TABLE holdings ADD COLUMN quantity INTEGER DEFAULT 0"),
+                ("eval_amount", "ALTER TABLE holdings ADD COLUMN eval_amount REAL DEFAULT 0"),
+            ]:
+                try:
+                    conn.execute(f"SELECT {col} FROM holdings LIMIT 1")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass
 
     # -- job_runs ---------------------------------------------------------------
 
@@ -942,6 +954,51 @@ class SQLiteStore:
                 (ticker,),
             ).fetchone()
         return dict(row) if row else None
+
+    def upsert_holding(
+        self,
+        ticker: str,
+        name: str,
+        quantity: int = 0,
+        buy_price: float = 0,
+        current_price: float = 0,
+        pnl_pct: float = 0,
+        eval_amount: float = 0,
+    ) -> int:
+        """스크린샷에서 파싱한 보유종목을 holdings DB에 upsert.
+
+        이미 active인 동일 종목이 있으면 현재가/수익률만 업데이트,
+        없으면 신규 등록.
+        """
+        existing = self.get_holding_by_ticker(ticker)
+        now = datetime.utcnow().isoformat()
+        if existing:
+            with self._connect() as conn:
+                conn.execute(
+                    """UPDATE holdings SET
+                        current_price=?, pnl_pct=?, quantity=?,
+                        eval_amount=?, name=?, updated_at=?
+                    WHERE id=?""",
+                    (current_price, pnl_pct, quantity, eval_amount,
+                     name, now, existing["id"]),
+                )
+            return existing["id"]
+        else:
+            target_1 = round(buy_price * 1.03, 0) if buy_price else 0
+            target_2 = round(buy_price * 1.07, 0) if buy_price else 0
+            stop_price = round(buy_price * 0.95, 0) if buy_price else 0
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """INSERT INTO holdings
+                        (ticker, name, buy_price, current_price, quantity,
+                         eval_amount, buy_date, target_1, target_2, stop_price,
+                         status, sold_pct, pnl_pct, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)""",
+                    (ticker, name, buy_price, current_price, quantity,
+                     eval_amount, now[:10], target_1, target_2, stop_price,
+                     pnl_pct, now, now),
+                )
+                return cursor.lastrowid
 
     def update_holding(self, holding_id: int, **kwargs) -> None:
         now = datetime.utcnow().isoformat()

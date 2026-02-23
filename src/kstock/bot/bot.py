@@ -307,6 +307,7 @@ class KQuantBot:
     def __init__(self) -> None:
         self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+        self._start_time = datetime.now(KST)
         # Try loading persisted numeric chat_id
         try:
             _saved_id = Path("data/.chat_id").read_text().strip()
@@ -368,6 +369,7 @@ class KQuantBot:
         app.add_handler(CommandHandler("accumulation", self.cmd_accumulation))
         app.add_handler(CommandHandler("register", self.cmd_register))
         app.add_handler(CommandHandler("balance", self.cmd_balance))
+        app.add_handler(CommandHandler("admin", self.cmd_admin))
         # v3.0: screenshot image handler
         app.add_handler(
             MessageHandler(filters.PHOTO, self.handle_screenshot)
@@ -704,6 +706,51 @@ class KQuantBot:
                 holdings_json=json.dumps(holdings, ensure_ascii=False),
             )
 
+            # [v3.5.1 FIX] 스크린샷 ID + 보유종목을 user_data에 저장 (진단/저장용)
+            context.user_data["pending_screenshot_id"] = screenshot_id
+            context.user_data["pending_holdings"] = holdings
+
+            # [v3.5.1 FIX] 보유종목을 holdings DB에 자동 upsert (이전 기록 유지)
+            for h in holdings:
+                ticker = h.get("ticker", "")
+                hname = h.get("name", "")
+                if not ticker:
+                    continue
+                qty = h.get("quantity", 0)
+                avg_price = h.get("avg_price", 0)
+                cur_price = h.get("current_price", 0)
+                pnl_pct = h.get("profit_pct", 0)
+                eval_amt = h.get("eval_amount", 0)
+                try:
+                    self.db.upsert_holding(
+                        ticker=ticker, name=hname,
+                        quantity=qty, buy_price=avg_price,
+                        current_price=cur_price, pnl_pct=pnl_pct,
+                        eval_amount=eval_amt,
+                    )
+                except Exception as he:
+                    logger.debug("Holding upsert for %s failed: %s", ticker, he)
+
+                # screenshot_holdings 테이블에도 저장
+                try:
+                    is_margin, margin_type = detect_margin_purchase(h)
+                    self.db.add_screenshot_holding(
+                        screenshot_id=screenshot_id,
+                        ticker=ticker, name=hname,
+                        quantity=qty, avg_price=avg_price,
+                        current_price=cur_price, profit_pct=pnl_pct,
+                        eval_amount=eval_amt,
+                        is_margin=1 if is_margin else 0,
+                        margin_type=margin_type or "",
+                    )
+                except Exception as she:
+                    logger.debug("Screenshot holding save for %s failed: %s", ticker, she)
+
+            logger.info(
+                "Screenshot saved: id=%s, %d holdings upserted",
+                screenshot_id, len(holdings),
+            )
+
             # Format and send summary
             msg = format_screenshot_summary(parsed, comparison, prev_diagnoses)
             await update.message.reply_text(msg, reply_markup=MAIN_MENU)
@@ -879,24 +926,21 @@ class KQuantBot:
                 await self._propose_trade_addition(update, context, trade)
                 return
 
-            # 2. 자연어 종목 감지
+            # 2. 자연어 종목 감지 — 종목명만 입력해도 바로 분석
             detected = self._detect_stock_query(text)
             if detected:
                 stock_name = detected.get("name", "")
                 remaining = text.replace(stock_name, "").strip()
-                # 질문형 키워드가 있으면 AI 분석, 없으면 액션 버튼
-                question_kw = [
-                    "분석", "어때", "전망", "어떻게", "살까", "팔까",
-                    "?", "해줘", "알려", "볼까", "될까", "좋을까",
-                    "추천", "의견", "생각", "리뷰", "진단", "점검",
-                ]
-                is_question = any(q in remaining for q in question_kw)
-                if is_question or len(remaining) > 3:
+                # [v3.5.1] 종목명만 입력하면 바로 분석 실행 (슬래시 명령 불필요)
+                # 종목명만 딱 입력한 경우 (remaining이 거의 없음) = 바로 분석
+                if len(remaining) <= 3:
+                    await self._handle_stock_analysis(
+                        update, context, detected, f"{stock_name} 분석",
+                    )
+                else:
                     await self._handle_stock_analysis(
                         update, context, detected, text,
                     )
-                else:
-                    await self._show_stock_actions(update, context, detected)
             else:
                 # 메뉴에 없는 텍스트 -> AI 질문으로 처리
                 await self._handle_ai_question(update, context, text)
@@ -6458,6 +6502,169 @@ class KQuantBot:
             logger.error("Accumulation command error: %s", e, exc_info=True)
             await update.message.reply_text(
                 "\u26a0\ufe0f 매집 탐지 중 오류가 발생했습니다.", reply_markup=MAIN_MENU,
+            )
+
+    async def cmd_admin(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """관리자 모드 — 오류 보고 + 봇 상태 확인 + Claude Code 연동.
+
+        사용법:
+            /admin bug <에러 내용>     → 버그 리포트 기록
+            /admin status              → 봇 상태 종합
+            /admin logs                → 최근 에러 로그
+            /admin restart             → 봇 재시작 요청
+            /admin holdings            → 보유종목 DB 현황
+        """
+        self._persist_chat_id(update)
+        args = context.args or []
+        admin_log_path = Path("data/admin_reports.jsonl")
+        admin_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not args:
+            await update.message.reply_text(
+                "\U0001f6e0 관리자 모드\n\n"
+                "/admin bug <에러 내용> — 버그 리포트\n"
+                "/admin status — 봇 상태\n"
+                "/admin logs — 최근 에러\n"
+                "/admin holdings — 보유종목 현황\n\n"
+                "\U0001f4a1 버그를 보고하면 Claude Code가\n"
+                "자동으로 감지하고 수정합니다.",
+                reply_markup=MAIN_MENU,
+            )
+            return
+
+        subcmd = args[0].lower()
+
+        if subcmd == "bug":
+            # 버그 리포트를 파일로 기록 (Claude Code가 모니터링)
+            bug_text = " ".join(args[1:]) if len(args) > 1 else "내용 없음"
+            import json as _json
+            report = {
+                "type": "bug",
+                "message": bug_text,
+                "timestamp": datetime.now(KST).isoformat(),
+                "chat_id": str(update.effective_chat.id),
+                "status": "open",
+            }
+            with open(admin_log_path, "a", encoding="utf-8") as f:
+                f.write(_json.dumps(report, ensure_ascii=False) + "\n")
+            # 최근 에러 로그도 첨부
+            recent_errors = []
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["tail", "-20", "bot.log"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                for line in result.stdout.splitlines():
+                    if "ERROR" in line or "error" in line.lower():
+                        recent_errors.append(line.strip()[-120:])
+            except Exception:
+                pass
+            if recent_errors:
+                report["recent_errors"] = recent_errors[-5:]
+                with open(admin_log_path, "a", encoding="utf-8") as f:
+                    f.write(_json.dumps({"type": "error_context", "errors": recent_errors[-5:]}, ensure_ascii=False) + "\n")
+
+            await update.message.reply_text(
+                f"\U0001f4e9 버그 리포트 접수 완료\n\n"
+                f"내용: {bug_text[:200]}\n"
+                f"시간: {datetime.now(KST).strftime('%H:%M:%S')}\n\n"
+                f"\U0001f4c1 data/admin_reports.jsonl에 기록됨\n"
+                f"Claude Code에서 확인 후 수정 예정",
+                reply_markup=MAIN_MENU,
+            )
+
+        elif subcmd == "status":
+            # 봇 상태 종합
+            holdings = self.db.get_active_holdings()
+            jobs_today = 0
+            try:
+                today_str = _today()
+                for job_name in ["morning_briefing", "sentiment_analysis", "daily_pdf_report"]:
+                    jr = self.db.get_job_run(job_name, today_str)
+                    if jr and jr.get("status") == "success":
+                        jobs_today += 1
+            except Exception:
+                pass
+
+            chat_count = 0
+            try:
+                chat_count = self.db.get_chat_usage(_today())
+            except Exception:
+                pass
+
+            uptime = datetime.now(KST) - getattr(self, '_start_time', datetime.now(KST))
+            lines = [
+                "\U0001f4ca 봇 상태 종합\n",
+                f"\u2705 가동시간: {uptime.seconds // 3600}시간 {(uptime.seconds % 3600) // 60}분",
+                f"\U0001f4b0 보유종목: {len(holdings)}개",
+                f"\U0001f916 오늘 AI 채팅: {chat_count}회",
+                f"\u23f0 오늘 완료 작업: {jobs_today}/3",
+                f"\U0001f4be DB: kquant.db",
+                f"\U0001f310 KIS: {'연결됨' if self.kis_broker.connected else '미연결'}",
+            ]
+            await update.message.reply_text(
+                "\n".join(lines), reply_markup=MAIN_MENU,
+            )
+
+        elif subcmd == "logs":
+            # 최근 에러 로그
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["tail", "-50", "bot.log"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                error_lines = [
+                    l.strip()[-100:]
+                    for l in result.stdout.splitlines()
+                    if "ERROR" in l or "WARNING" in l
+                ][-10:]
+                if error_lines:
+                    await update.message.reply_text(
+                        "\U0001f6a8 최근 에러/경고\n\n" + "\n".join(error_lines),
+                        reply_markup=MAIN_MENU,
+                    )
+                else:
+                    await update.message.reply_text(
+                        "\u2705 최근 에러 없음!", reply_markup=MAIN_MENU,
+                    )
+            except Exception as e:
+                await update.message.reply_text(
+                    f"\u26a0\ufe0f 로그 확인 실패: {e}", reply_markup=MAIN_MENU,
+                )
+
+        elif subcmd == "holdings":
+            # 보유종목 DB 현황
+            holdings = self.db.get_active_holdings()
+            if not holdings:
+                await update.message.reply_text(
+                    "\U0001f4ad DB에 보유종목이 없습니다.\n"
+                    "잔고 스크린샷을 찍어주세요!",
+                    reply_markup=MAIN_MENU,
+                )
+                return
+            lines = [f"\U0001f4ca 보유종목 DB ({len(holdings)}개)\n"]
+            for h in holdings:
+                pnl = h.get("pnl_pct", 0)
+                emoji = "\U0001f4c8" if pnl >= 0 else "\U0001f4c9"
+                lines.append(
+                    f"{emoji} {h.get('name', '')} ({h.get('ticker', '')})\n"
+                    f"  매수 {h.get('buy_price', 0):,.0f} | "
+                    f"현재 {h.get('current_price', 0):,.0f} | "
+                    f"{pnl:+.1f}%"
+                )
+            await update.message.reply_text(
+                "\n".join(lines), reply_markup=MAIN_MENU,
+            )
+
+        else:
+            await update.message.reply_text(
+                f"\u26a0\ufe0f 알 수 없는 명령: {subcmd}\n"
+                "/admin 으로 도움말 확인",
+                reply_markup=MAIN_MENU,
             )
 
     async def cmd_register(
