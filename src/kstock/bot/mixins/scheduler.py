@@ -1219,6 +1219,33 @@ class SchedulerMixin:
         except Exception as e:
             logger.error("Failed to save user preferences: %s", e)
 
+    # == 증권사 리포트 자동 수집 (v3.6.2) =====================================
+
+    async def job_report_crawl(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """매일 08:20 증권사 리포트 자동 수집 → DB 저장."""
+        try:
+            from kstock.ingest.report_crawler import crawl_all_reports
+
+            stats = await crawl_all_reports(
+                self.db, company_pages=3, industry_pages=2,
+            )
+            total = stats.get("total_new", 0)
+            if total > 0 and self.chat_id:
+                msg = (
+                    f"📋 증권사 리포트 자동 수집 완료\n"
+                    f"종목분석: {stats['company']}건 | "
+                    f"산업분석: {stats['industry']}건\n"
+                    f"신규 저장: {total}건"
+                )
+                await context.bot.send_message(chat_id=self.chat_id, text=msg)
+            self.db.upsert_job_run("report_crawl", _today(), status="success",
+                                   message=f"new={total}")
+            logger.info("Report crawl done: %s", stats)
+        except Exception as e:
+            logger.error("Report crawl job failed: %s", e, exc_info=True)
+            self.db.upsert_job_run("report_crawl", _today(), status="error",
+                                   message=str(e))
+
     # == Core Logic ==========================================================
 
     async def _update_sector_strengths(self) -> None:

@@ -194,12 +194,20 @@ class CoreHandlersMixin:
             time=dt_time(hour=21, minute=0, tzinfo=KST),
             name="daily_self_report",
         )
+        # v3.6.2: 증권사 리포트 자동 수집 (매일 08:20, 평일)
+        jq.run_daily(
+            self.job_report_crawl,
+            time=dt_time(hour=8, minute=20, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="report_crawl",
+        )
         logger.info(
             "Scheduled: us_premarket(07:00), morning(07:30), intraday(1min), "
             "weekly_learn(Sat 09:00), screenshot(Mon/Fri 08:00), "
             "sentiment(08:00), weekly_report(Sun 19:00), "
             "macro_refresh(1min), market_pulse(1min), "
-            "daily_report_pdf(16:00), self_report(21:00) KST"
+            "daily_report_pdf(16:00), self_report(21:00), "
+            "report_crawl(weekday 08:20) KST"
         )
 
     # == Command & Menu Handlers =============================================
