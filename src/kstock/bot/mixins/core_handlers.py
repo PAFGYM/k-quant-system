@@ -612,6 +612,26 @@ class CoreHandlersMixin:
                     reply_markup=MAIN_MENU,
                 )
         else:
+            # 0-fav. 즐겨찾기 종목 추가 모드
+            if context.user_data.get("awaiting_fav_add"):
+                context.user_data.pop("awaiting_fav_add", None)
+                detected = self._detect_stock_query(text)
+                if detected:
+                    ticker = detected.get("code", "")
+                    name = detected.get("name", text)
+                    if ticker:
+                        self.db.add_watchlist(ticker, name)
+                        await update.message.reply_text(
+                            f"⭐ {name}({ticker})을 즐겨찾기에 등록했습니다!",
+                            reply_markup=MAIN_MENU,
+                        )
+                        return
+                await update.message.reply_text(
+                    f"⚠️ '{text}' 종목을 찾을 수 없습니다. 정확한 종목명을 입력해주세요.",
+                    reply_markup=MAIN_MENU,
+                )
+                return
+
             # 0. 잔고에서 "종목 추가" 후 종목명 입력 대기 상태
             if context.user_data.get("awaiting_stock_add"):
                 detected = self._detect_stock_query(text)
@@ -1027,6 +1047,7 @@ class CoreHandlersMixin:
                 "ai": self._action_ai_status,
                 "orderbook": self._action_orderbook,
                 "short": self._action_short_analysis,
+                "hub": self._action_hub,
             }
             handler = dispatch.get(action)
             if handler:

@@ -27,11 +27,16 @@ USER_NAME = "주호님"
 SYSTEM_PROMPT_TEMPLATE = '''너는 {user_name}의 전속 투자 참모 '퀀트봇'이다.
 CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 
-[핵심 원칙]
-1. 절대 모호하게 답하지 마. "~할 수 있습니다" 금지. "~하세요"로 단정.
-2. 숫자로 말하라. 목표가, 손절가, 비중%, 기간을 반드시 명시.
-3. 이유를 반드시 달아라. "왜"가 없는 조언은 금지.
-4. 실행 가능한 액션을 줘라. "관심을 가져보세요" 금지. "내일 시가에 10% 비중으로 매수하세요" 식으로.
+[현재 시간]
+{current_time}
+
+[중요 원칙]
+1. 숫자로 근거를 제시하라. 목표가, 손절가, 비중%, 기간을 명시.
+2. 이유를 반드시 달아라. "왜"가 없는 조언은 금지.
+3. 참고용 분석이지 투자 지시가 아니다. "~검토해보세요", "~고려해볼 만합니다" 식으로.
+4. 긴급 매도/매수 지시를 절대 하지 마라. "지금 당장 매도하세요" 같은 표현 금지.
+5. 시장 데이터는 전일 종가 기준이다. "장 마감했습니다"라고 단정하지 말고, 현재 시간 기준으로 개장/마감 여부를 판단하라.
+6. 수익이 큰 종목에 대해 "절대 놓치면 안 된다", "긴급 당부" 같은 공포 유발 표현 금지.
 
 [분석 프레임워크]
 종목 질문 시 반드시 3가지 분석:
@@ -120,8 +125,26 @@ def build_system_prompt(context: dict) -> str:
     Returns:
         Fully formatted system prompt string for Claude API.
     """
+    # 현재 시간 + 시장 개장 상태 계산
+    now_kst = datetime.now(KST)
+    EST = timezone(timedelta(hours=-5))
+    now_est = datetime.now(EST)
+    weekday = now_est.weekday()  # 0=Mon
+
+    us_open = (weekday < 5 and 9 <= now_est.hour < 16)
+    kr_open = (weekday < 5 and 9 <= now_kst.hour < 16)
+
+    time_info = (
+        f"현재: {now_kst.strftime('%Y-%m-%d %H:%M')} KST "
+        f"({now_est.strftime('%H:%M')} EST)\n"
+        f"미국장: {'개장 중 (실시간 변동 가능)' if us_open else '마감'}\n"
+        f"한국장: {'개장 중' if kr_open else '마감'}\n"
+        f"아래 시장 데이터는 전일 종가 기준입니다."
+    )
+
     return SYSTEM_PROMPT_TEMPLATE.format(
         user_name=USER_NAME,
+        current_time=time_info,
         investor_style=context.get("investor_style", "투자 성향 데이터 없음"),
         portfolio_with_solutions=context.get(
             "portfolio_with_solutions",

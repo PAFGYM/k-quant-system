@@ -514,24 +514,110 @@ class AdminExtrasMixin:
         """분석 허브 — 종목명 입력 또는 빠른 분석 선택."""
         buttons = [
             [
-                InlineKeyboardButton("\U0001f4ca 멀티분석", callback_data="quick_q:multi"),
-                InlineKeyboardButton("\U0001f525 급등주", callback_data="quick_q:surge"),
+                InlineKeyboardButton("📊 멀티분석", callback_data="hub:multi"),
+                InlineKeyboardButton("🔥 급등주", callback_data="hub:surge"),
             ],
             [
-                InlineKeyboardButton("\u26a1 스윙기회", callback_data="quick_q:swing"),
-                InlineKeyboardButton("\U0001f3af 매수추천", callback_data="quick_q:buy_pick"),
+                InlineKeyboardButton("⚡ 스윙기회", callback_data="hub:swing"),
+                InlineKeyboardButton("🎯 매수추천", callback_data="quick_q:buy_pick"),
             ],
             [
-                InlineKeyboardButton("\U0001f4ca 호가조회", callback_data="orderbook:select"),
-                InlineKeyboardButton("\U0001f916 AI상태", callback_data="ai:status"),
+                InlineKeyboardButton("📊 호가조회", callback_data="orderbook:select"),
+                InlineKeyboardButton("🤖 AI상태", callback_data="ai:status"),
             ],
         ]
         await update.message.reply_text(
-            "\U0001f4ca 분석 허브\n\n"
+            "📊 분석 허브\n\n"
             "종목명을 직접 입력하거나\n"
             "아래 버튼으로 빠른 분석을 시작하세요:",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+
+    async def _action_hub(self, query, context, payload: str) -> None:
+        """분석 허브 버튼 콜백 — 각 기능 직접 실행."""
+        if payload == "surge":
+            await query.edit_message_text("🔥 급등주 실시간 스캔 중...")
+            # cmd_surge는 update.message를 사용하므로 직접 실행
+            try:
+                stocks_data = []
+                for item in self.all_tickers:
+                    try:
+                        code = item["code"]
+                        market = item.get("market", "KOSPI")
+                        ohlcv = await self.yf_client.get_ohlcv(code, market, period="1mo")
+                        if ohlcv is None or ohlcv.empty or len(ohlcv) < 2:
+                            continue
+                        close = ohlcv["close"].astype(float)
+                        volume = ohlcv["volume"].astype(float)
+                        cur_price = float(close.iloc[-1])
+                        prev_price = float(close.iloc[-2])
+                        change_pct = ((cur_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
+                        avg_vol = float(volume.tail(20).mean()) if len(volume) >= 20 else float(volume.mean())
+                        cur_vol = float(volume.iloc[-1])
+                        vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 0
+                        if change_pct >= 3.0 or vol_ratio >= 2.0:
+                            stocks_data.append({
+                                "name": item["name"], "ticker": code,
+                                "change_pct": change_pct, "volume_ratio": vol_ratio,
+                            })
+                    except Exception:
+                        continue
+
+                if not stocks_data:
+                    await query.edit_message_text("🔥 현재 급등 조건을 충족하는 종목이 없습니다.")
+                    return
+
+                stocks_data.sort(key=lambda s: s["change_pct"], reverse=True)
+                lines = [f"🔥 급등주 실시간 스캔 ({len(stocks_data)}종목 감지)\n"]
+                for i, s in enumerate(stocks_data[:10], 1):
+                    icon = "📈" if s["change_pct"] >= 5 else "🔥" if s["change_pct"] >= 3 else "⚡"
+                    lines.append(
+                        f"{i}. {icon} {s['name']}({s['ticker']}) "
+                        f"{s['change_pct']:+.1f}% 거래량 {s['volume_ratio']:.1f}배"
+                    )
+                await query.edit_message_text("\n".join(lines))
+            except Exception as e:
+                logger.error("Hub surge error: %s", e, exc_info=True)
+                await query.edit_message_text("⚠️ 급등주 스캔 중 오류가 발생했습니다.")
+
+        elif payload == "swing":
+            active_swings = self.db.get_active_swing_trades()
+            if active_swings:
+                lines = ["⚡ 활성 스윙 거래\n"]
+                for sw in active_swings[:5]:
+                    pnl = sw.get("pnl_pct", 0)
+                    lines.append(
+                        f"{sw['name']} {_won(sw['entry_price'])} → "
+                        f"목표 {_won(sw.get('target_price', 0))} ({pnl:+.1f}%)"
+                    )
+                await query.edit_message_text("\n".join(lines))
+            else:
+                await query.edit_message_text(
+                    "⚡ 현재 활성 스윙 거래가 없습니다.\n\n"
+                    "스캔 중 조건 충족 종목 발견 시 알려드리겠습니다."
+                )
+
+        elif payload == "multi":
+            # 멀티분석: 보유종목 버튼 표시
+            holdings = self.db.get_active_holdings()
+            buttons = []
+            for h in holdings[:4]:
+                ticker = h.get("ticker", "")
+                name = h.get("name", "")
+                if ticker and name:
+                    buttons.append([InlineKeyboardButton(
+                        f"🔍 {name} 분석", callback_data=f"multi_run:{ticker}",
+                    )])
+            if buttons:
+                await query.edit_message_text(
+                    "📊 멀티 에이전트 분석\n\n보유종목을 선택하세요:",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            else:
+                await query.edit_message_text(
+                    "📊 멀티분석\n\n종목명을 직접 입력하면 자동 분석됩니다.\n"
+                    "예: 삼성전자 분석"
+                )
 
     async def _action_ai_status(self, query, context, payload: str) -> None:
         """AI 엔진 상태 표시."""
@@ -670,6 +756,7 @@ class AdminExtrasMixin:
             ])
 
         buttons.append([
+            InlineKeyboardButton("➕ 종목 추가", callback_data="fav:add_mode"),
             InlineKeyboardButton("🔄 새로고침", callback_data="fav:refresh"),
         ])
         await update.message.reply_text(
@@ -691,6 +778,16 @@ class AdminExtrasMixin:
                     f"⭐ {name}({ticker})을 즐겨찾기에 등록했습니다!\n\n"
                     "⭐ 즐겨찾기 메뉴에서 확인하세요."
                 )
+            return
+
+        if action == "add_mode":
+            # 종목 추가 모드: 채팅에 종목명 입력하라고 안내
+            context.user_data["awaiting_fav_add"] = True
+            await query.edit_message_text(
+                "⭐ 종목 추가\n\n"
+                "추가할 종목명을 채팅창에 입력하세요.\n"
+                "예: 에코프로비엠, 삼성전자"
+            )
             return
 
         if action == "rm":
