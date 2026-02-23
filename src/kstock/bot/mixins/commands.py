@@ -906,8 +906,106 @@ class CommandsMixin:
     async def _menu_short(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """공매도 분석 메뉴."""
-        await self.cmd_short(update, context)
+        """공매도 분석 메뉴 — 보유종목 버튼 표시."""
+        holdings = self.db.get_active_holdings()
+        buttons = []
+        for h in holdings[:6]:
+            ticker = h.get("ticker", "")
+            name = h.get("name", ticker)
+            if ticker:
+                buttons.append([InlineKeyboardButton(
+                    f"📊 {name} 공매도", callback_data=f"short:{ticker}",
+                )])
+
+        if buttons:
+            buttons.append([InlineKeyboardButton(
+                "📊 전체 보유종목 요약", callback_data="short:all",
+            )])
+            await update.message.reply_text(
+                "📊 공매도/레버리지 분석\n\n"
+                "보유종목을 선택하면 공매도 현황을 분석합니다:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        else:
+            # 보유종목 없으면 기존 방식
+            await self.cmd_short(update, context)
+
+    async def _action_short_analysis(self, query, context, payload: str) -> None:
+        """공매도 분석 콜백 — 종목별 또는 전체."""
+        if payload == "all":
+            # 전체 보유종목 요약 (기존 cmd_short 로직)
+            holdings = self.db.get_active_holdings()
+            if not holdings:
+                await query.edit_message_text("📊 보유 종목이 없습니다.")
+                return
+            lines = ["📊 포트폴리오 공매도/레버리지 현황\n"]
+            for h in holdings[:10]:
+                ticker = h.get("ticker", "")
+                name = h.get("name", "?")
+                if not ticker:
+                    continue
+                short_data = self.db.get_short_selling(ticker, days=20)
+                signal = analyze_short_selling(short_data, ticker, name)
+                if signal.is_overheated:
+                    status = "🚨 과열"
+                elif signal.score_adj <= -5:
+                    status = "🔴 주의"
+                elif signal.score_adj >= 5:
+                    status = "🟢 긍정"
+                else:
+                    status = "⚪ 보통"
+                latest_ratio = 0.0
+                if short_data:
+                    latest_ratio = short_data[-1].get("short_ratio", 0.0)
+                lines.append(
+                    f"  {status} {name} ({ticker})\n"
+                    f"    공매도 비율: {latest_ratio:.1f}% | "
+                    f"점수: {signal.score_adj:+d}"
+                )
+            await query.edit_message_text("\n".join(lines))
+        else:
+            # 개별 종목 분석
+            ticker = payload
+            name = ticker
+            for item in self.all_tickers:
+                if item["code"] == ticker:
+                    name = item["name"]
+                    break
+            # holdings에서도 이름 찾기
+            h = self.db.get_holding_by_ticker(ticker)
+            if h:
+                name = h.get("name", name)
+
+            await query.edit_message_text(f"🔍 {name} ({ticker}) 공매도 분석 중...")
+
+            short_data = self.db.get_short_selling(ticker, days=60)
+            margin_data = self.db.get_margin_balance(ticker, days=60)
+            lines: list[str] = []
+
+            signal = analyze_short_selling(short_data, ticker, name)
+            lines.append(format_short_alert(signal, short_data))
+            lines.append("")
+
+            price_data = self.db.get_supply_demand(ticker, days=20)
+            pattern_result = detect_all_patterns(
+                short_data, price_data, ticker=ticker, name=name,
+            )
+            if pattern_result.patterns:
+                lines.append(format_pattern_report(pattern_result))
+                lines.append("")
+
+            if margin_data:
+                margin_signal = detect_margin_patterns(
+                    margin_data, price_data, short_data, ticker, name,
+                )
+                lines.append(format_margin_alert(margin_signal, margin_data))
+                lines.append("")
+                combined = compute_combined_leverage_score(
+                    signal.score_adj, margin_signal.total_score_adj,
+                )
+                lines.append(f"📊 공매도+레버리지 종합: {combined:+d}점")
+
+            await query.message.reply_text("\n".join(lines))
 
     async def _menu_future_tech(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

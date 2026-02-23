@@ -555,34 +555,35 @@ class CoreHandlersMixin:
         self._persist_chat_id(update)
         text = update.message.text
         handlers = {
-            # ── v3.6 메인 메뉴 (5행 핵심) ──
-            "\U0001f4ca 분석": self._menu_analysis_hub,
-            "\U0001f4b0 잔고": self._menu_balance,
-            "\U0001f4c8 시황": self._menu_market_status,
-            "\U0001f514 알림": self._menu_notification_settings,
-            "\U0001f4ac AI질문": self._menu_ai_chat,
-            "\u2699\ufe0f 더보기": self._menu_more,
-            "\U0001f519 메인으로": self._menu_back_to_main,
-            # ── 더보기 서브메뉴 항목들 ──
-            "\U0001f4f8 계좌분석": self._menu_account_analysis,
-            "\U0001f3af 전략별 보기": self._menu_strategy_view,
-            "\U0001f525 급등주": self._menu_surge,
-            "\u26a1 스윙 기회": self._menu_swing,
-            "\U0001f4ca 멀티분석": self._menu_multi_agent,
-            "\U0001f4e1 KIS설정": self._menu_kis_setup,
-            "\U0001f4cb 리포트": self._menu_reports,
-            "\U0001f4c5 주간 보고서": self._menu_weekly_report,
-            "\u2b50 즐겨찾기": self._menu_favorites,
-            "\U0001f575\ufe0f 매집탐지": self._menu_accumulation,
-            "\U0001f680 미래기술": self._menu_future_tech,
-            "\U0001f4ca 공매도": self._menu_short,
-            "\U0001f3af 30억 목표": self._menu_goal,
-            "\U0001f4ca 재무 진단": self._menu_financial,
-            "\U0001f6e0 관리자": self._menu_admin,
+            # ── v3.6.2 메인 메뉴 (4행) ──
+            "📊 분석": self._menu_analysis_hub,
+            "📈 시황": self._menu_market_status,
+            "💰 잔고": self._menu_balance,
+            "⭐ 즐겨찾기": self._menu_favorites,
+            "🤖 에이전트": self._menu_agent_chat,
+            "📋 리포트": self._menu_reports,
+            "💬 AI질문": self._menu_ai_chat,
+            "⚙️ 더보기": self._menu_more,
+            "🔙 메인으로": self._menu_back_to_main,
+            # ── 더보기 서브메뉴 ──
+            "📸 계좌분석": self._menu_account_analysis,
+            "🎯 전략별 보기": self._menu_strategy_view,
+            "🔥 급등주": self._menu_surge,
+            "⚡ 스윙 기회": self._menu_swing,
+            "📊 멀티분석": self._menu_multi_agent,
+            "🕵️ 매집탐지": self._menu_accumulation,
+            "📅 주간 보고서": self._menu_weekly_report,
+            "📊 공매도": self._menu_short,
+            "🚀 미래기술": self._menu_future_tech,
+            "🎯 30억 목표": self._menu_goal,
+            "📊 재무 진단": self._menu_financial,
+            "📡 KIS설정": self._menu_kis_setup,
+            "🔔 알림 설정": self._menu_notification_settings,
+            "⚙️ 최적화": self._menu_optimize,
+            "🛠 관리자": self._menu_admin,
             # ── 이전 메뉴 하위호환 ──
             "\U0001f4d6 사용법 가이드": self._menu_usage_guide,
-            "\U0001f514 알림 설정": self._menu_notification_settings,
-            "\u2699\ufe0f 최적화": self._menu_optimize,
+            "\U0001f514 알림": self._menu_notification_settings,
             "\U0001f30d 시장현황": self._menu_market_status,
             "\U0001f4c8 추천 성과": self._menu_reco_performance,
             "\U0001f4ac AI에게 질문": self._menu_ai_chat,
@@ -593,6 +594,9 @@ class CoreHandlersMixin:
             "\U0001f4bc 내 포트폴리오": self._menu_portfolio,
             "\U0001f4ca 백테스트": self._menu_backtest,
             "\u2753 도움말": self._menu_usage_guide,
+            "\U0001f4b0 잔고": self._menu_balance,
+            "\U0001f4cb 리포트": self._menu_reports,
+            "\U0001f4e1 KIS설정": self._menu_kis_setup,
         }
         handler = handlers.get(text)
         if handler:
@@ -1022,6 +1026,7 @@ class CoreHandlersMixin:
                 # v3.6 신규
                 "ai": self._action_ai_status,
                 "orderbook": self._action_orderbook,
+                "short": self._action_short_analysis,
             }
             handler = dispatch.get(action)
             if handler:

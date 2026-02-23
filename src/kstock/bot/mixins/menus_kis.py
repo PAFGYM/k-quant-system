@@ -178,9 +178,16 @@ class MenusKisMixin:
         opinion = r.get("opinion", "")
         target = r.get("target_price", 0)
         prev_target = r.get("prev_target_price", 0)
+        stock_name = r.get("summary", "")
+        ticker = r.get("ticker", "")
 
-        lines = [f"{broker} ({date})"]
-        lines.append(f"{title}")
+        if stock_name and ticker:
+            lines = [f"📌 {stock_name}({ticker}) — {broker} ({date})"]
+        elif stock_name:
+            lines = [f"📌 {stock_name} — {broker} ({date})"]
+        else:
+            lines = [f"{broker} ({date})"]
+        lines.append(f"  {title}")
 
         if target and prev_target and target != prev_target:
             change_pct = round((target - prev_target) / prev_target * 100, 1)

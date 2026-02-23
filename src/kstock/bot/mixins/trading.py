@@ -466,9 +466,10 @@ class TradingMixin:
         return ""
 
     async def _load_holdings_with_fallback(self) -> list[dict]:
-        """보유종목 로드 (DB 우선, 없으면 스크린샷 fallback).
+        """보유종목 로드 (DB 우선, 없으면 스크린샷 fallback → DB 동기화).
 
         [v3.5.5] 빈 ticker를 유니버스에서 해결 시도.
+        [v3.6.2] 스크린샷 fallback 시 holdings DB에 자동 동기화.
         """
         holdings = self.db.get_active_holdings()
         if not holdings:
@@ -500,6 +501,28 @@ class TradingMixin:
                 resolved = self._resolve_ticker_from_name(h["name"])
                 if resolved:
                     h["ticker"] = resolved
+
+        # [v3.6.2] ticker 있는 종목을 holdings DB에 동기화
+        #  → 리포트, 공매도, 멀티분석 등 다른 기능과 연동
+        synced = False
+        for h in holdings:
+            if h.get("ticker") and h.get("name"):
+                try:
+                    self.db.upsert_holding(
+                        ticker=h["ticker"],
+                        name=h["name"],
+                        quantity=h.get("quantity", 0),
+                        buy_price=h.get("buy_price", 0),
+                        current_price=h.get("current_price", 0),
+                        pnl_pct=h.get("pnl_pct", 0),
+                        eval_amount=h.get("eval_amount", 0),
+                    )
+                    synced = True
+                except Exception:
+                    pass
+        if synced:
+            logger.debug("Holdings synced to DB: %d items", len(holdings))
+
         return holdings
 
     async def _update_holdings_prices(self, holdings: list[dict]) -> tuple:
