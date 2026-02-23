@@ -1,4 +1,4 @@
-"""Account screenshot reader via Claude Vision API - K-Quant v3.0.
+"""Account screenshot reader via Claude Vision API - K-Quant v3.5.
 
 Reads stock brokerage account screenshots using Claude's vision capabilities,
 extracts holdings and summary data, compares with previous snapshots, and
@@ -600,7 +600,7 @@ def format_screenshot_summary(
             lines.append("")
 
     lines.append(f"\U0001f551 {now}")
-    lines.append("K-Quant v3.0")
+    lines.append("K-Quant v3.5")
 
     return "\n".join(lines)
 

@@ -8,7 +8,7 @@ import sys
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -29,7 +29,7 @@ def main() -> None:
     app = bot.build_app()
     bot.schedule_jobs(app)
 
-    logger.info("K-Quant System v3.0.0 started. Press Ctrl+C to stop.")
+    logger.info("K-Quant System v3.5.0 started. Press Ctrl+C to stop.")
     app.run_polling(drop_pending_updates=True)
 
 

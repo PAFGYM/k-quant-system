@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -65,8 +66,7 @@ class YFinanceKRClient:
                 return cached_df
 
         try:
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(period=period)
+            hist = await asyncio.to_thread(self._fetch_ohlcv_sync, symbol, period)
             if hist.empty:
                 raise ValueError(f"No data for {symbol}")
 
@@ -88,6 +88,12 @@ class YFinanceKRClient:
                 return _price_cache[symbol][1]
             return _generate_fallback_ohlcv(code)
 
+    @staticmethod
+    def _fetch_ohlcv_sync(symbol: str, period: str) -> pd.DataFrame:
+        """Synchronous yfinance fetch - runs in thread pool."""
+        ticker = yf.Ticker(symbol)
+        return ticker.history(period=period)
+
     async def get_stock_info(self, code: str, name: str = "", market: str = "KOSPI") -> dict:
         """Fetch fundamental info from yfinance."""
         symbol = _yf_ticker(code, market)
@@ -99,8 +105,7 @@ class YFinanceKRClient:
                 return cached_info
 
         try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.info or {}
+            info = await asyncio.to_thread(self._fetch_info_sync, symbol)
 
             result = {
                 "ticker": code,
@@ -129,12 +134,17 @@ class YFinanceKRClient:
                 return _info_cache[symbol][1]
             return _generate_fallback_info(code, name, market)
 
+    @staticmethod
+    def _fetch_info_sync(symbol: str) -> dict:
+        """Synchronous yfinance info fetch - runs in thread pool."""
+        ticker = yf.Ticker(symbol)
+        return ticker.info or {}
+
     async def get_current_price(self, code: str, market: str = "KOSPI") -> float:
         """Get current price from yfinance."""
         symbol = _yf_ticker(code, market)
         try:
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(period="1d")
+            hist = await asyncio.to_thread(self._fetch_ohlcv_sync, symbol, "1d")
             if not hist.empty:
                 return float(hist["Close"].iloc[-1])
         except Exception:
@@ -161,7 +171,9 @@ class YFinanceKRClient:
 
         result = {}
         try:
-            data = yf.download(symbols, period=period, group_by="ticker", progress=False)
+            data = await asyncio.to_thread(
+                yf.download, symbols, period=period, group_by="ticker", progress=False
+            )
             now = datetime.now()
             for symbol in symbols:
                 try:

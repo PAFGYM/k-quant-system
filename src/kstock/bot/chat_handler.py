@@ -10,7 +10,7 @@ Rules:
 - No ** bold, no Markdown parse_mode
 - Korean responses only
 - "주호님" personalized greeting
-- Max ~500 chars per response
+- CFA/CAIA 수준 전문 분석가 관점
 - Direct action instructions (not vague)
 """
 
@@ -63,10 +63,10 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory) -> s
             "내일 다시 이용해주세요."
         )
 
-    # Initialize Anthropic client
+    # Initialize Anthropic async client
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
+        client = anthropic.AsyncAnthropic(api_key=api_key)
     except ImportError:
         logger.error("anthropic 패키지 미설치. pip install anthropic 필요.")
         return f"{USER_NAME}, AI 채팅 기능이 현재 사용할 수 없습니다. 다른 기능을 이용해주세요."
@@ -85,11 +85,11 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory) -> s
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": question})
 
-    # Call Claude API
+    # Call Claude API (async)
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=800,
+        response = await client.messages.create(
+            model="claude-sonnet-4-5-20250929",
+            max_tokens=2000,
             temperature=0.3,
             system=system_prompt,
             messages=messages,
@@ -102,12 +102,17 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory) -> s
             "잠시 후 다시 시도해주세요."
         )
 
-    # Sanitize: remove all ** bold markers
+    # Sanitize: remove all ** bold markers and clean up formatting
     answer = answer.replace("**", "")
+    answer = answer.replace("###", "").replace("##", "").replace("# ", "")
+
+    # 3줄 이상 연속 빈 줄 → 2줄로 정리
+    import re
+    answer = re.sub(r'\n{3,}', '\n\n', answer)
 
     # Truncate if excessively long (safety net)
-    if len(answer) > 600:
-        answer = answer[:597] + "..."
+    if len(answer) > 4000:
+        answer = answer[:3997] + "..."
 
     # Save to conversation memory and increment daily usage
     chat_memory.add("user", question)

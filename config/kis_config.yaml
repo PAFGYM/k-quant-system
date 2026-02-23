@@ -1,17 +1,20 @@
 # KIS OpenAPI Configuration
-# 한국투자증권 Open API 연동 설정
-# 값을 입력한 후 봇을 재시작하거나 /setup_kis 명령어로 설정
-
 kis:
-  hts_id: ""           # 한투 HTS 아이디
-  app_key: ""          # KIS Developers에서 발급
-  app_secret: ""       # KIS Developers에서 발급
-  account: ""          # 계좌번호 (00000000-01 형식)
-  mode: "virtual"      # virtual(모의) 또는 real(실전)
+  mode: "virtual"
+  virtual:
+    hts_id: "@2877359"
+    app_key: "PSRln4nKF3ovkPvV417D8aBPidh2yurHmL6C"
+    app_secret: "0M7h1bPRjPP2X1F0V0Yv1nopqvAo/kwmKlvOPKWIBuQmYvlqYBFhdylZ7Ew/RVHIIDln08Ac9AD1AMoVjLheABLj28RknNN6n7pgewiZEouiPE/EWV/hLNQ6dpr+uWtLCmKBDufwSnyKoqzgltYqqYIw4t1+AYn93huvykHMX8f35GXldxg="
+    account: "997867"
+  real:
+    hts_id: "@2877359"
+    app_key: "PSJhDVK33YAo1fzKgJXgW3OXoDNZU3PkWIgH"
+    app_secret: "+2YUrAJiQtGpg3FBn2+x/pY3sNSZrmziM6f4+HBQzSva8WaYCCba/XzUL7rCB/TbkpyC6efB50RdBA7sfhPK9MxN692k1cpah6+6IEcE/2Z53jxd7chdrMDQzNdeO2fn03Nt4BjhdVQh7ehY4DWNoi7HZQSghjkfbW52MkHUxcbVhBc/OGA="
+    account: "44080555-01"
 
 # 자동매매 안전장치
 safety:
-  max_order_pct: 15       # 1회 최대 주문: 총 자산의 15%
-  max_daily_orders: 10    # 일일 최대 주문 횟수
-  daily_loss_limit_pct: -3  # 일일 손실 한도 (%)
-  require_confirmation: true  # 모든 주문에 확인 버튼 필수
+  max_order_pct: 15
+  max_daily_orders: 10
+  daily_loss_limit_pct: -3
+  require_confirmation: true

@@ -292,7 +292,7 @@ class TestFormatScreenshotSummary:
         assert "삼성전자" in text
         assert "005930" in text
         assert "포트폴리오 건강 점수" in text
-        assert "K-Quant v3.0" in text
+        assert "K-Quant v3.5" in text
 
     def test_summary_with_comparison(self):
         """When comparison is provided, change section is included."""

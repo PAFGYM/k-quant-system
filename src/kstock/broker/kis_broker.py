@@ -7,6 +7,7 @@ Gracefully degrades when KIS is not configured or pykis not installed.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -18,10 +19,11 @@ logger = logging.getLogger(__name__)
 KST = timezone(timedelta(hours=9))
 
 try:
-    from pykis import PyKis
+    from pykis import Api as PykisApi, DomainInfo as PykisDomain
     HAS_PYKIS = True
 except (ImportError, TypeError, OSError, Exception):
     HAS_PYKIS = False
+    PykisApi = None  # type: ignore
     logger.info("pykis not available; KIS broker disabled")
 
 
@@ -87,11 +89,36 @@ class KisBroker:
             return None
         try:
             with open(path) as f:
-                data = yaml.safe_load(f)
-            return data
+                data = yaml.safe_load(f) or {}
         except Exception as e:
             logger.error("Failed to load KIS config: %s", e)
             return None
+
+        kis_cfg = data.setdefault("kis", {})
+        mode = kis_cfg.get("mode", "virtual")
+
+        # 새 구조 (virtual/real 분리) → 현재 모드의 키를 최상위로 복사
+        mode_cfg = kis_cfg.get(mode, {})
+        if mode_cfg and mode_cfg.get("app_key"):
+            for k in ("hts_id", "app_key", "app_secret", "account"):
+                kis_cfg[k] = mode_cfg.get(k, "")
+
+        # .env fallback: yaml 값이 비어있으면 환경변수에서 읽기
+        env_map = {
+            "app_key": "KIS_APP_KEY",
+            "app_secret": "KIS_APP_SECRET",
+            "account": "KIS_ACCOUNT_NO",
+            "hts_id": "KIS_HTS_ID",
+        }
+        for yaml_key, env_key in env_map.items():
+            if not kis_cfg.get(yaml_key):
+                env_val = os.environ.get(env_key, "")
+                if env_val:
+                    kis_cfg[yaml_key] = env_val
+
+        if not kis_cfg.get("app_key"):
+            return None
+        return data
 
     def _connect(self, config: dict) -> None:
         kis_cfg = config.get("kis", {})
@@ -105,13 +132,26 @@ class KisBroker:
 
         self.mode = kis_cfg.get("mode", "virtual")
         try:
-            self.kis = PyKis(
-                id=kis_cfg.get("hts_id", ""),
-                account=kis_cfg.get("account", ""),
-                appkey=kis_cfg.get("app_key", ""),
-                secretkey=kis_cfg.get("app_secret", ""),
-                virtual=(self.mode == "virtual"),
+            is_virtual = (self.mode == "virtual")
+            domain = PykisDomain(kind="virtual" if is_virtual else "real")
+            key_info = {
+                "appkey": kis_cfg.get("app_key", ""),
+                "appsecret": kis_cfg.get("app_secret", ""),
+            }
+            account = kis_cfg.get("account", "")
+            account_info = None
+            if account:
+                parts = account.split("-")
+                account_info = {
+                    "account_no": parts[0] if parts else account,
+                    "product_code": parts[1] if len(parts) > 1 else "01",
+                }
+            self.kis = PykisApi(
+                key_info=key_info,
+                domain_info=domain,
+                account_info=account_info,
             )
+            self.kis.create_token()
             self.connected = True
             logger.info("KIS broker connected (mode=%s)", self.mode)
         except Exception as e:
@@ -127,8 +167,15 @@ class KisBroker:
         self.safety.daily_loss_limit_pct = safety.get("daily_loss_limit_pct", -3.0)
         self.safety.require_confirmation = safety.get("require_confirmation", True)
 
-    def save_credentials(self, hts_id: str, app_key: str, app_secret: str, account: str) -> bool:
-        """Save KIS credentials to config and attempt connection."""
+    def save_credentials(
+        self, hts_id: str, app_key: str, app_secret: str, account: str,
+        mode: str = "virtual",
+    ) -> bool:
+        """Save KIS credentials to config and attempt connection.
+
+        Args:
+            mode: "virtual" or "real" - which mode to save credentials for.
+        """
         path = Path(self._config_path)
         try:
             if path.exists():
@@ -137,12 +184,21 @@ class KisBroker:
             else:
                 data = {}
 
-            data.setdefault("kis", {})
-            data["kis"]["hts_id"] = hts_id
-            data["kis"]["app_key"] = app_key
-            data["kis"]["app_secret"] = app_secret
-            data["kis"]["account"] = account
-            data["kis"]["mode"] = "virtual"
+            kis_cfg = data.setdefault("kis", {})
+            kis_cfg["mode"] = mode
+
+            # 모드별 저장
+            mode_cfg = kis_cfg.setdefault(mode, {})
+            mode_cfg["hts_id"] = hts_id
+            mode_cfg["app_key"] = app_key
+            mode_cfg["app_secret"] = app_secret
+            mode_cfg["account"] = account
+
+            # 최상위에도 현재 모드 키 복사 (하위 호환)
+            kis_cfg["hts_id"] = hts_id
+            kis_cfg["app_key"] = app_key
+            kis_cfg["app_secret"] = app_secret
+            kis_cfg["account"] = account
 
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "w") as f:
@@ -154,29 +210,61 @@ class KisBroker:
             logger.error("Failed to save KIS credentials: %s", e)
             return False
 
+    def switch_mode(self, mode: str) -> bool:
+        """모의/실전 모드 전환."""
+        path = Path(self._config_path)
+        if not path.exists():
+            return False
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+            kis_cfg = data.get("kis", {})
+            mode_cfg = kis_cfg.get(mode, {})
+            if not mode_cfg.get("app_key"):
+                return False
+            kis_cfg["mode"] = mode
+            for k in ("hts_id", "app_key", "app_secret", "account"):
+                kis_cfg[k] = mode_cfg.get(k, "")
+            with open(path, "w") as f:
+                yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
+            self.connected = False
+            self.kis = None
+            self._connect(data)
+            return self.connected
+        except Exception as e:
+            logger.error("KIS mode switch failed: %s", e)
+            return False
+
     def get_balance(self) -> dict | None:
         """Get real-time account balance."""
         if not self.connected or not self.kis:
             return None
         try:
-            account = self.kis.account()
-            balance = account.balance()
+            # pykis 0.7: get_kr_stock_balance() → DataFrame, get_kr_deposit() → int
+            deposit = self.kis.get_kr_deposit()
+            balance_df = self.kis.get_kr_stock_balance()
             holdings = []
-            for stock in balance.stocks:
-                holdings.append({
-                    "ticker": stock.code,
-                    "name": stock.name,
-                    "quantity": int(stock.quantity),
-                    "avg_price": int(stock.avg_price),
-                    "current_price": int(stock.current_price),
-                    "profit_pct": round(float(stock.profit_rate) * 100, 2),
-                    "eval_amount": int(stock.eval_amount),
-                })
+            if balance_df is not None and not balance_df.empty:
+                for _, row in balance_df.iterrows():
+                    holdings.append({
+                        "ticker": str(row.get("종목코드", "")),
+                        "name": str(row.get("종목명", "")),
+                        "quantity": int(row.get("보유수량", 0)),
+                        "avg_price": int(row.get("매입평균가", 0)),
+                        "current_price": int(row.get("현재가", 0)),
+                        "profit_pct": round(float(row.get("수익률", 0)), 2),
+                        "eval_amount": int(row.get("평가금액", 0)),
+                    })
+            total_eval = sum(h["eval_amount"] for h in holdings) + deposit
+            total_profit = sum(
+                h["eval_amount"] - h["avg_price"] * h["quantity"]
+                for h in holdings
+            )
             return {
                 "holdings": holdings,
-                "total_eval": int(balance.total_eval),
-                "total_profit": int(balance.total_profit),
-                "cash": int(balance.cash),
+                "total_eval": total_eval,
+                "total_profit": total_profit,
+                "cash": deposit,
             }
         except Exception as e:
             logger.error("KIS balance query failed: %s", e)
@@ -187,9 +275,7 @@ class KisBroker:
         if not self.connected or not self.kis:
             return 0.0
         try:
-            stock = self.kis.stock(ticker)
-            quote = stock.quote()
-            return float(quote.price)
+            return float(self.kis.get_kr_current_price(ticker))
         except Exception as e:
             logger.error("KIS price query failed for %s: %s", ticker, e)
             return 0.0
@@ -197,22 +283,19 @@ class KisBroker:
     def buy(self, ticker: str, quantity: int, price: int | None = None) -> OrderResult:
         """Submit buy order."""
         if not self.connected or not self.kis:
-            return OrderResult(success=False, message="KIS \ubbf8\uc5f0\uacb0")
+            return OrderResult(success=False, message="KIS 미연결")
 
         order_type = "limit" if price else "market"
         try:
-            account = self.kis.account()
-            stock = self.kis.stock(ticker)
-            if price:
-                order = account.buy(stock, qty=quantity, price=price)
-            else:
-                order = account.buy(stock, qty=quantity)
+            # pykis 0.7: buy_kr_stock(ticker, order_amount, price)
+            # price=0 → 시장가
+            order = self.kis.buy_kr_stock(ticker, quantity, price or 0)
 
             self.safety.record_order()
             return OrderResult(
                 success=True,
-                order_id=str(getattr(order, "order_id", "")),
-                message="\uc8fc\ubb38 \uc811\uc218 \uc644\ub8cc",
+                order_id=str(order.get("ODNO", "") if isinstance(order, dict) else ""),
+                message="주문 접수 완료",
                 ticker=ticker,
                 quantity=quantity,
                 price=price or 0,
@@ -225,22 +308,18 @@ class KisBroker:
     def sell(self, ticker: str, quantity: int, price: int | None = None) -> OrderResult:
         """Submit sell order."""
         if not self.connected or not self.kis:
-            return OrderResult(success=False, message="KIS \ubbf8\uc5f0\uacb0")
+            return OrderResult(success=False, message="KIS 미연결")
 
         order_type = "limit" if price else "market"
         try:
-            account = self.kis.account()
-            stock = self.kis.stock(ticker)
-            if price:
-                order = account.sell(stock, qty=quantity, price=price)
-            else:
-                order = account.sell(stock, qty=quantity)
+            # pykis 0.7: sell_kr_stock(ticker, order_amount, price)
+            order = self.kis.sell_kr_stock(ticker, quantity, price or 0)
 
             self.safety.record_order()
             return OrderResult(
                 success=True,
-                order_id=str(getattr(order, "order_id", "")),
-                message="\ub9e4\ub3c4 \uc8fc\ubb38 \uc811\uc218",
+                order_id=str(order.get("ODNO", "") if isinstance(order, dict) else ""),
+                message="매도 주문 접수",
                 ticker=ticker,
                 quantity=quantity,
                 price=price or 0,

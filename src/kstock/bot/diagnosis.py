@@ -1,4 +1,4 @@
-"""Per-stock diagnosis via Claude API - K-Quant v3.0.
+"""Per-stock diagnosis via Claude API - K-Quant v3.5.
 
 Diagnoses each holding and generates personalized advice:
   A) +5% or more   -> Never sell. Praise. Trailing stop. Add-buy timing.

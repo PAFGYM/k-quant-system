@@ -456,6 +456,186 @@ def create_empty_report(ticker: str, name: str, price: float) -> MultiAgentRepor
 # Cost estimation
 # ---------------------------------------------------------------------------
 
+async def run_multi_agent_analysis(
+    ticker: str,
+    name: str,
+    price: float,
+    stock_data: dict,
+) -> MultiAgentReport:
+    """2개 에이전트(기술적/펀더멘털)를 병렬 호출하여 멀티 분석 수행.
+
+    Args:
+        ticker: 종목코드 (예: "005930")
+        name: 종목명 (예: "삼성전자")
+        price: 현재가
+        stock_data: 기술적/재무 데이터 dict
+
+    Returns:
+        MultiAgentReport with combined analysis.
+    """
+    import asyncio
+    import os
+
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        logger.warning("ANTHROPIC_API_KEY not set, returning empty report")
+        return create_empty_report(ticker, name, price)
+
+    try:
+        import anthropic
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+    except (ImportError, Exception) as e:
+        logger.error("Anthropic client init failed: %s", e)
+        return create_empty_report(ticker, name, price)
+
+    async def _call_agent(agent_key: str) -> AgentResult:
+        """단일 에이전트 API 호출."""
+        agent_config = AGENTS[agent_key]
+        data_text = format_data_for_agent(agent_key, stock_data)
+        prompt = f"종목: {name} ({ticker})\n현재가: {price:,.0f}원\n\n{data_text}"
+        try:
+            response = await client.messages.create(
+                model=agent_config["model"],
+                max_tokens=500,
+                system=agent_config["system_prompt"],
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text
+            return AgentResult(
+                agent_key=agent_key,
+                agent_name=agent_config["name"],
+                score=parse_agent_score(raw),
+                signal=parse_agent_signal(raw),
+                summary=raw[:200],
+                raw_response=raw,
+            )
+        except Exception as e:
+            logger.error("Agent %s failed: %s", agent_key, e)
+            return AgentResult(
+                agent_key=agent_key,
+                agent_name=agent_config["name"],
+                score=50,
+                signal="중립",
+                summary="분석 실패",
+            )
+
+    # 2개 에이전트 병렬 호출 (기술적 + 펀더멘털)
+    tech_result, fund_result = await asyncio.gather(
+        _call_agent("technical"),
+        _call_agent("fundamental"),
+    )
+
+    results = {
+        "technical": tech_result,
+        "fundamental": fund_result,
+        "sentiment": AgentResult(
+            agent_key="sentiment",
+            agent_name=AGENTS["sentiment"]["name"],
+            score=50,
+            signal="중립",
+            summary="수급 데이터 기반 중립 판단",
+        ),
+    }
+
+    combined_score, verdict, confidence = synthesize_scores(results)
+
+    # 목표가/손절가 계산
+    if verdict == "매수":
+        target_pct = 15
+        stop_pct = -5
+    elif verdict == "매도":
+        target_pct = -5
+        stop_pct = -10
+    else:
+        target_pct = 10
+        stop_pct = -7
+
+    target_price = price * (1 + target_pct / 100) if price > 0 else 0
+    stop_price = price * (1 + stop_pct / 100) if price > 0 else 0
+
+    action = ""
+    if verdict == "매수":
+        action = f"목표가 {target_price:,.0f}원(+{target_pct}%), 손절가 {stop_price:,.0f}원({stop_pct}%)"
+    elif verdict == "매도":
+        action = "보유 시 익절 또는 손절 검토"
+    else:
+        action = f"관망 추천. 진입 시 손절 {stop_price:,.0f}원({stop_pct}%) 설정"
+
+    now = datetime.now(tz=KST).strftime("%Y.%m.%d %H:%M")
+    return MultiAgentReport(
+        ticker=ticker,
+        name=name,
+        price=price,
+        results=results,
+        strategist_result=AgentResult(
+            agent_key="strategist",
+            agent_name="종합 전략",
+            score=combined_score,
+            signal=verdict,
+            summary=f"기술적 {tech_result.score}점 + 펀더멘털 {fund_result.score}점 종합",
+        ),
+        combined_score=combined_score,
+        verdict=verdict,
+        confidence=confidence,
+        action=action,
+        risk_note=f"목표가: {target_price:,.0f}원 / 손절가: {stop_price:,.0f}원",
+        created_at=now,
+    )
+
+
+def format_multi_agent_report_v2(report: MultiAgentReport) -> str:
+    """과제 4 형식: 멀티 분석 리포트 (이모지 + 구조화)."""
+    try:
+        now = report.created_at or datetime.now(tz=KST).strftime("%Y.%m.%d %H:%M")
+        lines = [
+            f"\U0001f4ca [{report.name}] 멀티 분석 리포트",
+            "\u2500" * 25,
+        ]
+
+        # 기술적 분석 (Agent 1)
+        tech = report.results.get("technical")
+        if tech:
+            lines.append(f"\U0001f535 기술적 분석 (Agent 1)")
+            if tech.summary:
+                for line in tech.summary.split("\n")[:3]:
+                    lines.append(f"  {line.strip()}")
+            lines.append(f"  판단: {tech.signal} {tech.score}점")
+            lines.append("")
+
+        # 펀더멘털 분석 (Agent 2)
+        fund = report.results.get("fundamental")
+        if fund:
+            lines.append(f"\U0001f7e2 펀더멘털 분석 (Agent 2)")
+            if fund.summary:
+                for line in fund.summary.split("\n")[:3]:
+                    lines.append(f"  {line.strip()}")
+            lines.append(f"  판단: {fund.signal} {fund.score}점")
+            lines.append("")
+
+        # 종합 판단
+        lines.append("\u2500" * 25)
+        verdict_emoji = {
+            "매수": "\U0001f3af", "홀딩": "\U0001f91d",
+            "관망": "\u23f8", "매도": "\u26a0\ufe0f",
+        }
+        emoji = verdict_emoji.get(report.verdict, "\U0001f3af")
+        lines.append(f"{emoji} 종합 판단: {report.verdict} ({report.combined_score}/215)")
+
+        if report.action:
+            lines.append(f"  {report.action}")
+        if report.risk_note:
+            lines.append(f"  {report.risk_note}")
+
+        lines.append("")
+        lines.append(f"분석 시각: {now}")
+        lines.append(f"{USER_NAME}, 2개 에이전트 종합 분석 결과입니다.")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error("멀티 리포트 v2 생성 실패: %s", e, exc_info=True)
+        return f"{USER_NAME}, 멀티 에이전트 분석 결과 생성 중 오류가 발생했습니다."
+
+
 def estimate_analysis_cost(n_stocks: int = 1) -> dict:
     """분석 비용을 추정합니다.
 

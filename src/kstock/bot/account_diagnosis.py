@@ -1,4 +1,4 @@
-"""Portfolio-level account diagnosis - K-Quant v3.0.
+"""Portfolio-level account diagnosis - K-Quant v3.5.
 
 8-item diagnostic report for account screenshots:
 1. Return diagnosis (vs KOSPI)
@@ -519,7 +519,7 @@ def format_diagnosis_report(diag: AccountDiagnosis) -> str:
             lines.append(f"  -> {sol['action']}")
 
     lines.append("")
-    lines.append("\U0001f916 Powered by K-Quant v3.0")
+    lines.append("\U0001f916 Powered by K-Quant v3.5")
 
     return "\n".join(lines)
 

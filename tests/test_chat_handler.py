@@ -39,6 +39,9 @@ class _MockDB:
     def get_latest_screenshot(self):
         return self._snapshot
 
+    def get_active_holdings(self):
+        return []
+
     def get_active_recommendations(self):
         return self._recs
 
@@ -127,16 +130,18 @@ class TestBuildSystemPrompt:
 class TestGetMarketContext:
     def test_with_full_data(self) -> None:
         data = {
-            "kospi": 2650.12,
-            "kosdaq": 850.50,
-            "usdkrw": 1310.0,
-            "sp500": 5200.33,
-            "vix": 15.5,
+            "sp500": 0.69,
+            "nasdaq": 0.90,
+            "usdkrw": 1444.0,
+            "vix": 19.1,
+            "btc_price": 64957,
+            "gold_price": 5190,
+            "us10y": 4.09,
         }
         result = get_market_context(data)
-        assert "KOSPI" in result
         assert "원/달러" in result
         assert "S&P500" in result
+        assert "나스닥" in result
 
     def test_empty_data(self) -> None:
         result = get_market_context(None)
@@ -147,9 +152,9 @@ class TestGetMarketContext:
         assert "시장 데이터 없음" in result
 
     def test_partial_data(self) -> None:
-        result = get_market_context({"kospi": 2600.0})
-        assert "KOSPI" in result
-        assert "S&P500" not in result
+        result = get_market_context({"sp500": 0.5})
+        assert "S&P500" in result
+        assert "나스닥" not in result
 
 
 class TestGetPortfolioContext:

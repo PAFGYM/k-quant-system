@@ -1,4 +1,4 @@
-"""Telegram message formatting - K-Quant v3.0 with ML, sentiment, KIS, screenshot.
+"""Telegram message formatting - K-Quant v3.5 with ML, sentiment, KIS, screenshot.
 
 Rules:
 - No ** bold, no Markdown parse_mode
@@ -335,6 +335,26 @@ def format_stock_detail(
     return format_buy_alert(name, ticker, score, tech, info, flow, macro, rank_pct, strategy_type)
 
 
+def _trend_arrow(change_pct: float) -> str:
+    """Return trend arrow based on change percentage."""
+    if change_pct > 1.0:
+        return "\u2b06\ufe0f"  # ⬆️
+    elif change_pct > 0.1:
+        return "\u2197\ufe0f"  # ↗️
+    elif change_pct < -1.0:
+        return "\u2b07\ufe0f"  # ⬇️
+    elif change_pct < -0.1:
+        return "\u2198\ufe0f"  # ↘️
+    return "\u27a1\ufe0f"  # ➡️
+
+
+def _fear_greed_bar(score: float) -> str:
+    """Visual bar for Fear & Greed score (0-100)."""
+    filled = int(score / 10)
+    bar = "\u2588" * filled + "\u2591" * (10 - filled)
+    return f"[{bar}]"
+
+
 def format_market_status(
     macro, regime_mode: dict | None = None,
     sector_text: str = "", fx_message: str = "",
@@ -357,16 +377,64 @@ def format_market_status(
     inst_text = _억(macro.institution_total) if macro.institution_total else "데이터 없음"
     foreign_text = _억(macro.foreign_total) if macro.foreign_total else "데이터 없음"
 
+    # v3.5: Header with timestamp
+    fetched_at = getattr(macro, "fetched_at", None)
+    is_cached = getattr(macro, "is_cached", False)
+
+    if fetched_at:
+        kst_time = fetched_at + timedelta(hours=9)
+        time_str = kst_time.strftime("%m/%d %H:%M")
+        cache_tag = " (캐시)" if is_cached else " (실시간)"
+    else:
+        time_str = "알 수 없음"
+        cache_tag = ""
+
+    # Trend arrows
+    spx_arrow = _trend_arrow(macro.spx_change_pct)
+    ndx_arrow = _trend_arrow(macro.nasdaq_change_pct)
+    vix_arrow = _trend_arrow(macro.vix_change_pct)
+    krw_arrow = _trend_arrow(macro.usdkrw_change_pct)
+    btc_arrow = _trend_arrow(macro.btc_change_pct)
+
     lines = [
-        f"오늘의 시장: {regime_text}\n",
-        f"\U0001f1fa\U0001f1f8 미국: S&P {macro.spx_change_pct:+.2f}% | 나스닥 {macro.nasdaq_change_pct:+.2f}%",
-        f"\U0001f631 공포: VIX {macro.vix:.2f} ({vix_status})",
-        f"\U0001f4b1 환율: {macro.usdkrw:,.0f}원 ({krw_status})",
-        f"\U0001fa99 BTC: ${macro.btc_price:,.0f} ({btc_status})",
+        f"\U0001f30d 시장 현황: {regime_text}",
+        f"\U0001f552 {time_str}{cache_tag}",
+        "\u2500" * 25,
+        "",
+        f"{spx_arrow} S&P500: {macro.spx_change_pct:+.2f}%",
+        f"{ndx_arrow} 나스닥: {macro.nasdaq_change_pct:+.2f}%",
+        f"{vix_arrow} VIX: {macro.vix:.1f} ({macro.vix_change_pct:+.1f}%) {vix_status}",
     ]
 
+    # v3.5: US10Y / DXY
+    us10y_change = getattr(macro, "us10y_change_pct", 0)
+    dxy_change = getattr(macro, "dxy_change_pct", 0)
+    us10y_arrow = _trend_arrow(us10y_change)
+    dxy_arrow = _trend_arrow(dxy_change)
+    lines.append(f"{us10y_arrow} 미국10년물: {macro.us10y:.2f}% ({us10y_change:+.1f}%)")
+    lines.append(f"{dxy_arrow} 달러인덱스: {macro.dxy:.1f} ({dxy_change:+.1f}%)")
+
+    lines.extend([
+        "",
+        f"{krw_arrow} \U0001f4b1 환율: {macro.usdkrw:,.0f}원 ({macro.usdkrw_change_pct:+.1f}%) {krw_status}",
+        f"{btc_arrow} \U0001fa99 BTC: ${macro.btc_price:,.0f} ({macro.btc_change_pct:+.1f}%) {btc_status}",
+    ])
+
     if macro.gold_price > 0:
-        lines.append(f"\U0001f947 금: ${macro.gold_price:,.0f} ({gold_status})")
+        gold_arrow = _trend_arrow(macro.gold_change_pct)
+        lines.append(f"{gold_arrow} \U0001f947 금: ${macro.gold_price:,.0f} ({macro.gold_change_pct:+.1f}%) {gold_status}")
+
+    # v3.5: Fear & Greed
+    fg_score = getattr(macro, "fear_greed_score", 50)
+    fg_label = getattr(macro, "fear_greed_label", "중립")
+    fg_bar = _fear_greed_bar(fg_score)
+    fg_emoji = "\U0001f631" if fg_score < 30 else "\U0001f60e" if fg_score > 70 else "\U0001f610"
+    lines.extend([
+        "",
+        f"{fg_emoji} 탐욕/공포: {fg_score:.0f}점 ({fg_label})",
+        f"   {fg_bar}",
+        "   공포 0 ──── 50 ──── 100 탐욕",
+    ])
 
     lines.extend([
         "",

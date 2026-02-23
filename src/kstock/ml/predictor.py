@@ -1,4 +1,4 @@
-"""K-Quant v3.0 LightGBM + XGBoost ensemble predictor.
+"""K-Quant v3.5 LightGBM + XGBoost ensemble predictor.
 
 Binary classification: will the stock's 5-business-day return exceed +3%?
 Uses 30 hand-crafted features drawn from the existing K-Quant data pipeline.

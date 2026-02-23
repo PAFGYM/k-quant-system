@@ -1,4 +1,4 @@
-"""K-Quant v3.0 news sentiment analysis via Naver scraping + Claude API.
+"""K-Quant v3.5 news sentiment analysis via Naver scraping + Claude API.
 
 Pipeline:
 1. Scrape Naver News search results for each stock name.

@@ -507,7 +507,7 @@ class TestFormatDiagnosisReport:
     def test_v3_branding(self):
         diag = diagnose_account([])
         text = format_diagnosis_report(diag)
-        assert "K-Quant v3.0" in text
+        assert "K-Quant v3.5" in text
 
 
 # ---------------------------------------------------------------------------

@@ -684,6 +684,62 @@ CREATE TABLE IF NOT EXISTS multi_agent_results (
     strategist_summary TEXT,
     created_at      TEXT    NOT NULL
 );
+
+-- v3.5-phase8 tables ---------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS macro_cache (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    snapshot_json   TEXT    NOT NULL,
+    ai_summary      TEXT    DEFAULT '',
+    ai_summary_at   TEXT,
+    fetched_at      TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL
+);
+
+-- v3.5-phase9: 투자자 프로필 & 학습 시스템 -----------------------------------
+
+CREATE TABLE IF NOT EXISTS investor_profile (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    style           TEXT    DEFAULT 'balanced',
+    risk_tolerance  TEXT    DEFAULT 'medium',
+    avg_hold_days   REAL    DEFAULT 0,
+    win_rate        REAL    DEFAULT 0,
+    avg_profit_pct  REAL    DEFAULT 0,
+    avg_loss_pct    REAL    DEFAULT 0,
+    trade_count     INTEGER DEFAULT 0,
+    leverage_used   INTEGER DEFAULT 0,
+    preferred_sectors TEXT  DEFAULT '',
+    notes_json      TEXT    DEFAULT '{}',
+    updated_at      TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS holding_analysis (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    holding_id      INTEGER NOT NULL,
+    ticker          TEXT    NOT NULL,
+    name            TEXT    NOT NULL,
+    hold_type       TEXT    NOT NULL DEFAULT 'swing',
+    hold_days       INTEGER DEFAULT 0,
+    leverage_flag   INTEGER DEFAULT 0,
+    sector          TEXT    DEFAULT '',
+    ai_analysis     TEXT    DEFAULT '',
+    ai_suggestion   TEXT    DEFAULT '',
+    last_alert_at   TEXT,
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL,
+    UNIQUE(holding_id)
+);
+
+CREATE TABLE IF NOT EXISTS trade_lessons (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker          TEXT    NOT NULL,
+    name            TEXT    NOT NULL,
+    action          TEXT    NOT NULL,
+    pnl_pct         REAL    DEFAULT 0,
+    hold_days       INTEGER DEFAULT 0,
+    lesson          TEXT    DEFAULT '',
+    created_at      TEXT    NOT NULL
+);
 """
 
 
@@ -768,6 +824,15 @@ class SQLiteStore:
                 (job_name,),
             ).fetchone()
         return dict(row) if row else None
+
+    def get_job_runs(self, run_date: str) -> list[dict]:
+        """특정 날짜의 모든 잡 실행 기록 반환."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM job_runs WHERE run_date=? ORDER BY started_at DESC",
+                (run_date,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # -- portfolio --------------------------------------------------------------
 
@@ -1173,6 +1238,9 @@ class SQLiteStore:
                 "SELECT * FROM screenshots ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
         return dict(row) if row else None
+
+    # Alias for backward compatibility
+    get_latest_screenshot = get_last_screenshot
 
     def get_screenshot_history(self, limit: int = 10) -> list[dict]:
         with self._connect() as conn:
@@ -2870,3 +2938,253 @@ class SQLiteStore:
                     (limit,),
                 ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- macro_cache (Phase 8 speed optimization) --------------------------------
+
+    def save_macro_cache(self, snapshot_json: str) -> None:
+        """매크로 스냅샷을 SQLite에 캐시 (항상 1행, UPSERT)."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO macro_cache (id, snapshot_json, fetched_at, created_at)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    snapshot_json=excluded.snapshot_json,
+                    fetched_at=excluded.fetched_at
+                """,
+                (snapshot_json, now, now),
+            )
+
+    def get_macro_cache(self) -> dict | None:
+        """캐시된 매크로 스냅샷 반환. 없으면 None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT snapshot_json, ai_summary, ai_summary_at, fetched_at "
+                "FROM macro_cache WHERE id=1"
+            ).fetchone()
+        if row:
+            return dict(row)
+        return None
+
+    def save_ai_summary_cache(self, summary: str) -> None:
+        """AI 요약을 캐시에 저장."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE macro_cache SET ai_summary=?, ai_summary_at=?
+                WHERE id=1
+                """,
+                (summary, now),
+            )
+
+    def get_ai_summary_cache(self, max_age_seconds: int = 300) -> str | None:
+        """캐시된 AI 요약 반환. max_age_seconds 이내만 유효."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT ai_summary, ai_summary_at FROM macro_cache WHERE id=1"
+            ).fetchone()
+        if not row or not row["ai_summary"] or not row["ai_summary_at"]:
+            return None
+        try:
+            cached_at = datetime.fromisoformat(row["ai_summary_at"])
+            if (datetime.utcnow() - cached_at).total_seconds() > max_age_seconds:
+                return None
+        except (ValueError, TypeError):
+            return None
+        return row["ai_summary"]
+
+    # -- Phase 9: 투자자 프로필 & 학습 시스템 ----------------------------------
+
+    def get_investor_profile(self) -> dict | None:
+        """투자자 프로필 반환."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM investor_profile WHERE id=1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_investor_profile(self, **kwargs) -> None:
+        """투자자 프로필 생성 또는 업데이트."""
+        now = datetime.utcnow().isoformat()
+        existing = self.get_investor_profile()
+        if existing:
+            sets = ["updated_at=?"]
+            vals: list = [now]
+            for k, v in kwargs.items():
+                sets.append(f"{k}=?")
+                vals.append(v)
+            vals.append(1)
+            with self._connect() as conn:
+                conn.execute(
+                    f"UPDATE investor_profile SET {', '.join(sets)} WHERE id=1",
+                    vals,
+                )
+        else:
+            cols = ["id", "updated_at"]
+            placeholders = ["1", "?"]
+            vals = [now]
+            for k, v in kwargs.items():
+                cols.append(k)
+                placeholders.append("?")
+                vals.append(v)
+            with self._connect() as conn:
+                conn.execute(
+                    f"INSERT INTO investor_profile ({', '.join(cols)}) "
+                    f"VALUES ({', '.join(placeholders)})",
+                    vals,
+                )
+
+    def get_holding_analysis(self, holding_id: int) -> dict | None:
+        """보유종목 분석 데이터 반환."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM holding_analysis WHERE holding_id=?",
+                (holding_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_all_holding_analyses(self) -> list[dict]:
+        """모든 활성 보유종목 분석 데이터."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT ha.* FROM holding_analysis ha "
+                "JOIN holdings h ON ha.holding_id = h.id "
+                "WHERE h.status = 'active' ORDER BY ha.updated_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_holding_analysis(
+        self, holding_id: int, ticker: str, name: str, **kwargs
+    ) -> None:
+        """보유종목 분석 생성 또는 업데이트."""
+        now = datetime.utcnow().isoformat()
+        existing = self.get_holding_analysis(holding_id)
+        if existing:
+            sets = ["updated_at=?"]
+            vals: list = [now]
+            for k, v in kwargs.items():
+                sets.append(f"{k}=?")
+                vals.append(v)
+            vals.append(holding_id)
+            with self._connect() as conn:
+                conn.execute(
+                    f"UPDATE holding_analysis SET {', '.join(sets)} "
+                    f"WHERE holding_id=?",
+                    vals,
+                )
+        else:
+            cols = ["holding_id", "ticker", "name", "created_at", "updated_at"]
+            placeholders = ["?", "?", "?", "?", "?"]
+            vals = [holding_id, ticker, name, now, now]
+            for k, v in kwargs.items():
+                cols.append(k)
+                placeholders.append("?")
+                vals.append(v)
+            with self._connect() as conn:
+                conn.execute(
+                    f"INSERT INTO holding_analysis ({', '.join(cols)}) "
+                    f"VALUES ({', '.join(placeholders)})",
+                    vals,
+                )
+
+    def add_trade_lesson(
+        self, ticker: str, name: str, action: str,
+        pnl_pct: float = 0, hold_days: int = 0, lesson: str = "",
+    ) -> int:
+        """매매 교훈 기록."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO trade_lessons "
+                "(ticker, name, action, pnl_pct, hold_days, lesson, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (ticker, name, action, pnl_pct, hold_days, lesson, now),
+            )
+            return cursor.lastrowid
+
+    def get_trade_lessons(self, limit: int = 20) -> list[dict]:
+        """최근 매매 교훈 반환."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM trade_lessons ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def compute_investor_stats(self) -> dict:
+        """매매 이력으로 투자 성향 통계 계산."""
+        with self._connect() as conn:
+            # 완료된 거래 통계
+            trades = conn.execute(
+                "SELECT * FROM holdings WHERE status != 'active'"
+            ).fetchall()
+
+        if not trades:
+            return {
+                "trade_count": 0, "win_rate": 0, "avg_hold_days": 0,
+                "avg_profit_pct": 0, "avg_loss_pct": 0,
+                "style": "신규", "risk_tolerance": "medium",
+            }
+
+        wins = 0
+        total_profit = 0.0
+        total_loss = 0.0
+        profit_count = 0
+        loss_count = 0
+        total_days = 0
+
+        for t in trades:
+            t = dict(t)
+            pnl = t.get("pnl_pct", 0)
+            # 보유 기간 계산
+            try:
+                buy = datetime.fromisoformat(t["buy_date"])
+                sell = datetime.fromisoformat(t["updated_at"])
+                days = (sell - buy).days
+            except (ValueError, TypeError, KeyError):
+                days = 0
+            total_days += max(days, 0)
+
+            if pnl > 0:
+                wins += 1
+                total_profit += pnl
+                profit_count += 1
+            elif pnl < 0:
+                total_loss += abs(pnl)
+                loss_count += 1
+
+        count = len(trades)
+        avg_hold = total_days / count if count else 0
+        win_rate = (wins / count * 100) if count else 0
+        avg_profit = total_profit / profit_count if profit_count else 0
+        avg_loss = total_loss / loss_count if loss_count else 0
+
+        # 투자 스타일 자동 판단
+        if avg_hold <= 3:
+            style = "scalper"
+        elif avg_hold <= 14:
+            style = "swing"
+        elif avg_hold <= 60:
+            style = "position"
+        else:
+            style = "long_term"
+
+        # 리스크 성향
+        if avg_loss > 10 or win_rate < 40:
+            risk = "aggressive"
+        elif avg_loss < 3 and win_rate > 60:
+            risk = "conservative"
+        else:
+            risk = "medium"
+
+        return {
+            "trade_count": count,
+            "win_rate": round(win_rate, 1),
+            "avg_hold_days": round(avg_hold, 1),
+            "avg_profit_pct": round(avg_profit, 1),
+            "avg_loss_pct": round(avg_loss, 1),
+            "style": style,
+            "risk_tolerance": risk,
+        }
