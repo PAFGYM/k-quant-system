@@ -504,12 +504,15 @@ class TradingMixin:
 
         # [v3.6.2] ticker 있는 종목을 holdings DB에 동기화
         #  → 리포트, 공매도, 멀티분석 등 다른 기능과 연동
+        # [v3.6.3 FIX] 한국 종목코드(6자리 숫자)만 동기화 — 미국주식 오등록 방지
+        import re
         synced = False
         for h in holdings:
-            if h.get("ticker") and h.get("name"):
+            ticker = h.get("ticker", "")
+            if ticker and re.match(r'^\d{6}$', ticker) and h.get("name"):
                 try:
                     self.db.upsert_holding(
-                        ticker=h["ticker"],
+                        ticker=ticker,
                         name=h["name"],
                         quantity=h.get("quantity", 0),
                         buy_price=h.get("buy_price", 0),

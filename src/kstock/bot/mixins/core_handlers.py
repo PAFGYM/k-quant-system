@@ -435,6 +435,8 @@ class CoreHandlersMixin:
             context.user_data["pending_holdings"] = holdings
 
             # [v3.5.1 FIX] 보유종목을 holdings DB에 자동 upsert (이전 기록 유지)
+            # [v3.6.3 FIX] 한국 종목코드(6자리 숫자)만 holdings에 등록 — 미국주식 오등록 방지
+            import re
             for h in holdings:
                 ticker = h.get("ticker", "")
                 hname = h.get("name", "")
@@ -444,6 +446,10 @@ class CoreHandlersMixin:
                     if ticker:
                         h["ticker"] = ticker  # 원본도 업데이트
                 if not hname:
+                    continue
+                # 한국 종목코드 형식(6자리 숫자)이 아니면 holdings에 넣지 않음
+                if not ticker or not re.match(r'^\d{6}$', ticker):
+                    logger.debug("Skipping non-KR holding: %s (%s)", hname, ticker)
                     continue
                 qty = h.get("quantity", 0)
                 avg_price = h.get("avg_price", 0)

@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
+WEEKDAY_KR = ['월', '화', '수', '목', '금', '토', '일']
 USER_NAME = "주호님"
 
 SYSTEM_PROMPT_TEMPLATE = '''너는 {user_name}의 전속 투자 참모 '퀀트봇'이다.
@@ -129,16 +130,23 @@ def build_system_prompt(context: dict) -> str:
     now_kst = datetime.now(KST)
     EST = timezone(timedelta(hours=-5))
     now_est = datetime.now(EST)
-    weekday = now_est.weekday()  # 0=Mon
+    kst_wd = now_kst.weekday()   # 0=Mon … 6=Sun
+    est_wd = now_est.weekday()
 
-    us_open = (weekday < 5 and 9 <= now_est.hour < 16)
-    kr_open = (weekday < 5 and 9 <= now_kst.hour < 16)
+    # 한국장: 평일 09:00~15:30 KST / 미국장: 평일 09:30~16:00 EST
+    kr_open = (kst_wd < 5 and 9 <= now_kst.hour < 16)
+    us_open = (est_wd < 5 and (
+        (now_est.hour == 9 and now_est.minute >= 30) or
+        (10 <= now_est.hour < 16)
+    ))
 
     time_info = (
         f"현재: {now_kst.strftime('%Y-%m-%d %H:%M')} KST "
-        f"({now_est.strftime('%H:%M')} EST)\n"
-        f"미국장: {'개장 중 (실시간 변동 가능)' if us_open else '마감'}\n"
-        f"한국장: {'개장 중' if kr_open else '마감'}\n"
+        f"({WEEKDAY_KR[kst_wd]}요일)\n"
+        f"미국: {now_est.strftime('%Y-%m-%d %H:%M')} EST "
+        f"({WEEKDAY_KR[est_wd]}요일)\n"
+        f"한국장: {'개장 중' if kr_open else '마감 (평일 09:00~15:30 KST)'}\n"
+        f"미국장: {'개장 중' if us_open else '마감 (평일 09:30~16:00 EST = 23:30~06:00 KST)'}\n"
         f"아래 시장 데이터는 전일 종가 기준입니다."
     )
 
