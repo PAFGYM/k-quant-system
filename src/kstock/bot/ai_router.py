@@ -151,6 +151,9 @@ class AIRouter:
             "gpt": AIUsageStats(),
             "gemini": AIUsageStats(),
         }
+        # [v3.6.4] Prompt Caching 통계
+        self._cache_hits: int = 0
+        self._cache_tokens_saved: int = 0
         self._init_providers()
 
     def _init_providers(self) -> None:
@@ -331,15 +334,20 @@ class AIRouter:
         self, api_key: str, model: str, prompt: str, *,
         system: str = "", max_tokens: int = 1000, temperature: float = 0.3,
     ) -> str:
-        """Anthropic Claude API 호출."""
+        """Anthropic Claude API 호출 (Prompt Caching 적용)."""
         payload: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "messages": [{"role": "user", "content": prompt}],
         }
+        # [v3.6.4] Prompt Caching: 시스템 프롬프트를 캐시하여 비용 90% 절감
         if system:
-            payload["system"] = system
+            payload["system"] = [{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }]
 
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
@@ -354,8 +362,15 @@ class AIRouter:
             if resp.status_code != 200:
                 raise RuntimeError(f"Claude API error {resp.status_code}: {resp.text[:200]}")
             data = resp.json()
-            self.stats["claude"].tokens_in += data.get("usage", {}).get("input_tokens", 0)
-            self.stats["claude"].tokens_out += data.get("usage", {}).get("output_tokens", 0)
+            usage = data.get("usage", {})
+            self.stats["claude"].tokens_in += usage.get("input_tokens", 0)
+            self.stats["claude"].tokens_out += usage.get("output_tokens", 0)
+            # 캐시 히트 통계 추적
+            cache_read = usage.get("cache_read_input_tokens", 0)
+            cache_write = usage.get("cache_creation_input_tokens", 0)
+            if cache_read > 0:
+                self._cache_hits += 1
+                self._cache_tokens_saved += cache_read
             return data["content"][0]["text"]
 
     async def _call_gpt(
@@ -526,6 +541,12 @@ class AIRouter:
         lines.append("")
         lines.append(f"💰 세션 비용: ~${total:.4f}")
         lines.append(f"   Claude: ${claude_cost:.4f} | GPT: ${gpt_cost:.4f} | Gemini: ${gemini_cost:.4f}")
+
+        # 캐시 절감 통계
+        if self._cache_hits > 0:
+            saved_cost = self._cache_tokens_saved * 2.70 / 1_000_000  # $3 - $0.30 = $2.70 saved per MTok
+            lines.append(f"\n🗄 캐시 히트: {self._cache_hits}회 | 절감 토큰: {self._cache_tokens_saved:,}")
+            lines.append(f"   예상 절감: ~${saved_cost:.4f}")
 
         return "\n".join(lines)
 

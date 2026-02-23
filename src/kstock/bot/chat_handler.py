@@ -85,16 +85,41 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory) -> s
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": question})
 
-    # Call Claude API (async)
+    # Call Claude API (async) with Prompt Caching
+    # - system prompt: explicit cache (변경 시에만 재생성, 동일하면 캐시 히트)
+    # - conversation: automatic cache (멀티턴 대화 자동 캐시)
     try:
         response = await client.messages.create(
             model="claude-sonnet-4-5-20250929",
             max_tokens=2000,
             temperature=0.3,
-            system=system_prompt,
+            cache_control={"type": "ephemeral"},  # 대화 자동 캐시
+            system=[{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},  # 시스템 프롬프트 캐시
+            }],
             messages=messages,
         )
         answer = response.content[0].text
+
+        # 캐시 히트 통계 로깅
+        usage = response.usage
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        input_tokens = getattr(usage, "input_tokens", 0) or 0
+        output_tokens = getattr(usage, "output_tokens", 0) or 0
+        if cache_read > 0:
+            logger.info(
+                "💰 Cache HIT: read=%d, write=%d, input=%d, output=%d (saved ~%.0f%%)",
+                cache_read, cache_write, input_tokens, output_tokens,
+                (cache_read / (cache_read + cache_write + input_tokens)) * 90,
+            )
+        else:
+            logger.info(
+                "📝 Cache MISS: write=%d, input=%d, output=%d",
+                cache_write, input_tokens, output_tokens,
+            )
     except Exception as e:
         logger.error("Claude API call error: %s", e)
         return (
