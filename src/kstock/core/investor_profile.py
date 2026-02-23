@@ -95,12 +95,20 @@ class InvestorInsight:
 def classify_hold_type(holding: dict) -> str:
     """보유종목의 보유기간/특성으로 유형 분류.
 
+    [v3.6.4] 유저가 설정한 holding_type이 있으면 그것을 우선 적용.
+    'auto'이거나 없으면 보유기간 기반 자동 분류.
+
     Args:
-        holding: Dict with buy_date, leverage_flag, etc.
+        holding: Dict with buy_date, leverage_flag, holding_type, etc.
 
     Returns:
         One of: 'scalp', 'swing', 'position', 'long_term'
     """
+    # [v3.6.4] 유저가 명시적으로 설정한 보유유형 우선
+    user_type = holding.get("holding_type", "auto")
+    if user_type and user_type != "auto" and user_type in HOLD_TYPE_CONFIG:
+        return user_type
+
     # 레버리지/신용 사용 → 무조건 단타
     if holding.get("leverage_flag") or holding.get("margin_used"):
         return "scalp"
