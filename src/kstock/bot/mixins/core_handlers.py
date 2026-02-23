@@ -1,0 +1,1251 @@
+"""Core handlers: init, build_app, routing, screenshot, callbacks."""
+from __future__ import annotations
+
+from kstock.bot.bot_imports import *  # noqa: F403
+
+
+class CoreHandlersMixin:
+    def __init__(self) -> None:
+        # v3.6: 보안 검증
+        startup_security_check()
+
+        self.token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+        self._start_time = datetime.now(KST)
+        # Try loading persisted numeric chat_id
+        try:
+            _saved_id = Path("data/.chat_id").read_text().strip()
+            if _saved_id.lstrip("-").isdigit():
+                self.chat_id = _saved_id
+        except Exception:
+            pass
+        self.anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
+        self.kis = KISClient()
+        self.yf_client = YFinanceKRClient()
+        self.db = SQLiteStore()
+        self.macro_client = MacroClient(db=self.db)
+        self.scoring_config = load_scoring_config()
+        self.universe_config = _load_universe()
+        self.universe = self.universe_config.get("tickers", [])
+        self.all_tickers = _all_tickers(self.universe_config)
+        self._last_scan_results: list = []
+        self._scan_cache_time: datetime | None = None
+        self._sector_strengths: list = []
+        self._ohlcv_cache: dict = {}
+        # v3.0: KIS broker + data router
+        self.kis_broker = KisBroker()
+        self.data_router = DataRouter(
+            kis_broker=self.kis_broker, yf_client=self.yf_client, db=self.db,
+        )
+        self._ml_model: dict | None = None
+        self._sentiment_cache: dict = {}
+        # Phase 8: 실시간 시장 감지 + 매도 계획
+        self.market_pulse = MarketPulse()
+        self.sell_planner = SellPlanner()
+        # v3.6: Multi-AI Router
+        self.ai = AIRouter()
+        # v3.6: KIS WebSocket (실시간 호가)
+        self.ws = KISWebSocket()
+
+    def build_app(self) -> Application:
+        app = (
+            Application.builder()
+            .token(self.token)
+            .post_init(self._post_init)
+            .build()
+        )
+        app.add_handler(CommandHandler("start", self.cmd_start))
+        app.add_handler(CommandHandler("backtest", self.cmd_backtest))
+        app.add_handler(CommandHandler("optimize", self.cmd_optimize))
+        app.add_handler(CommandHandler("setup_kis", self.cmd_setup_kis))
+        app.add_handler(CommandHandler("goal", self.cmd_goal))
+        # v3.5: new commands
+        app.add_handler(CommandHandler("finance", self.cmd_finance))
+        app.add_handler(CommandHandler("consensus", self.cmd_consensus))
+        app.add_handler(CommandHandler("short", self.cmd_short))
+        app.add_handler(CommandHandler("future", self.cmd_future))
+        app.add_handler(CommandHandler("history", self.cmd_history))
+        app.add_handler(CommandHandler("risk", self.cmd_risk))
+        app.add_handler(CommandHandler("health", self.cmd_health))
+        app.add_handler(CommandHandler("performance", self.cmd_performance))
+        app.add_handler(CommandHandler("scenario", self.cmd_scenario))
+        app.add_handler(CommandHandler("ml", self.cmd_ml))
+        app.add_handler(CommandHandler("multi", self.cmd_multi))
+        app.add_handler(CommandHandler("surge", self.cmd_surge))
+        app.add_handler(CommandHandler("feedback", self.cmd_feedback))
+        app.add_handler(CommandHandler("stats", self.cmd_stats))
+        app.add_handler(CommandHandler("accumulation", self.cmd_accumulation))
+        app.add_handler(CommandHandler("register", self.cmd_register))
+        app.add_handler(CommandHandler("balance", self.cmd_balance))
+        app.add_handler(CommandHandler("admin", self.cmd_admin))
+        # v3.0: screenshot image handler
+        app.add_handler(
+            MessageHandler(filters.PHOTO, self.handle_screenshot)
+        )
+        app.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_menu_text)
+        )
+        app.add_handler(CallbackQueryHandler(self.handle_callback))
+        return app
+
+    @staticmethod
+    async def _post_init(app: Application) -> None:
+        """Register Telegram menu button commands on startup."""
+        from telegram import BotCommand
+        await app.bot.set_my_commands([
+            BotCommand("start", "메뉴 열기"),
+            BotCommand("goal", "30억 목표 대시보드"),
+            BotCommand("finance", "재무 진단"),
+            BotCommand("consensus", "컨센서스 조회"),
+            BotCommand("backtest", "백테스트 실행"),
+            BotCommand("optimize", "포트폴리오 최적화"),
+            BotCommand("setup_kis", "KIS 증권 연결"),
+            BotCommand("short", "공매도/레버리지 분석"),
+            BotCommand("future", "미래기술 워치리스트"),
+            BotCommand("history", "계좌 추이/솔루션 이력"),
+            BotCommand("risk", "리스크 현황"),
+            BotCommand("health", "시스템 상태"),
+            BotCommand("performance", "실전 성과"),
+            BotCommand("scenario", "시나리오 분석"),
+            BotCommand("ml", "ML 모델 상태"),
+            BotCommand("multi", "멀티 에이전트 분석"),
+            BotCommand("surge", "급등주 포착"),
+            BotCommand("feedback", "피드백 현황"),
+            BotCommand("stats", "추천 성적표"),
+            BotCommand("accumulation", "매집 탐지"),
+            BotCommand("register", "매수 등록"),
+            BotCommand("balance", "잔고 조회"),
+        ])
+
+    def schedule_jobs(self, app: Application) -> None:
+        jq = app.job_queue
+        if jq is None:
+            logger.warning("Job queue not available; skipping scheduled jobs")
+            return
+
+        # Phase 10+: 07:00 미국 시장 프리마켓 브리핑 (새벽 미국장 분석)
+        jq.run_daily(
+            self.job_us_premarket_briefing,
+            time=dt_time(hour=7, minute=0, tzinfo=KST),
+            name="us_premarket_briefing",
+        )
+        # Phase 10+: 07:30 모닝 브리핑 (기존 08:45 → 07:30 앞당김)
+        jq.run_daily(
+            self.job_morning_briefing,
+            time=dt_time(hour=7, minute=30, tzinfo=KST),
+            name="morning_briefing",
+        )
+        jq.run_repeating(
+            self.job_intraday_monitor,
+            interval=60,
+            first=30,
+            name="intraday_monitor",
+        )
+        # job_eod_report 제거 → job_daily_pdf_report에 통합 (16:00)
+        jq.run_daily(
+            self.job_weekly_learning,
+            time=dt_time(hour=9, minute=0, tzinfo=KST),
+            days=(5,),
+            name="weekly_learning",
+        )
+        # v3.0: screenshot reminder (Mon, Fri 08:00)
+        jq.run_daily(
+            self.job_screenshot_reminder,
+            time=dt_time(hour=8, minute=0, tzinfo=KST),
+            days=(0, 4),
+            name="screenshot_reminder",
+        )
+        # v3.0: sentiment analysis (daily 08:00)
+        jq.run_daily(
+            self.job_sentiment_analysis,
+            time=dt_time(hour=8, minute=0, tzinfo=KST),
+            name="sentiment_analysis",
+        )
+        # v3.5: weekly report (Sunday 19:00)
+        jq.run_daily(
+            self.job_weekly_report,
+            time=dt_time(hour=19, minute=0, tzinfo=KST),
+            days=(6,),
+            name="weekly_report",
+        )
+        # Phase 8: macro cache warm-up (1분마다 백그라운드 갱신 — 정확도 향상)
+        jq.run_repeating(
+            self.job_macro_refresh,
+            interval=60,
+            first=10,
+            name="macro_refresh",
+        )
+        # Phase 8: market pulse (1분마다, 실시간 시장 모니터링)
+        jq.run_repeating(
+            self.job_market_pulse,
+            interval=60,
+            first=60,
+            name="market_pulse",
+        )
+        # 통합 장 마감 리포트 (16:00 — 텍스트 요약 + PDF 1건)
+        jq.run_daily(
+            self.job_daily_pdf_report,
+            time=dt_time(hour=16, minute=0, tzinfo=KST),
+            name="daily_pdf_report",
+        )
+        # Phase 10: daily self-report (21:00)
+        jq.run_daily(
+            self.job_daily_self_report,
+            time=dt_time(hour=21, minute=0, tzinfo=KST),
+            name="daily_self_report",
+        )
+        logger.info(
+            "Scheduled: us_premarket(07:00), morning(07:30), intraday(1min), "
+            "weekly_learn(Sat 09:00), screenshot(Mon/Fri 08:00), "
+            "sentiment(08:00), weekly_report(Sun 19:00), "
+            "macro_refresh(1min), market_pulse(1min), "
+            "daily_report_pdf(16:00), self_report(21:00) KST"
+        )
+
+    # == Command & Menu Handlers =============================================
+
+    def _persist_chat_id(self, update: Update) -> None:
+        """Save numeric chat_id from an incoming update for proactive messaging."""
+        if update.effective_chat and update.effective_chat.id:
+            numeric_id = str(update.effective_chat.id)
+            if self.chat_id != numeric_id:
+                self.chat_id = numeric_id
+                logger.info("Saved chat_id: %s", numeric_id)
+                # Persist to file for future sessions
+                try:
+                    chat_id_path = Path("data/.chat_id")
+                    chat_id_path.parent.mkdir(parents=True, exist_ok=True)
+                    chat_id_path.write_text(numeric_id)
+                except Exception:
+                    pass
+
+    async def cmd_start(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        self._persist_chat_id(update)
+        await update.message.reply_text(format_welcome(), reply_markup=MAIN_MENU)
+
+    async def cmd_backtest(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(
+                "사용법: /backtest [종목코드]\n예) /backtest 005930",
+                reply_markup=MAIN_MENU,
+            )
+            return
+
+        ticker = args[0].strip()
+        name = ticker
+        market = "KOSPI"
+        for item in self.all_tickers:
+            if item["code"] == ticker:
+                name = item["name"]
+                market = item.get("market", "KOSPI")
+                break
+
+        await update.message.reply_text(
+            f"\U0001f4ca {name} 백테스트 실행 중... 잠시만 기다려주세요."
+        )
+
+        try:
+            from kstock.backtest.engine import run_backtest, format_backtest_result
+            result = run_backtest(ticker, name=name, market=market)
+            if result:
+                msg = format_backtest_result(result)
+            else:
+                msg = f"\u26a0\ufe0f {name} 백테스트 실패\n데이터가 부족하거나 종목코드를 확인해주세요."
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("Backtest error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                f"\u26a0\ufe0f 백테스트 오류: {str(e)[:100]}",
+                reply_markup=MAIN_MENU,
+            )
+
+    async def cmd_optimize(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        args = context.args or []
+        ticker = args[0].strip() if args else "005930"
+        name = ticker
+        market = "KOSPI"
+        for item in self.all_tickers:
+            if item["code"] == ticker:
+                name = item["name"]
+                market = item.get("market", "KOSPI")
+                break
+
+        await update.message.reply_text(
+            f"\u2699\ufe0f {name} 파라미터 최적화 중...\n시간이 걸릴 수 있습니다."
+        )
+
+        try:
+            from kstock.backtest.optimizer import run_optimization, format_optimization_result
+            result = run_optimization(ticker, market=market)
+            if result:
+                msg = format_optimization_result(result)
+                buttons = [[
+                    InlineKeyboardButton(
+                        "\u2705 적용하기", callback_data=f"opt_apply:{ticker}",
+                    ),
+                    InlineKeyboardButton(
+                        "\u274c 무시", callback_data="opt_ignore:0",
+                    ),
+                ]]
+                await update.message.reply_text(
+                    msg, reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            else:
+                await update.message.reply_text(
+                    "\u26a0\ufe0f 최적화 실패 - 데이터 부족",
+                    reply_markup=MAIN_MENU,
+                )
+        except Exception as e:
+            logger.error("Optimize error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                f"\u26a0\ufe0f 최적화 오류: {str(e)[:100]}",
+                reply_markup=MAIN_MENU,
+            )
+
+    async def cmd_setup_kis(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /setup_kis command."""
+        args = context.args or []
+        if not args:
+            msg = format_kis_setup_guide()
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            return
+
+        # Parse KIS credentials from message text
+        text = update.message.text or ""
+        parts = {}
+        for line in text.split("\n"):
+            line = line.strip()
+            if ":" in line:
+                key, _, val = line.partition(":")
+                parts[key.strip().upper()] = val.strip()
+
+        hts_id = parts.get("KIS_ID", "")
+        app_key = parts.get("KIS_KEY", "")
+        app_secret = parts.get("KIS_SECRET", "")
+        account = parts.get("KIS_ACCOUNT", "")
+
+        if not all([hts_id, app_key, app_secret, account]):
+            await update.message.reply_text(
+                "\u26a0\ufe0f 형식이 올바르지 않습니다.\n\n"
+                "KIS_ID: 홍길동\nKIS_KEY: Pa0knAM6...\n"
+                "KIS_SECRET: V9J3YG...\nKIS_ACCOUNT: 12345678-01",
+                reply_markup=MAIN_MENU,
+            )
+            return
+
+        success = self.kis_broker.save_credentials(hts_id, app_key, app_secret, account)
+        if success:
+            self.data_router.refresh_source()
+            await update.message.reply_text(
+                "\u2705 KIS API 연결 완료!\n"
+                "모의투자 모드로 설정되었습니다.\n"
+                "이제 자동매매가 가능합니다.",
+                reply_markup=MAIN_MENU,
+            )
+        else:
+            await update.message.reply_text(
+                "\u274c KIS 연결 실패.\n인증 정보를 확인해주세요.",
+                reply_markup=MAIN_MENU,
+            )
+
+    async def handle_screenshot(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle screenshot image messages for account analysis."""
+        # 관리자 모드: 오류 스크린샷 접수
+        admin_mode = context.user_data.get("admin_mode")
+        if admin_mode:
+            context.user_data.pop("admin_mode", None)
+            caption = update.message.caption or "이미지 첨부"
+            await self._save_admin_report(update, admin_mode, caption, has_image=True)
+            return
+
+        if not self.anthropic_key:
+            await update.message.reply_text(
+                "\u26a0\ufe0f Anthropic API 키가 설정되지 않았습니다.",
+                reply_markup=MAIN_MENU,
+            )
+            return
+
+        await update.message.reply_text("\U0001f4f8 스크린샷 분석 중... 잠시만 기다려주세요.")
+
+        try:
+            photo = update.message.photo[-1]
+            file = await context.bot.get_file(photo.file_id)
+            image_bytes = await file.download_as_bytearray()
+
+            parsed = await parse_account_screenshot(bytes(image_bytes), self.anthropic_key)
+            holdings = parsed.get("holdings", [])
+
+            # Get previous screenshot for comparison
+            prev = self.db.get_last_screenshot()
+            comparison = None
+            prev_diagnoses = None
+            if prev and prev.get("holdings_json"):
+                import json
+                prev_parsed = json.loads(prev["holdings_json"])
+                comparison = compare_screenshots(parsed, {"holdings": prev_parsed})
+                prev_holdings = self.db.get_screenshot_holdings(prev["id"])
+                if prev_holdings:
+                    prev_diagnoses = [
+                        {
+                            "ticker": h["ticker"], "name": h["name"],
+                            "direction": "up" if h.get("profit_pct", 0) > 0 else "down",
+                            "confidence": 60,
+                        }
+                        for h in prev_holdings if h.get("diagnosis")
+                    ]
+
+            # Save screenshot to DB
+            from kstock.bot.account_reader import compute_portfolio_score
+            import json
+            import hashlib
+            summary = parsed.get("summary", {})
+            img_hash = hashlib.md5(bytes(image_bytes)).hexdigest()
+            score = compute_portfolio_score(holdings)
+            screenshot_id = self.db.add_screenshot(
+                image_hash=img_hash,
+                total_eval=summary.get("total_eval", 0),
+                total_profit=summary.get("total_profit", 0),
+                total_profit_pct=summary.get("total_profit_pct", 0),
+                cash=summary.get("cash", 0),
+                portfolio_score=score,
+                holdings_json=json.dumps(holdings, ensure_ascii=False),
+            )
+
+            # [v3.5.1 FIX] 스크린샷 ID + 보유종목을 user_data에 저장 (진단/저장용)
+            context.user_data["pending_screenshot_id"] = screenshot_id
+            context.user_data["pending_holdings"] = holdings
+
+            # [v3.5.1 FIX] 보유종목을 holdings DB에 자동 upsert (이전 기록 유지)
+            for h in holdings:
+                ticker = h.get("ticker", "")
+                hname = h.get("name", "")
+                # [v3.5.5 FIX] ticker 비어있으면 이름으로 유니버스에서 찾기
+                if not ticker and hname:
+                    ticker = self._resolve_ticker_from_name(hname)
+                    if ticker:
+                        h["ticker"] = ticker  # 원본도 업데이트
+                if not hname:
+                    continue
+                qty = h.get("quantity", 0)
+                avg_price = h.get("avg_price", 0)
+                cur_price = h.get("current_price", 0)
+                pnl_pct = h.get("profit_pct", 0)
+                eval_amt = h.get("eval_amount", 0)
+                try:
+                    self.db.upsert_holding(
+                        ticker=ticker, name=hname,
+                        quantity=qty, buy_price=avg_price,
+                        current_price=cur_price, pnl_pct=pnl_pct,
+                        eval_amount=eval_amt,
+                    )
+                except Exception as he:
+                    logger.debug("Holding upsert for %s failed: %s", ticker, he)
+
+                # screenshot_holdings 테이블에도 저장
+                try:
+                    is_margin, margin_type = detect_margin_purchase(h)
+                    self.db.add_screenshot_holding(
+                        screenshot_id=screenshot_id,
+                        ticker=ticker, name=hname,
+                        quantity=qty, avg_price=avg_price,
+                        current_price=cur_price, profit_pct=pnl_pct,
+                        eval_amount=eval_amt,
+                        is_margin=1 if is_margin else 0,
+                        margin_type=margin_type or "",
+                    )
+                except Exception as she:
+                    logger.debug("Screenshot holding save for %s failed: %s", ticker, she)
+
+            logger.info(
+                "Screenshot saved: id=%s, %d holdings upserted",
+                screenshot_id, len(holdings),
+            )
+
+            # Format and send summary
+            msg = format_screenshot_summary(parsed, comparison, prev_diagnoses)
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+
+            # 포트폴리오 자동 추가 제안 (스크린샷에서 인식된 종목)
+            if holdings:
+                # 이미 DB에 등록된 종목 제외
+                active = self.db.get_active_holdings()
+                active_tickers = {h.get("ticker", "") for h in active}
+                new_holdings = [
+                    h for h in holdings
+                    if h.get("ticker", "") and h.get("ticker", "") not in active_tickers
+                ]
+                if new_holdings:
+                    # user_data에 저장 (콜백에서 사용)
+                    context.user_data["screenshot_new_holdings"] = new_holdings
+                    names = ", ".join(h.get("name", "?") for h in new_holdings[:5])
+                    if len(new_holdings) > 5:
+                        names += f" 외 {len(new_holdings)-5}종목"
+                    buttons = [
+                        [
+                            InlineKeyboardButton(
+                                "✅ 전체 추가",
+                                callback_data="add_ss:all",
+                            ),
+                            InlineKeyboardButton(
+                                "❌ 건너뛰기",
+                                callback_data="add_ss:skip",
+                            ),
+                        ],
+                    ]
+                    # 개별 종목 버튼 (최대 5개)
+                    for h in new_holdings[:5]:
+                        t = h.get("ticker", "")
+                        n = h.get("name", t)
+                        p = h.get("avg_price", 0)
+                        buttons.append([
+                            InlineKeyboardButton(
+                                f"➕ {n} ({p:,.0f}원)",
+                                callback_data=f"add_ss:one:{t}",
+                            ),
+                        ])
+                    await update.message.reply_text(
+                        f"📋 신규 종목 {len(new_holdings)}개 감지!\n"
+                        f"{names}\n\n"
+                        "포트폴리오에 추가해드릴까요?",
+                        reply_markup=InlineKeyboardMarkup(buttons),
+                    )
+
+            # 자동 투자기간 설정 (기본: 단기 스윙)
+            if holdings:
+                for h in holdings:
+                    ticker = h.get("ticker", "")
+                    hname = h.get("name", "")
+                    if ticker:
+                        # 신용/레버리지면 단타, 아니면 단기 기본
+                        is_margin, _ = detect_margin_purchase(h)
+                        hz = "danta" if is_margin else "dangi"
+                        self.db.upsert_portfolio_horizon(
+                            ticker=ticker, name=hname, horizon=hz,
+                        )
+
+        except Exception as e:
+            logger.error("Screenshot analysis failed: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 스크린샷 분석 실패. 다시 시도해주세요.",
+                reply_markup=MAIN_MENU,
+            )
+
+    async def handle_menu_text(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        self._persist_chat_id(update)
+        text = update.message.text
+        handlers = {
+            # ── v3.6 메인 메뉴 (5행 핵심) ──
+            "\U0001f4ca 분석": self._menu_analysis_hub,
+            "\U0001f4b0 잔고": self._menu_balance,
+            "\U0001f4c8 시황": self._menu_market_status,
+            "\U0001f514 알림": self._menu_notification_settings,
+            "\U0001f4ac AI질문": self._menu_ai_chat,
+            "\u2699\ufe0f 더보기": self._menu_more,
+            "\U0001f519 메인으로": self._menu_back_to_main,
+            # ── 더보기 서브메뉴 항목들 ──
+            "\U0001f4f8 계좌분석": self._menu_account_analysis,
+            "\U0001f3af 전략별 보기": self._menu_strategy_view,
+            "\U0001f525 급등주": self._menu_surge,
+            "\u26a1 스윙 기회": self._menu_swing,
+            "\U0001f4ca 멀티분석": self._menu_multi_agent,
+            "\U0001f4e1 KIS설정": self._menu_kis_setup,
+            "\U0001f4cb 리포트": self._menu_reports,
+            "\U0001f4c5 주간 보고서": self._menu_weekly_report,
+            "\u2b50 즐겨찾기": self._menu_favorites,
+            "\U0001f575\ufe0f 매집탐지": self._menu_accumulation,
+            "\U0001f680 미래기술": self._menu_future_tech,
+            "\U0001f4ca 공매도": self._menu_short,
+            "\U0001f3af 30억 목표": self._menu_goal,
+            "\U0001f4ca 재무 진단": self._menu_financial,
+            "\U0001f6e0 관리자": self._menu_admin,
+            # ── 이전 메뉴 하위호환 ──
+            "\U0001f4d6 사용법 가이드": self._menu_usage_guide,
+            "\U0001f514 알림 설정": self._menu_notification_settings,
+            "\u2699\ufe0f 최적화": self._menu_optimize,
+            "\U0001f30d 시장현황": self._menu_market_status,
+            "\U0001f4c8 추천 성과": self._menu_reco_performance,
+            "\U0001f4ac AI에게 질문": self._menu_ai_chat,
+            "\U0001f4cb 증권사 리포트": self._menu_reports,
+            "\U0001f916 에이전트": self._menu_agent_chat,
+            "\U0001f514 실시간 알림": self._menu_alerts,
+            "\U0001f4ca 오늘의 추천종목": self._menu_recommendations,
+            "\U0001f4bc 내 포트폴리오": self._menu_portfolio,
+            "\U0001f4ca 백테스트": self._menu_backtest,
+            "\u2753 도움말": self._menu_usage_guide,
+        }
+        handler = handlers.get(text)
+        if handler:
+            # 메뉴 이동 시 진행 중인 KIS 설정/최적화 상태 클리어
+            context.user_data.pop("kis_setup", None)
+            context.user_data.pop("awaiting_optimize_ticker", None)
+            try:
+                await handler(update, context)
+            except Exception as e:
+                logger.error("Menu handler error: %s", e, exc_info=True)
+                await update.message.reply_text(
+                    "\u26a0\ufe0f 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+                    reply_markup=MAIN_MENU,
+                )
+        else:
+            # 0. 잔고에서 "종목 추가" 후 종목명 입력 대기 상태
+            if context.user_data.get("awaiting_stock_add"):
+                detected = self._detect_stock_query(text)
+                if detected:
+                    context.user_data.pop("awaiting_stock_add", None)
+                    await self._show_stock_actions(update, context, detected)
+                    return
+                else:
+                    context.user_data.pop("awaiting_stock_add", None)
+                    # 종목 못 찾으면 일반 처리로 진행
+
+            # 0-0.5. 관리자 모드: 오류 신고 / 업데이트 요청
+            admin_mode = context.user_data.get("admin_mode")
+            if admin_mode:
+                context.user_data.pop("admin_mode", None)
+                await self._save_admin_report(update, admin_mode, text)
+                return
+
+            # 0-1. KIS 설정 단계별 입력 상태
+            kis_setup = context.user_data.get("kis_setup")
+            if kis_setup:
+                await self._handle_kis_setup_step(update, context, text, kis_setup)
+                return
+
+            # 0-2. 최적화 종목코드 입력 대기 상태
+            if context.user_data.get("awaiting_optimize_ticker"):
+                context.user_data.pop("awaiting_optimize_ticker", None)
+                await self._run_optimize_from_text(update, context, text)
+                return
+
+            # 0-3. 에이전트 모드: 사용자 피드백 수집
+            if context.user_data.get("agent_mode"):
+                agent_type = context.user_data.get("agent_type", "feedback")
+                logger.info(
+                    "AGENT_FEEDBACK [%s]: %s", agent_type, text,
+                )
+                # 로그 파일에 피드백 기록
+                try:
+                    feedback_path = Path("data/agent_feedback.log")
+                    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(feedback_path, "a", encoding="utf-8") as f:
+                        ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+                        f.write(f"[{ts}] [{agent_type}] {text}\n")
+                except Exception:
+                    pass
+                context.user_data.pop("agent_mode", None)
+                context.user_data.pop("agent_type", None)
+                await update.message.reply_text(
+                    f"✅ 접수 완료!\n\n"
+                    f"📝 [{agent_type}] {text[:60]}{'...' if len(text) > 60 else ''}\n\n"
+                    f"다음 업데이트에 반영하겠습니다. 감사합니다! 🙏",
+                    reply_markup=MAIN_MENU,
+                )
+                return
+
+            # 1. 자연어 보유종목 등록 감지: "삼성전자 50주 76000원", "에코프로 100주 샀어"
+            trade = self._detect_trade_input(text)
+            if trade:
+                await self._propose_trade_addition(update, context, trade)
+                return
+
+            # 2. 자연어 종목 감지 — 종목명만 입력해도 바로 분석
+            detected = self._detect_stock_query(text)
+            if detected:
+                stock_name = detected.get("name", "")
+                remaining = text.replace(stock_name, "").strip()
+                # [v3.5.1] 종목명만 입력하면 바로 분석 실행 (슬래시 명령 불필요)
+                # 종목명만 딱 입력한 경우 (remaining이 거의 없음) = 바로 분석
+                if len(remaining) <= 3:
+                    await self._handle_stock_analysis(
+                        update, context, detected, f"{stock_name} 분석",
+                    )
+                else:
+                    await self._handle_stock_analysis(
+                        update, context, detected, text,
+                    )
+            else:
+                # 메뉴에 없는 텍스트 -> AI 질문으로 처리
+                await self._handle_ai_question(update, context, text)
+
+    def _detect_stock_query(self, text: str) -> dict | None:
+        """자연어에서 종목명/티커를 감지합니다.
+
+        긴 이름 우선 매칭 (예: "삼성전자우"가 "삼성전자"보다 먼저).
+        Returns:
+            dict with 'code', 'name', 'market' if detected, else None.
+        """
+        import re
+
+        clean = text.strip()
+
+        # 1. 6자리 숫자 종목코드 감지
+        code_match = re.search(r'(\d{6})', clean)
+        if code_match:
+            code = code_match.group(1)
+            for item in self.all_tickers:
+                if item["code"] == code:
+                    return item
+            holdings = self.db.get_active_holdings()
+            for h in holdings:
+                if h.get("ticker") == code:
+                    return {"code": code, "name": h.get("name", code), "market": "KOSPI"}
+            return {"code": code, "name": code, "market": "KOSPI"}
+
+        # 2. 한글 종목명 매칭 (긴 이름 우선: "삼성전자우" > "삼성전자")
+        # 유니버스 + 보유종목을 이름 길이 내림차순으로 정렬 후 매칭
+        candidates = []
+        for item in self.all_tickers:
+            candidates.append((item["name"], item))
+        holdings = self.db.get_active_holdings()
+        for h in holdings:
+            name = h.get("name", "")
+            if name:
+                candidates.append((name, {
+                    "code": h.get("ticker", ""),
+                    "name": name,
+                    "market": "KOSPI",
+                }))
+        # 긴 이름 우선 정렬
+        candidates.sort(key=lambda x: len(x[0]), reverse=True)
+
+        for cand_name, cand_data in candidates:
+            if cand_name and cand_name in clean:
+                return cand_data
+
+        return None
+
+    def _detect_trade_input(self, text: str) -> dict | None:
+        """자연어에서 매수 등록 패턴을 감지합니다.
+
+        지원 패턴:
+          - "삼성전자 50주 76000원"
+          - "에코프로 100주 178500원에 샀어"
+          - "005930 30주 매수"
+          - "삼성전자 추가 50주 76000원"
+
+        Returns:
+            dict with 'ticker', 'name', 'quantity', 'price' or None.
+        """
+        import re
+
+        # 매수 관련 키워드가 포함되었거나, 수량+가격 패턴이 있는 경우만
+        trade_keywords = ["샀", "매수", "추가", "편입", "담았", "들어갔"]
+        has_keyword = any(kw in text for kw in trade_keywords)
+
+        # 수량(주) + 가격(원) 패턴 감지
+        qty_price_pat = re.search(
+            r'(\d[\d,]*)주.*?(\d[\d,]*)원', text,
+        )
+        if not qty_price_pat and not has_keyword:
+            return None
+
+        # parse_trade_text로 구조화
+        trade = parse_trade_text(text)
+        if not trade:
+            return None
+
+        # 종목코드가 없으면 이름으로 매칭
+        ticker = trade.ticker
+        name = trade.name
+        if not ticker and name:
+            stock = self._detect_stock_query(name)
+            if stock:
+                ticker = stock.get("code", "")
+                name = stock.get("name", name)
+
+        if not ticker:
+            return None
+
+        return {
+            "ticker": ticker,
+            "name": name,
+            "quantity": trade.quantity,
+            "price": trade.price,
+        }
+
+    async def _propose_trade_addition(
+        self, update: Update, context, trade: dict,
+    ) -> None:
+        """감지된 매수 정보를 확인 후 포트폴리오에 추가 제안."""
+        ticker = trade["ticker"]
+        name = trade["name"]
+        qty = trade.get("quantity", 0)
+        price = trade.get("price", 0)
+
+        # user_data에 저장
+        context.user_data["pending_text_holding"] = trade
+
+        qty_str = f"{qty}주 " if qty else ""
+        price_str = f"{price:,.0f}원" if price else "가격 미지정"
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "✅ 추가", callback_data="add_txt:yes",
+                ),
+                InlineKeyboardButton(
+                    "❌ 취소", callback_data="add_txt:no",
+                ),
+            ],
+        ]
+        await update.message.reply_text(
+            f"📋 매수 등록 감지!\n\n"
+            f"종목: {name} ({ticker})\n"
+            f"수량: {qty_str}\n"
+            f"매수가: {price_str}\n\n"
+            f"포트폴리오에 추가해드릴까요?",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _show_stock_actions(
+        self, update: Update, context, stock: dict,
+    ) -> None:
+        """종목명만 입력했을 때 액션 버튼 제공.
+
+        "삼성전자" → [📊 분석] [➕ 추가] [👀 관심]
+        """
+        code = stock.get("code", "")
+        name = stock.get("name", code)
+        market = stock.get("market", "KOSPI")
+
+        # 현재가 자동 조회
+        price = 0.0
+        price_str = "현재가: 조회 중"
+        try:
+            price = await self._get_price(code)
+            if price > 0:
+                price_str = f"현재가: {price:,.0f}원"
+        except Exception:
+            price_str = "현재가: 조회 실패"
+
+        # user_data에 저장 (콜백에서 사용)
+        context.user_data["pending_stock_action"] = {
+            "code": code, "name": name, "market": market, "price": price,
+        }
+
+        # 이미 보유 중인지 확인
+        existing = self.db.get_holding_by_ticker(code)
+
+        if existing:
+            add_btn = InlineKeyboardButton(
+                "✅ 보유 중", callback_data=f"stock_act:noop:{code}",
+            )
+        else:
+            add_btn = InlineKeyboardButton(
+                "➕ 포트폴리오 추가",
+                callback_data=f"stock_act:add:{code}",
+            )
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "📊 분석", callback_data=f"stock_act:analyze:{code}",
+                ),
+                add_btn,
+            ],
+            [
+                InlineKeyboardButton(
+                    "👀 관심종목", callback_data=f"stock_act:watch:{code}",
+                ),
+            ],
+        ]
+
+        await update.message.reply_text(
+            f"📌 {name} ({code})\n{price_str}\n\n어떻게 하시겠어요?",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _handle_stock_analysis(
+        self, update: Update, context, stock: dict, original_text: str
+    ) -> None:
+        """자연어로 감지된 종목에 대해 AI 분석을 수행합니다."""
+        code = stock.get("code", "")
+        name = stock.get("name", code)
+
+        placeholder = await update.message.reply_text(
+            f"\U0001f50d {name}({code}) 분석 중..."
+        )
+
+        try:
+            market = stock.get("market", "KOSPI")
+            tech_data = ""
+            price_data = ""
+            fund_data = ""
+
+            try:
+                ohlcv = await self.yf_client.get_ohlcv(code, market)
+                if ohlcv is not None and not ohlcv.empty:
+                    tech = compute_indicators(ohlcv)
+                    close = ohlcv["close"].astype(float)
+                    volume = ohlcv["volume"].astype(float)
+                    cur_price = float(close.iloc[-1])
+                    prev_price = float(close.iloc[-2]) if len(close) >= 2 else cur_price
+                    change_pct = ((cur_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
+                    avg_vol = float(volume.tail(20).mean())
+                    cur_vol = float(volume.iloc[-1])
+
+                    price_data = (
+                        f"현재가: {cur_price:,.0f}원 ({change_pct:+.1f}%)\n"
+                        f"거래량: {cur_vol:,.0f}주 (20일평균 대비 {cur_vol/avg_vol:.1f}배)"
+                    )
+                    tech_data = (
+                        f"RSI: {tech.rsi:.1f}\n"
+                        f"MACD: {tech.macd:.2f} (시그널: {tech.macd_signal:.2f})\n"
+                        f"볼린저밴드 위치: {tech.bb_position:.2f}\n"
+                        f"이동평균선: 5일 {tech.ma5:,.0f}원, 20일 {tech.ma20:,.0f}원, "
+                        f"60일 {tech.ma60:,.0f}원, 120일 {tech.ma120:,.0f}원"
+                    )
+            except Exception:
+                tech_data = "기술적 데이터 조회 실패"
+
+            try:
+                fin = self.db.get_financials(code)
+                if fin:
+                    fund_data = (
+                        f"PER: {fin.get('per', 0):.1f} "
+                        f"(섹터평균: {fin.get('sector_per', 15):.1f})\n"
+                        f"PBR: {fin.get('pbr', 0):.2f}, "
+                        f"ROE: {fin.get('roe', 0):.1f}%\n"
+                        f"부채비율: {fin.get('debt_ratio', 0):.0f}%"
+                    )
+            except Exception:
+                fund_data = "재무 데이터 없음"
+
+            enriched_question = (
+                f"{name}({code}) 종목 분석 요청.\n"
+                f"사용자 질문: {original_text}\n\n"
+                f"[실시간 가격]\n{price_data}\n\n"
+                f"[기술적 지표]\n{tech_data}\n\n"
+                f"[펀더멘털]\n{fund_data}\n\n"
+                f"위 실시간 데이터를 참고하여 분석하라. "
+                f"반드시 관심/매수/매도 포인트를 명시하라."
+            )
+
+            from kstock.bot.chat_handler import handle_ai_question
+            from kstock.bot.context_builder import build_full_context_with_macro
+            from kstock.bot.chat_memory import ChatMemory
+
+            chat_mem = ChatMemory(self.db)
+            ctx = await build_full_context_with_macro(
+                self.db, self.macro_client, self.yf_client,
+            )
+            answer = await handle_ai_question(enriched_question, ctx, self.db, chat_mem)
+
+            try:
+                await placeholder.edit_text(answer)
+            except Exception:
+                await update.message.reply_text(answer, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("Stock analysis error: %s", e, exc_info=True)
+            try:
+                await placeholder.edit_text(
+                    f"\u26a0\ufe0f {name} 분석 중 오류가 발생했습니다."
+                )
+            except Exception:
+                await update.message.reply_text(
+                    f"\u26a0\ufe0f {name} 분석 중 오류가 발생했습니다.",
+                    reply_markup=MAIN_MENU,
+                )
+
+    async def handle_callback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        query = update.callback_query
+        await query.answer()
+        data = query.data or ""
+        try:
+            action, _, payload = data.partition(":")
+            dispatch = {
+                "buy": self._action_buy,
+                "skip": self._action_skip,
+                "watch_alert": self._action_watch,
+                "pass": self._action_skip,
+                "sell_profit": self._action_sell_profit,
+                "hold_profit": self._action_hold_profit,
+                "stop_loss": self._action_stop_loss,
+                "hold_through": self._action_hold_through,
+                "sell_half": self._action_sell_profit,
+                "hold_more": self._action_hold_profit,
+                "detail": self._action_detail,
+                "nowatch": self._action_nowatch,
+                "watch_btn": self._action_watch_btn,
+                "strat": self._action_strategy,
+                "opt_apply": self._action_opt_apply,
+                "opt_ignore": self._action_opt_ignore,
+                "kis_buy": self._action_kis_buy,
+                "kis_pass": self._action_skip,
+                "hz": self._action_horizon_select,
+                "sol": self._action_solution_detail,
+                "scn": self._action_scenario_run,
+                "notif": self._action_notification_toggle,
+                "rpt": self._action_report_submenu,
+                "sector_rpt": self._action_sector_report,
+                "weekly": self._action_weekly_submenu,
+                "sell_plans": self._action_sell_plans,
+                "multi_run": self._action_multi_run,
+                "quick_q": self._handle_quick_question,
+                "add_ss": self._action_add_from_screenshot,
+                "add_txt": self._action_confirm_text_holding,
+                "stock_act": self._action_stock_action,
+                "bal": self._action_balance,
+                "selfupd": self._action_self_update,
+                "kis_hub": self._action_kis_hub,
+                "kis_mode": self._action_kis_mode,
+                "price_alert": self._action_price_alert,
+                "kis": self._action_kis,
+                "opt_run": self._action_opt_run,
+                "fav": self._action_favorites,
+                "agent": self._action_agent,
+                "goto": self._action_goto,
+                "adm": self._handle_admin_callback,
+                # v3.6 신규
+                "ai": self._action_ai_status,
+                "orderbook": self._action_orderbook,
+            }
+            handler = dispatch.get(action)
+            if handler:
+                await handler(query, context, payload)
+        except Exception as e:
+            logger.error("Callback error: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text("\u26a0\ufe0f 오류가 발생했습니다.")
+            except Exception:
+                pass
+
+    # == Horizon selection ====================================================
+
+    async def _action_horizon_select(self, query, context, payload: str) -> None:
+        """Handle horizon selection callback: hz:horizon:ticker or hz:default_all:0."""
+        horizon, _, ticker = payload.partition(":")
+
+        # "전체 기본 진단" button → run legacy batch_diagnose
+        if horizon == "default_all":
+            holdings = context.user_data.get("pending_holdings", [])
+            screenshot_id = context.user_data.get("pending_screenshot_id")
+            if not holdings:
+                await query.edit_message_text("\u26a0\ufe0f 진단할 종목이 없습니다.")
+                return
+
+            await query.edit_message_text("\U0001f50d 전체 기본 진단 실행 중...")
+            tech_map: dict = {}
+            flow_map: dict = {}
+            diagnoses = await batch_diagnose(
+                holdings, tech_map, flow_map, self.anthropic_key,
+            )
+            pairs = list(zip(holdings, diagnoses))
+            diag_msg = format_diagnosis_report(pairs)
+            await query.message.reply_text(diag_msg, reply_markup=MAIN_MENU)
+
+            # Save to DB
+            if screenshot_id:
+                for h, d in zip(holdings, diagnoses):
+                    is_margin, margin_type = detect_margin_purchase(h)
+                    self.db.add_screenshot_holding(
+                        screenshot_id=screenshot_id,
+                        ticker=h.get("ticker", ""),
+                        name=h.get("name", ""),
+                        quantity=h.get("quantity", 0),
+                        avg_price=h.get("avg_price", 0),
+                        current_price=h.get("current_price", 0),
+                        profit_pct=h.get("profit_pct", 0),
+                        eval_amount=h.get("eval_amount", 0),
+                        diagnosis=d.diagnosis,
+                        diagnosis_action=d.action,
+                        diagnosis_msg=d.message,
+                        is_margin=1 if is_margin else 0,
+                        margin_type=margin_type or "",
+                    )
+
+            # Account-level 8-item diagnosis
+            await self._send_account_diagnosis(query, holdings, screenshot_id)
+
+            # Cleanup
+            context.user_data.pop("pending_horizons", None)
+            context.user_data.pop("pending_holdings", None)
+            context.user_data.pop("pending_screenshot_id", None)
+            return
+
+        # Individual horizon selection
+        pending = context.user_data.get("pending_horizons", {})
+        cfg = HORIZON_CONFIG.get(horizon, {})
+        label = cfg.get("label", "기본")
+        pending[ticker] = horizon
+
+        name = ticker
+        for h in context.user_data.get("pending_holdings", []):
+            if h.get("ticker") == ticker:
+                name = h.get("name", ticker)
+                break
+
+        await query.edit_message_text(f"\u2705 {name}: {label} 선택됨")
+
+        # Check if all holdings have been assigned a horizon
+        holdings = context.user_data.get("pending_holdings", [])
+        all_tickers = {h.get("ticker", "") for h in holdings}
+        if all_tickers and all_tickers <= set(pending.keys()):
+            await self._run_horizon_diagnosis(query, context)
+
+    async def _run_horizon_diagnosis(self, query, context) -> None:
+        """Execute horizon-based diagnosis for all pending holdings."""
+        holdings = context.user_data.get("pending_holdings", [])
+        horizons = context.user_data.get("pending_horizons", {})
+        screenshot_id = context.user_data.get("pending_screenshot_id")
+
+        if not holdings:
+            return
+
+        await query.message.reply_text("\U0001f50d 투자 시계별 진단 실행 중... 잠시만 기다려주세요.")
+
+        # Build (holding, horizon) pairs
+        pairs = []
+        for h in holdings:
+            ticker = h.get("ticker", "")
+            hz = horizons.get(ticker, "default")
+            pairs.append((h, hz))
+
+        results = await batch_diagnose_by_horizon(
+            pairs,
+            anthropic_key=self.anthropic_key,
+            db=self.db,
+        )
+
+        report = format_horizon_report(results)
+        await query.message.reply_text(report, reply_markup=MAIN_MENU)
+
+        # Save to DB
+        if screenshot_id:
+            for h, r in zip(holdings, results):
+                self.db.add_screenshot_holding(
+                    screenshot_id=screenshot_id,
+                    ticker=r.ticker,
+                    name=r.name,
+                    quantity=h.get("quantity", 0),
+                    avg_price=h.get("avg_price", 0),
+                    current_price=h.get("current_price", 0),
+                    profit_pct=r.profit_pct,
+                    eval_amount=h.get("eval_amount", 0),
+                    diagnosis=r.diagnosis,
+                    diagnosis_action=r.action,
+                    diagnosis_msg=r.message,
+                    is_margin=1 if r.is_margin else 0,
+                    margin_type=r.margin_type or "",
+                )
+                self.db.add_investment_horizon(
+                    ticker=r.ticker,
+                    name=r.name,
+                    horizon=r.horizon,
+                    screenshot_id=screenshot_id,
+                    stop_pct=HORIZON_CONFIG.get(r.horizon, {}).get("stop"),
+                    target_pct=HORIZON_CONFIG.get(r.horizon, {}).get("target"),
+                    trailing_pct=HORIZON_CONFIG.get(r.horizon, {}).get("trailing"),
+                    is_margin=1 if r.is_margin else 0,
+                    margin_type=r.margin_type,
+                    diagnosis=r.diagnosis,
+                    diagnosis_action=r.action,
+                    diagnosis_msg=r.message,
+                )
+                # Also save to portfolio_horizon for next time
+                if r.horizon and r.horizon != "default":
+                    self.db.upsert_portfolio_horizon(
+                        ticker=r.ticker, name=r.name, horizon=r.horizon,
+                    )
+
+        # Account-level 8-item diagnosis
+        await self._send_account_diagnosis(query, holdings, screenshot_id)
+
+        # Cleanup
+        context.user_data.pop("pending_horizons", None)
+        context.user_data.pop("pending_holdings", None)
+        context.user_data.pop("pending_screenshot_id", None)
+
+    async def _send_account_diagnosis(
+        self, query, holdings: list, screenshot_id: int | None = None,
+    ) -> None:
+        """Send portfolio-level 8-item diagnosis and offer solutions."""
+        try:
+            summary = {}
+            total_eval = sum(h.get("eval_amount", 0) for h in holdings)
+            total_profit = sum(h.get("eval_amount", 0) - (h.get("avg_price", 0) * h.get("quantity", 0))
+                               for h in holdings)
+            cash = 0
+            if screenshot_id:
+                ss = self.db.get_last_screenshot()
+                if ss:
+                    cash = ss.get("cash", 0) or 0
+                    total_eval = ss.get("total_eval", 0) or total_eval
+            total_buy = sum(h.get("avg_price", 0) * h.get("quantity", 0) for h in holdings)
+            total_profit_pct = (total_profit / total_buy * 100) if total_buy > 0 else 0
+
+            diag = diagnose_account(
+                holdings=holdings,
+                total_profit_pct=total_profit_pct,
+                cash=cash,
+                total_eval=total_eval,
+            )
+            report = format_account_diagnosis(diag)
+            await query.message.reply_text(report, reply_markup=MAIN_MENU)
+
+            # Save solutions to DB
+            if diag.solutions and screenshot_id:
+                for sol in diag.solutions:
+                    self.db.add_solution(
+                        solution_type=sol["type"],
+                        description=f"{sol['description']} -> {sol['action']}",
+                        before_snapshot_id=screenshot_id,
+                    )
+
+            # Offer "솔루션 보기" button if there are solutions
+            if diag.solutions:
+                import json
+                sol_btn = [[
+                    InlineKeyboardButton(
+                        "\U0001f4a1 솔루션 상세 보기",
+                        callback_data="sol:detail:0",
+                    ),
+                ]]
+                await query.message.reply_text(
+                    "솔루션 상세를 확인하시겠습니까?",
+                    reply_markup=InlineKeyboardMarkup(sol_btn),
+                )
+                # Store solutions in user_data for callback
+                context_data = getattr(query, "_context_data", None)
+
+        except Exception as e:
+            logger.error("Account diagnosis failed: %s", e, exc_info=True)
+
+    async def _action_solution_detail(self, query, context, payload: str) -> None:
+        """Handle [솔루션 보기] callback."""
+        try:
+            solutions = self.db.get_pending_solutions()
+            sol_dicts = [
+                {"type": s.get("solution_type", ""),
+                 "urgency": "medium",
+                 "description": s.get("description", "").split(" -> ")[0] if " -> " in s.get("description", "") else s.get("description", ""),
+                 "action": s.get("description", "").split(" -> ")[1] if " -> " in s.get("description", "") else ""}
+                for s in solutions
+            ]
+            msg = format_solution_detail(sol_dicts)
+            await query.edit_message_text(msg)
+        except Exception as e:
+            logger.error("Solution detail callback failed: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text("\u26a0\ufe0f 솔루션 조회 중 오류가 발생했습니다.")
+            except Exception:
+                pass
+
+    # == Usage guide ===========================================================
+
+

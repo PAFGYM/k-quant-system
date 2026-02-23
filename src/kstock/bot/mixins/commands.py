@@ -1,0 +1,1658 @@
+"""Commands and analysis functions."""
+from __future__ import annotations
+
+from kstock.bot.bot_imports import *  # noqa: F403
+
+
+class CommandsMixin:
+    async def _scan_all_stocks(self) -> list:
+        macro = await self.macro_client.get_snapshot()
+        await self._update_sector_strengths()
+
+        # First pass: collect all 3-month returns for RS ranking
+        all_returns = []
+        pre_results = []
+        for stock in self.all_tickers:
+            try:
+                ohlcv = await self.yf_client.get_ohlcv(
+                    stock["code"], stock.get("market", "KOSPI")
+                )
+                if ohlcv is not None and not ohlcv.empty:
+                    self._ohlcv_cache[stock["code"]] = ohlcv
+                    close = ohlcv["close"].astype(float)
+                    lookback_3m = min(60, len(close) - 1)
+                    if lookback_3m > 0:
+                        ret = (close.iloc[-1] - close.iloc[-lookback_3m - 1]) / close.iloc[-lookback_3m - 1] * 100
+                        all_returns.append(float(ret))
+                        pre_results.append((stock, float(ret)))
+                    else:
+                        pre_results.append((stock, 0.0))
+                else:
+                    pre_results.append((stock, 0.0))
+            except Exception:
+                pre_results.append((stock, 0.0))
+
+        # Second pass: full analysis with RS rank
+        results = []
+        for stock, ret_3m in pre_results:
+            try:
+                rs_rank, _ = compute_relative_strength_rank(ret_3m, all_returns)
+                r = await self._analyze_stock(
+                    stock["code"], stock["name"], macro,
+                    market=stock.get("market", "KOSPI"),
+                    sector=stock.get("sector", ""),
+                    category=stock.get("category", ""),
+                    rs_rank=rs_rank,
+                    rs_total=len(all_returns),
+                )
+                if r:
+                    results.append(r)
+            except Exception as e:
+                logger.error("Scan error %s: %s", stock.get("code"), e)
+        results.sort(key=lambda r: r.score.composite, reverse=True)
+        return results
+
+    async def _analyze_stock(
+        self, ticker: str, name: str, macro: MacroSnapshot,
+        market: str = "KOSPI", sector: str = "", category: str = "",
+        rs_rank: int = 0, rs_total: int = 1,
+    ) -> ScanResult | None:
+        try:
+            ohlcv = self._ohlcv_cache.get(ticker)
+            if ohlcv is None or ohlcv.empty:
+                # Fetch OHLCV and stock info in parallel
+                import asyncio
+                ohlcv, yf_info = await asyncio.gather(
+                    self.yf_client.get_ohlcv(ticker, market),
+                    self.yf_client.get_stock_info(ticker, name, market),
+                )
+                self._ohlcv_cache[ticker] = ohlcv
+            else:
+                yf_info = await self.yf_client.get_stock_info(ticker, name, market)
+
+            info = StockInfo(
+                ticker=ticker, name=name, market=market,
+                market_cap=yf_info.get("market_cap", 0),
+                per=yf_info.get("per", 0),
+                roe=yf_info.get("roe", 0),
+                debt_ratio=yf_info.get("debt_ratio", 0),
+                consensus_target=yf_info.get("consensus_target", 0),
+                current_price=yf_info.get("current_price", 0),
+            )
+
+            tech = compute_indicators(ohlcv)
+
+            # Multi-timeframe
+            weekly_trend = compute_weekly_trend(ohlcv)
+            tech.weekly_trend = weekly_trend
+            tech.mtf_aligned = (weekly_trend == "up" and tech.ema_50 > tech.ema_200)
+
+            # Sector adjustment
+            sector_adj = get_sector_score_adjustment(sector, self._sector_strengths)
+
+            # MTF bonus
+            if tech.mtf_aligned:
+                mtf_bonus = 10
+            elif weekly_trend == "down" and tech.ema_50 < tech.ema_200:
+                mtf_bonus = -10
+            else:
+                mtf_bonus = 0
+
+            # Mock flow data (parallel)
+            foreign_flow, inst_flow = await asyncio.gather(
+                self.kis.get_foreign_flow(ticker),
+                self.kis.get_institution_flow(ticker),
+            )
+            foreign_days = int(
+                (foreign_flow["net_buy_volume"] > 0).sum()
+                - (foreign_flow["net_buy_volume"] < 0).sum()
+            )
+            inst_days = int(
+                (inst_flow["net_buy_volume"] > 0).sum()
+                - (inst_flow["net_buy_volume"] < 0).sum()
+            )
+            avg_value = float(
+                ohlcv["close"].astype(float).iloc[-5:].mean()
+                * ohlcv["volume"].astype(float).iloc[-5:].mean()
+            )
+            flow = FlowData(
+                foreign_net_buy_days=foreign_days,
+                institution_net_buy_days=inst_days,
+                avg_trade_value_krw=avg_value,
+            )
+            # v3.0: policy bonus
+            policy_bonus = get_policy_bonus(ticker, sector=sector, market=market)
+
+            # v3.0: ML bonus
+            ml_bonus_val = 0
+            if HAS_ML and self._ml_model:
+                try:
+                    features = build_features(tech, info, macro, flow, policy_bonus=policy_bonus)
+                    ml_pred = predict(features, self._ml_model)
+                    ml_bonus_val = get_ml_bonus(ml_pred.probability)
+                except Exception:
+                    pass
+
+            # v3.0: sentiment bonus
+            sentiment_bonus = 0
+            if ticker in self._sentiment_cache and HAS_SENTIMENT:
+                try:
+                    sentiment_bonus = get_sentiment_bonus(self._sentiment_cache[ticker])
+                except Exception:
+                    pass
+
+            # v3.0: leading sector bonus
+            from kstock.signal.policy_engine import _load_config as _load_policy_config
+            try:
+                pc = _load_policy_config()
+                leading = pc.get("leading_sectors", {})
+                tier1 = leading.get("tier1", [])
+                tier2 = leading.get("tier2", [])
+                leading_sector_bonus = 5 if sector in tier1 else 2 if sector in tier2 else 0
+            except Exception:
+                leading_sector_bonus = 0
+
+            score = compute_composite_score(
+                macro, flow, info, tech, self.scoring_config,
+                mtf_bonus=mtf_bonus, sector_adj=sector_adj,
+                policy_bonus=policy_bonus,
+                ml_bonus=ml_bonus_val,
+                sentiment_bonus=sentiment_bonus,
+                leading_sector_bonus=leading_sector_bonus,
+            )
+
+            # Multi-strategy evaluation
+            strat_signals = evaluate_all_strategies(
+                ticker, name, score, tech, flow, macro,
+                info_dict=yf_info, sector=sector,
+                rs_rank=rs_rank, rs_total=rs_total,
+            )
+            best_strategy = strat_signals[0].strategy if strat_signals else "A"
+
+            # Enhanced confidence score
+            from kstock.signal.strategies import LEVERAGE_ETFS
+            conf_score, conf_stars, conf_label = compute_confidence_score(
+                base_score=score.composite,
+                tech=tech,
+                sector_adj=sector_adj,
+                roe_top_30=(yf_info.get("roe", 0) >= 15),
+                inst_buy_days=inst_days,
+                is_leverage_etf=(ticker in LEVERAGE_ETFS),
+            )
+
+            return ScanResult(
+                ticker=ticker, name=name, score=score,
+                tech=tech, info=info, flow=flow,
+                strategy_type=best_strategy,
+                strategy_signals=strat_signals,
+                confidence_score=conf_score,
+                confidence_stars=conf_stars,
+                confidence_label=conf_label,
+            )
+        except Exception as e:
+            logger.error("Analysis failed %s: %s", ticker, e)
+            return None
+
+    async def _scan_single_stock(self, ticker: str) -> ScanResult | None:
+        name = ticker
+        market = "KOSPI"
+        sector = ""
+        for s in self.all_tickers:
+            if s["code"] == ticker:
+                name = s["name"]
+                market = s.get("market", "KOSPI")
+                sector = s.get("sector", "")
+                break
+        macro = await self.macro_client.get_snapshot()
+        return await self._analyze_stock(ticker, name, macro, market=market, sector=sector)
+
+    async def _get_price(self, ticker: str, base_price: float = 0) -> float:
+        """Get current price. KIS API 우선, yfinance 폴백."""
+        # 1순위: KIS API (정확도 최우선)
+        try:
+            price = await self.kis.get_current_price(ticker, 0)
+            if price > 0:
+                return price
+        except Exception:
+            pass
+        # 2순위: yfinance
+        market = "KOSPI"
+        for s in self.all_tickers:
+            if s["code"] == ticker:
+                market = s.get("market", "KOSPI")
+                break
+        try:
+            price = await self.yf_client.get_current_price(ticker, market)
+            if price > 0:
+                return price
+        except Exception:
+            pass
+        # 3순위: base_price fallback
+        if base_price > 0:
+            return base_price
+        return 0.0
+
+    async def _get_price_detail(self, ticker: str, base_price: float = 0) -> dict:
+        """Get price with day change info. KIS 우선 → yfinance 폴백.
+
+        Returns dict: {price, prev_close, day_change, day_change_pct}
+        """
+        # 1순위: KIS API (전일 대비 포함)
+        try:
+            detail = await self.kis.get_price_detail(ticker, 0)
+            if detail["price"] > 0 and detail["prev_close"] > 0:
+                return detail
+        except Exception:
+            pass
+        # 2순위: yfinance로 현재가만, 전일 대비는 0
+        price = await self._get_price(ticker, base_price)
+        return {
+            "price": price,
+            "prev_close": price,
+            "day_change": 0.0,
+            "day_change_pct": 0.0,
+        }
+
+    async def _check_and_send_alerts(
+        self, bot, result: ScanResult, macro: MacroSnapshot
+    ) -> None:
+        ticker = result.ticker
+        name = result.name
+        score = result.score
+        tech = result.tech
+        strat_type = result.strategy_type
+
+        # Momentum alert (Strategy F)
+        if result.strategy_signals:
+            for sig in result.strategy_signals:
+                if sig.strategy == "F" and sig.action == "BUY":
+                    if not self.db.has_recent_alert(ticker, "momentum", hours=24):
+                        msg = format_momentum_alert(
+                            name, ticker, tech, result.info,
+                            rs_rank=0, rs_total=len(self.all_tickers),
+                        )
+                        await bot.send_message(chat_id=self.chat_id, text=msg)
+                        self.db.insert_alert(ticker, "momentum", f"\U0001f680 모멘텀! {name}")
+                        if not self.db.has_active_recommendation(ticker):
+                            self.db.add_recommendation(
+                                ticker=ticker, name=name,
+                                rec_price=result.info.current_price,
+                                rec_score=score.composite,
+                                strategy_type="F",
+                                target_pct=STRATEGY_META["F"]["target"],
+                                stop_pct=STRATEGY_META["F"]["stop"],
+                            )
+
+                elif sig.strategy == "G" and sig.action == "BUY":
+                    if not self.db.has_recent_alert(ticker, "breakout", hours=24):
+                        msg = format_breakout_alert(name, ticker, tech, result.info)
+                        await bot.send_message(chat_id=self.chat_id, text=msg)
+                        self.db.insert_alert(ticker, "breakout", f"\U0001f4a5 돌파! {name}")
+                        if not self.db.has_active_recommendation(ticker):
+                            self.db.add_recommendation(
+                                ticker=ticker, name=name,
+                                rec_price=result.info.current_price,
+                                rec_score=score.composite,
+                                strategy_type="G",
+                                target_pct=STRATEGY_META["G"]["target"],
+                                stop_pct=STRATEGY_META["G"]["stop"],
+                            )
+
+        # Buy alert
+        if score.signal == "BUY":
+            buy_trigger = (
+                tech.rsi <= 30 or tech.bb_pctb <= 0.2 or tech.macd_signal_cross == 1
+            )
+            if buy_trigger and not self.db.has_recent_alert(ticker, "buy", hours=8):
+                msg = format_buy_alert(
+                    name, ticker, score, tech, result.info, result.flow, macro,
+                    strategy_type=strat_type,
+                )
+                if self.kis_broker.connected:
+                    buttons = [[
+                        InlineKeyboardButton("\ubc14\ub85c \ub9e4\uc218 \U0001f680", callback_data=f"kis_buy:{ticker}"),
+                        InlineKeyboardButton("\uc0c0\uc5b4\uc694 \u2705", callback_data=f"buy:{ticker}"),
+                        InlineKeyboardButton("\ud328\uc2a4 \u274c", callback_data=f"kis_pass:{ticker}"),
+                    ]]
+                else:
+                    buttons = [[
+                        InlineKeyboardButton("\uc0c0\uc5b4\uc694 \u2705", callback_data=f"buy:{ticker}"),
+                        InlineKeyboardButton("\uc548 \uc0b4\ub798\uc694 \u274c", callback_data=f"skip:{ticker}"),
+                    ]]
+                await bot.send_message(
+                    chat_id=self.chat_id, text=msg,
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+                self.db.insert_alert(
+                    ticker, "buy",
+                    f"\U0001f7e2 매수! {name} ({score.composite:.1f}점) "
+                    f"[{STRATEGY_META.get(strat_type, {}).get('emoji', '')}]",
+                )
+                if not self.db.has_active_recommendation(ticker):
+                    meta = STRATEGY_META.get(strat_type, {})
+                    self.db.add_recommendation(
+                        ticker=ticker, name=name,
+                        rec_price=result.info.current_price,
+                        rec_score=score.composite, status="active",
+                        strategy_type=strat_type,
+                        target_pct=meta.get("target", 3.0),
+                        stop_pct=meta.get("stop", -5.0),
+                    )
+                logger.info("Buy alert: %s (%.1f) [%s]", name, score.composite, strat_type)
+
+        elif score.signal == "WATCH":
+            watch_trigger = tech.rsi <= 40 or tech.bb_pctb <= 0.35
+            if watch_trigger and not self.db.has_recent_alert(ticker, "watch", hours=12):
+                msg = format_watch_alert(name, ticker, score, tech, result.info, strat_type)
+                buttons = [[
+                    InlineKeyboardButton("\U0001f514 알림 받기", callback_data=f"watch_alert:{ticker}"),
+                    InlineKeyboardButton("\u274c 관심없음", callback_data=f"nowatch:{ticker}"),
+                ]]
+                await bot.send_message(
+                    chat_id=self.chat_id, text=msg,
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+                self.db.insert_alert(ticker, "watch", f"\U0001f7e1 주시: {name} ({score.composite:.1f}점)")
+                if not self.db.has_active_recommendation(ticker):
+                    target_entry = round(result.info.current_price * 0.97, 0)
+                    self.db.add_recommendation(
+                        ticker=ticker, name=name,
+                        rec_price=target_entry, rec_score=score.composite,
+                        status="watch", strategy_type=strat_type,
+                    )
+
+    async def _check_holdings(self, bot) -> None:
+        holdings = self.db.get_active_holdings()
+        for h in holdings:
+            try:
+                ticker = h["ticker"]
+                name = h["name"]
+                buy_price = h["buy_price"]
+                current = await self._get_price(ticker, buy_price)
+                self.db.update_holding(
+                    h["id"], current_price=current,
+                    pnl_pct=round((current - buy_price) / buy_price * 100, 2),
+                )
+
+                target_1 = h.get("target_1") or buy_price * 1.03
+                stop_price = h.get("stop_price") or buy_price * 0.95
+
+                if current >= target_1 and (h.get("sold_pct") or 0) < 50:
+                    if not self.db.has_recent_alert(ticker, "sell", hours=4):
+                        msg = format_sell_alert_profit(name, h, current)
+                        buttons = [[
+                            InlineKeyboardButton("\ud314\uc558\uc5b4\uc694 \u2705", callback_data=f"sell_profit:{ticker}"),
+                            InlineKeyboardButton("\ub354 \ub4e4\uace0\uac08\ub798\uc694 \u23f8\ufe0f", callback_data=f"hold_profit:{ticker}"),
+                        ]]
+                        await bot.send_message(
+                            chat_id=self.chat_id, text=msg,
+                            reply_markup=InlineKeyboardMarkup(buttons),
+                        )
+                        self.db.insert_alert(ticker, "sell", f"\U0001f534 익절! {name}")
+                elif current <= stop_price:
+                    if not self.db.has_recent_alert(ticker, "stop", hours=4):
+                        msg = format_sell_alert_stop(name, h, current)
+                        buttons = [[
+                            InlineKeyboardButton("\uc190\uc808\ud588\uc5b4\uc694 \u2705", callback_data=f"stop_loss:{ticker}"),
+                            InlineKeyboardButton("\ubc84\ud2f8\ub798\uc694 \u26a0\ufe0f", callback_data=f"hold_through:{ticker}"),
+                        ]]
+                        await bot.send_message(
+                            chat_id=self.chat_id, text=msg,
+                            reply_markup=InlineKeyboardMarkup(buttons),
+                        )
+                        self.db.insert_alert(ticker, "stop", f"\U0001f534 손절! {name}")
+            except Exception as e:
+                logger.error("Holdings check error %s: %s", h.get("ticker"), e)
+
+    async def _update_recommendations(self, bot) -> None:
+        active_recs = self.db.get_active_recommendations()
+        for rec in active_recs:
+            try:
+                ticker = rec["ticker"]
+                name = rec["name"]
+                rec_price = rec["rec_price"]
+                current = await self._get_price(ticker, rec_price)
+                pnl_pct = round((current - rec_price) / rec_price * 100, 2)
+                self.db.update_recommendation(rec["id"], current_price=current, pnl_pct=pnl_pct)
+
+                target_1 = rec.get("target_1") or rec_price * 1.03
+                stop_price = rec.get("stop_price") or rec_price * 0.95
+                strat = rec.get("strategy_type", "A")
+                tag = f"[{STRATEGY_META.get(strat, {}).get('emoji', '')}{STRATEGY_META.get(strat, {}).get('name', '')}]"
+
+                if current >= target_1:
+                    now = datetime.utcnow().isoformat()
+                    self.db.update_recommendation(rec["id"], status="profit", closed_at=now)
+                    if self.chat_id:
+                        await bot.send_message(
+                            chat_id=self.chat_id,
+                            text=(
+                                f"\U0001f389 추천 성공! {name} {tag}\n\n"
+                                f"추천가: {rec_price:,.0f}원 -> 현재: {current:,.0f}원\n"
+                                f"수익률: {pnl_pct:+.1f}%\n\n"
+                                f"\u2705 목표 도달!"
+                            ),
+                        )
+                elif current <= stop_price:
+                    now = datetime.utcnow().isoformat()
+                    self.db.update_recommendation(rec["id"], status="stop", closed_at=now)
+                    if self.chat_id:
+                        await bot.send_message(
+                            chat_id=self.chat_id,
+                            text=(
+                                f"\U0001f6d1 추천 손절! {name} {tag}\n\n"
+                                f"추천가: {rec_price:,.0f}원 -> 현재: {current:,.0f}원\n"
+                                f"수익률: {pnl_pct:+.1f}%\n\n"
+                                f"\U0001f534 손절가 도달"
+                            ),
+                        )
+            except Exception as e:
+                logger.error("Reco update error %s: %s", rec.get("ticker"), e)
+
+    async def _generate_claude_briefing(
+        self, macro: MacroSnapshot, regime_mode: dict
+    ) -> str | None:
+        if not self.anthropic_key:
+            return None
+        try:
+            import httpx
+            prompt = (
+                f"한국 투자자를 위한 오늘의 시장 브리핑을 3~5줄로 작성해주세요. "
+                f"데이터: VIX={macro.vix:.1f}({macro.vix_change_pct:+.1f}%), "
+                f"S&P500={macro.spx_change_pct:+.2f}%, "
+                f"나스닥={macro.nasdaq_change_pct:+.2f}%, "
+                f"환율={macro.usdkrw:,.0f}원({macro.usdkrw_change_pct:+.2f}%), "
+                f"BTC=${macro.btc_price:,.0f}({macro.btc_change_pct:+.1f}%), "
+                f"금=${macro.gold_price:,.0f}({macro.gold_change_pct:+.1f}%), "
+                f"레짐={macro.regime}, 모드={regime_mode.get('label', '')}. "
+                f"볼드(**) 사용하지 말고 이모지와 줄바꿈으로 가독성을 확보해주세요."
+            )
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": self.anthropic_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_tokens": 500,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["content"][0]["text"]
+                logger.warning("Claude API returned %d", resp.status_code)
+        except Exception as e:
+            logger.warning("Claude API briefing failed: %s", e)
+        return None
+
+    def _find_cached_result(self, ticker: str) -> ScanResult | None:
+        for r in self._last_scan_results:
+            if r.ticker == ticker:
+                return r
+        return None
+
+    # -- /goal command + 30억 menu handlers (v3.0+ sections 40-46) -----------
+
+    async def cmd_short(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /short command — show short selling & leverage analysis."""
+        args = context.args or []
+
+        # If ticker specified: analyze that ticker
+        if args:
+            ticker = args[0].strip()
+            name = ticker
+            for item in self.all_tickers:
+                if item["code"] == ticker:
+                    name = item["name"]
+                    break
+
+            await update.message.reply_text(
+                f"\U0001f50d {name} ({ticker}) 공매도/레버리지 분석 중...",
+            )
+
+            # Fetch data from DB
+            short_data = self.db.get_short_selling(ticker, days=60)
+            margin_data = self.db.get_margin_balance(ticker, days=60)
+
+            lines: list[str] = []
+
+            # Short selling analysis
+            short_signal = analyze_short_selling(short_data, ticker, name)
+            lines.append(format_short_alert(short_signal, short_data))
+            lines.append("")
+
+            # Short pattern detection
+            price_data = self.db.get_supply_demand(ticker, days=20)
+            pattern_result = detect_all_patterns(
+                short_data, price_data, ticker=ticker, name=name,
+            )
+            if pattern_result.patterns:
+                lines.append(format_pattern_report(pattern_result))
+                lines.append("")
+
+            # Margin analysis
+            if margin_data:
+                margin_signal = detect_margin_patterns(
+                    margin_data, price_data, short_data, ticker, name,
+                )
+                lines.append(format_margin_alert(margin_signal, margin_data))
+                lines.append("")
+
+                # Combined score
+                combined = compute_combined_leverage_score(
+                    short_signal.score_adj, margin_signal.total_score_adj,
+                )
+                lines.append(f"\U0001f4ca 공매도+레버리지 종합: {combined:+d}점")
+
+            # Calibration
+            calibrations = calibrate_all_metrics(short_data, margin_data, ticker)
+            if calibrations:
+                lines.append("")
+                lines.append(format_calibration_report(calibrations, name))
+
+            await update.message.reply_text(
+                "\n".join(lines), reply_markup=MAIN_MENU,
+            )
+        else:
+            # No ticker: show portfolio overview
+            last_ss = self.db.get_last_screenshot()
+            if not last_ss:
+                await update.message.reply_text(
+                    "\U0001f4f8 먼저 계좌 스크린샷을 전송해주세요.\n"
+                    "또는: /short [종목코드]\n예) /short 005930",
+                    reply_markup=MAIN_MENU,
+                )
+                return
+
+            import json as _json
+            try:
+                holdings = _json.loads(last_ss.get("holdings_json", "[]") or "[]")
+            except (_json.JSONDecodeError, TypeError):
+                holdings = []
+
+            if not holdings:
+                await update.message.reply_text(
+                    "\U0001f4ca 보유 종목이 없습니다.", reply_markup=MAIN_MENU,
+                )
+                return
+
+            lines = ["\U0001f4ca 포트폴리오 공매도/레버리지 현황\n"]
+
+            for h in holdings[:10]:
+                ticker = h.get("ticker", "")
+                name = h.get("name", "?")
+                if not ticker:
+                    continue
+
+                short_data = self.db.get_short_selling(ticker, days=20)
+                signal = analyze_short_selling(short_data, ticker, name)
+
+                status = ""
+                if signal.is_overheated:
+                    status = "\U0001f6a8 과열"
+                elif signal.score_adj <= -5:
+                    status = "\U0001f534 주의"
+                elif signal.score_adj >= 5:
+                    status = "\U0001f7e2 긍정"
+                else:
+                    status = "\u26aa 보통"
+
+                latest_ratio = 0.0
+                if short_data:
+                    latest_ratio = short_data[-1].get("short_ratio", 0.0)
+
+                lines.append(
+                    f"  {name}: {status} (비중 {latest_ratio:.1f}%, "
+                    f"스코어 {signal.score_adj:+d})"
+                )
+
+            lines.append("")
+            lines.append("상세 분석: /short [종목코드]")
+
+            await update.message.reply_text(
+                "\n".join(lines), reply_markup=MAIN_MENU,
+            )
+
+    async def cmd_goal(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        await self._menu_goal(update, context)
+
+    async def _menu_goal(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """30억 목표 대시보드."""
+        from kstock.bot.messages import format_goal_dashboard
+
+        # Get current asset from screenshot or holdings
+        last_ss = self.db.get_last_screenshot()
+        current_asset = 175_000_000
+        holdings_list = []
+        if last_ss:
+            current_asset = last_ss.get("total_eval", 175_000_000) or 175_000_000
+            import json
+            try:
+                h_json = last_ss.get("holdings_json", "[]")
+                holdings_list = json.loads(h_json) if h_json else []
+            except (json.JSONDecodeError, TypeError):
+                holdings_list = []
+
+        progress = compute_goal_progress(current_asset)
+        tenbagger_count = len(self.db.get_active_tenbagger_candidates())
+        swing_count = len(self.db.get_active_swing_trades())
+
+        progress_dict = {
+            "start_asset": progress.start_asset,
+            "current_asset": progress.current_asset,
+            "target_asset": progress.target_asset,
+            "progress_pct": progress.progress_pct,
+            "current_milestone": progress.current_milestone,
+            "milestone_progress_pct": progress.milestone_progress_pct,
+            "monthly_return_pct": progress.monthly_return_pct,
+            "needed_monthly_pct": progress.needed_monthly_pct,
+        }
+
+        msg = format_goal_dashboard(
+            progress_dict,
+            holdings=holdings_list,
+            tenbagger_count=tenbagger_count,
+            swing_count=swing_count,
+        )
+        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+
+    async def _menu_swing(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """스윙 트레이딩 기회 조회."""
+        from kstock.bot.messages import format_swing_alert
+
+        active_swings = self.db.get_active_swing_trades()
+        if active_swings:
+            lines = ["\u26a1 활성 스윙 거래\n"]
+            for sw in active_swings[:5]:
+                pnl = sw.get("pnl_pct", 0)
+                lines.append(
+                    f"{sw['name']} {_won(sw['entry_price'])} -> "
+                    f"목표 {_won(sw.get('target_price', 0))} "
+                    f"({pnl:+.1f}%)"
+                )
+            msg = "\n".join(lines)
+        else:
+            msg = "\u26a1 현재 활성 스윙 거래가 없습니다.\n\n스캔 중 조건 충족 종목 발견 시 알려드리겠습니다."
+        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+
+    # -- v3.5 handlers ---------------------------------------------------------
+
+    async def _menu_ai_chat(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """AI 질문 모드 - 자주하는 질문 4개 버튼 + 직접 입력 안내."""
+        buttons = [
+            [InlineKeyboardButton("📊 오늘 시장 분석", callback_data="quick_q:market")],
+            [InlineKeyboardButton("💼 내 포트폴리오 조언", callback_data="quick_q:portfolio")],
+            [InlineKeyboardButton("🔥 지금 매수할 종목", callback_data="quick_q:buy_pick")],
+            [InlineKeyboardButton("⚠️ 리스크 점검", callback_data="quick_q:risk")],
+        ]
+        msg = (
+            "🤖 주호님, 무엇이든 물어보세요!\n\n"
+            "⬇️ 자주하는 질문을 바로 선택하거나,\n"
+            "💬 채팅창에 직접 입력하세요.\n\n"
+            "예시: 에코프로 어떻게 보여? / 반도체 전망은?"
+        )
+        await update.message.reply_text(
+            msg, reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _handle_ai_question(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, question: str
+    ) -> None:
+        """Process free-form text as AI question."""
+        if not self.anthropic_key:
+            await update.message.reply_text(
+                "주호님, AI 기능을 사용하려면 ANTHROPIC_API_KEY 설정이 필요합니다.",
+                reply_markup=MAIN_MENU,
+            )
+            return
+
+        # 즉시 "처리 중..." 메시지 → edit로 교체
+        placeholder = await update.message.reply_text(
+            "\U0001f4ad 주호님의 질문을 분석하고 있습니다..."
+        )
+        try:
+            from kstock.bot.chat_handler import handle_ai_question
+            from kstock.bot.context_builder import build_full_context_with_macro
+            from kstock.bot.chat_memory import ChatMemory
+
+            chat_mem = ChatMemory(self.db)
+            ctx = await build_full_context_with_macro(
+                self.db, self.macro_client, self.yf_client,
+            )
+            answer = await handle_ai_question(question, ctx, self.db, chat_mem)
+            try:
+                await placeholder.edit_text(answer)
+            except Exception:
+                await update.message.reply_text(answer, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("AI chat error: %s", e, exc_info=True)
+            try:
+                await placeholder.edit_text(
+                    "주호님, AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+                )
+            except Exception:
+                await update.message.reply_text(
+                    "주호님, AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+                    reply_markup=MAIN_MENU,
+                )
+
+    async def _handle_quick_question(
+        self, query, context: ContextTypes.DEFAULT_TYPE, question_type: str
+    ) -> None:
+        """Handle quick question buttons from AI chat menu."""
+        questions = {
+            "market": "오늘 미국/한국 시장 전체 흐름을 분석하고, 지금 어떤 전략이 유효한지 판단해줘",
+            "portfolio": "내 보유종목 전체를 점검하고, 각 종목별로 지금 해야 할 행동(홀딩/추매/익절/손절)을 구체적으로 알려줘",
+            "buy_pick": "현재 시장 상황에서 매수하기 좋은 한국 주식 3개를 골라서 목표가와 손절가까지 제시해줘",
+            "risk": "내 포트폴리오의 리스크를 점검해줘. 집중도, 섹터 편중, 손실 종목, 전체 시장 리스크를 분석하고 대응 방안을 알려줘",
+        }
+        question = questions.get(question_type, "오늘 시장 어때?")
+
+        if not self.anthropic_key:
+            await query.edit_message_text(
+                "주호님, AI 기능을 사용하려면 ANTHROPIC_API_KEY 설정이 필요합니다."
+            )
+            return
+
+        await query.edit_message_text(
+            "\U0001f4ad 주호님의 질문을 분석하고 있습니다..."
+        )
+
+        try:
+            from kstock.bot.chat_handler import handle_ai_question
+            from kstock.bot.context_builder import build_full_context_with_macro
+            from kstock.bot.chat_memory import ChatMemory
+
+            chat_mem = ChatMemory(self.db)
+            ctx = await build_full_context_with_macro(self.db, self.macro_client)
+            answer = await handle_ai_question(question, ctx, self.db, chat_mem)
+            try:
+                await query.edit_message_text(answer)
+            except Exception:
+                await query.message.reply_text(answer, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("Quick question error: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text(
+                    "주호님, AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+                )
+            except Exception:
+                pass
+
+    async def _menu_reports(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """최근 증권사 리포트 조회."""
+        reports = self.db.get_recent_reports(limit=5)
+        if reports:
+            lines = ["\U0001f4cb 최근 증권사 리포트\n"]
+            for r in reports:
+                opinion = r.get("opinion", "")
+                target = r.get("target_price", 0)
+                target_str = f" 목표가 {target:,.0f}원" if target else ""
+                lines.append(
+                    f"[{r.get('broker', '')}] {r.get('title', '')}\n"
+                    f"  {opinion}{target_str} ({r.get('date', '')})"
+                )
+            msg = "\n".join(lines)
+        else:
+            msg = "\U0001f4cb 수집된 리포트가 없습니다.\n리포트 수집이 시작되면 여기에 표시됩니다."
+        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+
+    async def _menu_financial(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """재무 진단 안내."""
+        msg = (
+            "\U0001f4ca 재무 진단\n\n"
+            "사용법: /finance [종목코드 또는 종목명]\n"
+            "예) /finance 에코프로\n"
+            "예) /finance 005930\n\n"
+            "보유 종목의 성장성, 수익성, 안정성, 밸류에이션을 분석합니다."
+        )
+        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+
+    async def cmd_finance(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /finance command."""
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(
+                "사용법: /finance [종목코드]\n예) /finance 005930",
+                reply_markup=MAIN_MENU,
+            )
+            return
+        query = args[0].strip()
+        ticker = query
+        name = query
+        for item in self.all_tickers:
+            if item["code"] == query or item["name"] == query:
+                ticker = item["code"]
+                name = item["name"]
+                break
+
+        fin_data = self.db.get_financials(ticker)
+        if fin_data:
+            from kstock.signal.financial_analyzer import (
+                FinancialData, analyze_financials, format_financial_report,
+            )
+            fd = FinancialData(
+                ticker=ticker, name=name,
+                revenue=fin_data.get("revenue", 0),
+                operating_income=fin_data.get("operating_income", 0),
+                net_income=fin_data.get("net_income", 0),
+                op_margin=fin_data.get("op_margin", 0),
+                roe=fin_data.get("roe", 0),
+                roa=fin_data.get("roa", 0),
+                debt_ratio=fin_data.get("debt_ratio", 0),
+                current_ratio=fin_data.get("current_ratio", 0),
+                per=fin_data.get("per", 0),
+                pbr=fin_data.get("pbr", 0),
+                eps=fin_data.get("eps", 0),
+                bps=fin_data.get("bps", 0),
+                dps=fin_data.get("dps", 0),
+                fcf=fin_data.get("fcf", 0),
+                ebitda=fin_data.get("ebitda", 0),
+            )
+            score = analyze_financials(fd)
+            msg = format_financial_report(fd, score)
+        else:
+            msg = f"\U0001f4ca {name} 재무 데이터가 아직 수집되지 않았습니다."
+        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+
+    async def cmd_consensus(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /consensus command."""
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(
+                "사용법: /consensus [종목코드 또는 종목명]\n예) /consensus 에코프로",
+                reply_markup=MAIN_MENU,
+            )
+            return
+        query = args[0].strip()
+        ticker = query
+        name = query
+        for item in self.all_tickers:
+            if item["code"] == query or item["name"] == query:
+                ticker = item["code"]
+                name = item["name"]
+                break
+
+        consensus_data = self.db.get_consensus(ticker)
+        if consensus_data:
+            from kstock.signal.consensus_tracker import format_consensus_from_dict
+            msg = format_consensus_from_dict(consensus_data)
+        else:
+            msg = f"\U0001f4ca {name} 컨센서스 데이터가 아직 수집되지 않았습니다."
+        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+
+    async def _menu_short(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """공매도 분석 메뉴."""
+        await self.cmd_short(update, context)
+
+    async def _menu_future_tech(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """미래기술 워치리스트 메뉴."""
+        await self.cmd_future(update, context)
+
+    async def cmd_future(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /future command.
+
+        /future        → 전체 워치리스트 개요
+        /future ad     → 자율주행 상세
+        /future space  → 우주항공 상세
+        /future qc     → 양자컴퓨터 상세
+        """
+        try:
+            args = context.args or []
+            sub = args[0].strip().lower() if args else ""
+
+            # Sector sub-commands
+            sector_map = {
+                "ad": "autonomous_driving",
+                "space": "space_aerospace",
+                "qc": "quantum_computing",
+            }
+
+            if sub in sector_map:
+                sector_key = sector_map[sub]
+                # Load scores from DB if available
+                db_entries = self.db.get_future_watchlist(sector=sector_key)
+                scores = {}
+                for entry in db_entries:
+                    from kstock.signal.future_tech import FutureStockScore
+                    scores[entry["ticker"]] = FutureStockScore(
+                        ticker=entry["ticker"],
+                        name=entry["name"],
+                        sector=entry["sector"],
+                        tier=entry["tier"],
+                        total_score=entry.get("future_score", 0),
+                        tech_maturity=entry.get("tech_maturity", 0),
+                        financial_stability=entry.get("financial_stability", 0),
+                        policy_benefit=entry.get("policy_benefit", 0),
+                        momentum=entry.get("momentum", 0),
+                        valuation=entry.get("valuation", 0),
+                        details=[],
+                    )
+                msg = format_sector_detail(sector_key, scores or None)
+                await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+                return
+
+            # Full overview
+            db_entries = self.db.get_future_watchlist()
+            scores = {}
+            for entry in db_entries:
+                from kstock.signal.future_tech import FutureStockScore
+                scores[entry["ticker"]] = FutureStockScore(
+                    ticker=entry["ticker"],
+                    name=entry["name"],
+                    sector=entry["sector"],
+                    tier=entry["tier"],
+                    total_score=entry.get("future_score", 0),
+                )
+
+            # Compute future tech weight
+            seed_positions = self.db.get_seed_positions()
+            total_eval = 0
+            last_ss = self.db.get_last_screenshot()
+            if last_ss:
+                total_eval = last_ss.get("total_eval", 0) or 0
+            seed_total = sum(
+                (p.get("avg_price", 0) or 0) * (p.get("quantity", 0) or 0)
+                for p in seed_positions
+            )
+            future_pct = (seed_total / total_eval * 100) if total_eval > 0 else 0.0
+
+            # Load triggers per sector
+            triggers: dict = {}
+            for sk in FUTURE_SECTORS:
+                triggers[sk] = self.db.get_future_triggers(sector=sk, days=7, limit=3)
+
+            msg = format_full_watchlist(
+                scores=scores or None,
+                triggers=triggers or None,
+                future_weight_pct=future_pct,
+            )
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+
+        except Exception as e:
+            logger.error("Future tech command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 미래기술 워치리스트 조회 중 오류가 발생했습니다.",
+                reply_markup=MAIN_MENU,
+            )
+
+
+    async def cmd_history(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /history command - show account snapshot history and solution stats."""
+        try:
+            self._persist_chat_id(update)
+            snapshots = self.db.get_screenshot_history(limit=10)
+            msg = format_account_history(snapshots)
+
+            # Add solution stats
+            stats = self.db.get_solution_stats()
+            if stats["total"] > 0:
+                msg += "\n\n"
+                msg += "\u2500" * 22 + "\n"
+                msg += "\U0001f4a1 솔루션 이력\n"
+                msg += f"총 제안: {stats['total']}건\n"
+                msg += f"실행율: {stats['execution_rate']:.0%}\n"
+                msg += f"효과율: {stats['effectiveness_rate']:.0%}\n"
+
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("History command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 계좌 추이 조회 중 오류가 발생했습니다.",
+                reply_markup=MAIN_MENU,
+            )
+
+
+    async def cmd_risk(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /risk command - show risk status and violations."""
+        try:
+            self._persist_chat_id(update)
+            last_ss = self.db.get_last_screenshot()
+            if not last_ss:
+                await update.message.reply_text(
+                    "\u26a0\ufe0f 포트폴리오 데이터가 없습니다. 스크린샷을 먼저 보내주세요.",
+                    reply_markup=MAIN_MENU,
+                )
+                return
+            import json
+            holdings = json.loads(last_ss.get("holdings_json", "[]")) if last_ss.get("holdings_json") else []
+            total_value = last_ss.get("total_eval", 0) or 0
+            peak = self.db.get_portfolio_peak() or total_value
+            report = check_risk_limits(
+                holdings=holdings,
+                total_value=total_value,
+                peak_value=peak,
+                daily_pnl_pct=0.0,
+                cash=last_ss.get("cash", 0) or 0,
+            )
+            msg = format_risk_report(report)
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("Risk command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 리스크 조회 중 오류가 발생했습니다.",
+                reply_markup=MAIN_MENU,
+            )
+
+    async def cmd_health(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /health command - show system health."""
+        try:
+            self._persist_chat_id(update)
+            checks = run_health_checks(db_path=self.db.db_path)
+            msg = format_system_report(checks, db_path=self.db.db_path)
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("Health command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 시스템 상태 조회 중 오류가 발생했습니다.",
+                reply_markup=MAIN_MENU,
+            )
+
+    async def cmd_performance(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /performance command - show live performance."""
+        try:
+            self._persist_chat_id(update)
+            tracks_raw = self.db.get_recommendation_tracks(limit=100)
+            from kstock.core.performance_tracker import RecommendationTrack
+            tracks = []
+            for r in tracks_raw:
+                t = RecommendationTrack(
+                    ticker=r["ticker"], name=r["name"],
+                    strategy=r.get("strategy", "A"),
+                    score=r.get("score", 0),
+                    recommended_date=r.get("recommended_date", ""),
+                    entry_price=r.get("entry_price", 0),
+                    returns={
+                        d: r.get(f"return_d{d}", 0) or 0
+                        for d in [1, 3, 5, 10, 20]
+                        if r.get(f"return_d{d}") is not None
+                    },
+                    hit=bool(r.get("hit", 0)),
+                )
+                tracks.append(t)
+            summary = compute_performance_summary(tracks, start_date="2026-02-24")
+            msg = format_performance_report(summary)
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("Performance command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 성과 조회 중 오류가 발생했습니다.",
+                reply_markup=MAIN_MENU,
+            )
+
+    async def cmd_scenario(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /scenario command - show scenario menu."""
+        try:
+            self._persist_chat_id(update)
+            buttons = [
+                [
+                    InlineKeyboardButton("관세 인상", callback_data="scn:tariff_increase:0"),
+                    InlineKeyboardButton("금리 인하", callback_data="scn:rate_cut:0"),
+                ],
+                [
+                    InlineKeyboardButton("MSCI 편입", callback_data="scn:msci_inclusion:0"),
+                    InlineKeyboardButton("폭락 재현", callback_data="scn:crash:0"),
+                ],
+            ]
+            await update.message.reply_text(
+                "\U0001f4ca 시나리오 분석을 선택하세요:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception as e:
+            logger.error("Scenario command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 시나리오 분석 오류.",
+                reply_markup=MAIN_MENU,
+            )
+
+    async def _action_multi_run(self, query, context, payload: str) -> None:
+        """멀티 에이전트 분석 인라인 버튼 콜백."""
+        ticker = payload
+        try:
+            await query.edit_message_text(
+                f"\U0001f4ca {ticker} 멀티 에이전트 분석 중..."
+            )
+
+            name = ticker
+            market = "KOSPI"
+            for item in self.all_tickers:
+                if item["code"] == ticker:
+                    name = item["name"]
+                    market = item.get("market", "KOSPI")
+                    break
+
+            stock_data = {"name": name, "ticker": ticker, "price": 0}
+            try:
+                ohlcv = await self.yf_client.get_ohlcv(ticker, market)
+                if ohlcv is not None and not ohlcv.empty:
+                    tech = compute_indicators(ohlcv)
+                    close = ohlcv["close"].astype(float)
+                    stock_data.update({
+                        "price": float(close.iloc[-1]),
+                        "ma5": tech.ma5, "ma20": tech.ma20,
+                        "ma60": tech.ma60, "ma120": tech.ma120,
+                        "rsi": tech.rsi, "macd": tech.macd,
+                        "macd_signal": tech.macd_signal,
+                        "volume": float(ohlcv["volume"].iloc[-1]),
+                        "avg_volume_20": float(ohlcv["volume"].tail(20).mean()),
+                        "high_52w": float(close.max()),
+                        "low_52w": float(close.min()),
+                        "prices_5d": [float(x) for x in close.tail(5).tolist()],
+                    })
+            except Exception:
+                pass
+
+            fin = self.db.get_financials(ticker)
+            if fin:
+                stock_data.update({
+                    "per": fin.get("per", 0), "pbr": fin.get("pbr", 0),
+                    "roe": fin.get("roe", 0), "debt_ratio": fin.get("debt_ratio", 0),
+                    "sector_per": fin.get("sector_per", 15),
+                    "revenue_growth": fin.get("revenue_growth", 0),
+                    "op_growth": fin.get("op_growth", 0),
+                    "target_price": fin.get("target_price", 0),
+                    "recent_earnings": fin.get("recent_earnings", "정보 없음"),
+                })
+
+            price = stock_data.get("price", 0)
+
+            from kstock.bot.multi_agent import run_multi_agent_analysis, format_multi_agent_report_v2
+            if self.anthropic_key:
+                report = await run_multi_agent_analysis(
+                    ticker=ticker, name=name, price=price, stock_data=stock_data,
+                )
+            else:
+                report = create_empty_report(ticker, name, price)
+
+            msg = format_multi_agent_report_v2(report)
+            self.db.add_multi_agent_result(
+                ticker=ticker, name=name,
+                combined_score=report.combined_score,
+                verdict=report.verdict, confidence=report.confidence,
+            )
+            await query.edit_message_text(msg)
+        except Exception as e:
+            logger.error("Multi-run callback error: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text("\u26a0\ufe0f 멀티 분석 오류.")
+            except Exception:
+                pass
+
+    async def _action_sell_plans(self, query, context, payload: str) -> None:
+        """Phase 8: 매도 계획 표시."""
+        try:
+            holdings = self.db.get_active_holdings()
+            if not holdings:
+                await query.edit_message_text("보유종목이 없어 매도 계획을 생성할 수 없습니다.")
+                return
+
+            for h in holdings:
+                try:
+                    cur = await self._get_price(h["ticker"], h.get("buy_price", 0))
+                    bp = h.get("buy_price", 0)
+                    if bp > 0:
+                        h["current_price"] = cur
+                        h["pnl_pct"] = round((cur - bp) / bp * 100, 2)
+                except Exception:
+                    pass
+
+            market_state = self.market_pulse.get_current_state()
+            plans = self.sell_planner.create_plans_for_all(holdings, market_state)
+            msg = format_sell_plans(plans)
+
+            # 텔레그램 메시지 길이 제한 (4096자)
+            if len(msg) > 4000:
+                msg = msg[:3990] + "\n\n... (일부 생략)"
+
+            await query.edit_message_text(msg)
+        except Exception as e:
+            logger.error("Sell plans error: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text("\u26a0\ufe0f 매도 계획 생성 오류.")
+            except Exception:
+                pass
+
+    async def _action_scenario_run(self, query, context, payload: str) -> None:
+        """Handle scenario selection callback."""
+        try:
+            scenario_key, _, _ = payload.partition(":")
+            last_ss = self.db.get_last_screenshot()
+            if not last_ss or not last_ss.get("holdings_json"):
+                await query.edit_message_text("\u26a0\ufe0f 포트폴리오 데이터가 없습니다.")
+                return
+            import json
+            holdings = json.loads(last_ss["holdings_json"])
+            result = simulate_scenario(holdings, scenario_key)
+            msg = format_scenario_report(scenario_key, result)
+            await query.edit_message_text(msg)
+        except Exception as e:
+            logger.error("Scenario run error: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text("\u26a0\ufe0f 시나리오 분석 오류.")
+            except Exception:
+                pass
+
+    async def cmd_ml(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /ml command - show ML model status."""
+        try:
+            self._persist_chat_id(update)
+            ml_records = self.db.get_ml_performance(limit=6)
+            if not ml_records:
+                await update.message.reply_text(
+                    "\U0001f916 ML 모델 성능 기록이 없습니다.\n재학습 후 자동 기록됩니다.",
+                    reply_markup=MAIN_MENU,
+                )
+                return
+            latest = ml_records[0]
+            monthly_vals = [r.get("val_score", 0) for r in ml_records]
+            from kstock.signal.ml_validator import check_model_drift
+            drift = check_model_drift(monthly_vals)
+            cv_result = {
+                "train_score": latest.get("train_score", 0),
+                "avg_val": latest.get("val_score", 0),
+                "overfit_gap": latest.get("overfit_gap", 0),
+                "val_scores": monthly_vals,
+            }
+            msg = format_ml_report(cv_result, None, drift)
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("ML command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f ML 상태 조회 오류.",
+                reply_markup=MAIN_MENU,
+            )
+
+
+    # -- Phase 7 commands --------------------------------------------------------
+
+    async def cmd_multi(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /multi <종목> - multi-agent analysis."""
+        try:
+            self._persist_chat_id(update)
+            args = context.args
+            if not args:
+                await update.message.reply_text(
+                    "사용법: /multi <종목명 또는 종목코드>\n예: /multi 삼성전자",
+                    reply_markup=MAIN_MENU,
+                )
+                return
+            query = " ".join(args)
+
+            # 종목 찾기
+            ticker = query
+            name = query
+            market = "KOSPI"
+            for item in self.all_tickers:
+                if item["code"] == query or item["name"] == query:
+                    ticker = item["code"]
+                    name = item["name"]
+                    market = item.get("market", "KOSPI")
+                    break
+
+            placeholder = await update.message.reply_text(
+                f"\U0001f4ca {name} 멀티 에이전트 분석 중... (2개 에이전트 병렬 호출)"
+            )
+
+            # 종목 데이터 수집
+            stock_data = {"name": name, "ticker": ticker, "price": 0}
+            try:
+                ohlcv = await self.yf_client.get_ohlcv(ticker, market)
+                if ohlcv is not None and not ohlcv.empty:
+                    tech = compute_indicators(ohlcv)
+                    close = ohlcv["close"].astype(float)
+                    stock_data.update({
+                        "price": float(close.iloc[-1]),
+                        "ma5": tech.ma5, "ma20": tech.ma20,
+                        "ma60": tech.ma60, "ma120": tech.ma120,
+                        "rsi": tech.rsi, "macd": tech.macd,
+                        "macd_signal": tech.macd_signal,
+                        "volume": float(ohlcv["volume"].iloc[-1]),
+                        "avg_volume_20": float(ohlcv["volume"].tail(20).mean()),
+                        "high_52w": float(close.tail(252).max()) if len(close) >= 252 else float(close.max()),
+                        "low_52w": float(close.tail(252).min()) if len(close) >= 252 else float(close.min()),
+                        "prices_5d": [float(x) for x in close.tail(5).tolist()],
+                    })
+            except Exception:
+                pass
+
+            fin = self.db.get_financials(ticker)
+            if fin:
+                stock_data.update({
+                    "per": fin.get("per", 0), "pbr": fin.get("pbr", 0),
+                    "roe": fin.get("roe", 0), "debt_ratio": fin.get("debt_ratio", 0),
+                    "sector_per": fin.get("sector_per", 15),
+                    "revenue_growth": fin.get("revenue_growth", 0),
+                    "op_growth": fin.get("op_growth", 0),
+                    "target_price": fin.get("target_price", 0),
+                    "recent_earnings": fin.get("recent_earnings", "정보 없음"),
+                })
+
+            price = stock_data.get("price", 0)
+
+            # 멀티 에이전트 분석 (API 키 있으면 실제 호출, 없으면 빈 리포트)
+            from kstock.bot.multi_agent import run_multi_agent_analysis, format_multi_agent_report_v2
+            if self.anthropic_key:
+                report = await run_multi_agent_analysis(
+                    ticker=ticker, name=name, price=price, stock_data=stock_data,
+                )
+            else:
+                report = create_empty_report(ticker, name, price)
+
+            msg = format_multi_agent_report_v2(report)
+            self.db.add_multi_agent_result(
+                ticker=ticker, name=name,
+                combined_score=report.combined_score,
+                verdict=report.verdict, confidence=report.confidence,
+            )
+            try:
+                await placeholder.edit_text(msg)
+            except Exception:
+                await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("Multi-agent command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 멀티 에이전트 분석 오류.", reply_markup=MAIN_MENU,
+            )
+
+    async def cmd_surge(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /surge - scan for surge stocks in real-time."""
+        try:
+            self._persist_chat_id(update)
+            placeholder = await update.message.reply_text(
+                "\U0001f525 급등주 실시간 스캔 중..."
+            )
+
+            # 실시간 스캔: 유니버스 전체 종목의 등락률/거래량 체크
+            stocks_data = []
+            for item in self.all_tickers:
+                try:
+                    code = item["code"]
+                    market = item.get("market", "KOSPI")
+                    ohlcv = await self.yf_client.get_ohlcv(code, market, period="1mo")
+                    if ohlcv is None or ohlcv.empty or len(ohlcv) < 2:
+                        continue
+                    close = ohlcv["close"].astype(float)
+                    volume = ohlcv["volume"].astype(float)
+                    cur_price = float(close.iloc[-1])
+                    prev_price = float(close.iloc[-2])
+                    change_pct = ((cur_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
+                    avg_vol_20 = float(volume.tail(20).mean()) if len(volume) >= 20 else float(volume.mean())
+                    cur_vol = float(volume.iloc[-1])
+                    vol_ratio = cur_vol / avg_vol_20 if avg_vol_20 > 0 else 0
+                    mkt_cap = cur_price * 1e6  # 대략적 시총 (정확하지 않지만 필터용)
+
+                    # 급등 조건: +3% 이상 또는 거래량 2배 이상
+                    if change_pct >= 3.0 or vol_ratio >= 2.0:
+                        stocks_data.append({
+                            "ticker": code,
+                            "name": item["name"],
+                            "price": cur_price,
+                            "change_pct": change_pct,
+                            "volume": cur_vol,
+                            "avg_volume_20": avg_vol_20,
+                            "volume_ratio": vol_ratio,
+                            "market_cap": mkt_cap,
+                            "daily_volume": cur_vol * cur_price,
+                            "is_managed": False,
+                            "is_warning": False,
+                            "listing_days": 999,
+                            "has_news": False,
+                            "has_disclosure": False,
+                            "inst_net": 0,
+                            "foreign_net": 0,
+                            "retail_net": 0,
+                            "prev_vol_ratio": 0,
+                            "detected_time": datetime.now(KST).strftime("%H:%M"),
+                            "past_suspicious_count": 0,
+                        })
+                except Exception:
+                    continue
+
+            if not stocks_data:
+                try:
+                    await placeholder.edit_text(
+                        "\U0001f525 현재 급등 조건을 충족하는 종목이 없습니다."
+                    )
+                except Exception:
+                    pass
+                return
+
+            # 등락률 기준 정렬, 상위 10개
+            stocks_data.sort(key=lambda s: s["change_pct"], reverse=True)
+            top = stocks_data[:10]
+
+            lines = [f"\U0001f525 급등주 실시간 스캔 ({len(stocks_data)}종목 감지)\n"]
+            for i, s in enumerate(top, 1):
+                icon = "\U0001f4c8" if s["change_pct"] >= 5 else "\U0001f525" if s["change_pct"] >= 3 else "\u26a1"
+                lines.append(
+                    f"{i}. {icon} {s['name']}({s['ticker']}) "
+                    f"{s['change_pct']:+.1f}% "
+                    f"거래량 {s['volume_ratio']:.1f}배"
+                )
+                # DB에도 저장
+                self.db.add_surge_stock(
+                    ticker=s["ticker"], name=s["name"],
+                    scan_time=s["detected_time"],
+                    change_pct=s["change_pct"],
+                    volume_ratio=s["volume_ratio"],
+                    triggers="price_surge" if s["change_pct"] >= 5 else "combined",
+                    market_cap=s["market_cap"],
+                    health_grade="HEALTHY" if s["change_pct"] < 10 else "CAUTION",
+                )
+
+            try:
+                await placeholder.edit_text("\n".join(lines))
+            except Exception:
+                await update.message.reply_text("\n".join(lines), reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("Surge command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 급등주 스캔 중 오류가 발생했습니다.", reply_markup=MAIN_MENU,
+            )
+
+    async def cmd_feedback(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /feedback - strategy win rates + feedback status."""
+        try:
+            self._persist_chat_id(update)
+            from kstock.signal.feedback_loop import (
+                generate_weekly_feedback,
+                format_feedback_report,
+            )
+            report = generate_weekly_feedback(self.db, period_days=90)
+            msg = format_feedback_report(report)
+            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("Feedback command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 피드백 조회 오류.", reply_markup=MAIN_MENU,
+            )
+
+    async def cmd_stats(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /stats - overall recommendation scorecard."""
+        try:
+            self._persist_chat_id(update)
+            stats = self.db.get_strategy_stats(limit=20)
+            if not stats:
+                await update.message.reply_text(
+                    "\U0001f4ca 추천 성적 데이터가 아직 없습니다.",
+                    reply_markup=MAIN_MENU,
+                )
+                return
+            lines = ["\U0001f4ca 전체 추천 성적표\n"]
+            for s in stats:
+                lines.append(
+                    f"  {s.get('strategy', '')}: 승률 {s.get('win_rate', 0):.0f}% "
+                    f"({s.get('win_count', 0)}/{s.get('total_count', 0)}), "
+                    f"평균 {s.get('avg_return', 0):+.1f}%"
+                )
+            await update.message.reply_text("\n".join(lines), reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("Stats command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 성적표 조회 오류.", reply_markup=MAIN_MENU,
+            )
+
+    async def cmd_accumulation(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /accumulation - real-time stealth accumulation scan."""
+        try:
+            self._persist_chat_id(update)
+            placeholder = await update.message.reply_text(
+                "\U0001f575\ufe0f 매집 패턴 실시간 탐지 중..."
+            )
+
+            # 유니버스 종목의 기관/외인 수급 데이터 수집
+            stocks_data = []
+            for item in self.all_tickers[:30]:  # 상위 30종목만 (속도)
+                try:
+                    code = item["code"]
+                    market = item.get("market", "KOSPI")
+                    ohlcv = await self.yf_client.get_ohlcv(code, market, period="3mo")
+                    if ohlcv is None or ohlcv.empty or len(ohlcv) < 20:
+                        continue
+                    close = ohlcv["close"].astype(float)
+                    volume = ohlcv["volume"].astype(float)
+
+                    # 20일 가격 변화율
+                    if len(close) >= 20:
+                        price_20d_ago = float(close.iloc[-20])
+                        price_now = float(close.iloc[-1])
+                        prc_chg = ((price_now - price_20d_ago) / price_20d_ago * 100) if price_20d_ago > 0 else 0
+                    else:
+                        prc_chg = 0
+
+                    # 거래량 기반 의사-수급 데이터 (실제 기관/외인 데이터 없이 추정)
+                    # 거래량이 평균 대비 높으면 기관/외인 매수로 추정
+                    avg_vol = float(volume.tail(20).mean()) if len(volume) >= 20 else float(volume.mean())
+                    daily_inst = []
+                    daily_foreign = []
+                    for j in range(-20, 0):
+                        if abs(j) <= len(volume):
+                            v = float(volume.iloc[j])
+                            ratio = v / avg_vol if avg_vol > 0 else 1
+                            # 거래량 1.5배 이상이면 기관 매수로 추정
+                            inst_est = v * 0.3 if ratio > 1.5 else -v * 0.1
+                            foreign_est = v * 0.2 if ratio > 1.3 else -v * 0.1
+                            daily_inst.append(inst_est)
+                            daily_foreign.append(foreign_est)
+
+                    stocks_data.append({
+                        "ticker": code,
+                        "name": item["name"],
+                        "daily_inst": daily_inst,
+                        "daily_foreign": daily_foreign,
+                        "price_change_20d": prc_chg,
+                        "disclosure_text": "",
+                    })
+                except Exception:
+                    continue
+
+            if not stocks_data:
+                try:
+                    await placeholder.edit_text(
+                        "\U0001f575\ufe0f 분석 가능한 종목 데이터가 없습니다."
+                    )
+                except Exception:
+                    pass
+                return
+
+            # 매집 패턴 탐지
+            detections = scan_accumulations(stocks_data)
+
+            if not detections:
+                try:
+                    await placeholder.edit_text(
+                        "\U0001f575\ufe0f 현재 매집 패턴이 감지되지 않았습니다.\n"
+                        f"({len(stocks_data)}종목 스캔 완료)"
+                    )
+                except Exception:
+                    pass
+                return
+
+            lines = [f"\U0001f575\ufe0f 스텔스 매집 감지 ({len(detections)}종목)\n"]
+            for i, d in enumerate(detections[:10], 1):
+                lines.append(
+                    f"{i}. {d.name} ({d.ticker}) "
+                    f"스코어 {d.total_score}"
+                )
+                lines.append(
+                    f"   기관 누적: {d.inst_total / 1e8:.0f}억, "
+                    f"외인 누적: {d.foreign_total / 1e8:.0f}억, "
+                    f"20일 등락: {d.price_change_20d:+.1f}%"
+                )
+                # DB에도 저장
+                import json
+                patterns_json = json.dumps(
+                    [{"type": p.pattern_type, "days": p.streak_days, "score": p.score}
+                     for p in d.patterns],
+                    ensure_ascii=False,
+                ) if d.patterns else "[]"
+                self.db.add_stealth_accumulation(
+                    ticker=d.ticker, name=d.name,
+                    total_score=d.total_score,
+                    patterns_json=patterns_json,
+                    price_change_20d=d.price_change_20d,
+                    inst_total=d.inst_total,
+                    foreign_total=d.foreign_total,
+                )
+
+            try:
+                await placeholder.edit_text("\n".join(lines))
+            except Exception:
+                await update.message.reply_text("\n".join(lines), reply_markup=MAIN_MENU)
+        except Exception as e:
+            logger.error("Accumulation command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "\u26a0\ufe0f 매집 탐지 중 오류가 발생했습니다.", reply_markup=MAIN_MENU,
+            )
+
+
