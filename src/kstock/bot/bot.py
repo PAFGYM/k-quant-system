@@ -3355,73 +3355,16 @@ class KQuantBot:
         elif payload == "refresh":
             await query.edit_message_text("🔄 잔고 새로고침 중...")
             try:
-                holdings = self.db.get_active_holdings()
+                holdings = await self._load_holdings_with_fallback()
                 if not holdings:
                     await query.message.reply_text(
-                        "💰 등록된 보유종목이 없습니다.",
+                        "💰 등록된 보유종목이 없습니다.\n📸 스크린샷을 보내주세요!",
                         reply_markup=MAIN_MENU,
                     )
                     return
 
-                total_eval = 0.0
-                total_invested = 0.0
-                for h in holdings:
-                    try:
-                        ticker = h.get("ticker", "")
-                        bp = h.get("buy_price", 0)
-                        qty = h.get("quantity", 0)
-                        if ticker and bp > 0:
-                            detail = await self._get_price_detail(ticker, bp)
-                            cur = detail["price"]
-                            h["current_price"] = cur
-                            h["pnl_pct"] = round((cur - bp) / bp * 100, 2) if bp > 0 else 0
-                            h["day_change_pct"] = detail["day_change_pct"]
-                            h["day_change"] = detail["day_change"]
-                            total_eval += cur * qty
-                            total_invested += bp * qty
-                    except Exception:
-                        pass
-
-                total_pnl = total_eval - total_invested
-                total_pnl_rate = (total_pnl / total_invested * 100) if total_invested > 0 else 0
-                pnl_sign = "+" if total_pnl >= 0 else ""
-                pnl_arrow = "\u25b2" if total_pnl > 0 else ("\u25bc" if total_pnl < 0 else "\u2015")
-
-                lines = [
-                    f"\U0001f4b0 주호님 잔고 현황",
-                    f"\u2500" * 25,
-                    f"총 평가금액: {total_eval:,.0f}원",
-                    f"총 투자금액: {total_invested:,.0f}원",
-                    f"총 손익: {pnl_arrow} {pnl_sign}{total_pnl:,.0f}원 ({pnl_sign}{total_pnl_rate:.2f}%)",
-                    "",
-                    f"보유종목 ({len(holdings)}개)",
-                    "\u2500" * 25,
-                ]
-                for h in holdings:
-                    hname = h.get("name", "")
-                    ticker = h.get("ticker", "")
-                    qty = h.get("quantity", 0)
-                    bp = h.get("buy_price", 0)
-                    cp = h.get("current_price", bp)
-                    pnl = h.get("pnl_pct", 0)
-                    pnl_amount = (cp - bp) * qty
-                    day_chg_pct = h.get("day_change_pct", 0)
-                    day_chg = h.get("day_change", 0)
-                    emoji = "\U0001f7e2" if pnl > 0 else "\U0001f534" if pnl < 0 else "\u26aa"
-                    pnl_sign_s = "+" if pnl_amount >= 0 else ""
-                    if day_chg_pct != 0:
-                        day_emoji = "📈" if day_chg_pct > 0 else "📉"
-                        day_sign = "+" if day_chg_pct > 0 else ""
-                        day_line = f"   오늘 {day_emoji} {day_sign}{day_chg:,.0f}원 ({day_sign}{day_chg_pct:.1f}%)"
-                    else:
-                        day_line = ""
-                    lines.append(
-                        f"{emoji} {hname}({ticker}) {qty}주\n"
-                        f"   매수 {bp:,.0f}원 → 현재 {cp:,.0f}원\n"
-                        f"   손익 {pnl_sign_s}{pnl_amount:,.0f}원 ({pnl:+.1f}%)"
-                        + (f"\n{day_line}" if day_line else "")
-                    )
-
+                total_eval, total_invested = await self._update_holdings_prices(holdings)
+                lines = self._format_balance_lines(holdings, total_eval, total_invested)
                 bal_buttons = self._build_balance_buttons(holdings)
                 await query.message.reply_text(
                     "\n".join(lines),
@@ -3442,6 +3385,128 @@ class KQuantBot:
                 await query.edit_message_text(f"🗑️ {hname} 포트폴리오에서 삭제!")
             else:
                 await query.edit_message_text("⚠️ 종목을 찾을 수 없습니다.")
+
+    async def _load_holdings_with_fallback(self) -> list[dict]:
+        """보유종목 로드 (DB 우선, 없으면 스크린샷 fallback)."""
+        holdings = self.db.get_active_holdings()
+        if not holdings:
+            try:
+                screenshot = self.db.get_latest_screenshot()
+                if screenshot:
+                    import json
+                    raw = screenshot.get("holdings_json", "")
+                    items = json.loads(raw) if isinstance(raw, str) and raw else []
+                    if items:
+                        holdings = [
+                            {
+                                "ticker": h.get("ticker", ""),
+                                "name": h.get("name", ""),
+                                "buy_price": h.get("avg_price", 0),
+                                "current_price": h.get("current_price", 0),
+                                "quantity": h.get("quantity", 0),
+                                "pnl_pct": h.get("profit_pct", 0),
+                                "eval_amount": h.get("eval_amount", 0),
+                            }
+                            for h in items
+                        ]
+            except Exception as e:
+                logger.warning("Screenshot holdings fallback failed: %s", e)
+        return holdings
+
+    async def _update_holdings_prices(self, holdings: list[dict]) -> tuple:
+        """보유종목 실시간 가격 업데이트 + 총합 계산. Returns (total_eval, total_invested)."""
+        total_eval = 0.0
+        total_invested = 0.0
+        for h in holdings:
+            try:
+                ticker = h.get("ticker", "")
+                bp = h.get("buy_price", 0)
+                qty = h.get("quantity", 0)
+                if ticker and bp > 0:
+                    detail = await self._get_price_detail(ticker, bp)
+                    cur = detail["price"]
+                    h["current_price"] = cur
+                    h["pnl_pct"] = round((cur - bp) / bp * 100, 2) if bp > 0 else 0
+                    h["day_change_pct"] = detail["day_change_pct"]
+                    h["day_change"] = detail["day_change"]
+                    if qty > 0:
+                        total_eval += cur * qty
+                        total_invested += bp * qty
+                    elif h.get("eval_amount", 0) > 0:
+                        # quantity 없는 경우 eval_amount 사용
+                        total_eval += h["eval_amount"]
+                        total_invested += h["eval_amount"] / (1 + h["pnl_pct"] / 100) if h["pnl_pct"] != -100 else 0
+            except Exception:
+                cur = h.get("current_price", h.get("buy_price", 0))
+                qty = h.get("quantity", 0)
+                if qty > 0:
+                    total_eval += cur * qty
+                    total_invested += h.get("buy_price", 0) * qty
+                elif h.get("eval_amount", 0) > 0:
+                    total_eval += h["eval_amount"]
+        return total_eval, total_invested
+
+    def _format_balance_lines(self, holdings, total_eval, total_invested) -> list[str]:
+        """잔고 현황 텍스트 포맷."""
+        total_pnl = total_eval - total_invested
+        total_pnl_rate = (total_pnl / total_invested * 100) if total_invested > 0 else 0
+        pnl_sign = "+" if total_pnl >= 0 else ""
+        pnl_arrow = "\u25b2" if total_pnl > 0 else ("\u25bc" if total_pnl < 0 else "\u2015")
+
+        # 신용/마진 종목 분리
+        margin_count = 0
+        margin_eval = 0.0
+        for h in holdings:
+            if h.get("is_margin") or h.get("margin_type"):
+                margin_count += 1
+                margin_eval += h.get("eval_amount", 0) or (
+                    h.get("current_price", 0) * h.get("quantity", 0)
+                )
+
+        lines = [
+            f"\U0001f4b0 주호님 잔고 현황",
+            f"\u2500" * 25,
+            f"\U0001f4b5 총 평가금액: {total_eval:,.0f}원",
+            f"\U0001f4b4 총 투자금액: {total_invested:,.0f}원",
+            f"\U0001f4b0 총 손익: {pnl_arrow} {pnl_sign}{total_pnl:,.0f}원 ({pnl_sign}{total_pnl_rate:.2f}%)",
+        ]
+        if margin_count > 0:
+            lines.append(f"\U0001f4b3 신용/마진: {margin_count}종목 ({margin_eval:,.0f}원)")
+        lines.extend(["", f"보유종목 ({len(holdings)}개)", "\u2500" * 25])
+
+        for h in holdings:
+            name = h.get("name", "")
+            ticker = h.get("ticker", "")
+            qty = h.get("quantity", 0)
+            bp = h.get("buy_price", 0)
+            cp = h.get("current_price", bp)
+            pnl = h.get("pnl_pct", 0)
+            pnl_amount = (cp - bp) * qty if qty > 0 else 0
+            day_chg_pct = h.get("day_change_pct", 0)
+            day_chg = h.get("day_change", 0)
+            emoji = "\U0001f7e2" if pnl > 0 else "\U0001f534" if pnl < 0 else "\u26aa"
+            pnl_sign_s = "+" if pnl_amount >= 0 else ""
+
+            # 신용 표시
+            margin_tag = ""
+            if h.get("is_margin") or h.get("margin_type"):
+                margin_tag = " \U0001f4b3"
+
+            qty_text = f" {qty}주" if qty > 0 else ""
+            line = f"{emoji} {name}({ticker}){qty_text}{margin_tag}\n"
+            line += f"   매수 {bp:,.0f}원 \u2192 현재 {cp:,.0f}원\n"
+            if pnl_amount != 0:
+                line += f"   손익 {pnl_sign_s}{pnl_amount:,.0f}원 ({pnl:+.1f}%)"
+            else:
+                line += f"   수익률 {pnl:+.1f}%"
+
+            if day_chg_pct != 0:
+                day_emoji = "\U0001f4c8" if day_chg_pct > 0 else "\U0001f4c9"
+                day_sign = "+" if day_chg_pct > 0 else ""
+                line += f"\n   오늘 {day_emoji} {day_sign}{day_chg:,.0f}원 ({day_sign}{day_chg_pct:.1f}%)"
+
+            lines.append(line)
+        return lines
 
     def _build_balance_buttons(self, holdings: list[dict]) -> list[list]:
         """잔고 화면용 InlineKeyboard 버튼 구성."""
@@ -6881,31 +6946,7 @@ class KQuantBot:
                 "\U0001f4b0 잔고 조회 중..."
             )
 
-            # 1순위: DB 보유종목 (매수 등록된 종목)
-            holdings = self.db.get_active_holdings()
-
-            # 2순위: 보유종목 없으면 스크린샷에서 가져오기
-            if not holdings:
-                try:
-                    screenshot = self.db.get_latest_screenshot()
-                    if screenshot:
-                        import json
-                        raw = screenshot.get("holdings_json", "")
-                        items = json.loads(raw) if isinstance(raw, str) and raw else []
-                        if items:
-                            holdings = [
-                                {
-                                    "ticker": h.get("ticker", ""),
-                                    "name": h.get("name", ""),
-                                    "buy_price": h.get("avg_price", 0),
-                                    "current_price": h.get("current_price", 0),
-                                    "quantity": h.get("quantity", 0),
-                                    "pnl_pct": h.get("profit_pct", 0),
-                                }
-                                for h in items
-                            ]
-                except Exception as e:
-                    logger.warning("Screenshot holdings load failed: %s", e)
+            holdings = await self._load_holdings_with_fallback()
 
             if not holdings:
                 empty_buttons = [[
@@ -6925,69 +6966,8 @@ class KQuantBot:
                     pass
                 return
 
-            # 현재가 + 전일 대비 업데이트
-            total_eval = 0.0
-            total_invested = 0.0
-            for h in holdings:
-                try:
-                    ticker = h.get("ticker", "")
-                    bp = h.get("buy_price", 0)
-                    qty = h.get("quantity", 0)
-                    if ticker and bp > 0:
-                        detail = await self._get_price_detail(ticker, bp)
-                        cur = detail["price"]
-                        h["current_price"] = cur
-                        h["pnl_pct"] = round((cur - bp) / bp * 100, 2) if bp > 0 else 0
-                        h["day_change_pct"] = detail["day_change_pct"]
-                        h["day_change"] = detail["day_change"]
-                        total_eval += cur * qty
-                        total_invested += bp * qty
-                except Exception:
-                    cur = h.get("current_price", h.get("buy_price", 0))
-                    total_eval += cur * h.get("quantity", 0)
-                    total_invested += h.get("buy_price", 0) * h.get("quantity", 0)
-
-            total_pnl = total_eval - total_invested
-            total_pnl_rate = (total_pnl / total_invested * 100) if total_invested > 0 else 0
-            pnl_sign = "+" if total_pnl >= 0 else ""
-            pnl_arrow = "\u25b2" if total_pnl > 0 else ("\u25bc" if total_pnl < 0 else "\u2015")
-
-            lines = [
-                f"\U0001f4b0 주호님 잔고 현황",
-                f"\u2500" * 25,
-                f"총 평가금액: {total_eval:,.0f}원",
-                f"총 투자금액: {total_invested:,.0f}원",
-                f"총 손익: {pnl_arrow} {pnl_sign}{total_pnl:,.0f}원 ({pnl_sign}{total_pnl_rate:.2f}%)",
-                "",
-                f"보유종목 ({len(holdings)}개)",
-                "\u2500" * 25,
-            ]
-            for h in holdings:
-                name = h.get("name", "")
-                ticker = h.get("ticker", "")
-                qty = h.get("quantity", 0)
-                bp = h.get("buy_price", 0)
-                cp = h.get("current_price", bp)
-                pnl = h.get("pnl_pct", 0)
-                pnl_amount = (cp - bp) * qty
-                day_chg_pct = h.get("day_change_pct", 0)
-                day_chg = h.get("day_change", 0)
-                emoji = "\U0001f7e2" if pnl > 0 else "\U0001f534" if pnl < 0 else "\u26aa"
-                pnl_sign_s = "+" if pnl_amount >= 0 else ""
-                # 전일 대비 표시
-                if day_chg_pct != 0:
-                    day_emoji = "📈" if day_chg_pct > 0 else "📉"
-                    day_sign = "+" if day_chg_pct > 0 else ""
-                    day_line = f"   오늘 {day_emoji} {day_sign}{day_chg:,.0f}원 ({day_sign}{day_chg_pct:.1f}%)"
-                else:
-                    day_line = ""
-                lines.append(
-                    f"{emoji} {name}({ticker}) {qty}주\n"
-                    f"   매수 {bp:,.0f}원 \u2192 현재 {cp:,.0f}원\n"
-                    f"   손익 {pnl_sign_s}{pnl_amount:,.0f}원 ({pnl:+.1f}%)"
-                    + (f"\n{day_line}" if day_line else "")
-                )
-
+            total_eval, total_invested = await self._update_holdings_prices(holdings)
+            lines = self._format_balance_lines(holdings, total_eval, total_invested)
             bal_buttons = self._build_balance_buttons(holdings)
             try:
                 await placeholder.edit_text(
