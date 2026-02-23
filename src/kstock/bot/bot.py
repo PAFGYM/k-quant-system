@@ -722,7 +722,12 @@ class KQuantBot:
             for h in holdings:
                 ticker = h.get("ticker", "")
                 hname = h.get("name", "")
-                if not ticker:
+                # [v3.5.5 FIX] ticker 비어있으면 이름으로 유니버스에서 찾기
+                if not ticker and hname:
+                    ticker = self._resolve_ticker_from_name(hname)
+                    if ticker:
+                        h["ticker"] = ticker  # 원본도 업데이트
+                if not hname:
                     continue
                 qty = h.get("quantity", 0)
                 avg_price = h.get("avg_price", 0)
@@ -3386,8 +3391,25 @@ class KQuantBot:
             else:
                 await query.edit_message_text("⚠️ 종목을 찾을 수 없습니다.")
 
+    def _resolve_ticker_from_name(self, name: str) -> str:
+        """종목명으로 유니버스에서 티커 코드를 찾습니다."""
+        if not name:
+            return ""
+        # 1. 유니버스 정확 매치
+        for item in self.all_tickers:
+            if item["name"] == name:
+                return item["code"]
+        # 2. DB 보유종목에서 이름+ticker 매치
+        existing = self.db.get_holding_by_name(name)
+        if existing and existing.get("ticker"):
+            return existing["ticker"]
+        return ""
+
     async def _load_holdings_with_fallback(self) -> list[dict]:
-        """보유종목 로드 (DB 우선, 없으면 스크린샷 fallback)."""
+        """보유종목 로드 (DB 우선, 없으면 스크린샷 fallback).
+
+        [v3.5.5] 빈 ticker를 유니버스에서 해결 시도.
+        """
         holdings = self.db.get_active_holdings()
         if not holdings:
             try:
@@ -3411,39 +3433,64 @@ class KQuantBot:
                         ]
             except Exception as e:
                 logger.warning("Screenshot holdings fallback failed: %s", e)
+
+        # [v3.5.5] 빈 ticker를 유니버스에서 해결 시도
+        for h in holdings:
+            if not h.get("ticker") and h.get("name"):
+                resolved = self._resolve_ticker_from_name(h["name"])
+                if resolved:
+                    h["ticker"] = resolved
         return holdings
 
     async def _update_holdings_prices(self, holdings: list[dict]) -> tuple:
-        """보유종목 실시간 가격 업데이트 + 총합 계산. Returns (total_eval, total_invested)."""
+        """보유종목 실시간 가격 업데이트 + 총합 계산. Returns (total_eval, total_invested).
+
+        [v3.5.5] ticker 없어도 eval_amount/quantity로 총합 계산.
+        """
         total_eval = 0.0
         total_invested = 0.0
         for h in holdings:
-            try:
-                ticker = h.get("ticker", "")
-                bp = h.get("buy_price", 0)
-                qty = h.get("quantity", 0)
-                if ticker and bp > 0:
+            ticker = h.get("ticker", "")
+            bp = float(h.get("buy_price", 0) or 0)
+            qty = int(h.get("quantity", 0) or 0)
+            eval_amt = float(h.get("eval_amount", 0) or 0)
+            cur = float(h.get("current_price", 0) or 0)
+            pnl_pct = float(h.get("pnl_pct", 0) or 0)
+
+            # 1. ticker 있으면 실시간 시세 업데이트 시도
+            if ticker and bp > 0:
+                try:
                     detail = await self._get_price_detail(ticker, bp)
                     cur = detail["price"]
                     h["current_price"] = cur
                     h["pnl_pct"] = round((cur - bp) / bp * 100, 2) if bp > 0 else 0
+                    pnl_pct = h["pnl_pct"]
                     h["day_change_pct"] = detail["day_change_pct"]
                     h["day_change"] = detail["day_change"]
-                    if qty > 0:
-                        total_eval += cur * qty
-                        total_invested += bp * qty
-                    elif h.get("eval_amount", 0) > 0:
-                        # quantity 없는 경우 eval_amount 사용
-                        total_eval += h["eval_amount"]
-                        total_invested += h["eval_amount"] / (1 + h["pnl_pct"] / 100) if h["pnl_pct"] != -100 else 0
-            except Exception:
-                cur = h.get("current_price", h.get("buy_price", 0))
-                qty = h.get("quantity", 0)
-                if qty > 0:
-                    total_eval += cur * qty
-                    total_invested += h.get("buy_price", 0) * qty
-                elif h.get("eval_amount", 0) > 0:
-                    total_eval += h["eval_amount"]
+                except Exception:
+                    # 시세 조회 실패해도 기존 데이터로 진행
+                    if cur <= 0:
+                        cur = bp
+
+            # 2. 총합 계산 — ticker 유무 상관없이 항상 수행
+            if qty > 0 and cur > 0:
+                total_eval += cur * qty
+                total_invested += bp * qty if bp > 0 else cur * qty
+            elif eval_amt > 0:
+                # eval_amount 있으면 그대로 사용
+                total_eval += eval_amt
+                # 투자금액 역산: eval_amount / (1 + 수익률)
+                if pnl_pct != -100 and pnl_pct != 0:
+                    total_invested += eval_amt / (1 + pnl_pct / 100)
+                elif bp > 0 and qty > 0:
+                    total_invested += bp * qty
+                else:
+                    total_invested += eval_amt  # 수익률 0이면 동일
+            elif qty > 0 and bp > 0:
+                # cur=0인 경우 buy_price로 대체
+                total_eval += bp * qty
+                total_invested += bp * qty
+
         return total_eval, total_invested
 
     def _format_balance_lines(self, holdings, total_eval, total_invested) -> list[str]:
@@ -3453,14 +3500,19 @@ class KQuantBot:
         pnl_sign = "+" if total_pnl >= 0 else ""
         pnl_arrow = "\u25b2" if total_pnl > 0 else ("\u25bc" if total_pnl < 0 else "\u2015")
 
-        # 신용/마진 종목 분리
+        # 신용/마진 종목 분리 (purchase_type에 유융/유옹/신용/담보 포함)
         margin_count = 0
         margin_eval = 0.0
         for h in holdings:
-            if h.get("is_margin") or h.get("margin_type"):
+            pt = str(h.get("purchase_type", "") or "").lower()
+            is_margin = h.get("is_margin") or h.get("margin_type") or any(
+                k in pt for k in ("유융", "유옹", "신용", "담보")
+            )
+            if is_margin:
+                h["_is_margin_display"] = True
                 margin_count += 1
-                margin_eval += h.get("eval_amount", 0) or (
-                    h.get("current_price", 0) * h.get("quantity", 0)
+                margin_eval += float(h.get("eval_amount", 0) or 0) or (
+                    float(h.get("current_price", 0) or 0) * int(h.get("quantity", 0) or 0)
                 )
 
         lines = [
@@ -3477,25 +3529,43 @@ class KQuantBot:
         for h in holdings:
             name = h.get("name", "")
             ticker = h.get("ticker", "")
-            qty = h.get("quantity", 0)
-            bp = h.get("buy_price", 0)
-            cp = h.get("current_price", bp)
-            pnl = h.get("pnl_pct", 0)
-            pnl_amount = (cp - bp) * qty if qty > 0 else 0
-            day_chg_pct = h.get("day_change_pct", 0)
-            day_chg = h.get("day_change", 0)
+            qty = int(h.get("quantity", 0) or 0)
+            bp = float(h.get("buy_price", 0) or 0)
+            cp = float(h.get("current_price", 0) or 0) or bp
+            pnl = float(h.get("pnl_pct", 0) or 0)
+            eval_amt = float(h.get("eval_amount", 0) or 0)
+            day_chg_pct = float(h.get("day_change_pct", 0) or 0)
+            day_chg = float(h.get("day_change", 0) or 0)
+
+            # 손익금액 계산
+            if qty > 0 and bp > 0:
+                pnl_amount = (cp - bp) * qty
+            elif eval_amt > 0 and pnl != 0:
+                pnl_amount = eval_amt - (eval_amt / (1 + pnl / 100)) if pnl != -100 else -eval_amt
+            else:
+                pnl_amount = 0
+
             emoji = "\U0001f7e2" if pnl > 0 else "\U0001f534" if pnl < 0 else "\u26aa"
             pnl_sign_s = "+" if pnl_amount >= 0 else ""
 
             # 신용 표시
             margin_tag = ""
-            if h.get("is_margin") or h.get("margin_type"):
+            if h.get("_is_margin_display") or h.get("is_margin") or h.get("margin_type"):
                 margin_tag = " \U0001f4b3"
 
             qty_text = f" {qty}주" if qty > 0 else ""
-            line = f"{emoji} {name}({ticker}){qty_text}{margin_tag}\n"
+            # ticker 있으면 표시, 없으면 생략
+            ticker_text = f"({ticker})" if ticker else ""
+            line = f"{emoji} {name}{ticker_text}{qty_text}{margin_tag}\n"
             line += f"   매수 {bp:,.0f}원 \u2192 현재 {cp:,.0f}원\n"
-            if pnl_amount != 0:
+
+            if eval_amt > 0:
+                line += f"   평가 {eval_amt:,.0f}원"
+                if pnl_amount != 0:
+                    line += f" | 손익 {pnl_sign_s}{pnl_amount:,.0f}원 ({pnl:+.1f}%)"
+                else:
+                    line += f" | 수익률 {pnl:+.1f}%"
+            elif pnl_amount != 0:
                 line += f"   손익 {pnl_sign_s}{pnl_amount:,.0f}원 ({pnl:+.1f}%)"
             else:
                 line += f"   수익률 {pnl:+.1f}%"

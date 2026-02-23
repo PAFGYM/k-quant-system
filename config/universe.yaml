@@ -52,6 +52,7 @@ universe:
     - { code: "028300", name: "HLB", market: KOSDAQ, sector: "바이오" }
     - { code: "196170", name: "알테오젠", market: KOSDAQ, sector: "바이오" }
     - { code: "247540", name: "에코프로비엠", market: KOSDAQ, sector: "2차전지" }
+    - { code: "086520", name: "에코프로", market: KOSDAQ, sector: "2차전지" }
 
   # ── ETF ───────────────────────────────────────────────────────────
 

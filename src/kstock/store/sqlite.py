@@ -955,6 +955,18 @@ class SQLiteStore:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_holding_by_name(self, name: str) -> dict | None:
+        """종목명으로 active 보유종목 조회 (ticker 없을 때 fallback)."""
+        if not name:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM holdings WHERE name=? AND status='active' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (name,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def upsert_holding(
         self,
         ticker: str,
@@ -969,8 +981,14 @@ class SQLiteStore:
 
         이미 active인 동일 종목이 있으면 현재가/수익률만 업데이트,
         없으면 신규 등록.
+        ticker가 비어있으면 name으로 조회.
         """
-        existing = self.get_holding_by_ticker(ticker)
+        # ticker가 있으면 ticker로, 없으면 name으로 조회
+        existing = None
+        if ticker:
+            existing = self.get_holding_by_ticker(ticker)
+        if not existing and name:
+            existing = self.get_holding_by_name(name)
         now = datetime.utcnow().isoformat()
         if existing:
             with self._connect() as conn:
