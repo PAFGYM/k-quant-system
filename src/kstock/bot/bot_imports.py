@@ -244,6 +244,9 @@ from kstock.core.security import startup_security_check, security_audit, mask_ke
 
 KST = timezone(timedelta(hours=9))
 
+# Claude Code remote execution prefix
+CLAUDE_PREFIX = "클코"
+
 # ── v3.6.2 메인 메뉴 (자주 쓰는 기능 상단 배치) ─────────────────────────────
 MAIN_MENU = ReplyKeyboardMarkup(
     [
@@ -265,7 +268,8 @@ MORE_MENU = ReplyKeyboardMarkup(
         ["🚀 미래기술", "🎯 30억 목표"],
         ["📊 재무 진단", "📡 KIS설정"],
         ["🔔 알림 설정", "⚙️ 최적화"],
-        ["🛠 관리자", "🔙 메인으로"],
+        ["💻 클로드", "🛠 관리자"],
+        ["🔙 메인으로"],
     ],
     resize_keyboard=True,
 )

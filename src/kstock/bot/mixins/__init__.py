@@ -6,6 +6,7 @@ from kstock.bot.mixins.trading import TradingMixin  # noqa: F401
 from kstock.bot.mixins.scheduler import SchedulerMixin  # noqa: F401
 from kstock.bot.mixins.commands import CommandsMixin  # noqa: F401
 from kstock.bot.mixins.admin_extras import AdminExtrasMixin  # noqa: F401
+from kstock.bot.mixins.remote_claude import RemoteClaudeMixin  # noqa: F401
 
 __all__ = [
     "CoreHandlersMixin",
@@ -14,4 +15,5 @@ __all__ = [
     "SchedulerMixin",
     "CommandsMixin",
     "AdminExtrasMixin",
+    "RemoteClaudeMixin",
 ]

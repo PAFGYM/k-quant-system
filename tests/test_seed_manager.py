@@ -440,9 +440,9 @@ class TestWeeklyReportFutureTech:
 class TestBotFutureMenu:
     """Test bot menu structure with future tech."""
 
-    def test_main_menu_has_future(self):
-        from kstock.bot.bot import MAIN_MENU
-        flat = str(MAIN_MENU)
+    def test_more_menu_has_future(self):
+        from kstock.bot.bot_imports import MORE_MENU
+        flat = str(MORE_MENU)
         assert "미래기술" in flat
 
     def test_bot_has_future_handler(self):

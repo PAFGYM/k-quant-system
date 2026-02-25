@@ -1,10 +1,75 @@
 """Scheduled jobs and report generators."""
 from __future__ import annotations
 
+import asyncio
+import time as _time
+
 from kstock.bot.bot_imports import *  # noqa: F403
+
+# ── 적응형 모니터링: VIX 레짐별 체크 주기 (초) ─────────────────────
+ADAPTIVE_INTERVALS = {
+    "calm":   {"intraday_monitor": 120, "market_pulse": 180},  # VIX < 18
+    "normal": {"intraday_monitor": 60,  "market_pulse": 60},   # VIX 18-25
+    "fear":   {"intraday_monitor": 30,  "market_pulse": 30},   # VIX 25-30
+    "panic":  {"intraday_monitor": 15,  "market_pulse": 15},   # VIX > 30
+}
+
+# 레짐 변경 쿨다운 (초)
+_RESCHEDULE_COOLDOWN = 300  # 5분
+
+
+def _get_vix_regime(vix: float) -> str:
+    """VIX 값으로 시장 레짐 산출."""
+    if vix >= 30:
+        return "panic"
+    if vix >= 25:
+        return "fear"
+    if vix >= 18:
+        return "normal"
+    return "calm"
 
 
 class SchedulerMixin:
+    # 급등 감지 + 매도 가이드 상태
+    _surge_cooldown: dict = {}
+    _SURGE_COOLDOWN_SEC = 1800
+    _SELL_TARGET_COOLDOWN_SEC = 3600
+    _SURGE_THRESHOLD_PCT = 3.0
+    _surge_callback_registered: bool = False
+    _holdings_cache: list = []
+    _holdings_index: dict = {}  # ticker → holding dict (O(1) 조회)
+
+    async def job_premarket_buy_planner(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매일 07:50 장 시작 전 매수 플래너 질문."""
+        if not self.chat_id:
+            return
+        now = datetime.now(KST)
+        if now.weekday() >= 5:
+            return
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "📈 매수 계획 있음", callback_data="bp:yes",
+                ),
+                InlineKeyboardButton(
+                    "🏖️ 오늘은 쉴게", callback_data="bp:no",
+                ),
+            ],
+        ])
+        await context.bot.send_message(
+            chat_id=self.chat_id,
+            text=(
+                "☀️ 주호님, 좋은 아침이에요\n\n"
+                "오늘 추가 매수 계획이 있으신가요?"
+            ),
+            reply_markup=keyboard,
+        )
+        self.db.upsert_job_run("premarket_buy_planner", _today(), status="success")
+        logger.info("Premarket buy planner sent")
+
     async def job_morning_briefing(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self.chat_id:
             return
@@ -123,6 +188,11 @@ class SchedulerMixin:
         market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
         if not (market_open <= now <= market_close):
             return
+        # 보유종목 캐시 갱신 (매도 가이드용)
+        self._holdings_cache = self.db.get_active_holdings()
+        self._holdings_index = {
+            h.get("ticker", ""): h for h in self._holdings_cache if h.get("ticker")
+        }
         try:
             results = await self._scan_all_stocks()
             self._last_scan_results = results
@@ -481,14 +551,35 @@ class SchedulerMixin:
     # == Phase 8: Macro Refresh, Market Pulse & PDF Report Jobs ================
 
     async def job_macro_refresh(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """3분마다 매크로 데이터 백그라운드 갱신 → SQLite 캐시 따뜻하게 유지."""
+        """매크로 데이터 백그라운드 갱신 + VIX 레짐 변경 시 모니터링 주기 조정."""
         try:
             await self.macro_client.refresh_now()
         except Exception as e:
             logger.debug("Macro refresh job error: %s", e)
+            return
+
+        # ── VIX 레짐 체크 → 모니터링 주기 동적 조정 ──
+        try:
+            macro = await self.macro_client.get_snapshot()
+            new_regime = _get_vix_regime(macro.vix)
+
+            if not hasattr(self, "_current_vix_regime"):
+                self._current_vix_regime = "normal"
+            if not hasattr(self, "_last_reschedule_time"):
+                self._last_reschedule_time = 0.0
+
+            if new_regime != self._current_vix_regime:
+                now_mono = _time.monotonic()
+                if now_mono - self._last_reschedule_time >= _RESCHEDULE_COOLDOWN:
+                    old_regime = self._current_vix_regime
+                    self._current_vix_regime = new_regime
+                    self._last_reschedule_time = now_mono
+                    await self._reschedule_monitors(context, new_regime, old_regime, macro.vix)
+        except Exception as e:
+            logger.debug("VIX regime check error: %s", e)
 
     async def job_market_pulse(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """5분마다 시장 맥박 체크 + 변화 시 알림."""
+        """시장 맥박 체크 + 변화 시 알림 + 적응형 모니터링 주기 조정."""
         if not self.chat_id:
             return
         now = datetime.now(KST)
@@ -522,8 +613,73 @@ class SchedulerMixin:
                     "Market pulse alert: %s -> %s (severity=%d)",
                     change.from_state, change.to_state, change.severity,
                 )
+
         except Exception as e:
             logger.error("Market pulse error: %s", e, exc_info=True)
+
+    async def _reschedule_monitors(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        new_regime: str,
+        old_regime: str,
+        vix: float,
+    ) -> None:
+        """VIX 레짐 변경 시 intraday_monitor/market_pulse 제거 후 새 주기로 재등록."""
+        intervals = ADAPTIVE_INTERVALS.get(new_regime, ADAPTIVE_INTERVALS["normal"])
+        old_intervals = ADAPTIVE_INTERVALS.get(old_regime, ADAPTIVE_INTERVALS["normal"])
+
+        jq = getattr(self, "_job_queue", None) or context.application.job_queue
+        if jq is None:
+            return
+
+        try:
+            # 기존 job 제거
+            current_jobs = jq.jobs()
+            for job in current_jobs:
+                if job.name in ("intraday_monitor", "market_pulse"):
+                    job.schedule_removal()
+
+            # 새 주기로 재등록
+            jq.run_repeating(
+                self.job_intraday_monitor,
+                interval=intervals["intraday_monitor"],
+                first=5,
+                name="intraday_monitor",
+            )
+            jq.run_repeating(
+                self.job_market_pulse,
+                interval=intervals["market_pulse"],
+                first=10,
+                name="market_pulse",
+            )
+
+            old_sec = old_intervals.get("intraday_monitor", 60)
+            new_sec = intervals["intraday_monitor"]
+
+            logger.info(
+                "Adaptive monitoring: %s -> %s (VIX: %.1f, interval: %ds -> %ds)",
+                old_regime, new_regime, vix, old_sec, new_sec,
+            )
+
+            # 텔레그램 알림
+            if self.chat_id:
+                regime_emoji = {
+                    "calm": "😴", "normal": "🟢", "fear": "🟠", "panic": "🔴",
+                }
+                msg = (
+                    f"{regime_emoji.get(new_regime, '⚡')} 모니터링 주기 변경\n\n"
+                    f"VIX: {vix:.1f}\n"
+                    f"레짐: {old_regime} → {new_regime}\n"
+                    f"체크 주기: {old_sec}초 → {new_sec}초"
+                )
+                if new_regime in ("fear", "panic"):
+                    msg += "\n\n🚨 시장 감시 강화 모드 진입"
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=msg,
+                )
+        except Exception as e:
+            logger.error("Adaptive reschedule failed: %s", e)
 
     async def job_daily_pdf_report(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """통합 장 마감 리포트 (16:00 KST).
@@ -1253,6 +1409,363 @@ class SchedulerMixin:
             logger.error("Report crawl job failed: %s", e, exc_info=True)
             self.db.upsert_job_run("report_crawl", _today(), status="error",
                                    message=str(e))
+
+    # == KIS WebSocket Jobs ====================================================
+
+    async def job_ws_connect(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """장 시작 전 WebSocket 연결 + 보유종목 구독."""
+        # 이미 연결되어 있으면 스킵
+        if self.ws.is_connected:
+            return
+
+        # 장중 시간 체크 (평일 08:50~15:35)
+        now = datetime.now(KST)
+        if now.weekday() >= 5:  # 주말
+            return
+
+        try:
+            ok = await self.ws.connect()
+            if not ok:
+                logger.warning("WebSocket connection failed")
+                return
+
+            # 보유종목 + 전체 유니버스 구독
+            tickers_to_sub: set[str] = set()
+
+            # 1. 보유종목 (최우선)
+            holdings = self.db.get_active_holdings()
+            for h in holdings:
+                ticker = h.get("ticker", "")
+                if ticker and len(ticker) == 6:
+                    tickers_to_sub.add(ticker)
+
+            # 2. 전체 유니버스
+            for item in self.all_tickers:
+                code = item.get("code", "")
+                if code:
+                    tickers_to_sub.add(code)
+
+            subscribed = 0
+            for ticker in tickers_to_sub:
+                await self.ws.subscribe(ticker)
+                subscribed += 1
+
+            # 급등 감지 + 매도 가이드 콜백 등록 (최초 1회)
+            if not self._surge_callback_registered:
+                self.ws.on_update(self._on_realtime_update)
+                self._surge_callback_registered = True
+                # 보유종목 캐시 초기화
+                self._holdings_cache = self.db.get_active_holdings()
+                self._holdings_index = {
+                    h.get("ticker", ""): h
+                    for h in self._holdings_cache if h.get("ticker")
+                }
+                logger.info("Realtime surge/sell-guide callback registered")
+
+            logger.info("WebSocket connected: %d tickers subscribed", subscribed)
+
+            if self.chat_id:
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        f"📡 실시간 시세 연결 완료\n"
+                        f"구독 종목: {subscribed}개\n"
+                        f"{self.ws.get_status()}"
+                    ),
+                )
+        except Exception as e:
+            logger.error("WebSocket connect job failed: %s", e)
+
+    async def job_ws_disconnect(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """장 종료 후 WebSocket 연결 해제."""
+        if not self.ws.is_connected:
+            return
+        try:
+            subs = len(self.ws.get_subscriptions())
+            await self.ws.disconnect()
+            logger.info("WebSocket disconnected (%d subs)", subs)
+        except Exception as e:
+            logger.error("WebSocket disconnect job failed: %s", e)
+
+    # == Realtime WebSocket: 급등 감지 + 매도 가이드 ========================
+
+    def _on_realtime_update(self, event_type: str, ticker: str, data) -> None:
+        """KIS WebSocket 실시간 업데이트 콜백. 동기 함수."""
+        if event_type != "price":
+            return
+
+        now = _time.time()
+        now_kst = datetime.now(KST)
+
+        # 장중 시간 체크 (09:00 ~ 15:20)
+        if now_kst.hour < 9 or (now_kst.hour >= 15 and now_kst.minute > 20):
+            return
+
+        # 이벤트 루프에서 비동기 태스크 안전하게 실행
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        # 1. 급등 감지 (+3% 이상)
+        change_pct = getattr(data, 'change_pct', 0)
+        if change_pct >= self._SURGE_THRESHOLD_PCT:
+            last_alert = self._surge_cooldown.get(f"surge:{ticker}", 0)
+            if now - last_alert >= self._SURGE_COOLDOWN_SEC:
+                self._surge_cooldown[f"surge:{ticker}"] = now
+                if loop and loop.is_running():
+                    loop.call_soon_threadsafe(
+                        asyncio.ensure_future,
+                        self._send_surge_alert(ticker, data),
+                    )
+                else:
+                    try:
+                        asyncio.ensure_future(
+                            self._send_surge_alert(ticker, data),
+                        )
+                    except RuntimeError:
+                        pass
+
+        # 2. 보유종목 목표가/손절가 체크
+        self._check_sell_targets(ticker, data, now, loop)
+
+    async def _send_surge_alert(self, ticker: str, data) -> None:
+        """급등 감지 알림 발송."""
+        if not self.chat_id or not hasattr(self, '_application'):
+            return
+        try:
+            # 종목명 조회
+            name = ticker
+            for item in self.all_tickers:
+                if item.get("code") == ticker:
+                    name = item.get("name", ticker)
+                    break
+
+            # 보유 여부
+            is_held = ticker in self._holdings_index
+
+            # 스캔 캐시에서 스코어 확인
+            score_info = ""
+            if getattr(self, '_last_scan_results', None):
+                for r in self._last_scan_results:
+                    if r.ticker == ticker:
+                        if r.score.composite < 50:
+                            logger.debug("Surge skipped (low score): %s", ticker)
+                            return
+                        score_info = (
+                            f"📊 스코어: {r.score.composite:.0f}점 | "
+                            f"RSI: {r.tech.rsi:.0f}"
+                        )
+                        break
+
+            held_tag = "📦 보유중" if is_held else "🆕 미보유"
+            pressure = getattr(data, 'pressure', '중립')
+            change_pct = getattr(data, 'change_pct', 0)
+            price = getattr(data, 'price', 0)
+
+            text = (
+                f"🚀 급등 감지: {name} ({ticker})\n\n"
+                f"현재가: {price:,.0f}원 ({change_pct:+.1f}%)\n"
+                f"매수세: {pressure}\n"
+                f"{score_info}\n"
+                f"{held_tag}"
+            )
+
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔍 상세분석", callback_data=f"detail:{ticker}",
+                    ),
+                    InlineKeyboardButton(
+                        "⭐ 즐겨찾기",
+                        callback_data=f"fav:add:{ticker}:{name}",
+                    ),
+                ],
+            ])
+
+            await self._application.bot.send_message(
+                chat_id=self.chat_id, text=text, reply_markup=keyboard,
+            )
+            logger.info("Surge alert: %s %+.1f%%", ticker, change_pct)
+        except Exception as e:
+            logger.error("Surge alert error %s: %s", ticker, e)
+
+    def _check_sell_targets(
+        self, ticker: str, data, now: float, loop=None,
+    ) -> None:
+        """보유종목 목표가/손절가 도달 여부 확인. O(1) ticker 조회."""
+        h = self._holdings_index.get(ticker)
+        if not h:
+            return
+
+        buy_price = h.get("buy_price", 0)
+        if buy_price <= 0:
+            return
+
+        price = getattr(data, 'price', 0)
+        if price <= 0:
+            return
+
+        change_from_buy = (price - buy_price) / buy_price * 100
+        holding_type = h.get("holding_type", "auto")
+        name = h.get("name", ticker)
+
+        # 쿨다운
+        alert_key = f"sell:{ticker}"
+        if now - self._surge_cooldown.get(alert_key, 0) < self._SELL_TARGET_COOLDOWN_SEC:
+            return
+
+        # holding_type별 목표가/손절가
+        targets = {
+            "scalp":     {"target": 3.0,  "stop": -2.0},
+            "swing":     {"target": 5.0,  "stop": -3.0},
+            "position":  {"target": 12.0, "stop": -7.0},
+            "long_term": {"target": 20.0, "stop": -10.0},
+            "auto":      {"target": 5.0,  "stop": -3.0},
+        }
+        t = targets.get(holding_type, targets["auto"])
+
+        alert_type = None
+        if change_from_buy >= t["target"]:
+            alert_type = "target"
+        elif change_from_buy <= t["stop"]:
+            alert_type = "stop"
+
+        if alert_type:
+            self._surge_cooldown[alert_key] = now
+            coro = self._send_sell_guide(
+                name, ticker, price, buy_price,
+                change_from_buy, alert_type, holding_type,
+            )
+            if loop and loop.is_running():
+                loop.call_soon_threadsafe(asyncio.ensure_future, coro)
+            else:
+                try:
+                    asyncio.ensure_future(coro)
+                except RuntimeError:
+                    pass
+
+    async def _send_sell_guide(
+        self, name: str, ticker: str, current_price: float,
+        buy_price: float, change_pct: float,
+        alert_type: str, holding_type: str,
+    ) -> None:
+        """매도 가이드 알림."""
+        if not self.chat_id or not hasattr(self, '_application'):
+            return
+
+        type_labels = {
+            "scalp": "⚡ 초단기", "swing": "🔥 단기",
+            "position": "📊 중기", "long_term": "💎 장기", "auto": "📌 자동",
+        }
+        type_label = type_labels.get(holding_type, "📌")
+
+        if alert_type == "target":
+            emoji, title = "🎯", "목표가 도달"
+            action = "수익 실현을 검토해보세요"
+        else:
+            emoji, title = "🔴", "손절가 도달"
+            action = "포지션 정리를 검토해보세요"
+
+        text = (
+            f"{emoji} {title}: {name} ({ticker})\n\n"
+            f"현재가: {current_price:,.0f}원 ({change_pct:+.1f}%)\n"
+            f"매수가: {buy_price:,.0f}원\n"
+            f"유형: {type_label}\n\n"
+            f"💡 {action}"
+        )
+
+        try:
+            await self._application.bot.send_message(
+                chat_id=self.chat_id, text=text,
+            )
+            logger.info("Sell guide: %s %s %.1f%%", ticker, alert_type, change_pct)
+        except Exception as e:
+            logger.error("Sell guide error: %s", e)
+
+    async def job_scalp_close_reminder(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """14:30 초단기 보유종목 청산 리마인더."""
+        if not self.chat_id:
+            return
+
+        holdings = self.db.get_active_holdings()
+        scalp_holdings = [h for h in holdings if h.get("holding_type") == "scalp"]
+        if not scalp_holdings:
+            return
+
+        lines = ["⏰ 초단기 종목 청산 점검 (14:30)\n"]
+        for h in scalp_holdings:
+            name = h.get("name", "")
+            ticker = h.get("ticker", "")
+            buy_price = h.get("buy_price", 0)
+            rt = self.ws.get_price(ticker) if self.ws.is_connected else None
+            if rt and buy_price > 0:
+                pnl = (rt.price - buy_price) / buy_price * 100
+                lines.append(
+                    f"  {name}: {rt.price:,.0f}원 ({pnl:+.1f}%)"
+                )
+            else:
+                lines.append(f"  {name}: 실시간 가격 미수신")
+
+        lines.append("\n💡 당일 청산 전제. 오버나잇 리스크 유의.")
+        await context.bot.send_message(
+            chat_id=self.chat_id, text="\n".join(lines),
+        )
+
+    async def job_short_term_review(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """단기 보유종목 3거래일 경과 + 수익률 미달 점검."""
+        if not self.chat_id:
+            return
+
+        holdings = self.db.get_active_holdings()
+        now = datetime.now(KST)
+        alerts = []
+
+        for h in holdings:
+            if h.get("holding_type") != "swing":
+                continue
+            buy_date_str = h.get("buy_date") or h.get("created_at", "")
+            if not buy_date_str:
+                continue
+            try:
+                buy_date = datetime.fromisoformat(buy_date_str[:10])
+            except (ValueError, TypeError):
+                continue
+
+            days_held = (now.date() - buy_date.date()).days
+            if days_held < 4:
+                continue
+
+            buy_price = h.get("buy_price", 0)
+            name = h.get("name", "")
+            ticker = h.get("ticker", "")
+            current_price = 0
+            rt = self.ws.get_price(ticker) if self.ws.is_connected else None
+            if rt:
+                current_price = rt.price
+            if current_price > 0 and buy_price > 0:
+                pnl = (current_price - buy_price) / buy_price * 100
+                if pnl < 3.0:
+                    alerts.append(
+                        f"  {name}: {current_price:,.0f}원 "
+                        f"({pnl:+.1f}%) [{days_held}일 보유]"
+                    )
+
+        if not alerts:
+            return
+
+        text = (
+            "📋 단기 종목 검토 알림\n\n"
+            "3거래일 경과 + 수익률 3% 미만:\n"
+            + "\n".join(alerts)
+            + "\n\n💡 본전 매도를 검토해보세요\n"
+            "📊 자금이 묶여 있는 시간도 비용입니다 (기회비용)"
+        )
+        await context.bot.send_message(chat_id=self.chat_id, text=text)
 
     # == Core Logic ==========================================================
 

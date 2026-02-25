@@ -36,6 +36,14 @@ _NUMERIC_CLAIM_PATTERN = re.compile(
     r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?)\s*(?:원|%|조|억)"
 )
 
+# 종목명 + 가격 패턴 (현재가, 매수가, 목표가, 손절가 등 모든 가격)
+_STOCK_PRICE_PATTERN = re.compile(
+    r"([가-힣A-Za-z]+(?:\s*[가-힣A-Za-z]*)?)"  # 종목명
+    r"\s*(?:\([0-9]{6}\))?"                       # 선택적 종목코드
+    r"[^\n]*?"                                     # 사이 텍스트
+    r"(\d{1,3}(?:,\d{3})+)\s*원"                  # 가격 (1,000원 이상)
+)
+
 # Tolerance for target price verification
 TARGET_PRICE_TOLERANCE = 0.10  # 10%
 
@@ -216,6 +224,132 @@ def _verify_event(
 # ---------------------------------------------------------------------------
 # Main guard function
 # ---------------------------------------------------------------------------
+
+def _extract_context_price(question: str) -> float:
+    """질문 텍스트에서 '현재가: XX,XXX원' 패턴의 가격을 추출합니다."""
+    match = re.search(r"현재가:\s*([\d,]+)\s*원", question)
+    if match:
+        return float(match.group(1).replace(",", ""))
+    return 0.0
+
+
+def _extract_all_prices(text: str) -> list[float]:
+    """텍스트에서 모든 '원' 단위 가격을 추출합니다."""
+    prices = []
+    for match in re.finditer(r"(\d{1,3}(?:,\d{3})+)\s*원", text):
+        prices.append(float(match.group(1).replace(",", "")))
+    return prices
+
+
+def validate_prices_against_context(
+    response: str,
+    question: str,
+) -> str:
+    """AI 응답의 가격이 컨텍스트 현재가와 크게 다르면 교체합니다.
+
+    질문에 포함된 실시간 현재가를 기준으로 AI 응답의 모든 가격을 검증.
+    현재가 대비 ±50% 범위를 벗어나는 가격은 '[가격 확인 필요]'로 교체.
+
+    Args:
+        response: AI 응답 텍스트
+        question: 원본 질문 (현재가 포함)
+
+    Returns:
+        수정된 응답 텍스트
+    """
+    try:
+        context_price = _extract_context_price(question)
+        if context_price <= 0:
+            return response
+
+        lower_bound = context_price * 0.50
+        upper_bound = context_price * 1.50
+
+        def _replace_bad_price(match):
+            price_str = match.group(1)
+            suffix = match.group(2) or ""
+            price_val = float(price_str.replace(",", ""))
+            if price_val < lower_bound or price_val > upper_bound:
+                logger.warning(
+                    "가격 환각 감지: %s원 (현재가 %s원 대비 범위 초과)",
+                    price_str, f"{context_price:,.0f}",
+                )
+                return f"[가격 확인 필요 - 현재가 {context_price:,.0f}원 참고]{suffix}"
+            return match.group(0)
+
+        modified = re.sub(
+            r"(\d{1,3}(?:,\d{3})+)\s*원(대)?",
+            _replace_bad_price,
+            response,
+        )
+        return modified
+
+    except Exception as e:
+        logger.error("가격 검증 실패: %s", e, exc_info=True)
+        return response
+
+
+def strip_unverified_prices(
+    response: str,
+    known_stock_names: set[str] | None = None,
+) -> str:
+    """AI 응답에서 검증 불가능한 종목 가격을 제거/경고 태그.
+
+    known_stock_names에 없는 종목의 구체적 가격(현재가, 매수가, 목표가 등)을
+    '[가격 미확인]'으로 교체합니다.
+
+    Args:
+        response: AI 응답 텍스트
+        known_stock_names: 보유 종목명 set (가격 데이터가 있는 종목)
+
+    Returns:
+        수정된 응답 텍스트
+    """
+    if not known_stock_names:
+        return response
+
+    try:
+        known_lower = {n.lower().strip() for n in known_stock_names if n}
+
+        lines = response.split("\n")
+        current_stock = ""
+        modified_lines = []
+
+        for line in lines:
+            stripped = line.strip()
+
+            # 종목명 감지 (예: "SK하이닉스 (000660)", "✅ 삼성전자 (005930)")
+            stock_match = re.search(
+                r"([가-힣A-Za-z][가-힣A-Za-z0-9\s]*?)(?:\s*\([0-9]{6}\))?$",
+                re.sub(r"^[^\w가-힣]+", "", stripped),
+            )
+            if stock_match:
+                candidate = stock_match.group(1).strip()
+                if len(candidate) >= 2 and not re.search(r"\d", candidate):
+                    current_stock = candidate
+
+            has_price = bool(re.search(r"\d{1,3}(?:,\d{3})+\s*원", stripped))
+
+            if has_price and current_stock:
+                stock_known = current_stock.lower().strip() in known_lower
+                if not stock_known:
+                    line = re.sub(
+                        r"(\d{1,3}(?:,\d{3})+)\s*원(?:대)?",
+                        "[가격 미확인]",
+                        line,
+                    )
+                    logger.info(
+                        "가격 환각 제거: %s (비보유 종목)", current_stock,
+                    )
+
+            modified_lines.append(line)
+
+        return "\n".join(modified_lines)
+
+    except Exception as e:
+        logger.error("가격 환각 제거 실패: %s", e, exc_info=True)
+        return response
+
 
 def guard_response(
     response: str,

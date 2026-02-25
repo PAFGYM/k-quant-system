@@ -18,6 +18,7 @@ from kstock.bot.mixins import (
     SchedulerMixin,
     CommandsMixin,
     AdminExtrasMixin,
+    RemoteClaudeMixin,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ class KQuantBot(
     SchedulerMixin,
     CommandsMixin,
     AdminExtrasMixin,
+    RemoteClaudeMixin,
 ):
     """K-Quant v3.6 Telegram Bot — Multi-AI + Real-time + Modular."""
     pass

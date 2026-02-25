@@ -286,10 +286,9 @@ class MacroClient:
             btc_change=btc_change, gold_change=gold_change,
         )
 
-        # Mock institutional/foreign totals (KIS API required for real data)
-        rng = np.random.default_rng(seed=int(vix * 100) % (2**31))
-        inst_total = float(rng.integers(-2_000_000_000_000, 2_000_000_000_000))
-        foreign_total = float(rng.integers(-1_000_000_000_000, 1_000_000_000_000))
+        # KIS API 미연동 — 기관/외국인 수급 데이터 없음 (0 = 미제공)
+        inst_total = 0.0
+        foreign_total = 0.0
 
         return MacroSnapshot(
             vix=round(vix, 2),
@@ -330,8 +329,8 @@ class MacroClient:
         usdkrw_change = float(rng.normal(0, 0.5))
         btc = float(rng.uniform(50000, 80000))
         btc_change = float(rng.normal(0, 2))
-        inst_total = float(rng.integers(-2_000_000_000_000, 2_000_000_000_000))
-        foreign_total = float(rng.integers(-1_000_000_000_000, 1_000_000_000_000))
+        inst_total = 0.0
+        foreign_total = 0.0
         gold = float(rng.uniform(1800, 2500))
         gold_change = float(rng.normal(0, 1))
 

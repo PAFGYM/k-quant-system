@@ -1,14 +1,14 @@
-"""Tests for the main menu structure and new handlers."""
+"""Tests for the main/more menu structure and new handlers."""
 
 from __future__ import annotations
 
 import pytest
 
-from kstock.bot.bot import MAIN_MENU
+from kstock.bot.bot_imports import MAIN_MENU, MORE_MENU
 
 
 # ---------------------------------------------------------------------------
-# MAIN_MENU structure
+# MAIN_MENU structure (v3.6.2: 4-row compact layout)
 # ---------------------------------------------------------------------------
 
 class TestMainMenuStructure:
@@ -16,89 +16,43 @@ class TestMainMenuStructure:
 
     def test_menu_is_reply_keyboard(self):
         assert MAIN_MENU is not None
-        # ReplyKeyboardMarkup wraps a list of rows
         assert hasattr(MAIN_MENU, "keyboard")
 
     def test_menu_has_rows(self):
         rows = MAIN_MENU.keyboard
-        assert len(rows) >= 7
+        assert len(rows) == 4  # v3.6.2: 4행 compact
 
     def test_each_row_has_two_columns(self):
         rows = MAIN_MENU.keyboard
         for row in rows:
             assert len(row) == 2, f"Row has {len(row)} buttons: {row}"
 
-    def test_usage_guide_in_menu(self):
+    def test_main_menu_buttons(self):
         flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("사용법 가이드" in b for b in flat)
+        for expected in ["분석", "시황", "잔고", "즐겨찾기", "에이전트", "리포트", "AI질문", "더보기"]:
+            assert any(expected in b for b in flat), f"Missing: {expected}"
 
-    def test_notification_settings_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("알림 설정" in b for b in flat)
 
-    def test_account_analysis_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("계좌분석" in b for b in flat)
+# ---------------------------------------------------------------------------
+# MORE_MENU structure
+# ---------------------------------------------------------------------------
 
-    def test_ai_chat_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("AI에게 질문" in b for b in flat)
+class TestMoreMenuStructure:
+    """Verify MORE_MENU has the key feature buttons."""
 
-    def test_reports_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("증권사 리포트" in b for b in flat)
+    def test_more_menu_is_reply_keyboard(self):
+        assert MORE_MENU is not None
+        assert hasattr(MORE_MENU, "keyboard")
 
-    def test_financial_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("재무 진단" in b for b in flat)
-
-    def test_swing_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("스윙 기회" in b for b in flat)
-
-    def test_strategy_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("전략별 보기" in b for b in flat)
-
-    def test_market_status_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("시장현황" in b for b in flat)
-
-    def test_reco_performance_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("추천 성과" in b for b in flat)
-
-    def test_weekly_report_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("주간 보고서" in b for b in flat)
-
-    def test_kis_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("KIS설정" in b for b in flat)
-
-    def test_goal_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("30억 목표" in b for b in flat)
-
-    def test_optimize_in_menu(self):
-        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        assert any("최적화" in b for b in flat)
-
-    def test_left_column_utilities(self):
-        """Left column should contain utility/settings buttons."""
-        left_buttons = [row[0].text if hasattr(row[0], "text") else str(row[0]) for row in MAIN_MENU.keyboard]
-        left_text = " ".join(left_buttons)
-        assert "사용법" in left_text
-        assert "알림" in left_text
-        assert "최적화" in left_text
-
-    def test_right_column_investing(self):
-        """Right column should contain investing feature buttons."""
-        right_buttons = [row[1].text if hasattr(row[1], "text") else str(row[1]) for row in MAIN_MENU.keyboard]
-        right_text = " ".join(right_buttons)
-        assert "계좌분석" in right_text
-        assert "AI" in right_text
-        assert "리포트" in right_text
+    def test_more_menu_buttons(self):
+        flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MORE_MENU.keyboard for btn in row]
+        for expected in [
+            "계좌분석", "전략별 보기", "급등주", "스윙 기회",
+            "멀티분석", "매집탐지", "주간 보고서", "공매도",
+            "미래기술", "30억 목표", "재무 진단", "KIS설정",
+            "알림 설정", "최적화", "클로드", "관리자", "메인으로",
+        ]:
+            assert any(expected in b for b in flat), f"Missing in MORE_MENU: {expected}"
 
 
 # ---------------------------------------------------------------------------
@@ -107,11 +61,6 @@ class TestMainMenuStructure:
 
 class TestHandlerDispatch:
     """Verify all menu buttons have handler connections."""
-
-    def test_bot_has_usage_guide_handler(self):
-        from kstock.bot.bot import KQuantBot
-        bot = KQuantBot.__new__(KQuantBot)
-        assert hasattr(bot, "_menu_usage_guide")
 
     def test_bot_has_notification_settings_handler(self):
         from kstock.bot.bot import KQuantBot
@@ -132,43 +81,6 @@ class TestHandlerDispatch:
         from kstock.bot.bot import KQuantBot
         bot = KQuantBot.__new__(KQuantBot)
         assert hasattr(bot, "_action_notification_toggle")
-
-
-# ---------------------------------------------------------------------------
-# Usage guide text
-# ---------------------------------------------------------------------------
-
-class TestUsageGuideText:
-    """Verify usage guide content."""
-
-    def test_guide_mentions_username(self):
-        """The usage guide should mention 주호님."""
-        # We test the text by calling the method logic indirectly
-        # Since we can't easily call the async method, we verify the class has it
-        from kstock.bot.bot import KQuantBot
-        import inspect
-        source = inspect.getsource(KQuantBot._menu_usage_guide)
-        assert "주호님" in source
-
-    def test_guide_mentions_all_features(self):
-        from kstock.bot.bot import KQuantBot
-        import inspect
-        source = inspect.getsource(KQuantBot._menu_usage_guide)
-        for feature in [
-            "계좌분석", "AI에게 질문", "증권사 리포트", "재무 진단",
-            "스윙 기회", "전략별 보기", "주간 보고서",
-            "알림 설정", "최적화", "KIS설정", "30억 목표",
-            "추천 성과", "시장현황",
-        ]:
-            assert feature in source, f"Missing feature in guide: {feature}"
-
-    def test_guide_no_bold(self):
-        from kstock.bot.bot import KQuantBot
-        import inspect
-        source = inspect.getsource(KQuantBot._menu_usage_guide)
-        # Check the string literals inside the method for **
-        # Extract the msg string
-        assert '**' not in source.split('msg = ')[1].split('await')[0] if 'msg = ' in source else True
 
 
 # ---------------------------------------------------------------------------
@@ -241,3 +153,30 @@ class TestPortfolioHorizonDB:
     def test_nonexistent_ticker(self, store):
         row = store.get_portfolio_horizon("999999")
         assert row is None
+
+
+# ---------------------------------------------------------------------------
+# Holdings with horizon JOIN
+# ---------------------------------------------------------------------------
+
+class TestHoldingsHorizonJoin:
+    """get_active_holdings()가 portfolio_horizon을 LEFT JOIN하는지 확인."""
+
+    @pytest.fixture
+    def store(self, tmp_path):
+        from kstock.store.sqlite import SQLiteStore
+        return SQLiteStore(db_path=tmp_path / "test.db")
+
+    def test_holdings_include_horizon(self, store):
+        holding_id = store.add_holding("005930", "삼성전자", 75000)
+        store.upsert_portfolio_horizon("005930", "삼성전자", "janggi")
+        holdings = store.get_active_holdings()
+        assert len(holdings) >= 1
+        h = [x for x in holdings if x["ticker"] == "005930"][0]
+        assert h["horizon"] == "janggi"
+
+    def test_holdings_without_horizon(self, store):
+        store.add_holding("000660", "SK하이닉스", 150000)
+        holdings = store.get_active_holdings()
+        h = [x for x in holdings if x["ticker"] == "000660"][0]
+        assert h.get("horizon") is None

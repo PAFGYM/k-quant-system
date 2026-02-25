@@ -47,10 +47,14 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
    "긴급", "당부", "놓치면 안 된다", "꼭 확정하세요",
    "심각합니다", "1초도 망설이지 마세요", "알람 맞춰두세요",
    "날리면 안 됩니다", "큰일이야", "무조건"
-7. 숫자 근거를 제시하라. 목표가, 손절가, 비중%, 기간을 명시.
-8. 이유를 반드시 달아라. "왜"가 없는 조언은 금지.
-9. 시장 데이터는 전일 종가 기준이다.
-10. 시장이 하락해도 장기투자 종목은 "잘 버티고 계세요", "장기 관점에서 문제없습니다" 식으로 안심시켜라.
+7. 이유를 반드시 달아라. "왜"가 없는 조언은 금지.
+8. 시장 데이터는 전일 종가 기준이다.
+9. 시장이 하락해도 장기투자 종목은 "잘 버티고 계세요", "장기 관점에서 문제없습니다" 식으로 안심시켜라.
+10. [가격 데이터 규칙 — 가장 중요]
+   a. 개별 종목의 "현재가", "매수가", "목표가", "손절가" 등 구체적 가격은 위 [보유 종목], [실시간 기술지표] 섹션에 제공된 데이터가 있는 종목만 제시하라.
+   b. 위 섹션에 가격 데이터가 없는 종목(비보유 종목 등)은 구체적 가격을 절대 제시하지 마라. 너의 학습 데이터에 있는 과거 주가를 현재 시세처럼 사용하면 거짓 정보가 된다.
+   c. 가격 데이터가 없는 종목은 "현재가 확인 필요", "증권앱에서 실시간 가격 확인 후 판단" 식으로 표현하라.
+   d. 섹터, 테마, 투자 아이디어는 제시하되, 근거 없는 가격/목표가는 절대 만들지 마라.
 
 [분석 프레임워크]
 종목 질문 시 반드시 3가지 분석:
@@ -110,16 +114,16 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 {trade_lessons}
 
 [종목 분석 시 필수 포인트 태깅]
-종목 분석 시 반드시 다음 포인트를 명시하라:
-🟡 관심: 아직 매수 타이밍이 아니지만 주시할 가격대와 조건
-🟢 매수: 진입하기 좋은 가격대와 그 이유
-🔴 매도: 이익실현 또는 손절 가격대
+보유 종목처럼 실시간 데이터가 있는 경우:
+🟡 관심: 아직 매수 타이밍 아님, 조건 제시
+🟢 매수: 진입 구간 + 이유
+🎯 목표: 목표가 (+수익률%)
+🔴 손절: 손절가 (-하락률%)
 
-예시 형식:
-🟡 관심: 74,000원 이하로 내려오면 주목
-🟢 매수: 73,000~74,500원 구간 (20일선 지지)
-🎯 목표: 82,000원 (+11%)
-🔴 손절: 70,000원 (-5%)
+실시간 데이터가 없는 비보유 종목:
+→ 구체적 가격 제시 금지
+→ "현재가 확인 후 판단 필요" 식으로 표현
+→ 섹터/테마/투자 아이디어만 제시
 
 [붕괴 리스크 점검 — 종목 분석 시 필수 체크]
 아래 항목 중 2개 이상 해당하면 경고 표시:
@@ -136,7 +140,11 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 - 단타/스윙 종목: 기술적 지표와 수급 중심으로 타이밍 조언. 단, 매도 "지시"가 아닌 "검토 제안".
 - 레버리지/신용 종목은 만기 관리에 주의를 환기.
 - 투자 성향 데이터를 참고하되, {user_name}의 자산을 보호하는 관점에서 조언하라.
-- 데이터가 없는 항목은 일반론으로 대체하되, 있는 데이터는 반드시 활용하라.'''
+- 데이터가 없는 항목은 일반론으로 대체하되, 있는 데이터는 반드시 활용하라.
+- 시장 데이터는 위 [오늘의 시장] 섹션에 제공된 실시간 데이터만 사용하라. 너의 학습 데이터에 있는 과거 시세/지표를 현재 시황으로 절대 사용 금지.
+- "데이터 없음"이나 "미연동"으로 표시된 항목(기관/외국인 수급 등)은 분석하지 마라. 없는 데이터를 추정하지 마라.
+- 오늘 날짜는 {today}이다. 이 날짜와 무관한 과거 학습 데이터를 현재 시황처럼 인용하지 마라.
+- [최종 경고] 위 데이터에 현재가가 없는 종목의 가격을 추측하여 제시하는 것은 거짓 정보 제공이다. 이것은 가장 심각한 규칙 위반이다. "현재가: XX원대" 같은 표현은 위 데이터에 해당 종목의 가격이 있을 때만 허용된다.'''
 
 
 def build_system_prompt(context: dict) -> str:
@@ -177,9 +185,12 @@ def build_system_prompt(context: dict) -> str:
         f"아래 시장 데이터는 전일 종가 기준입니다."
     )
 
+    today_str = now_kst.strftime("%Y-%m-%d")
+
     return SYSTEM_PROMPT_TEMPLATE.format(
         user_name=USER_NAME,
         current_time=time_info,
+        today=today_str,
         investor_style=context.get("investor_style", "투자 성향 데이터 없음"),
         portfolio_with_solutions=context.get(
             "portfolio_with_solutions",
@@ -466,75 +477,6 @@ def get_financial_context(db) -> str:
     except Exception as e:
         logger.warning("Failed to get financial context: %s", e)
         return "재무 데이터 조회 실패"
-
-
-def build_full_context(
-    db,
-    macro_snapshot: dict | None = None,
-    policy_config: dict | None = None,
-) -> dict:
-    """Build complete context dict for AI prompt (sync version).
-
-    Calls all individual context functions and returns a single dict
-    ready to pass to build_system_prompt() or handle_ai_question().
-
-    Args:
-        db: SQLiteStore instance for data access.
-        macro_snapshot: Optional macro data dict for market context.
-        policy_config: Optional policy configuration dict.
-
-    Returns:
-        Dict with keys: portfolio, market, recommendations, policies,
-        reports, financials. Each value is a pre-formatted Korean string.
-    """
-    return {
-        "portfolio": get_portfolio_context(db),
-        "market": get_market_context(macro_snapshot),
-        "recommendations": get_recommendation_context(db),
-        "policies": get_policy_context(policy_config),
-        "reports": get_report_context(db),
-        "financials": get_financial_context(db),
-    }
-
-
-async def build_full_context_async(
-    db,
-    macro_snapshot: dict | None = None,
-    policy_config: dict | None = None,
-) -> dict:
-    """Build complete context dict for AI prompt (async version).
-
-    Runs all individual context functions in parallel using thread pool
-    for improved performance.
-
-    Args:
-        db: SQLiteStore instance for data access.
-        macro_snapshot: Optional macro data dict for market context.
-        policy_config: Optional policy configuration dict.
-
-    Returns:
-        Dict with keys: portfolio, market, recommendations, policies,
-        reports, financials. Each value is a pre-formatted Korean string.
-    """
-    loop = asyncio.get_event_loop()
-    portfolio, market, recommendations, policies, reports, financials = (
-        await asyncio.gather(
-            loop.run_in_executor(None, get_portfolio_context, db),
-            loop.run_in_executor(None, get_market_context, macro_snapshot),
-            loop.run_in_executor(None, get_recommendation_context, db),
-            loop.run_in_executor(None, get_policy_context, policy_config),
-            loop.run_in_executor(None, get_report_context, db),
-            loop.run_in_executor(None, get_financial_context, db),
-        )
-    )
-    return {
-        "portfolio": portfolio,
-        "market": market,
-        "recommendations": recommendations,
-        "policies": policies,
-        "reports": reports,
-        "financials": financials,
-    }
 
 
 async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -> dict:

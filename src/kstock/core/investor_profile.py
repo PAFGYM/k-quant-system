@@ -35,6 +35,14 @@ RISK_LABELS = {
     "aggressive": "공격적",
 }
 
+# portfolio_horizon 테이블의 horizon 값 → classify_hold_type 키 매핑
+HORIZON_TO_HOLD_TYPE = {
+    "danta": "scalp",
+    "dangi": "swing",
+    "junggi": "position",
+    "janggi": "long_term",
+}
+
 HOLD_TYPE_CONFIG = {
     "scalp": {
         "label": "단타 (1~3일)",
@@ -95,25 +103,33 @@ class InvestorInsight:
 def classify_hold_type(holding: dict) -> str:
     """보유종목의 보유기간/특성으로 유형 분류.
 
-    [v3.6.4] 유저가 설정한 holding_type이 있으면 그것을 우선 적용.
-    'auto'이거나 없으면 보유기간 기반 자동 분류.
+    우선순위:
+      1. holding_type (유저 명시 설정)
+      2. horizon (portfolio_horizon 테이블 → HORIZON_TO_HOLD_TYPE 매핑)
+      3. leverage/margin → 단타
+      4. buy_date 기반 자동 분류 (fallback)
 
     Args:
-        holding: Dict with buy_date, leverage_flag, holding_type, etc.
+        holding: Dict with buy_date, leverage_flag, holding_type, horizon, etc.
 
     Returns:
         One of: 'scalp', 'swing', 'position', 'long_term'
     """
-    # [v3.6.4] 유저가 명시적으로 설정한 보유유형 우선
+    # 1. 유저가 명시적으로 설정한 보유유형 우선
     user_type = holding.get("holding_type", "auto")
     if user_type and user_type != "auto" and user_type in HOLD_TYPE_CONFIG:
         return user_type
 
-    # 레버리지/신용 사용 → 무조건 단타
+    # 2. portfolio_horizon 테이블의 horizon 값 매핑
+    horizon = holding.get("horizon", "")
+    if horizon and horizon in HORIZON_TO_HOLD_TYPE:
+        return HORIZON_TO_HOLD_TYPE[horizon]
+
+    # 3. 레버리지/신용 사용 → 무조건 단타
     if holding.get("leverage_flag") or holding.get("margin_used"):
         return "scalp"
 
-    # 보유기간으로 분류
+    # 4. 보유기간으로 분류 (fallback)
     try:
         buy_date = datetime.fromisoformat(holding["buy_date"])
         now = datetime.now(KST).replace(tzinfo=None)

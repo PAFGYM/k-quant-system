@@ -729,11 +729,41 @@ class CommandsMixin:
             from kstock.bot.context_builder import build_full_context_with_macro
             from kstock.bot.chat_memory import ChatMemory
 
+            # 질문에 종목명이 있으면 실시간 가격을 주입
+            enriched = question
+            try:
+                stock = self._detect_stock_query(question)
+                if stock:
+                    code = stock.get("code", "")
+                    name = stock.get("name", code)
+                    market = stock.get("market", "KOSPI")
+                    ohlcv = await self.yf_client.get_ohlcv(code, market)
+                    if ohlcv is not None and not ohlcv.empty:
+                        from kstock.core.technical import compute_indicators
+                        tech = compute_indicators(ohlcv)
+                        close = ohlcv["close"].astype(float)
+                        cur = float(close.iloc[-1])
+                        if cur > 0:
+                            enriched = (
+                                f"{question}\n\n"
+                                f"[{name}({code}) 실시간 데이터]\n"
+                                f"현재가: {cur:,.0f}원\n"
+                                f"이동평균: 5일 {tech.ma5:,.0f}원, "
+                                f"20일 {tech.ma20:,.0f}원, "
+                                f"60일 {tech.ma60:,.0f}원\n"
+                                f"RSI: {tech.rsi:.1f}\n\n"
+                                f"[절대 규칙] 위 실시간 데이터의 가격만 참고하라. "
+                                f"너의 학습 데이터에 있는 과거 주가를 절대 사용 금지."
+                            )
+                            logger.info("AI질문 가격 주입: %s 현재가 %s원", name, f"{cur:,.0f}")
+            except Exception as e:
+                logger.warning("AI질문 가격 주입 실패: %s", e)
+
             chat_mem = ChatMemory(self.db)
             ctx = await build_full_context_with_macro(
                 self.db, self.macro_client, self.yf_client,
             )
-            answer = await handle_ai_question(question, ctx, self.db, chat_mem)
+            answer = await handle_ai_question(enriched, ctx, self.db, chat_mem)
             try:
                 await placeholder.edit_text(answer)
             except Exception:
@@ -757,7 +787,7 @@ class CommandsMixin:
         questions = {
             "market": "오늘 미국/한국 시장 전체 흐름을 분석하고, 지금 어떤 전략이 유효한지 판단해줘",
             "portfolio": "내 보유종목 전체를 점검하고, 각 종목별로 지금 해야 할 행동(홀딩/추매/익절/손절)을 구체적으로 알려줘",
-            "buy_pick": "현재 시장 상황에서 매수하기 좋은 한국 주식 3개를 골라서 목표가와 손절가까지 제시해줘",
+            "buy_pick": "현재 시장 상황에서 관심 가질 만한 한국 주식 섹터와 종목 3개를 골라줘. 단, 실시간 가격 데이터가 없으니 구체적 현재가/목표가/매수가는 제시하지 말고, 관심 이유와 체크 포인트만 알려줘.",
             "risk": "내 포트폴리오의 리스크를 점검해줘. 집중도, 섹터 편중, 손실 종목, 전체 시장 리스크를 분석하고 대응 방안을 알려줘",
         }
         question = questions.get(question_type, "오늘 시장 어때?")
@@ -778,7 +808,7 @@ class CommandsMixin:
             from kstock.bot.chat_memory import ChatMemory
 
             chat_mem = ChatMemory(self.db)
-            ctx = await build_full_context_with_macro(self.db, self.macro_client)
+            ctx = await build_full_context_with_macro(self.db, self.macro_client, self.yf_client)
             answer = await handle_ai_question(question, ctx, self.db, chat_mem)
             try:
                 await query.edit_message_text(answer)

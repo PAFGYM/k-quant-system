@@ -793,10 +793,11 @@ class SQLiteStore:
                     )
                 except sqlite3.OperationalError:
                     pass
-            # Migrate: add quantity/eval_amount to holdings table (v3.5.1)
+            # Migrate: add quantity/eval_amount/holding_type to holdings table
             for col, sql in [
                 ("quantity", "ALTER TABLE holdings ADD COLUMN quantity INTEGER DEFAULT 0"),
                 ("eval_amount", "ALTER TABLE holdings ADD COLUMN eval_amount REAL DEFAULT 0"),
+                ("holding_type", "ALTER TABLE holdings ADD COLUMN holding_type TEXT DEFAULT 'auto'"),
             ]:
                 try:
                     conn.execute(f"SELECT {col} FROM holdings LIMIT 1")
@@ -913,7 +914,10 @@ class SQLiteStore:
 
     # -- holdings ---------------------------------------------------------------
 
-    def add_holding(self, ticker: str, name: str, buy_price: float) -> int:
+    def add_holding(
+        self, ticker: str, name: str, buy_price: float,
+        holding_type: str = "auto",
+    ) -> int:
         now = datetime.utcnow().isoformat()
         target_1 = round(buy_price * 1.03, 0)
         target_2 = round(buy_price * 1.07, 0)
@@ -924,18 +928,22 @@ class SQLiteStore:
                 INSERT INTO holdings
                     (ticker, name, buy_price, current_price, buy_date,
                      target_1, target_2, stop_price, status, sold_pct, pnl_pct,
-                     created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, 0, ?, ?)
+                     holding_type, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, 0, ?, ?, ?)
                 """,
                 (ticker, name, buy_price, buy_price, now[:10],
-                 target_1, target_2, stop_price, now, now),
+                 target_1, target_2, stop_price, holding_type, now, now),
             )
             return cursor.lastrowid
 
     def get_active_holdings(self) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM holdings WHERE status='active' ORDER BY created_at DESC"
+                """SELECT h.*, ph.horizon
+                   FROM holdings h
+                   LEFT JOIN portfolio_horizon ph ON h.ticker = ph.ticker
+                   WHERE h.status='active'
+                   ORDER BY h.created_at DESC"""
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -976,6 +984,7 @@ class SQLiteStore:
         current_price: float = 0,
         pnl_pct: float = 0,
         eval_amount: float = 0,
+        holding_type: str = "auto",
     ) -> int:
         """스크린샷에서 파싱한 보유종목을 holdings DB에 upsert.
 
@@ -983,7 +992,6 @@ class SQLiteStore:
         없으면 신규 등록.
         ticker가 비어있으면 name으로 조회.
         """
-        # ticker가 있으면 ticker로, 없으면 name으로 조회
         existing = None
         if ticker:
             existing = self.get_holding_by_ticker(ticker)
@@ -1010,11 +1018,13 @@ class SQLiteStore:
                     """INSERT INTO holdings
                         (ticker, name, buy_price, current_price, quantity,
                          eval_amount, buy_date, target_1, target_2, stop_price,
-                         status, sold_pct, pnl_pct, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)""",
+                         status, sold_pct, pnl_pct, holding_type,
+                         created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?,
+                            ?, ?)""",
                     (ticker, name, buy_price, current_price, quantity,
                      eval_amount, now[:10], target_1, target_2, stop_price,
-                     pnl_pct, now, now),
+                     pnl_pct, holding_type, now, now),
                 )
                 return cursor.lastrowid
 
@@ -1030,6 +1040,10 @@ class SQLiteStore:
             conn.execute(
                 f"UPDATE holdings SET {', '.join(sets)} WHERE id=?", vals
             )
+
+    def update_holding_type(self, holding_id: int, holding_type: str) -> None:
+        """보유종목의 투자전략(holding_type)을 변경합니다."""
+        self.update_holding(holding_id, holding_type=holding_type)
 
     # -- watchlist --------------------------------------------------------------
 

@@ -192,6 +192,21 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory) -> s
     # [v3.6.6] 코드 기반 응답 검증 + 매도 지시 필터링
     answer = _sanitize_response(answer)
 
+    # [v3.6.7] 가격 환각 검증 — 현재가 대비 범위 밖 가격 교체
+    try:
+        from kstock.bot.hallucination_guard import (
+            validate_prices_against_context,
+            strip_unverified_prices,
+        )
+        # 1) 질문에 현재가가 있으면 그 기준으로 범위 밖 가격 교체
+        answer = validate_prices_against_context(answer, question)
+        # 2) 비보유 종목 가격 교체
+        holdings = db.get_active_holdings()
+        known_names = {h.get("name", "") for h in holdings if h.get("name")}
+        answer = strip_unverified_prices(answer, known_names)
+    except Exception as e:
+        logger.error("환각 가드 적용 실패: %s", e)
+
     # Save to conversation memory and increment daily usage
     chat_memory.add("user", question)
     chat_memory.add("assistant", answer)

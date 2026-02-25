@@ -78,6 +78,7 @@ class CoreHandlersMixin:
         app.add_handler(CommandHandler("register", self.cmd_register))
         app.add_handler(CommandHandler("balance", self.cmd_balance))
         app.add_handler(CommandHandler("admin", self.cmd_admin))
+        app.add_handler(CommandHandler("claude", self.cmd_claude))
         # v3.0: screenshot image handler
         app.add_handler(
             MessageHandler(filters.PHOTO, self.handle_screenshot)
@@ -86,6 +87,8 @@ class CoreHandlersMixin:
             MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_menu_text)
         )
         app.add_handler(CallbackQueryHandler(self.handle_callback))
+        # 글로벌 에러 핸들러: 오류 발생 시 Claude Code에 자동 수정 요청
+        app.add_error_handler(self._on_error_with_auto_fix)
         return app
 
     @staticmethod
@@ -115,6 +118,7 @@ class CoreHandlersMixin:
             BotCommand("accumulation", "매집 탐지"),
             BotCommand("register", "매수 등록"),
             BotCommand("balance", "잔고 조회"),
+            BotCommand("claude", "Claude Code 원격 실행"),
         ])
 
     def schedule_jobs(self, app: Application) -> None:
@@ -123,6 +127,16 @@ class CoreHandlersMixin:
             logger.warning("Job queue not available; skipping scheduled jobs")
             return
 
+        self._job_queue = jq
+        self._application = app  # WebSocket 콜백에서 bot 접근용
+
+        # 매수 플래너 (07:50 평일)
+        jq.run_daily(
+            self.job_premarket_buy_planner,
+            time=dt_time(hour=7, minute=50, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="premarket_buy_planner",
+        )
         # Phase 10+: 07:00 미국 시장 프리마켓 브리핑 (새벽 미국장 분석)
         jq.run_daily(
             self.job_us_premarket_briefing,
@@ -201,13 +215,45 @@ class CoreHandlersMixin:
             days=(0, 1, 2, 3, 4),
             name="report_crawl",
         )
+        # KIS WebSocket: 장 시작 전 연결 (08:50), 장 종료 후 해제 (15:35)
+        jq.run_daily(
+            self.job_ws_connect,
+            time=dt_time(hour=8, minute=50, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="ws_connect",
+        )
+        jq.run_daily(
+            self.job_ws_disconnect,
+            time=dt_time(hour=15, minute=35, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="ws_disconnect",
+        )
+        # 봇 시작 시 장중이면 즉시 WebSocket 연결
+        jq.run_once(self.job_ws_connect, when=5, name="ws_connect_startup")
+        # 14:30 초단기 청산 리마인더
+        jq.run_daily(
+            self.job_scalp_close_reminder,
+            time=dt_time(hour=14, minute=30, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="scalp_close_reminder",
+        )
+        # 08:00 단기 종목 3일 미달 검토
+        jq.run_daily(
+            self.job_short_term_review,
+            time=dt_time(hour=8, minute=0, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="short_term_review",
+        )
         logger.info(
-            "Scheduled: us_premarket(07:00), morning(07:30), intraday(1min), "
+            "Scheduled: buy_planner(weekday 07:50), us_premarket(07:00), "
+            "morning(07:30), intraday(1min), "
             "weekly_learn(Sat 09:00), screenshot(Mon/Fri 08:00), "
             "sentiment(08:00), weekly_report(Sun 19:00), "
             "macro_refresh(1min), market_pulse(1min), "
             "daily_report_pdf(16:00), self_report(21:00), "
-            "report_crawl(weekday 08:20) KST"
+            "report_crawl(weekday 08:20), "
+            "ws_connect(weekday 08:50), ws_disconnect(weekday 15:35), "
+            "scalp_close(weekday 14:30), short_review(weekday 08:00) KST"
         )
 
     # == Command & Menu Handlers =============================================
@@ -369,6 +415,19 @@ class CoreHandlersMixin:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle screenshot image messages for account analysis."""
+        # Claude Code 대화 모드: 이미지는 지원 안 됨 → 안내
+        if context.user_data.get("claude_mode"):
+            from kstock.bot.mixins.remote_claude import CLAUDE_MODE_MENU
+            await update.message.reply_text(
+                "💻 Claude Code 모드에서는\n"
+                "이미지 전송이 불가합니다.\n\n"
+                "텍스트로 질문해주세요.\n"
+                "스크린샷 분석은 대화 종료 후\n"
+                "다시 보내주세요.",
+                reply_markup=CLAUDE_MODE_MENU,
+            )
+            return
+
         # 관리자 모드: 오류 스크린샷 접수
         admin_mode = context.user_data.get("admin_mode")
         if admin_mode:
@@ -586,6 +645,8 @@ class CoreHandlersMixin:
             "📡 KIS설정": self._menu_kis_setup,
             "🔔 알림 설정": self._menu_notification_settings,
             "⚙️ 최적화": self._menu_optimize,
+            "💻 클로드": self._menu_claude_code,
+            "🔙 대화 종료": self._exit_claude_mode,
             "🛠 관리자": self._menu_admin,
             # ── 이전 메뉴 하위호환 ──
             "\U0001f4d6 사용법 가이드": self._menu_usage_guide,
@@ -606,9 +667,13 @@ class CoreHandlersMixin:
         }
         handler = handlers.get(text)
         if handler:
-            # 메뉴 이동 시 진행 중인 KIS 설정/최적화 상태 클리어
+            # 메뉴 이동 시 진행 중인 상태 클리어
             context.user_data.pop("kis_setup", None)
             context.user_data.pop("awaiting_optimize_ticker", None)
+            # Claude Code 대화 모드도 해제 (💻 클로드, 🔙 대화 종료 제외)
+            if text not in ("💻 클로드", "🔙 대화 종료"):
+                context.user_data.pop("claude_mode", None)
+                context.user_data.pop("claude_turn", None)
             try:
                 await handler(update, context)
             except Exception as e:
@@ -618,6 +683,46 @@ class CoreHandlersMixin:
                     reply_markup=MAIN_MENU,
                 )
         else:
+            # 매수 플래너: 금액 입력 대기 중
+            if context.user_data.get("awaiting_buy_amount"):
+                import re as _re
+                nums = _re.findall(r'\d+', text)
+                if nums:
+                    amount = int(nums[0])
+                    context.user_data["awaiting_buy_amount"] = False
+                    context.user_data["buy_plan_amount"] = amount
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(
+                                "⚡ 초단기 (당일~1일)",
+                                callback_data=f"bp:hz:scalp:{amount}",
+                            ),
+                            InlineKeyboardButton(
+                                "🔥 단기 (3~5일)",
+                                callback_data=f"bp:hz:short:{amount}",
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "📊 중기 (1~3개월)",
+                                callback_data=f"bp:hz:mid:{amount}",
+                            ),
+                            InlineKeyboardButton(
+                                "💎 장기 (6개월+)",
+                                callback_data=f"bp:hz:long:{amount}",
+                            ),
+                        ],
+                    ])
+                    await update.message.reply_text(
+                        f"⏰ {amount}만원으로 투자 기간을 선택하세요",
+                        reply_markup=keyboard,
+                    )
+                else:
+                    await update.message.reply_text(
+                        "숫자를 입력해주세요 (예: 100)"
+                    )
+                return
+
             # 0-fav. 즐겨찾기 종목 추가 모드
             if context.user_data.get("awaiting_fav_add"):
                 context.user_data.pop("awaiting_fav_add", None)
@@ -693,6 +798,27 @@ class CoreHandlersMixin:
                 )
                 return
 
+            # 0-4. Claude Code 대화 모드: 메뉴에서 "💻 클로드" 누른 후 연속 대화
+            if context.user_data.get("claude_mode"):
+                # 대화 종료 버튼
+                if text == "🔙 대화 종료":
+                    await self._exit_claude_mode(update, context)
+                    return
+                if not self._is_authorized_chat(update):
+                    return
+                await self._execute_claude_prompt(update, text, context=context)
+                return
+
+            # 0-5. Claude Code 원격 실행: "클코 ..." prefix
+            from kstock.bot.mixins.remote_claude import CLAUDE_PREFIX
+            if text.startswith(CLAUDE_PREFIX):
+                if not self._is_authorized_chat(update):
+                    return
+                prompt = text[len(CLAUDE_PREFIX):].strip()
+                if prompt:
+                    await self._execute_claude_prompt(update, prompt)
+                    return
+
             # 1. 자연어 보유종목 등록 감지: "삼성전자 50주 76000원", "에코프로 100주 샀어"
             trade = self._detect_trade_input(text)
             if trade:
@@ -762,6 +888,14 @@ class CoreHandlersMixin:
         for cand_name, cand_data in candidates:
             if cand_name and cand_name in clean:
                 return cand_data
+
+        # 3. 부분 매칭: 사용자 입력 키워드가 종목명에 포함 ("하이닉스" → "SK하이닉스")
+        # 한글 3글자 이상 키워드만 매칭 (오탐 방지)
+        words = re.findall(r"[가-힣]{3,}", clean)
+        for word in words:
+            for cand_name, cand_data in candidates:
+                if cand_name and word in cand_name and word != cand_name:
+                    return cand_data
 
         return None
 
@@ -922,6 +1056,7 @@ class CoreHandlersMixin:
             tech_data = ""
             price_data = ""
             fund_data = ""
+            cur_price = 0.0
 
             try:
                 ohlcv = await self.yf_client.get_ohlcv(code, market)
@@ -962,14 +1097,28 @@ class CoreHandlersMixin:
             except Exception:
                 fund_data = "재무 데이터 없음"
 
+            # 매매 레벨 계산 (현재가 기반)
+            trade_levels = ""
+            if cur_price > 0:
+                trade_levels = (
+                    f"[매매 참고 레벨 - 현재가 {cur_price:,.0f}원 기준]\n"
+                    f"적극 매수: {cur_price * 0.90:,.0f}원 (현재가 -10%)\n"
+                    f"관심 매수: {cur_price * 0.95:,.0f}원 (현재가 -5%)\n"
+                    f"단기 목표: {cur_price * 1.10:,.0f}원 (현재가 +10%)\n"
+                    f"중기 목표: {cur_price * 1.20:,.0f}원 (현재가 +20%)\n"
+                    f"손절 기준: {cur_price * 0.93:,.0f}원 (현재가 -7%)\n"
+                )
+
             enriched_question = (
                 f"{name}({code}) 종목 분석 요청.\n"
                 f"사용자 질문: {original_text}\n\n"
                 f"[실시간 가격]\n{price_data}\n\n"
                 f"[기술적 지표]\n{tech_data}\n\n"
                 f"[펀더멘털]\n{fund_data}\n\n"
-                f"위 실시간 데이터를 참고하여 분석하라. "
-                f"반드시 관심/매수/매도 포인트를 명시하라."
+                f"{trade_levels}\n"
+                f"[절대 규칙] 위 [실시간 가격]과 [매매 참고 레벨]의 숫자만 사용하라. "
+                f"너의 학습 데이터에 있는 과거 주가를 절대 사용 금지. "
+                f"매수/매도 포인트 가격은 반드시 위 [매매 참고 레벨]에서 선택하라."
             )
 
             from kstock.bot.chat_handler import handle_ai_question
@@ -1026,6 +1175,7 @@ class CoreHandlersMixin:
                 "kis_buy": self._action_kis_buy,
                 "kis_pass": self._action_skip,
                 "hz": self._action_horizon_select,
+                "ht": self._action_set_holding_type,
                 "sol": self._action_solution_detail,
                 "scn": self._action_scenario_run,
                 "notif": self._action_notification_toggle,
@@ -1054,6 +1204,8 @@ class CoreHandlersMixin:
                 "orderbook": self._action_orderbook,
                 "short": self._action_short_analysis,
                 "hub": self._action_hub,
+                # v3.7: 매수 플래너
+                "bp": self._action_buy_plan,
             }
             handler = dispatch.get(action)
             if handler:
@@ -1130,9 +1282,18 @@ class CoreHandlersMixin:
                 name = h.get("name", ticker)
                 break
 
+        # portfolio_horizon에 항상 저장 (매수 후 선택 / 스크린샷 선택 공통)
+        if ticker:
+            holding = self.db.get_holding_by_ticker(ticker)
+            if holding:
+                name = holding.get("name", name)
+            self.db.upsert_portfolio_horizon(
+                ticker=ticker, name=name, horizon=horizon,
+            )
+
         await query.edit_message_text(f"\u2705 {name}: {label} 선택됨")
 
-        # Check if all holdings have been assigned a horizon
+        # Check if all holdings have been assigned a horizon (스크린샷 플로우)
         holdings = context.user_data.get("pending_holdings", [])
         all_tickers = {h.get("ticker", "") for h in holdings}
         if all_tickers and all_tickers <= set(pending.keys()):
