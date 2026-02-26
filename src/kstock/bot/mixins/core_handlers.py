@@ -1401,6 +1401,8 @@ class CoreHandlersMixin:
                 "bt_adv": self._action_backtest_advanced,
                 # auto-fix 승인/거부
                 "autofix": self._action_autofix,
+                # AI 후속 질문
+                "followup": self._action_followup,
             }
             handler = dispatch.get(action)
             if handler:

@@ -739,6 +739,7 @@ class CommandsMixin:
 
             # 질문에 종목명이 있으면 실시간 가격을 주입
             enriched = question
+            stock = None
             try:
                 stock = self._detect_stock_query(question)
                 if stock:
@@ -772,10 +773,18 @@ class CommandsMixin:
                 self.db, self.macro_client, self.yf_client,
             )
             answer = await handle_ai_question(enriched, ctx, self.db, chat_mem)
+
+            # 후속 질문 버튼 생성
+            followup_buttons = self._build_followup_buttons(question, stock)
+            markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None
+
             try:
-                await placeholder.edit_text(answer)
+                await placeholder.edit_text(answer, reply_markup=markup)
             except Exception:
-                await update.message.reply_text(answer, reply_markup=MAIN_MENU)
+                await update.message.reply_text(
+                    answer,
+                    reply_markup=markup or MAIN_MENU,
+                )
         except Exception as e:
             logger.error("AI chat error: %s", e, exc_info=True)
             try:
@@ -787,6 +796,144 @@ class CommandsMixin:
                     "주호님, AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
                     reply_markup=MAIN_MENU,
                 )
+
+    def _build_followup_buttons(self, question: str, stock: dict | None) -> list:
+        """AI 응답 후 후속 질문 인라인 버튼 생성."""
+        buttons = []
+        if stock:
+            ticker = stock.get("code", "")
+            name = stock.get("name", "")
+            # 종목 관련 후속 질문
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        "\U0001f7e2 지금 사도 돼?",
+                        callback_data=f"followup:buy_timing:{ticker}",
+                    ),
+                    InlineKeyboardButton(
+                        "\U0001f3af 목표가/손절가",
+                        callback_data=f"followup:target:{ticker}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "\U0001f4ca 차트 분석",
+                        callback_data=f"followup:chart:{ticker}",
+                    ),
+                    InlineKeyboardButton(
+                        "\u2696\ufe0f 다른 종목 비교",
+                        callback_data=f"followup:compare:{ticker}",
+                    ),
+                ],
+            ]
+        else:
+            # 일반 질문 후속
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        "\U0001f4b0 내 포트폴리오 점검",
+                        callback_data="followup:portfolio:",
+                    ),
+                    InlineKeyboardButton(
+                        "\U0001f525 오늘 뭐 살까?",
+                        callback_data="followup:buy_pick:",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "\U0001f30d 시장 전망",
+                        callback_data="followup:market:",
+                    ),
+                    InlineKeyboardButton(
+                        "\u26a0\ufe0f 리스크 점검",
+                        callback_data="followup:risk:",
+                    ),
+                ],
+            ]
+        return buttons
+
+    async def _action_followup(self, query, context, payload: str) -> None:
+        """후속 질문 버튼 콜백 — AI에 후속 질문 전달."""
+        parts = payload.split(":")
+        qtype = parts[0] if parts else ""
+        ticker = parts[1] if len(parts) > 1 else ""
+
+        # 종목명 조회
+        name = ticker
+        for item in self.all_tickers:
+            if item["code"] == ticker:
+                name = item["name"]
+                break
+
+        question_map = {
+            "buy_timing": f"{name} 지금 매수 타이밍이야? 기술적 지표 기준으로 진입 시점 알려줘",
+            "target": f"{name} 목표가와 손절가를 구체적으로 알려줘. 근거도 같이",
+            "chart": f"{name} 차트 분석해줘. 이동평균선, RSI, MACD, 거래량 종합 판단",
+            "compare": f"{name}과 같은 섹터 경쟁사 비교해줘. 어디가 더 매력적인지",
+            "portfolio": "내 보유종목 전체 점검하고 각 종목별 행동(홀딩/추매/익절) 알려줘",
+            "buy_pick": "지금 시장에서 관심 가질 종목 3개 추천해줘. 이유도 같이",
+            "market": "오늘 시장 전체 흐름과 앞으로 전략 알려줘",
+            "risk": "내 포트폴리오 리스크 점검해줘. 집중도, 섹터 편중, 대응 방안",
+        }
+
+        question = question_map.get(qtype, f"{name} 더 자세히 분석해줘")
+
+        await query.edit_message_text(
+            query.message.text + f"\n\n\U0001f4ad {question}..."
+        )
+
+        try:
+            from kstock.bot.chat_handler import handle_ai_question
+            from kstock.bot.context_builder import build_full_context_with_macro
+            from kstock.bot.chat_memory import ChatMemory
+
+            # 종목 관련이면 가격 주입
+            enriched = question
+            if ticker:
+                try:
+                    stock = self._detect_stock_query(name)
+                    if stock:
+                        code = stock.get("code", "")
+                        market = stock.get("market", "KOSPI")
+                        ohlcv = await self.yf_client.get_ohlcv(code, market)
+                        if ohlcv is not None and not ohlcv.empty:
+                            from kstock.core.technical import compute_indicators
+                            tech = compute_indicators(ohlcv)
+                            close = ohlcv["close"].astype(float)
+                            cur = float(close.iloc[-1])
+                            if cur > 0:
+                                enriched = (
+                                    f"{question}\n\n"
+                                    f"[{name}({code}) 실시간 데이터]\n"
+                                    f"현재가: {cur:,.0f}원\n"
+                                    f"RSI: {tech.rsi:.1f}\n"
+                                    f"[절대 규칙] 위 실시간 데이터의 가격만 참고하라."
+                                )
+                except Exception:
+                    pass
+
+            chat_mem = ChatMemory(self.db)
+            ctx = await build_full_context_with_macro(
+                self.db, self.macro_client, self.yf_client,
+            )
+            answer = await handle_ai_question(enriched, ctx, self.db, chat_mem)
+
+            # 다음 후속 버튼도 생성
+            stock_data = {"code": ticker, "name": name, "market": "KOSPI"} if ticker else None
+            followup_buttons = self._build_followup_buttons(question, stock_data)
+            markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None
+
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=answer,
+                reply_markup=markup,
+            )
+        except Exception as e:
+            logger.error("Followup AI error: %s", e, exc_info=True)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="\u26a0\ufe0f AI 응답 중 오류가 발생했습니다.",
+            )
 
     async def _handle_quick_question(
         self, query, context: ContextTypes.DEFAULT_TYPE, question_type: str
