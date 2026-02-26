@@ -45,4 +45,5 @@ models/
 *.pth
 
 # Claude Code
-.claude/
+.claude/*
+!.claude/docs/
