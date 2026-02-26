@@ -275,11 +275,34 @@ def check_db_accessible(db_path: str | Path) -> HealthCheck:
 
 
 def check_data_staleness(db_path: str | Path, max_hours: int = 2) -> HealthCheck:
-    """DB의 마지막 업데이트 시각 확인. max_hours 이상 지나면 warning."""
+    """DB의 마지막 업데이트 시각 확인. max_hours 이상 지나면 warning.
+
+    장 마감(평일 16:00 이후 ~ 익일 08:30) 및 주말에는 staleness를
+    체크하지 않습니다 (정상적으로 데이터가 없는 시간대).
+    """
     check = HealthCheck(
         name="data_staleness",
         checked_at=datetime.now().isoformat(timespec="seconds"),
     )
+
+    # 비장시간에는 체크 스킵
+    try:
+        from datetime import timezone, timedelta
+        KST_TZ = timezone(timedelta(hours=9))
+        now_kst = datetime.now(KST_TZ)
+        weekday = now_kst.weekday()  # 0=Mon ... 6=Sun
+        hour = now_kst.hour
+
+        # 주말 또는 평일 16:00~08:30 → 스킵
+        is_weekend = weekday >= 5
+        is_off_hours = hour >= 16 or hour < 9
+        if is_weekend or is_off_hours:
+            check.status = "ok"
+            check.message = "비장시간 — staleness 체크 스킵"
+            return check
+    except Exception:
+        pass
+
     try:
         db_path = Path(db_path)
         if not db_path.exists():
