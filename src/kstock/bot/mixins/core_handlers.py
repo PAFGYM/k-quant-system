@@ -251,6 +251,20 @@ class CoreHandlersMixin:
             days=(6,),
             name="lstm_retrain",
         )
+        # v4.0: 실시간 리스크 모니터링 (5분마다)
+        jq.run_repeating(
+            self.job_risk_monitor,
+            interval=300,
+            first=30,
+            name="risk_monitor",
+        )
+        # v4.0: 시스템 헬스체크 (30분마다)
+        jq.run_repeating(
+            self.job_health_check,
+            interval=1800,
+            first=60,
+            name="health_check",
+        )
         logger.info(
             "Scheduled: buy_planner(weekday 07:50), us_premarket(07:00), "
             "morning(07:30), intraday(1min), "
@@ -261,7 +275,8 @@ class CoreHandlersMixin:
             "report_crawl(weekday 08:20), "
             "ws_connect(weekday 08:50), ws_disconnect(weekday 15:35), "
             "scalp_close(weekday 14:30), short_review(weekday 08:00), "
-            "lstm_retrain(Sun 03:00) KST"
+            "lstm_retrain(Sun 03:00), risk_monitor(5min), "
+            "health_check(30min) KST"
         )
 
     # == Command & Menu Handlers =============================================

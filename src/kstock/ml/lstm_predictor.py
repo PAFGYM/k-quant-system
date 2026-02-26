@@ -241,14 +241,36 @@ def ensemble_3model_predict(
     lgb_prob: float,
     xgb_prob: float,
     lstm_prob: float,
-    weights: tuple[float, float, float] = (0.35, 0.30, 0.35),
+    weights: tuple[float, float, float] | None = None,
 ) -> float:
-    """3-모델 가중 앙상블. LSTM neutral이면 기존 2-모델 fallback."""
+    """3-모델 가중 앙상블. LSTM neutral이면 기존 2-모델 fallback.
+
+    v4.0: weights=None이면 AutoTrainer에서 최적화된 가중치 자동 로드.
+    """
+    if weights is None:
+        weights = _load_optimal_weights()
+
     if abs(lstm_prob - 0.5) < 0.01:
         return lgb_prob * 0.55 + xgb_prob * 0.45
 
     w_lgb, w_xgb, w_lstm = weights
     return w_lgb * lgb_prob + w_xgb * xgb_prob + w_lstm * lstm_prob
+
+
+def _load_optimal_weights() -> tuple[float, float, float]:
+    """AutoTrainer가 저장한 최적 가중치 로드. 없으면 기본값."""
+    try:
+        import json
+        history_path = os.path.join(MODEL_DIR, 'train_history.json')
+        if os.path.exists(history_path):
+            with open(history_path, 'r') as f:
+                data = json.load(f)
+            w = data.get("current_weights", [0.35, 0.30, 0.35])
+            if len(w) == 3 and all(isinstance(x, (int, float)) for x in w):
+                return tuple(w)
+    except Exception:
+        pass
+    return (0.35, 0.30, 0.35)
 
 
 # ── Model Save/Load ──────────────────────────────────────

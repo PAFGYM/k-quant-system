@@ -1,4 +1,7 @@
-"""Real data client for Korean stocks via yfinance (.KS/.KQ suffixes)."""
+"""Real data client for Korean stocks via yfinance (.KS/.KQ suffixes).
+
+v4.0: 서킷 브레이커 + Naver Finance 폴백 적용.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +19,13 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+# v4.0: 서킷 브레이커 (yfinance 연속 실패 시 일시 차단)
+try:
+    from kstock.core.circuit_breaker import get_breaker
+    _yf_breaker = get_breaker("yfinance", failure_threshold=5, recovery_timeout=120)
+except Exception:
+    _yf_breaker = None
 
 # Cache for yfinance data to avoid repeated API calls
 _price_cache: dict[str, tuple[datetime, pd.DataFrame]] = {}
@@ -65,6 +75,13 @@ class YFinanceKRClient:
             if now - cached_time < _CACHE_TTL and not cached_df.empty:
                 return cached_df
 
+        # v4.0: 서킷 브레이커 체크
+        if _yf_breaker and not _yf_breaker.can_execute():
+            logger.debug("yfinance circuit OPEN, using cache/fallback for %s", symbol)
+            if symbol in _price_cache:
+                return _price_cache[symbol][1]
+            return await self._naver_fallback_ohlcv(code)
+
         try:
             hist = await asyncio.to_thread(self._fetch_ohlcv_sync, symbol, period)
             if hist.empty:
@@ -80,13 +97,17 @@ class YFinanceKRClient:
             })
             df = df.reset_index(drop=True)
             _price_cache[symbol] = (now, df)
+            if _yf_breaker:
+                _yf_breaker.record_success()
             return df
 
         except Exception as e:
             logger.warning("yfinance OHLCV failed for %s: %s", symbol, e)
+            if _yf_breaker:
+                _yf_breaker.record_failure()
             if symbol in _price_cache:
                 return _price_cache[symbol][1]
-            return _generate_fallback_ohlcv(code)
+            return await self._naver_fallback_ohlcv(code)
 
     @staticmethod
     def _fetch_ohlcv_sync(symbol: str, period: str) -> pd.DataFrame:
@@ -141,20 +162,59 @@ class YFinanceKRClient:
         return ticker.info or {}
 
     async def get_current_price(self, code: str, market: str = "KOSPI") -> float:
-        """Get current price from yfinance."""
+        """Get current price from yfinance (v4.0: circuit breaker + Naver fallback)."""
         symbol = _yf_ticker(code, market)
+
+        # 서킷 브레이커 체크
+        if _yf_breaker and not _yf_breaker.can_execute():
+            # Naver 폴백
+            price = await self._naver_fallback_price(code)
+            if price > 0:
+                return price
+            if symbol in _price_cache:
+                df = _price_cache[symbol][1]
+                if not df.empty:
+                    return float(df["close"].iloc[-1])
+            return 0.0
+
         try:
             hist = await asyncio.to_thread(self._fetch_ohlcv_sync, symbol, "1d")
             if not hist.empty:
+                if _yf_breaker:
+                    _yf_breaker.record_success()
                 return float(hist["Close"].iloc[-1])
         except Exception:
-            pass
-        # Fallback: use cached OHLCV
+            if _yf_breaker:
+                _yf_breaker.record_failure()
+
+        # Fallback chain: cache → Naver
         if symbol in _price_cache:
             df = _price_cache[symbol][1]
             if not df.empty:
                 return float(df["close"].iloc[-1])
-        return 0.0
+
+        return await self._naver_fallback_price(code)
+
+    async def _naver_fallback_price(self, code: str) -> float:
+        """Naver Finance 가격 폴백."""
+        try:
+            from kstock.ingest.naver_finance import NaverFinanceClient
+            naver = NaverFinanceClient()
+            return await naver.get_current_price(code)
+        except Exception:
+            return 0.0
+
+    async def _naver_fallback_ohlcv(self, code: str) -> pd.DataFrame:
+        """Naver Finance OHLCV 폴백."""
+        try:
+            from kstock.ingest.naver_finance import NaverFinanceClient
+            naver = NaverFinanceClient()
+            df = await naver.get_ohlcv(code)
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+        return _generate_fallback_ohlcv(code)
 
     async def batch_download(
         self, codes: list[dict], period: str = "6mo"

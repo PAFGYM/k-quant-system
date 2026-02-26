@@ -1888,65 +1888,207 @@ class SchedulerMixin:
     async def job_lstm_retrain(
         self, context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        """매주 일요일 03:00 LSTM 모델 재학습."""
+        """매주 일요일 03:00 ML 전체 자동 재학습 (AutoTrainer v4.0).
+
+        v4.0: AutoTrainer → LGB+XGB+LSTM 통합 학습 + 가중치 최적화.
+        기존 개별 LSTM 학습 → 통합 파이프라인으로 대체.
+        """
         try:
-            from kstock.ml.lstm_predictor import train_lstm, save_lstm_model, _HAS_TORCH
-            if not _HAS_TORCH:
-                logger.info("LSTM retrain skipped: PyTorch not installed")
-                return
+            from kstock.ml.auto_trainer import AutoTrainer
+
+            trainer = AutoTrainer(db=self.db, yf_client=self.yf_client)
+
+            # 1. 드리프트 체크 → 트리거 결정
+            drift = trainer.should_retrain()
+            trigger = "drift" if drift.is_drifting else "scheduled"
+
+            # 2. 자동 재학습 실행
+            result = await trainer.run_auto_train(trigger=trigger)
+
+            # 3. 결과 알림
+            if self.chat_id:
+                msg = result.message or (
+                    "🧠 ML 재학습 완료" if result.success else "❌ ML 재학습 실패"
+                )
+                await context.bot.send_message(chat_id=self.chat_id, text=msg)
+
+            self.db.upsert_job_run(
+                "lstm_retrain", _today(),
+                status="success" if result.success else "error",
+            )
+            logger.info("ML auto-train %s: %s", trigger, "OK" if result.success else "FAIL")
+
+        except Exception as e:
+            logger.error("ML auto-train job error: %s", e, exc_info=True)
+            try:
+                self.db.upsert_job_run("lstm_retrain", _today(), status="error")
+            except Exception:
+                pass
+
+    async def job_risk_monitor(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """실시간 포트폴리오 리스크 모니터링 (매 5분).
+
+        v4.0: risk_engine + risk_manager 연동하여 실시간 위험 감시.
+        VaR 한도 초과, 집중도 위반, MDD 경고 시 즉시 알림.
+        """
+        if not self.chat_id:
+            return
+        try:
+            from kstock.core.risk_manager import (
+                calculate_mdd, calculate_stock_weights,
+                calculate_sector_weights, RISK_LIMITS,
+            )
 
             holdings = self.db.get_active_holdings()
-            if not holdings:
-                logger.info("LSTM retrain skipped: no holdings")
+            if not holdings or len(holdings) < 1:
                 return
 
-            import yfinance as yf
-            import numpy as np
-            from kstock.core.predictor import _build_features
+            # 현재 포트폴리오 가치 계산
+            total_value = 0.0
+            for h in holdings:
+                cp = h.get("current_price", 0) or h.get("buy_price", 0)
+                qty = h.get("quantity", 1)
+                total_value += cp * qty
 
-            trained_count = 0
-            for h in holdings[:10]:  # 최대 10종목
-                ticker = h.get("ticker", "")
-                market = h.get("market", "KOSPI")
-                suffix = ".KS" if market == "KOSPI" else ".KQ"
-                yf_ticker = ticker + suffix
+            if total_value <= 0:
+                return
 
-                try:
-                    df = yf.download(yf_ticker, period="2y", progress=False)
-                    if df is None or len(df) < 120:
-                        continue
+            # 종목별 비중 계산
+            weights = {}
+            for h in holdings:
+                cp = h.get("current_price", 0) or h.get("buy_price", 0)
+                qty = h.get("quantity", 1)
+                w = (cp * qty) / total_value if total_value > 0 else 0
+                weights[h.get("ticker", "")] = w
 
-                    features = _build_features(df)
-                    if features is None or len(features) < 60:
-                        continue
+            # 리스크 위반 체크
+            violations = []
 
-                    feature_cols = [c for c in features.columns if c not in [
-                        "Date", "date", "Close", "close",
-                    ]]
-                    X = features[feature_cols].values
-                    close_arr = features["Close"].values if "Close" in features.columns else features["close"].values
-                    y = (np.roll(close_arr, -5) / close_arr - 1 > 0.03).astype(int)
-                    y[-5:] = 0
-
-                    model, sm, ss, result = train_lstm(X, y)
-                    if model is not None:
-                        save_lstm_model(model, sm, ss, path=f"models/lstm_{ticker}.pt")
-                        trained_count += 1
-                        logger.info(
-                            "LSTM trained: %s val_auc=%.4f epochs=%d",
-                            ticker, result.val_auc, result.epochs,
-                        )
-                except Exception as e:
-                    logger.warning("LSTM retrain %s error: %s", ticker, e)
-
-            logger.info("LSTM retrain done: %d models", trained_count)
-            if self.chat_id and trained_count > 0:
-                await context.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=f"🧠 LSTM 재학습 완료: {trained_count}개 모델 업데이트",
+            # 1. 종목 집중도 (40% 초과)
+            max_weight = max(weights.values()) if weights else 0
+            max_ticker = max(weights, key=weights.get) if weights else ""
+            if max_weight > RISK_LIMITS.get("max_single_stock_weight", 0.40):
+                max_name = next(
+                    (h["name"] for h in holdings if h.get("ticker") == max_ticker),
+                    max_ticker,
                 )
+                violations.append(
+                    f"⚠️ 종목 집중 위험: {max_name} "
+                    f"비중 {max_weight*100:.1f}% (한도 40%)"
+                )
+
+            # 2. 일간 손실률 체크
+            for h in holdings:
+                pnl = h.get("pnl_pct", 0) or 0
+                if pnl < -5.0:
+                    violations.append(
+                        f"🔴 {h['name']}: 수익률 {pnl:+.1f}% "
+                        f"(일간 손실 한도 초과)"
+                    )
+
+            # 3. 포트폴리오 MDD 체크 (DB 스냅샷 기반)
+            try:
+                snapshots = self.db.get_portfolio_snapshots(days=30)
+                if snapshots and len(snapshots) >= 2:
+                    peak = max(s.get("total_value", 0) for s in snapshots)
+                    if peak > 0:
+                        mdd = calculate_mdd(total_value, peak)
+                        if mdd < RISK_LIMITS.get("max_portfolio_mdd", -0.15):
+                            violations.append(
+                                f"📉 포트폴리오 MDD {mdd*100:.1f}% "
+                                f"(한도 {RISK_LIMITS['max_portfolio_mdd']*100:.0f}%)"
+                            )
+                        if mdd < RISK_LIMITS.get("emergency_mdd", -0.20):
+                            violations.append(
+                                "🚨 긴급: MDD 20% 초과 — 전량 매도 검토 필요"
+                            )
+            except Exception:
+                pass
+
+            # 위반 사항 있으면 알림
+            if violations:
+                text = (
+                    "🛡️ 리스크 경고\n"
+                    f"{'━' * 22}\n\n"
+                    + "\n".join(violations)
+                    + f"\n\n💰 포트폴리오: {total_value:,.0f}원"
+                )
+                await context.bot.send_message(chat_id=self.chat_id, text=text)
+                logger.warning("Risk violations: %d", len(violations))
+
+                # DB에 위반 기록
+                for v in violations:
+                    try:
+                        self.db.add_risk_violation(
+                            violation_type="realtime_monitor",
+                            severity="warning" if "⚠️" in v else "error",
+                            details=v,
+                        )
+                    except Exception:
+                        pass
+
         except Exception as e:
-            logger.error("LSTM retrain job error: %s", e, exc_info=True)
+            logger.debug("Risk monitor error: %s", e)
+
+    async def job_health_check(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """시스템 헬스체크 (30분마다).
+
+        v4.0: health_monitor + circuit_breaker 통합.
+        디스크/메모리/DB/데이터 최신성 + 서킷 브레이커 상태.
+        """
+        if not self.chat_id:
+            return
+        try:
+            from kstock.core.health_monitor import (
+                run_health_checks, attempt_recovery,
+            )
+
+            db_path = getattr(self.db, 'db_path', None) or "data/kquant.db"
+            checks = run_health_checks(db_path=db_path)
+
+            # 실패한 체크만 필터
+            failed = [c for c in checks if c.status in ("error", "warning")]
+
+            if failed:
+                # 자동 복구 시도
+                for fc in failed:
+                    if fc.status == "error":
+                        try:
+                            recovered = attempt_recovery(fc)
+                            if recovered:
+                                fc.status = "ok"
+                                fc.message += " (자동 복구 완료)"
+                        except Exception:
+                            pass
+
+                # 에러 항목만 알림 (warning은 로그만)
+                errors = [c for c in failed if c.status == "error"]
+                if errors:
+                    lines = ["🏥 시스템 헬스체크 알림", "━" * 22, ""]
+                    for c in errors:
+                        lines.append(f"🔴 {c.name}: {c.message}")
+                    await context.bot.send_message(
+                        chat_id=self.chat_id, text="\n".join(lines),
+                    )
+
+            # 서킷 브레이커 상태 로그
+            try:
+                from kstock.core.circuit_breaker import get_all_stats
+                for stat in get_all_stats():
+                    if stat.state != "closed":
+                        logger.warning(
+                            "CircuitBreaker %s: %s (failures=%d)",
+                            stat.name, stat.state, stat.consecutive_failures,
+                        )
+            except Exception:
+                pass
+
+        except Exception as e:
+            logger.debug("Health check job error: %s", e)
 
     # == Core Logic ==========================================================
 
