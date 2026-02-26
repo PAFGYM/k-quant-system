@@ -1077,11 +1077,14 @@ class TradingMixin:
         return win_rate * target_pct + (1 - win_rate) * stop_pct
 
     async def _action_buy_plan(self, query, context, payload: str) -> None:
-        """매수 플래너 콜백 핸들러.
+        """매수 플래너 콜백 핸들러. 장바구니 모드.
 
-        콜백: bp:yes, bp:no, bp:hz:{horizon}:{amount}, bp:dismiss
+        콜백: bp:start/yes, bp:no, bp:dismiss,
+              bp:view:{horizon}, bp:ai, bp:addall,
+              bp:add:{ticker}:{horizon},
+              bp:done, bp:confirm, bp:retry, bp:cancel
         """
-        if payload == "yes":
+        if payload in ("yes", "start"):
             context.user_data["awaiting_buy_amount"] = True
             await query.edit_message_text(
                 "💰 투자 금액을 입력해주세요\n"
@@ -1103,6 +1106,64 @@ class TradingMixin:
             await query.edit_message_text("👋 확인했습니다.")
             return
 
+        if payload.startswith("view:"):
+            horizon = payload.split(":")[1]
+            await self._show_horizon_picks(query, context, horizon)
+            return
+
+        if payload == "ai":
+            await self._show_ai_recommendation(query, context)
+            return
+
+        if payload == "addall":
+            # AI 추천 전체 담기
+            ai_picks = context.user_data.get("_ai_picks", [])
+            cart = context.user_data.get("buy_cart")
+            if not cart or not ai_picks:
+                await query.edit_message_text("⚠️ 장바구니 정보가 없습니다.")
+                return
+            added = 0
+            for p in ai_picks:
+                if cart["remaining"] < p["amount"]:
+                    continue
+                cart["items"].append(p)
+                cart["remaining"] -= p["amount"]
+                added += 1
+            context.user_data.pop("_ai_picks", None)
+            await query.edit_message_text(
+                f"✅ {added}종목을 장바구니에 담았습니다"
+            )
+            await self._show_cart_menu(query, context)
+            return
+
+        if payload.startswith("add:"):
+            parts = payload.split(":")
+            if len(parts) < 3:
+                return
+            ticker, horizon = parts[1], parts[2]
+            await self._add_to_cart(query, context, ticker, horizon)
+            return
+
+        if payload == "done":
+            await self._show_cart_summary(query, context)
+            return
+
+        if payload == "confirm":
+            await self._confirm_cart(query, context)
+            return
+
+        if payload == "retry":
+            await self._show_cart_menu(query, context)
+            return
+
+        if payload == "cancel":
+            context.user_data.pop("buy_cart", None)
+            context.user_data.pop("_horizon_picks", None)
+            context.user_data.pop("_ai_picks", None)
+            await query.edit_message_text("❌ 매수 계획을 취소했습니다.")
+            return
+
+        # 하위 호환: 기존 hz:{horizon}:{amount}
         if payload.startswith("hz:"):
             parts = payload.split(":")
             if len(parts) < 3:
@@ -1110,52 +1171,125 @@ class TradingMixin:
             horizon = parts[1]
             amount_만원 = int(parts[2])
             amount_won = amount_만원 * 10000
-
+            # 장바구니 모드로 전환
+            context.user_data["buy_cart"] = {
+                "budget": amount_won,
+                "remaining": amount_won,
+                "items": [],
+                "active": True,
+            }
             await query.edit_message_text(
-                "💭 주호님 맞춤 종목을 분석하고 있습니다...\n"
-                "(약 30초 소요)"
+                "💭 종목을 분석하고 있습니다..."
+            )
+            await self._show_horizon_picks(query, context, horizon)
+            return
+
+    # ── 장바구니 매수 모드 ─────────────────────────────────────
+
+    async def _show_cart_menu(self, query_or_update, context) -> None:
+        """장바구니 메인 메뉴 — 기간별 종목 보기 + 장바구니 현황."""
+        cart = context.user_data.get("buy_cart")
+        if not cart:
+            return
+
+        budget_만원 = cart["budget"] // 10000
+        remaining_만원 = cart["remaining"] // 10000
+        items = cart["items"]
+
+        lines = [f"🛒 장바구니 매수 모드\n"]
+        lines.append(
+            f"💰 예산: {budget_만원}만원 | "
+            f"남은: {remaining_만원}만원\n"
+        )
+
+        if items:
+            lines.append(f"{'─' * 20}")
+            horizon_emoji = {
+                "scalp": "⚡", "short": "🔥", "mid": "📊", "long": "💎",
+            }
+            for i, item in enumerate(items, 1):
+                emoji = horizon_emoji.get(item["horizon"], "📌")
+                lines.append(
+                    f"  {i}. {item['name']} ({emoji})\n"
+                    f"     {item['price']:,.0f}원 x {item['quantity']}주"
+                    f" = {item['amount']:,.0f}원"
+                )
+            lines.append(f"{'─' * 20}\n")
+
+        lines.append("종목을 선택하세요")
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "⚡ 단타 종목 보기", callback_data="bp:view:scalp",
+                ),
+                InlineKeyboardButton(
+                    "🔥 스윙 종목 보기", callback_data="bp:view:short",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📊 포지션 종목 보기", callback_data="bp:view:mid",
+                ),
+                InlineKeyboardButton(
+                    "💎 장기 종목 보기", callback_data="bp:view:long",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🤖 AI 추천 받기", callback_data="bp:ai",
+                ),
+            ],
+        ]
+        if items:
+            buttons.append([
+                InlineKeyboardButton(
+                    f"✅ 선택 완료 ({len(items)}종목)",
+                    callback_data="bp:done",
+                ),
+            ])
+        buttons.append([
+            InlineKeyboardButton("❌ 취소", callback_data="bp:cancel"),
+        ])
+
+        text = "\n".join(lines)
+        keyboard = InlineKeyboardMarkup(buttons)
+
+        # query(CallbackQuery) 또는 update(Message)에 따라 다르게 발송
+        if hasattr(query_or_update, "message") and hasattr(
+            query_or_update, "edit_message_text"
+        ):
+            # CallbackQuery
+            await query_or_update.message.reply_text(
+                text, reply_markup=keyboard,
+            )
+        else:
+            # Update (from handle_menu_text)
+            await query_or_update.message.reply_text(
+                text, reply_markup=keyboard,
             )
 
-            try:
-                result_text, buttons = await self._generate_buy_recommendations(
-                    horizon, amount_won,
-                )
-                keyboard = InlineKeyboardMarkup(buttons) if buttons else None
-                await query.message.reply_text(
-                    result_text, reply_markup=keyboard,
-                )
-            except Exception as e:
-                logger.error("Buy planner error: %s", e, exc_info=True)
-                await query.message.reply_text(
-                    "⚠️ 종목 분석 중 오류가 발생했습니다.\n"
-                    "잠시 후 다시 시도해주세요."
-                )
-
-    async def _generate_buy_recommendations(
-        self, horizon: str, amount_won: int,
-    ) -> tuple:
-        """투자 기간 + 예산에 맞는 종목 추천 생성."""
+    async def _get_horizon_picks_data(
+        self, horizon: str, budget_won: int,
+    ) -> tuple[list[dict], str | None]:
+        """기간별 종목 스캔 + Kelly/E[R] 계산. (picks_data, error_msg) 반환."""
         config = self._HORIZON_STRATEGIES.get(horizon)
         if not config:
-            return "⚠️ 잘못된 투자 기간입니다.", []
+            return [], "⚠️ 잘못된 투자 기간입니다."
 
-        amount_만원 = amount_won // 10000
-
-        # 0. 시장 레짐 확인
+        # 시장 레짐 확인
         macro = await self.macro_client.get_snapshot()
         from kstock.signal.strategies import get_regime_mode
         regime = get_regime_mode(macro)
 
         if horizon == "scalp" and regime["mode"] == "defense":
-            return (
+            return [], (
                 f"🛡️ 현재 방어 모드 (VIX {macro.vix:.1f})\n\n"
-                "시장 변동성이 높아 초단기 매매는 권장하지 않습니다.\n"
-                "단기 이상 기간을 선택하시거나, 시장 안정 후 재시도해주세요.\n\n"
-                "💡 방어 모드에서는 현금 비중 35% 권장",
-                [],
+                "변동성이 높아 초단기 매매 비추천\n"
+                "💡 현금 비중 35% 권장"
             )
 
-        # 1. 전체 종목 스캔 (5분 캐시)
+        # 전체 종목 스캔 (5분 캐시)
         now = datetime.now(KST)
         if (
             hasattr(self, '_scan_cache_time')
@@ -1169,7 +1303,7 @@ class TradingMixin:
             self._last_scan_results = results
             self._scan_cache_time = now
 
-        # 2. 전략 필터링
+        # 전략 필터링
         target_strategies = config["strategies"]
         filtered = []
         for r in results:
@@ -1178,21 +1312,19 @@ class TradingMixin:
                     filtered.append((r, sig))
                     break
 
-        # BUY 우선, 점수 높은 순
         filtered.sort(
             key=lambda x: (0 if x[1].action == "BUY" else 1, -x[0].score.composite),
         )
         top_picks = filtered[:5]
 
         if not top_picks:
-            return (
-                f"📋 {config['label']} 조건에 맞는 종목이 현재 없습니다.\n\n"
-                "시장 상황이 해당 전략에 맞지 않을 수 있습니다.\n"
-                "다른 기간을 선택하거나 장 시작 후 다시 확인해보세요.",
-                [],
+            return [], (
+                f"📋 {config['label']} 조건 종목 없음\n\n"
+                "다른 기간을 선택하거나\n"
+                "장 시작 후 다시 확인해보세요"
             )
 
-        # 3. 종목 데이터 + ATR 등급 + Kelly 배분 + E[R] 계산
+        # 종목 데이터 + ATR 등급 + Kelly 배분 + E[R] 계산
         picks_data = []
         for r, sig in top_picks:
             price = getattr(r.info, 'current_price', 0) or 0
@@ -1214,23 +1346,20 @@ class TradingMixin:
                 win_rate, target_pct, stop_pct,
             )
 
-            # E[R] < 거래비용(0.5%)이면 스킵
-            if expected_return < 0.5:
+            if expected_return < 0.5 or price <= 0:
                 continue
 
-            if price <= 0:
-                continue
-
-            allocated_won = int(amount_won * kelly_frac)
+            allocated_won = int(budget_won * kelly_frac)
             qty = int(allocated_won / price)
             invest_amount = qty * price
-
             if qty <= 0:
                 continue
 
+            rg_label = risk_grade["label"] if risk_grade else ""
             picks_data.append({
                 "name": r.name,
                 "ticker": r.ticker,
+                "horizon": horizon,
                 "price": price,
                 "score": r.score.composite,
                 "rsi": getattr(r.tech, 'rsi', 50),
@@ -1240,14 +1369,14 @@ class TradingMixin:
                 "ma20": getattr(r.tech, 'ma20', 0),
                 "ma60": getattr(r.tech, 'ma60', 0),
                 "atr_pct": atr_pct,
-                "risk_grade": risk_grade,
+                "risk_grade": rg_label,
                 "strategy": sig.strategy,
                 "strategy_name": sig.strategy_name,
                 "signal": sig.action,
                 "confidence": sig.confidence,
                 "reasons": sig.reasons or [],
                 "quantity": qty,
-                "invest_amount": invest_amount,
+                "amount": invest_amount,
                 "kelly_frac": kelly_frac,
                 "expected_return": expected_return,
                 "target_pct": target_pct,
@@ -1256,207 +1385,544 @@ class TradingMixin:
             })
 
         if not picks_data:
-            return (
-                f"📋 {config['label']} 기간에 기대수익이 양수인 종목이 없습니다.\n\n"
-                "현재 시장에서 해당 전략의 수익 기대가 거래비용보다 낮습니다.\n"
-                "💡 오늘은 관망하시는 것이 합리적입니다.",
-                [],
+            return [], (
+                f"📋 {config['label']} 기간에\n"
+                "기대수익 양수인 종목 없음\n\n"
+                "💡 오늘은 관망이 합리적입니다"
             )
 
-        # 4. Claude Sonnet AI 분석
-        analysis = await self._ai_analyze_buy_picks(
-            picks_data, config, horizon, amount_만원, macro, regime,
+        return picks_data, None
+
+    async def _show_horizon_picks(self, query, context, horizon: str) -> None:
+        """기간별 종목 리스트 표시 + [담기] 버튼."""
+        cart = context.user_data.get("buy_cart")
+        if not cart:
+            await query.edit_message_text("⚠️ 장바구니 정보가 없습니다.")
+            return
+
+        await query.edit_message_text("🔍 종목을 분석하고 있습니다...")
+
+        picks_data, error = await self._get_horizon_picks_data(
+            horizon, cart["remaining"],
         )
 
-        # 5. 결과 메시지
-        regime_emoji = regime.get("emoji", "")
-        regime_label = regime.get("label", "")
-        header = (
-            f"📋 주호님 맞춤 매수 추천\n\n"
-            f"💰 예산: {amount_만원}만원 | {config['label']}\n"
-            f"📊 VIX: {macro.vix:.1f} | 나스닥: {macro.nasdaq_change_pct:+.1f}%\n"
-            f"{regime_emoji} 시장 레짐: {regime_label}\n\n"
-            f"{'━' * 22}\n\n"
-        )
+        if error:
+            buttons = [[
+                InlineKeyboardButton("🔙 돌아가기", callback_data="bp:retry"),
+            ]]
+            await query.message.reply_text(
+                error, reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
 
-        # E[R] 요약
-        top3 = picks_data[:3]
-        avg_er = sum(p["expected_return"] for p in top3) / len(top3)
-        max_loss = sum(
-            abs(p["stop_pct"]) / 100 * p["invest_amount"]
-            for p in top3
-        )
+        # 임시 저장 (담기 버튼 클릭 시 참조용)
+        if not hasattr(self, '_horizon_picks_cache'):
+            self._horizon_picks_cache = {}
+        for p in picks_data:
+            self._horizon_picks_cache[p["ticker"]] = p
 
-        footer = (
-            f"\n{'━' * 22}\n"
-            f"⚠️ 참고용 분석이며 투자 지시가 아닙니다\n"
-            f"📌 {config['hold_desc']}\n"
-            f"💡 평균 E[R]: {avg_er:+.1f}% | 최대 손실: {max_loss:,.0f}원"
-        )
+        config = self._HORIZON_STRATEGIES[horizon]
+        horizon_emoji = {"scalp": "⚡", "short": "🔥", "mid": "📊", "long": "💎"}
+        emoji = horizon_emoji.get(horizon, "📌")
 
-        text = header + analysis + footer
+        lines = [f"{emoji} {config['label']} 추천 종목\n"]
+        emojis_num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 
-        # 6. 버튼
+        for i, p in enumerate(picks_data[:5]):
+            risk_info = f" [{p['risk_grade']}]" if p["risk_grade"] else ""
+            lines.append(
+                f"{emojis_num[i]} {p['name']} ({p['ticker']}){risk_info}\n"
+                f"   현재가: {p['price']:,.0f}원 | 점수: {p['score']:.0f}점\n"
+                f"   ATR {p['atr_pct']:.1f}% | RSI {p['rsi']:.0f}\n"
+                f"   🎯 +{p['target_pct']:.0f}% | 🔴 {p['stop_pct']:.0f}%\n"
+                f"   Kelly {p['kelly_frac']:.0%} → "
+                f"{p['amount']:,.0f}원, {p['quantity']}주"
+            )
+
+        text = "\n".join(lines)
+
+        # 담기 버튼
         buttons = []
-        for i, p in enumerate(top3):
+        # 이미 장바구니에 있는 종목은 제외
+        cart_tickers = {item["ticker"] for item in cart["items"]}
+        for i, p in enumerate(picks_data[:5]):
+            if p["ticker"] in cart_tickers:
+                continue
+            if p["amount"] > cart["remaining"]:
+                continue
             buttons.append([
                 InlineKeyboardButton(
-                    f"🔍 {i+1}번 상세분석",
-                    callback_data=f"detail:{p['ticker']}",
-                ),
-                InlineKeyboardButton(
-                    "⭐ 즐겨찾기",
-                    callback_data=f"fav:add:{p['ticker']}:{p['name']}",
+                    f"{emojis_num[i]} {p['name']} 담기",
+                    callback_data=f"bp:add:{p['ticker']}:{horizon}",
                 ),
             ])
         buttons.append([
-            InlineKeyboardButton("❌ 패스", callback_data="bp:dismiss"),
+            InlineKeyboardButton("🔙 돌아가기", callback_data="bp:retry"),
         ])
 
-        return text, buttons
-
-    async def _ai_analyze_buy_picks(
-        self, picks: list, config: dict, horizon: str,
-        amount_만원: int, macro, regime: dict,
-    ) -> str:
-        """Claude Sonnet으로 매수 추천 종목 정교한 분석."""
-        if not self.anthropic_key:
-            return self._format_picks_basic(picks, config, horizon)
-
-        picks_text = ""
-        for i, p in enumerate(picks[:3], 1):
-            risk_info = ""
-            if p.get("risk_grade"):
-                rg = p["risk_grade"]
-                risk_info = (
-                    f"  ATR(20): {p['atr_pct']:.1f}% | 리스크: {rg['label']}\n"
-                    f"  등급별 목표: +{rg['target_min']}~{rg['target_max']}% | "
-                    f"손절: {rg['stop']}%\n"
-                )
-            picks_text += (
-                f"\n종목 {i}: {p['name']} ({p['ticker']})\n"
-                f"  현재가: {p['price']:,.0f}원 | 스코어: {p['score']:.0f}점\n"
-                f"  RSI: {p['rsi']:.0f} | MACD: {p['macd']:+.0f} | "
-                f"BB%: {p['bb_pct']:.2f}\n"
-                f"  5일선: {p['ma5']:,.0f} | 20일선: {p['ma20']:,.0f} | "
-                f"60일선: {p['ma60']:,.0f}\n"
-                f"{risk_info}"
-                f"  전략: {p['strategy_name']} ({p['strategy']}) | "
-                f"신호: {p['signal']}\n"
-                f"  매수근거: {', '.join(p['reasons'][:3])}\n"
-                f"  Kelly 배분: {p['kelly_frac']:.0%} "
-                f"({p['invest_amount']:,.0f}원, {p['quantity']}주)\n"
-                f"  E[R]: {p['expected_return']:+.1f}% | "
-                f"승률: {p['win_rate']:.0%}\n"
-                f"  목표: +{p['target_pct']:.1f}% | "
-                f"손절: {p['stop_pct']:.1f}%\n"
-            )
-
-        horizon_rules = {
-            "scalp": (
-                "초단기 당일 매매 전략이다.\n"
-                "- ATR 기반 리스크 등급(A/B/C) 제공됨\n"
-                "- Kelly 배분 비율 참고\n"
-                "- 장 시작 30분 내 거래량 확인 후 진입\n"
-                "- 갭업 5% 이상 추격 매수 금지\n"
-                "- 14:30까지 목표 미달 시 종가 청산\n"
-                "- RSI 70+ 종목 제외"
-            ),
-            "short": (
-                "단기 3~5일 보유 전략이다.\n"
-                "- 목표: +5~10%. 손절: -3%\n"
-                "- 3거래일 내 +3% 미만이면 본전 매도 검토\n"
-                "- 이동평균선 지지/저항 기준으로 매수 범위 제시"
-            ),
-            "mid": (
-                "중기 1~3개월 보유 전략이다.\n"
-                "- 목표: +10~15%. 손절: -7%\n"
-                "- 60일 이동평균선 위 종목 우선\n"
-                "- 섹터 로테이션 흐름과 매크로 중심 판단"
-            ),
-            "long": (
-                "장기 6개월+ 보유 전략이다.\n"
-                "- 목표: +15~30%. 손절: -10%\n"
-                "- 펀더멘털(PER, ROE, 배당) 중심\n"
-                "- 분할 매수 계획 제시 (1/3씩 3회)"
-            ),
-        }
-
-        rules = horizon_rules.get(horizon, "")
-
-        prompt = (
-            f"주호님이 오늘 {amount_만원}만원으로 {config['label']} 매수를 계획.\n\n"
-            f"[시장 상황]\n"
-            f"VIX: {macro.vix:.1f} | S&P500: {macro.spx_change_pct:+.2f}% | "
-            f"나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
-            f"원/달러: {macro.usdkrw:,.0f}원 | 레짐: {regime['label']}\n\n"
-            f"[투자 기간 규칙]\n{rules}\n\n"
-            f"[후보 종목 데이터]\n{picks_text}\n\n"
-            f"위 후보 중 최적 3종목 선정하여 아래 형식으로 추천.\n"
-            f"E[R] 높은 종목 우선. 리스크 분산 고려.\n"
-            f"시장 불안하면 '오늘은 관망' 권고.\n\n"
-            f"형식 (종목당):\n"
-            f"[번호 이모지] 종목명 (코드) [리스크 등급]\n"
-            f"   현재가: X원 | 점수: X점\n"
-            f"   [핵심 기술지표 1줄]\n"
-            f"   🟢 매수: 가격범위 (수량, 금액)\n"
-            f"   🎯 목표: 가격 (+수익률%)\n"
-            f"   🔴 손절: 가격 (-하락률%)\n"
-            f"   📊 배분: X% (Kelly) | E[R]: +X.X%\n"
-            f"   💡 실전 팁 1줄\n\n"
-            f"볼드(**) 사용 금지. 한 문장 25자 이내. 이모지로 구분."
+        await query.message.reply_text(
+            text, reply_markup=InlineKeyboardMarkup(buttons),
         )
 
-        try:
-            import anthropic
-            client = anthropic.AsyncAnthropic(api_key=self.anthropic_key)
-            response = await client.messages.create(
-                model="claude-sonnet-4-5-20250929",
-                max_tokens=2000,
-                temperature=0.2,
-                system=(
-                    "너는 주호님의 전속 투자 참모 '퀀트봇'이다.\n"
-                    "CFA/CAIA 자격 + 계량금융 전문가.\n\n"
-                    "[절대 규칙]\n"
-                    "1. 매도/매수 '지시' 금지. '검토해보세요' 식으로\n"
-                    "2. 공포 유발 표현 금지\n"
-                    "3. 제공된 데이터만 사용. 과거 가격 사용 금지\n"
-                    "4. 볼드(**) 사용 금지. 이모지로 구분\n"
-                    "5. 초단기는 당일 청산. 오버나잇 경고\n"
-                    "6. Kelly 배분과 E[R] 근거로 배분\n"
-                    "7. C등급(ATR>4%)은 '고위험' 경고 필수\n"
-                    "8. 손실 비대칭성: -10%는 +11.1% 필요"
-                ),
-                messages=[{"role": "user", "content": prompt}],
+    async def _add_to_cart(self, query, context, ticker: str, horizon: str) -> None:
+        """종목을 장바구니에 추가."""
+        cart = context.user_data.get("buy_cart")
+        if not cart:
+            await query.edit_message_text("⚠️ 장바구니 정보가 없습니다.")
+            return
+
+        # 캐시에서 종목 데이터 가져오기
+        picks_cache = getattr(self, '_horizon_picks_cache', {})
+        pick = picks_cache.get(ticker)
+
+        if not pick:
+            await query.edit_message_text(
+                "⚠️ 종목 정보를 찾을 수 없습니다.\n다시 종목 보기를 선택해주세요."
             )
+            return
 
-            from kstock.bot.chat_handler import _sanitize_response
-            return _sanitize_response(response.content[0].text)
+        # 이미 담긴 종목 체크
+        if any(item["ticker"] == ticker for item in cart["items"]):
+            await query.edit_message_text(
+                f"⚠️ {pick['name']}은 이미 장바구니에 있습니다."
+            )
+            return
 
-        except Exception as e:
-            logger.error("Buy planner AI error: %s", e)
-            return self._format_picks_basic(picks, config, horizon)
+        # 예산 체크
+        if pick["amount"] > cart["remaining"]:
+            await query.edit_message_text(
+                f"⚠️ 예산이 부족합니다\n\n"
+                f"필요: {pick['amount']:,.0f}원\n"
+                f"남은 예산: {cart['remaining']:,.0f}원"
+            )
+            return
 
-    def _format_picks_basic(self, picks: list, config: dict, horizon: str) -> str:
-        """AI 없을 때 기본 포맷."""
-        emojis = ["1️⃣", "2️⃣", "3️⃣"]
-        lines = []
-        for i, p in enumerate(picks[:3]):
-            rg = p.get("risk_grade")
-            risk_label = f" [{rg['label']}]" if rg else ""
-            target_price = int(p['price'] * (1 + p['target_pct'] / 100))
-            stop_price = int(p['price'] * (1 + p['stop_pct'] / 100))
-            lines.append(
-                f"{emojis[i]} {p['name']} ({p['ticker']}){risk_label}\n"
+        # 장바구니에 추가
+        cart["items"].append(pick)
+        cart["remaining"] -= pick["amount"]
+
+        horizon_emoji = {"scalp": "⚡", "short": "🔥", "mid": "📊", "long": "💎"}
+        emoji = horizon_emoji.get(horizon, "📌")
+
+        await query.edit_message_text(
+            f"✅ {pick['name']} 담김 ({emoji})\n\n"
+            f"🛒 장바구니 ({len(cart['items'])}종목)\n"
+            f"💰 남은 예산: {cart['remaining']:,.0f}원"
+        )
+
+        # 다시 메인 메뉴로
+        await self._show_cart_menu(query, context)
+
+    async def _show_ai_recommendation(self, query, context) -> None:
+        """AI가 전 기간 통합 최적 포트폴리오 추천."""
+        cart = context.user_data.get("buy_cart")
+        if not cart:
+            await query.edit_message_text("⚠️ 장바구니 정보가 없습니다.")
+            return
+
+        await query.edit_message_text(
+            "🤖 AI가 최적 포트폴리오를 분석 중...\n"
+            "(약 30초 소요)"
+        )
+
+        budget_won = cart["remaining"]
+        amount_만원 = budget_won // 10000
+
+        # 전 기간 종목을 수집
+        all_picks = []
+        for hz in ("scalp", "short", "mid", "long"):
+            picks, _ = await self._get_horizon_picks_data(hz, budget_won)
+            for p in picks:
+                p["horizon"] = hz
+            all_picks.extend(picks[:3])
+
+        if not all_picks:
+            buttons = [[
+                InlineKeyboardButton("🔙 돌아가기", callback_data="bp:retry"),
+            ]]
+            await query.message.reply_text(
+                "📋 추천할 종목이 없습니다.\n현재 시장에서 적합한 종목을 찾지 못했습니다.",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        # 기존 보유종목 확인
+        holdings = self.db.get_active_holdings()
+        holdings_text = ""
+        if holdings:
+            h_list = [
+                f"{h['name']}({h.get('holding_type', 'auto')})"
+                for h in holdings[:5]
+            ]
+            holdings_text = f"현재 보유: {', '.join(h_list)}\n"
+
+        # 매크로 데이터
+        macro = await self.macro_client.get_snapshot()
+        from kstock.signal.strategies import get_regime_mode
+        regime = get_regime_mode(macro)
+
+        # AI 분석
+        horizon_emoji = {"scalp": "⚡단타", "short": "🔥스윙", "mid": "📊포지션", "long": "💎장기"}
+        picks_text = ""
+        for i, p in enumerate(all_picks, 1):
+            hz_label = horizon_emoji.get(p["horizon"], p["horizon"])
+            picks_text += (
+                f"\n{i}. {p['name']} ({p['ticker']}) [{hz_label}]\n"
                 f"   현재가: {p['price']:,.0f}원 | 점수: {p['score']:.0f}점\n"
-                f"   RSI {p['rsi']:.0f} | ATR {p['atr_pct']:.1f}%\n"
-                f"   🟢 매수: {p['price']:,.0f}원 ({p['quantity']}주)\n"
-                f"   🎯 목표: {target_price:,.0f}원 (+{p['target_pct']:.1f}%)\n"
-                f"   🔴 손절: {stop_price:,.0f}원 ({p['stop_pct']:.1f}%)\n"
-                f"   📊 배분: {p['kelly_frac']:.0%} | "
-                f"E[R]: {p['expected_return']:+.1f}%"
+                f"   RSI: {p['rsi']:.0f} | ATR: {p['atr_pct']:.1f}%\n"
+                f"   Kelly: {p['kelly_frac']:.0%} | E[R]: {p['expected_return']:+.1f}%\n"
+                f"   목표: +{p['target_pct']:.0f}% | 손절: {p['stop_pct']:.0f}%\n"
             )
-        return "\n\n".join(lines)
+
+        analysis_text = ""
+        if self.anthropic_key:
+            try:
+                import anthropic
+                client = anthropic.AsyncAnthropic(api_key=self.anthropic_key)
+                prompt = (
+                    f"주호님이 {amount_만원}만원 예산으로 매수 계획.\n\n"
+                    f"[시장]\nVIX: {macro.vix:.1f} | 나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
+                    f"레짐: {regime['label']}\n\n"
+                    f"{holdings_text}\n"
+                    f"[후보 종목]\n{picks_text}\n\n"
+                    f"위 후보에서 최적 3종목 조합을 추천하세요.\n"
+                    f"기간 분산, 섹터 분산, 리스크 분산 고려.\n"
+                    f"시장 불안하면 '관망' 권고.\n\n"
+                    f"형식 (종목당):\n"
+                    f"[번호] 종목명 (기간이모지) — 금액 (비율%)\n"
+                    f"   핵심 지표 1줄\n"
+                    f"   🎯 +목표% | 🔴 -손절%\n"
+                    f"   💡 실전 팁 1줄\n\n"
+                    f"마지막에 전체 E[R]과 최대 손실 요약.\n"
+                    f"볼드(**) 금지. 25자 이내. 이모지 구분."
+                )
+
+                response = await client.messages.create(
+                    model="claude-sonnet-4-5-20250929",
+                    max_tokens=1500,
+                    temperature=0.2,
+                    system=(
+                        "너는 주호님의 전속 투자 참모 '퀀트봇'이다.\n"
+                        "CFA/CAIA + 계량금융 전문가.\n\n"
+                        "[규칙]\n"
+                        "1. 매매 '지시' 금지. '검토해보세요' 식\n"
+                        "2. 제공된 데이터만 사용\n"
+                        "3. 볼드(**) 금지\n"
+                        "4. Kelly/E[R] 근거 배분\n"
+                        "5. 기존 보유종목과 분산 고려\n"
+                        "6. 전체 포트폴리오 관점 추천"
+                    ),
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                from kstock.bot.chat_handler import _sanitize_response
+                analysis_text = _sanitize_response(response.content[0].text)
+            except Exception as e:
+                logger.error("AI recommendation error: %s", e)
+
+        if not analysis_text:
+            # 폴백: 기본 포맷
+            lines = []
+            for i, p in enumerate(all_picks[:3]):
+                hz_label = horizon_emoji.get(p["horizon"], "")
+                lines.append(
+                    f"{['1️⃣','2️⃣','3️⃣'][i]} {p['name']} ({hz_label})\n"
+                    f"   {p['price']:,.0f}원 x {p['quantity']}주 = {p['amount']:,.0f}원\n"
+                    f"   🎯 +{p['target_pct']:.0f}% | 🔴 {p['stop_pct']:.0f}%\n"
+                    f"   E[R]: {p['expected_return']:+.1f}%"
+                )
+            analysis_text = "\n\n".join(lines)
+
+        header = (
+            f"🤖 AI 추천 포트폴리오 ({amount_만원}만원)\n\n"
+            f"📊 VIX: {macro.vix:.1f} | {regime.get('emoji', '')} {regime.get('label', '')}\n"
+            f"{holdings_text}\n"
+            f"{'━' * 22}\n\n"
+        )
+
+        text = header + analysis_text
+
+        # AI 추천 top3를 임시 저장 (전체 담기용)
+        ai_top3 = all_picks[:3]
+        context.user_data["_ai_picks"] = ai_top3
+
+        # 캐시에도 저장 (개별 담기용)
+        if not hasattr(self, '_horizon_picks_cache'):
+            self._horizon_picks_cache = {}
+        for p in ai_top3:
+            self._horizon_picks_cache[p["ticker"]] = p
+
+        # 버튼
+        buttons = [
+            [InlineKeyboardButton("✅ 전체 담기", callback_data="bp:addall")],
+        ]
+        for i, p in enumerate(ai_top3):
+            hz_label = horizon_emoji.get(p["horizon"], "")
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{['1️⃣','2️⃣','3️⃣'][i]} {p['name']} 담기",
+                    callback_data=f"bp:add:{p['ticker']}:{p['horizon']}",
+                ),
+            ])
+        buttons.append([
+            InlineKeyboardButton("🔙 돌아가기", callback_data="bp:retry"),
+        ])
+
+        await query.message.reply_text(
+            text, reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _show_cart_summary(self, query, context) -> None:
+        """장바구니 최종 확인 화면."""
+        cart = context.user_data.get("buy_cart")
+        if not cart or not cart["items"]:
+            await query.edit_message_text("🛒 장바구니가 비어있습니다.")
+            return
+
+        budget_만원 = cart["budget"] // 10000
+        used = sum(item["amount"] for item in cart["items"])
+        remaining = cart["budget"] - used
+
+        lines = [
+            f"📋 주호님 최종 매수 계획\n",
+            f"💰 총 예산: {budget_만원}만원",
+            f"📍 사용: {used:,.0f}원 | 여유: {remaining:,.0f}원\n",
+            f"{'━' * 22}",
+        ]
+
+        horizon_emoji = {"scalp": "⚡단타", "short": "🔥스윙", "mid": "📊포지션", "long": "💎장기"}
+        emojis_num = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+        total_er = 0
+        total_max_loss = 0
+
+        for i, item in enumerate(cart["items"]):
+            hz_label = horizon_emoji.get(item["horizon"], item["horizon"])
+            target_price = int(item["price"] * (1 + item["target_pct"] / 100))
+            stop_price = int(item["price"] * (1 + item["stop_pct"] / 100))
+            max_loss = abs(item["stop_pct"]) / 100 * item["amount"]
+            total_er += item["expected_return"]
+            total_max_loss += max_loss
+
+            em = emojis_num[i] if i < len(emojis_num) else f"{i+1}."
+            lines.append(
+                f"\n{em} {item['name']} ({hz_label})\n"
+                f"   🟢 매수: {item['price']:,.0f}원 "
+                f"({item['quantity']}주, {item['amount']:,.0f}원)\n"
+                f"   🎯 목표: {target_price:,.0f}원 (+{item['target_pct']:.0f}%)\n"
+                f"   🔴 손절: {stop_price:,.0f}원 ({item['stop_pct']:.0f}%)\n"
+                f"   📊 배분: {item['kelly_frac']:.0%} (Kelly)"
+                f" | E[R]: {item['expected_return']:+.1f}%"
+            )
+
+        avg_er = total_er / len(cart["items"]) if cart["items"] else 0
+
+        lines.append(f"\n{'━' * 22}")
+
+        # 기간별 모니터링 안내
+        horizons_in_cart = {item["horizon"] for item in cart["items"]}
+        if "scalp" in horizons_in_cart:
+            lines.append("⚡ 단타 → 장중 실시간 모니터링")
+        if "short" in horizons_in_cart:
+            lines.append("🔥 스윙 → 매일 목표/손절 점검")
+        if "mid" in horizons_in_cart:
+            lines.append("📊 포지션 → 주 1회 점검")
+        if "long" in horizons_in_cart:
+            lines.append("💎 장기 → 분기 실적 기준")
+
+        lines.append(
+            f"\n⚠️ 참고용 분석이며 투자 지시가 아닙니다\n"
+            f"💡 평균 E[R]: {avg_er:+.1f}%"
+            f" | 최대 손실: {total_max_loss:,.0f}원"
+        )
+
+        text = "\n".join(lines)
+
+        buttons = [
+            [
+                InlineKeyboardButton("✅ 확정", callback_data="bp:confirm"),
+                InlineKeyboardButton("🔄 다시 선택", callback_data="bp:retry"),
+            ],
+            [
+                InlineKeyboardButton("❌ 취소", callback_data="bp:cancel"),
+            ],
+        ]
+
+        await query.edit_message_text(
+            text, reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _confirm_cart(self, query, context) -> None:
+        """장바구니 확정: 보유종목 등록 + 모니터링 시작."""
+        cart = context.user_data.get("buy_cart")
+        if not cart or not cart["items"]:
+            await query.edit_message_text("🛒 장바구니가 비어있습니다.")
+            return
+
+        # 보유종목 등록
+        registered = []
+        horizon_to_holding_type = {
+            "scalp": "scalp",
+            "short": "swing",
+            "mid": "position",
+            "long": "long_term",
+        }
+
+        for item in cart["items"]:
+            holding_type = horizon_to_holding_type.get(
+                item["horizon"], "auto",
+            )
+            try:
+                self.db.add_holding(
+                    ticker=item["ticker"],
+                    name=item["name"],
+                    buy_price=item["price"],
+                    holding_type=holding_type,
+                )
+                registered.append(item)
+                logger.info(
+                    "Cart confirmed: %s %s (%s) %d주 @ %d원",
+                    holding_type, item["name"], item["ticker"],
+                    item["quantity"], item["price"],
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to register holding %s: %s",
+                    item["ticker"], e,
+                )
+
+        # 장바구니 정리
+        context.user_data.pop("buy_cart", None)
+        context.user_data.pop("_ai_picks", None)
+        context.user_data.pop("_horizon_picks", None)
+
+        if not registered:
+            await query.edit_message_text("⚠️ 종목 등록에 실패했습니다.")
+            return
+
+        # 결과 메시지
+        horizon_emoji = {"scalp": "⚡", "short": "🔥", "mid": "📊", "long": "💎"}
+        lines = [
+            f"✅ {len(registered)}종목 매수 계획 확정!\n",
+            f"{'━' * 22}",
+        ]
+        for item in registered:
+            emoji = horizon_emoji.get(item["horizon"], "📌")
+            lines.append(
+                f"{emoji} {item['name']}\n"
+                f"   {item['price']:,.0f}원 x {item['quantity']}주"
+            )
+        lines.append(f"\n{'━' * 22}")
+        lines.append("📡 모니터링이 시작됩니다")
+
+        # 단타 종목이 있으면 모니터링 주기 안내
+        has_scalp = any(
+            item["horizon"] == "scalp" for item in registered
+        )
+        if has_scalp:
+            lines.append("⚡ 단타 종목 → 실시간 급등/목표 알림")
+
+        lines.append("\n행운을 빕니다, 주호님!")
+
+        await query.edit_message_text("\n".join(lines))
+
+    # == Backtest Pro ========================================================
+
+    async def _action_backtest_pro(self, query, context, payload: str) -> None:
+        """Backtest Pro 콜백: bt:portfolio, bt:withcost:{ticker}."""
+        if payload == "portfolio":
+            holdings = self.db.get_active_holdings()
+            if not holdings:
+                await query.edit_message_text("\u26a0\ufe0f 보유종목이 없습니다.")
+                return
+            await query.edit_message_text(
+                "\U0001f4ca 포트폴리오 백테스트 실행 중...\n(시간이 걸릴 수 있습니다)"
+            )
+            from kstock.backtest.engine import (
+                TradeCosts,
+                run_portfolio_backtest,
+                format_portfolio_backtest,
+            )
+            tickers = []
+            n = len(holdings)
+            for h in holdings:
+                tickers.append({
+                    "code": h["ticker"],
+                    "name": h.get("name", h["ticker"]),
+                    "market": h.get("market", "KOSPI"),
+                    "weight": 1.0 / n,
+                })
+            result = run_portfolio_backtest(tickers, costs=TradeCosts())
+            if result:
+                text = format_portfolio_backtest(result)
+                await query.message.reply_text(text)
+            else:
+                await query.message.reply_text(
+                    "\u26a0\ufe0f 백테스트 데이터가 부족합니다."
+                )
+            return
+
+        if payload.startswith("withcost:"):
+            ticker = payload.split(":")[1]
+            name = ticker
+            market = "KOSPI"
+            for item in self.all_tickers:
+                if item["code"] == ticker:
+                    name = item["name"]
+                    market = item.get("market", "KOSPI")
+                    break
+            await query.edit_message_text(
+                f"\U0001f4ca {name} 비용 포함 백테스트 실행 중..."
+            )
+            from kstock.backtest.engine import (
+                TradeCosts,
+                run_backtest,
+                format_backtest_result,
+            )
+            result = run_backtest(
+                ticker, name=name, market=market, costs=TradeCosts(),
+            )
+            if result:
+                text = format_backtest_result(result)
+                text += f"\n\n\U0001f4b0 총 거래비용: {result.total_cost_pct:.1f}%"
+                await query.message.reply_text(text)
+            else:
+                await query.message.reply_text("\u26a0\ufe0f 백테스트 실패")
+            return
+
+    async def _action_risk_advanced(self, query, context, payload: str) -> None:
+        """고급 리스크 리포트 콜백: risk:advanced."""
+        if payload != "advanced":
+            return
+        holdings = self.db.get_active_holdings()
+        if not holdings:
+            await query.edit_message_text("\u26a0\ufe0f 보유종목이 없습니다.")
+            return
+        await query.edit_message_text(
+            "📊 고급 리스크 분석 실행 중...\n"
+            "(VaR, Monte Carlo, 스트레스 테스트)"
+        )
+        try:
+            from kstock.core.risk_engine import (
+                generate_advanced_risk_report,
+                format_advanced_risk_report,
+            )
+            total_value = sum(
+                h.get("current_price", 0) * h.get("quantity", 0)
+                for h in holdings
+            )
+            if total_value <= 0:
+                total_value = sum(
+                    h.get("buy_price", 0) * h.get("quantity", 0)
+                    for h in holdings
+                )
+            report = await generate_advanced_risk_report(total_value, holdings)
+            text = format_advanced_risk_report(report)
+            await query.message.reply_text(text)
+            logger.info("Advanced risk report generated")
+        except Exception as e:
+            logger.error("Advanced risk report error: %s", e, exc_info=True)
+            await query.message.reply_text(
+                "\u26a0\ufe0f 리스크 분석 실행 중 오류가 발생했습니다."
+            )
 
     # == Scheduled Jobs ======================================================
 

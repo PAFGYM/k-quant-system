@@ -27,6 +27,32 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class TradeCosts:
+    """한국 주식 거래 비용 모델."""
+    commission_rate: float = 0.00015    # KIS 수수료 0.015%
+    sell_tax_rate: float = 0.0023       # 매도세 0.23% (코스피)
+    slippage_rate: float = 0.001        # 슬리피지 0.1%
+
+    def buy_cost(self, price: float, quantity: int) -> float:
+        amount = price * quantity
+        return amount * (self.commission_rate + self.slippage_rate)
+
+    def sell_cost(self, price: float, quantity: int) -> float:
+        amount = price * quantity
+        return amount * (self.commission_rate + self.sell_tax_rate + self.slippage_rate)
+
+    def net_pnl(self, buy_price: float, sell_price: float, quantity: int) -> float:
+        gross = (sell_price - buy_price) * quantity
+        costs = self.buy_cost(buy_price, quantity) + self.sell_cost(sell_price, quantity)
+        return gross - costs
+
+    def net_pnl_pct(self, buy_price: float, sell_price: float) -> float:
+        gross_pct = (sell_price - buy_price) / buy_price * 100
+        cost_pct = (self.commission_rate * 2 + self.sell_tax_rate + self.slippage_rate * 2) * 100
+        return gross_pct - cost_pct
+
+
+@dataclass
 class BacktestTrade:
     """A single simulated trade."""
 
@@ -57,6 +83,7 @@ class BacktestResult:
     max_drawdown_pct: float
     sharpe_ratio: float
     profit_factor: float
+    total_cost_pct: float = 0.0
     trades: list[BacktestTrade] = field(default_factory=list)
 
 
@@ -87,6 +114,7 @@ def run_backtest(
     target_pct: float = 3.0,
     stop_pct: float = -5.0,
     lookback: int = 60,
+    costs: TradeCosts | None = None,
 ) -> BacktestResult | None:
     """Run backtest for a single ticker.
 
@@ -140,7 +168,10 @@ def run_backtest(
 
         if in_trade:
             current = closes[i]
-            pnl = (current - entry_price) / entry_price * 100
+            if costs:
+                pnl = costs.net_pnl_pct(entry_price, current)
+            else:
+                pnl = (current - entry_price) / entry_price * 100
             days_held = i - entry_idx
 
             # Exit conditions
@@ -189,7 +220,10 @@ def run_backtest(
     # Close any remaining trade
     if in_trade:
         current = closes[-1]
-        pnl = (current - entry_price) / entry_price * 100
+        if costs:
+            pnl = costs.net_pnl_pct(entry_price, current)
+        else:
+            pnl = (current - entry_price) / entry_price * 100
         trades.append(BacktestTrade(
             ticker=code, name=name,
             entry_date=entry_date, entry_price=round(entry_price, 0),
@@ -239,6 +273,11 @@ def run_backtest(
 
     period_str = f"{df['date'].iloc[0]} ~ {df['date'].iloc[-1]}"
 
+    total_cost_pct = 0.0
+    if costs:
+        cost_per_trade = (costs.commission_rate * 2 + costs.sell_tax_rate + costs.slippage_rate * 2) * 100
+        total_cost_pct = cost_per_trade * len(trades)
+
     return BacktestResult(
         ticker=code,
         name=name,
@@ -252,6 +291,7 @@ def run_backtest(
         max_drawdown_pct=round(max_dd, 2),
         sharpe_ratio=round(sharpe, 2),
         profit_factor=round(profit_factor, 2),
+        total_cost_pct=round(total_cost_pct, 2),
         trades=trades,
     )
 
@@ -294,5 +334,176 @@ def format_backtest_result(result: BacktestResult) -> str:
                 f"  {emoji} {t.entry_date} \u2192 {t.exit_date} "
                 f"{t.pnl_pct:+.1f}% ({t.holding_days}\uc77c)"
             )
+
+    return "\n".join(lines)
+
+
+@dataclass
+class PortfolioBacktestResult:
+    period: str
+    initial_capital: float
+    final_capital: float
+    total_return_pct: float
+    annualized_return_pct: float
+    max_drawdown_pct: float
+    sharpe_ratio: float
+    sortino_ratio: float
+    calmar_ratio: float
+    total_trades: int
+    win_rate: float
+    profit_factor: float
+    avg_holding_days: float
+    total_cost_pct: float
+    per_stock_results: list[BacktestResult] = field(default_factory=list)
+    equity_curve: list[float] = field(default_factory=list)
+
+
+def run_portfolio_backtest(
+    tickers: list[dict],
+    period: str = "1y",
+    initial_capital: float = 10_000_000,
+    costs: TradeCosts | None = None,
+    rebalance_days: int = 0,
+) -> PortfolioBacktestResult | None:
+    """Run portfolio-level backtest.
+
+    tickers: [{"code": "005930", "name": "삼성전자", "market": "KOSPI", "weight": 0.4}, ...]
+    """
+    if not tickers:
+        return None
+
+    # Normalize weights
+    total_weight = sum(t.get("weight", 1.0 / len(tickers)) for t in tickers)
+
+    per_stock = []
+    all_pnls = []
+    total_cost = 0.0
+    total_holding_days = 0
+
+    for t in tickers:
+        weight = t.get("weight", 1.0 / len(tickers)) / total_weight
+        result = run_backtest(
+            code=t["code"],
+            name=t.get("name", t["code"]),
+            market=t.get("market", "KOSPI"),
+            period=period,
+            costs=costs,
+        )
+        if result is None:
+            continue
+        per_stock.append(result)
+        # Weight pnls
+        for trade in result.trades:
+            all_pnls.append(trade.pnl_pct * weight)
+            total_holding_days += trade.holding_days
+        total_cost += result.total_cost_pct * weight
+
+    if not per_stock:
+        return None
+
+    # Total return
+    total_return = 1.0
+    for p in all_pnls:
+        total_return *= (1 + p / 100)
+    total_return_pct = (total_return - 1) * 100
+
+    final_capital = initial_capital * total_return
+
+    # Annualized return (assume period from first result)
+    # Approximate trading days from period string
+    period_map = {"1y": 252, "2y": 504, "6mo": 126, "3mo": 63}
+    trading_days = period_map.get(period, 252)
+    annualized = ((1 + total_return_pct / 100) ** (252 / max(trading_days, 1)) - 1) * 100
+
+    # MDD from equity curve
+    if all_pnls:
+        cumulative = np.cumprod([1 + p / 100 for p in all_pnls])
+        equity_curve = (cumulative * initial_capital).tolist()
+        peak = np.maximum.accumulate(cumulative)
+        dd = (cumulative - peak) / peak * 100
+        max_dd = float(np.min(dd))
+    else:
+        equity_curve = [initial_capital]
+        max_dd = 0.0
+
+    # Sharpe
+    if len(all_pnls) > 1 and np.std(all_pnls) > 0:
+        sharpe = float(np.mean(all_pnls) / np.std(all_pnls) * np.sqrt(252 / 10))
+    else:
+        sharpe = 0.0
+
+    # Sortino
+    downside = [r for r in all_pnls if r < 0]
+    if downside:
+        downside_std = float(np.std(downside))
+        sortino = (annualized / 100) / (downside_std / 100 * np.sqrt(252)) if downside_std > 0 else 0.0
+    else:
+        sortino = 0.0
+
+    # Calmar
+    calmar = annualized / abs(max_dd) if max_dd != 0 else 0.0
+
+    # Win rate & profit factor
+    wins = [p for p in all_pnls if p > 0]
+    losses = [p for p in all_pnls if p <= 0]
+    win_rate = len(wins) / len(all_pnls) * 100 if all_pnls else 0.0
+    total_wins = sum(wins) if wins else 0
+    total_losses_val = abs(sum(losses)) if losses else 1
+    profit_factor = total_wins / total_losses_val if total_losses_val > 0 else total_wins
+
+    avg_hd = total_holding_days / len(all_pnls) if all_pnls else 0
+
+    period_str = per_stock[0].period if per_stock else period
+
+    return PortfolioBacktestResult(
+        period=period_str,
+        initial_capital=initial_capital,
+        final_capital=round(final_capital, 0),
+        total_return_pct=round(total_return_pct, 2),
+        annualized_return_pct=round(annualized, 2),
+        max_drawdown_pct=round(max_dd, 2),
+        sharpe_ratio=round(sharpe, 2),
+        sortino_ratio=round(sortino, 2),
+        calmar_ratio=round(calmar, 2),
+        total_trades=len(all_pnls),
+        win_rate=round(win_rate, 1),
+        profit_factor=round(profit_factor, 2),
+        avg_holding_days=round(avg_hd, 1),
+        total_cost_pct=round(total_cost, 2),
+        per_stock_results=per_stock,
+        equity_curve=equity_curve,
+    )
+
+
+def format_portfolio_backtest(result: PortfolioBacktestResult) -> str:
+    pnl_emoji = "\U0001f7e2" if result.total_return_pct > 0 else "\U0001f534"
+    init_만 = result.initial_capital / 10000
+    final_만 = result.final_capital / 10000
+
+    lines = [
+        "\U0001f4ca \ud3ec\ud2b8\ud3f4\ub9ac\uc624 \ubc31\ud14c\uc2a4\ud2b8 \uacb0\uacfc",
+        "\u2501" * 22,
+        f"\uae30\uac04: {result.period}",
+        f"\ucd08\uae30 \uc790\ubcf8: {init_만:,.0f}\ub9cc\uc6d0 \u2192 \ucd5c\uc885: {final_만:,.0f}\ub9cc\uc6d0",
+        "",
+        f"{pnl_emoji} \ucd1d \uc218\uc775\ub960: {result.total_return_pct:+.1f}% (\uc5f0\ud658\uc0b0 {result.annualized_return_pct:+.1f}%)",
+        f"\U0001f4c9 \ucd5c\ub300 \ub0a8\ud3ed: {result.max_drawdown_pct:.1f}%",
+        f"\U0001f4ca \uc0e4\ud504\ube44\uc728: {result.sharpe_ratio:.2f}",
+        f"\U0001f4ca \uc18c\ub974\ud2f0\ub178: {result.sortino_ratio:.2f}",
+        f"\U0001f4ca \uce7c\ub9c8\ube44\uc728: {result.calmar_ratio:.2f}",
+        f"\u2696\ufe0f Profit Factor: {result.profit_factor:.2f}",
+        "",
+        f"\U0001f4b0 \ucd1d \uac70\ub798\ube44\uc6a9: {result.total_cost_pct:.1f}%",
+        f"\U0001f504 \uc21c\uc218\uc775\ub960: {result.total_return_pct - result.total_cost_pct:+.1f}% (\ube44\uc6a9 \ucc28\uac10 \ud6c4)",
+        "",
+        "\uc885\ubaa9\ubcc4:",
+    ]
+
+    for r in result.per_stock_results:
+        emoji = "\U0001f7e2" if r.total_return_pct > 0 else "\U0001f534"
+        lines.append(
+            f"  {emoji} {r.name}: {r.total_return_pct:+.1f}% "
+            f"({r.winning_trades}\uc2b9 {r.losing_trades}\ud328)"
+        )
 
     return "\n".join(lines)

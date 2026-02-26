@@ -1064,6 +1064,31 @@ class SchedulerMixin:
         except Exception:
             pass
 
+        # 5. v3.8 건강 체크: WebSocket, LSTM, 브리핑, 단타 모니터링
+        try:
+            health_items = []
+            if not self._surge_callback_registered:
+                health_items.append("🔌 WebSocket 콜백 미등록")
+            import os
+            if not os.path.exists("models/lstm_stock.pt"):
+                has_any_lstm = any(
+                    os.path.exists(f"models/lstm_{h.get('ticker', '')}.pt")
+                    for h in holdings
+                ) if holdings else False
+                if not has_any_lstm:
+                    health_items.append("🧠 LSTM 모델 없음")
+            scalp_count = len([
+                h for h in holdings if h.get("holding_type") == "scalp"
+            ])
+            if scalp_count > 0:
+                health_items.append(f"⚡ 단타 종목 {scalp_count}개 보유중")
+            if health_items:
+                suggestions.append(
+                    "🏥 시스템 상태: " + ", ".join(health_items)
+                )
+        except Exception:
+            pass
+
         if not suggestions:
             return None
 
@@ -1766,6 +1791,69 @@ class SchedulerMixin:
             "📊 자금이 묶여 있는 시간도 비용입니다 (기회비용)"
         )
         await context.bot.send_message(chat_id=self.chat_id, text=text)
+
+    async def job_lstm_retrain(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매주 일요일 03:00 LSTM 모델 재학습."""
+        try:
+            from kstock.ml.lstm_predictor import train_lstm, save_lstm_model, _HAS_TORCH
+            if not _HAS_TORCH:
+                logger.info("LSTM retrain skipped: PyTorch not installed")
+                return
+
+            holdings = self.db.get_active_holdings()
+            if not holdings:
+                logger.info("LSTM retrain skipped: no holdings")
+                return
+
+            import yfinance as yf
+            import numpy as np
+            from kstock.core.predictor import _build_features
+
+            trained_count = 0
+            for h in holdings[:10]:  # 최대 10종목
+                ticker = h.get("ticker", "")
+                market = h.get("market", "KOSPI")
+                suffix = ".KS" if market == "KOSPI" else ".KQ"
+                yf_ticker = ticker + suffix
+
+                try:
+                    df = yf.download(yf_ticker, period="2y", progress=False)
+                    if df is None or len(df) < 120:
+                        continue
+
+                    features = _build_features(df)
+                    if features is None or len(features) < 60:
+                        continue
+
+                    feature_cols = [c for c in features.columns if c not in [
+                        "Date", "date", "Close", "close",
+                    ]]
+                    X = features[feature_cols].values
+                    close_arr = features["Close"].values if "Close" in features.columns else features["close"].values
+                    y = (np.roll(close_arr, -5) / close_arr - 1 > 0.03).astype(int)
+                    y[-5:] = 0
+
+                    model, sm, ss, result = train_lstm(X, y)
+                    if model is not None:
+                        save_lstm_model(model, sm, ss, path=f"models/lstm_{ticker}.pt")
+                        trained_count += 1
+                        logger.info(
+                            "LSTM trained: %s val_auc=%.4f epochs=%d",
+                            ticker, result.val_auc, result.epochs,
+                        )
+                except Exception as e:
+                    logger.warning("LSTM retrain %s error: %s", ticker, e)
+
+            logger.info("LSTM retrain done: %d models", trained_count)
+            if self.chat_id and trained_count > 0:
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=f"🧠 LSTM 재학습 완료: {trained_count}개 모델 업데이트",
+                )
+        except Exception as e:
+            logger.error("LSTM retrain job error: %s", e, exc_info=True)
 
     # == Core Logic ==========================================================
 

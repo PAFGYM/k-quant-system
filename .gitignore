@@ -39,5 +39,10 @@ htmlcov/
 venv/
 .venv/
 
+# ML Models
+models/
+*.pt
+*.pth
+
 # Claude Code
 .claude/

@@ -244,6 +244,13 @@ class CoreHandlersMixin:
             days=(0, 1, 2, 3, 4),
             name="short_term_review",
         )
+        # v3.8: LSTM 재학습 (일요일 03:00)
+        jq.run_daily(
+            self.job_lstm_retrain,
+            time=dt_time(hour=3, minute=0, tzinfo=KST),
+            days=(6,),
+            name="lstm_retrain",
+        )
         logger.info(
             "Scheduled: buy_planner(weekday 07:50), us_premarket(07:00), "
             "morning(07:30), intraday(1min), "
@@ -253,7 +260,8 @@ class CoreHandlersMixin:
             "daily_report_pdf(16:00), self_report(21:00), "
             "report_crawl(weekday 08:20), "
             "ws_connect(weekday 08:50), ws_disconnect(weekday 15:35), "
-            "scalp_close(weekday 14:30), short_review(weekday 08:00) KST"
+            "scalp_close(weekday 14:30), short_review(weekday 08:00), "
+            "lstm_retrain(Sun 03:00) KST"
         )
 
     # == Command & Menu Handlers =============================================
@@ -308,9 +316,29 @@ class CoreHandlersMixin:
             result = run_backtest(ticker, name=name, market=market)
             if result:
                 msg = format_backtest_result(result)
+                await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+                # Backtest Pro 버튼 추가
+                bt_buttons = [
+                    [
+                        InlineKeyboardButton(
+                            "\U0001f4b0 비용 포함 재실행",
+                            callback_data=f"bt:withcost:{ticker}",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "\U0001f4ca 포트폴리오 백테스트",
+                            callback_data="bt:portfolio",
+                        ),
+                    ],
+                ]
+                await update.message.reply_text(
+                    "\U0001f4ca Backtest Pro",
+                    reply_markup=InlineKeyboardMarkup(bt_buttons),
+                )
             else:
                 msg = f"\u26a0\ufe0f {name} 백테스트 실패\n데이터가 부족하거나 종목코드를 확인해주세요."
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+                await update.message.reply_text(msg, reply_markup=MAIN_MENU)
         except Exception as e:
             logger.error("Backtest error: %s", e, exc_info=True)
             await update.message.reply_text(
@@ -683,40 +711,22 @@ class CoreHandlersMixin:
                     reply_markup=MAIN_MENU,
                 )
         else:
-            # 매수 플래너: 금액 입력 대기 중
+            # 매수 플래너: 금액 입력 대기 → 장바구니 모드 진입
             if context.user_data.get("awaiting_buy_amount"):
                 import re as _re
                 nums = _re.findall(r'\d+', text)
                 if nums:
-                    amount = int(nums[0])
+                    amount_만원 = int(nums[0])
+                    amount_won = amount_만원 * 10000
                     context.user_data["awaiting_buy_amount"] = False
-                    context.user_data["buy_plan_amount"] = amount
-                    keyboard = InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                "⚡ 초단기 (당일~1일)",
-                                callback_data=f"bp:hz:scalp:{amount}",
-                            ),
-                            InlineKeyboardButton(
-                                "🔥 단기 (3~5일)",
-                                callback_data=f"bp:hz:short:{amount}",
-                            ),
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                "📊 중기 (1~3개월)",
-                                callback_data=f"bp:hz:mid:{amount}",
-                            ),
-                            InlineKeyboardButton(
-                                "💎 장기 (6개월+)",
-                                callback_data=f"bp:hz:long:{amount}",
-                            ),
-                        ],
-                    ])
-                    await update.message.reply_text(
-                        f"⏰ {amount}만원으로 투자 기간을 선택하세요",
-                        reply_markup=keyboard,
-                    )
+                    context.user_data["buy_cart"] = {
+                        "budget": amount_won,
+                        "remaining": amount_won,
+                        "items": [],
+                        "active": True,
+                    }
+                    # 장바구니 메뉴 표시
+                    await self._show_cart_menu(update, context)
                 else:
                     await update.message.reply_text(
                         "숫자를 입력해주세요 (예: 100)"
@@ -1206,6 +1216,10 @@ class CoreHandlersMixin:
                 "hub": self._action_hub,
                 # v3.7: 매수 플래너
                 "bp": self._action_buy_plan,
+                # Backtest Pro
+                "bt": self._action_backtest_pro,
+                # v3.8: 고급 리스크
+                "risk": self._action_risk_advanced,
             }
             handler = dispatch.get(action)
             if handler:
