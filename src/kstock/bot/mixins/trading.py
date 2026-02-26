@@ -717,9 +717,24 @@ class TradingMixin:
             if holding:
                 self.db.update_holding(holding["id"], status="sold")
                 hname = holding.get("name", ticker)
-                await query.edit_message_text(f"🗑️ {hname} 포트폴리오에서 삭제!")
+                # 삭제 후 잔고 메뉴 재표시 (메뉴 닫기 전까지 유지)
+                holdings = await self._load_holdings_with_fallback()
+                if holdings:
+                    total_eval, total_invested = await self._update_holdings_prices(holdings)
+                    lines = self._format_balance_lines(holdings, total_eval, total_invested)
+                    lines.insert(0, f"\U0001f5d1\ufe0f {hname} 삭제 완료!\n")
+                    bal_buttons = self._build_balance_buttons(holdings)
+                    await query.edit_message_text(
+                        "\n".join(lines),
+                        reply_markup=InlineKeyboardMarkup(bal_buttons),
+                    )
+                else:
+                    await query.edit_message_text(
+                        f"\U0001f5d1\ufe0f {hname} 삭제 완료!\n\n"
+                        "\U0001f4b0 보유종목이 없습니다."
+                    )
             else:
-                await query.edit_message_text("⚠️ 종목을 찾을 수 없습니다.")
+                await query.edit_message_text("\u26a0\ufe0f 종목을 찾을 수 없습니다.")
 
     def _resolve_ticker_from_name(self, name: str) -> str:
         """종목명으로 유니버스에서 티커 코드를 찾습니다."""
@@ -740,9 +755,22 @@ class TradingMixin:
 
         [v3.5.5] 빈 ticker를 유니버스에서 해결 시도.
         [v3.6.2] 스크린샷 fallback 시 holdings DB에 자동 동기화.
+        [v3.10] sold 이력이 있으면 스크린샷 fallback 스킵 (삭제 종목 부활 방지).
         """
         holdings = self.db.get_active_holdings()
         if not holdings:
+            # sold 이력이 있으면 유저가 의도적으로 삭제한 것 → fallback 스킵
+            has_sold = False
+            try:
+                with self.db._connect() as conn:
+                    row = conn.execute(
+                        "SELECT COUNT(*) as cnt FROM holdings WHERE status='sold'"
+                    ).fetchone()
+                    has_sold = (row["cnt"] if row else 0) > 0
+            except Exception:
+                pass
+            if has_sold:
+                return []
             try:
                 screenshot = self.db.get_latest_screenshot()
                 if screenshot:

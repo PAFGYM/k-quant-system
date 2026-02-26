@@ -1008,6 +1008,16 @@ class SQLiteStore:
             existing = self.get_holding_by_ticker(ticker)
         if not existing and name:
             existing = self.get_holding_by_name(name)
+        # sold/삭제된 종목이 있으면 재등록하지 않음
+        if not existing and ticker:
+            with self._connect() as conn:
+                sold_row = conn.execute(
+                    "SELECT id FROM holdings WHERE ticker=? AND status='sold' "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (ticker,),
+                ).fetchone()
+                if sold_row:
+                    return sold_row["id"]
         now = datetime.utcnow().isoformat()
         if existing:
             with self._connect() as conn:
