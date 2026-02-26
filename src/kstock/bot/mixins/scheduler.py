@@ -2040,7 +2040,7 @@ class SchedulerMixin:
         - 리스크 위반 감시 (집중도, MDD, 일간 손실)
         - 차익실현 자동 알림 (+50% 1/3 매도, +100% 원금 회수)
         - 트레일링 스탑 추적 (고점 대비 하락 감지)
-        - 집중도 강화 경고 (종목 25%, 섹터 40%)
+        - 집중도 강화 경고 (종목 30%, 섹터 50%)
         """
         if not self.chat_id:
             return
@@ -2086,20 +2086,20 @@ class SchedulerMixin:
             # === 1. 리스크 위반 체크 ===
             violations = []
 
-            # 종목 집중도 (25% 강화 기준 + 40% 기존 기준)
+            # 종목 집중도 (30% 경고 + 50% 긴급)
             for h in holdings:
                 ticker = h.get("ticker", "")
                 w = weights.get(ticker, 0)
                 name = h.get("name", ticker)
-                if w > 0.40:
+                if w > 0.50:
                     violations.append(
                         f"🚨 종목 극집중: {name} "
-                        f"비중 {w*100:.1f}% (위험 한도 40% 초과)"
+                        f"비중 {w*100:.1f}% (긴급 한도 50% 초과)"
                     )
-                elif w > 0.25:
+                elif w > 0.30:
                     violations.append(
                         f"⚠️ 종목 집중: {name} "
-                        f"비중 {w*100:.1f}% (권장 한도 25% 초과)"
+                        f"비중 {w*100:.1f}% (경고 한도 30% 초과)"
                     )
 
             # 일간 손실률 체크

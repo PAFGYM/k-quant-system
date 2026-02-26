@@ -3,7 +3,7 @@
 Phase 1: 상위 1% 투자자 시스템
 - Half-Kelly Criterion 기반 최적 투자 비율 산출
 - ATR 기반 변동성 조정 (고변동성 종목 → 비중 축소)
-- 포트폴리오 집중도 제한 (종목 25%, 섹터 40%)
+- 포트폴리오 집중도 제한 (종목 30%, 섹터 50%)
 - 단계별 차익실현 자동 알림 (Trailing Stop)
 
 사용법:
@@ -29,8 +29,8 @@ USER_NAME = "주호님"
 
 # ── 기본 설정 ──────────────────────────────────────────────
 DEFAULT_LIMITS = {
-    "max_single_weight": 0.25,     # 종목당 최대 25%
-    "max_sector_weight": 0.40,     # 섹터당 최대 40%
+    "max_single_weight": 0.30,     # 종목당 최대 30%
+    "max_sector_weight": 0.50,     # 섹터당 최대 50%
     "min_kelly_fraction": 0.03,    # 최소 3% 배분
     "max_kelly_fraction": 0.25,    # 최대 25% 배분 (Half-Kelly cap)
     "min_shares": 1,               # 최소 1주
@@ -612,9 +612,9 @@ class PositionSizer:
 
         if available <= 0:
             if existing_w >= self.limits["max_single_weight"]:
-                return "종목 비중 한도(25%) 초과. 추가 매수 불가."
+                return "종목 비중 한도(30%) 초과. 추가 매수 불가."
             if sector_w >= self.limits["max_sector_weight"]:
-                return "섹터 비중 한도(40%) 초과. 추가 매수 불가."
+                return "섹터 비중 한도(50%) 초과. 추가 매수 불가."
             return "비중 한도 초과. 추가 매수 불가."
 
         # Kelly 해석

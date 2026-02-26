@@ -19,16 +19,16 @@ from kstock.core.position_sizer import (
 def test_sizer_init():
     sizer = PositionSizer(account_value=200_000_000)
     assert sizer.account_value == 200_000_000
-    assert sizer.limits["max_single_weight"] == 0.25
+    assert sizer.limits["max_single_weight"] == 0.30
 
 
 def test_sizer_init_custom_limits():
     sizer = PositionSizer(
         account_value=100_000_000,
-        limits={"max_single_weight": 0.30},
+        limits={"max_single_weight": 0.35},
     )
-    assert sizer.limits["max_single_weight"] == 0.30
-    assert sizer.limits["max_sector_weight"] == 0.40  # 기본값 유지
+    assert sizer.limits["max_single_weight"] == 0.35
+    assert sizer.limits["max_sector_weight"] == 0.50  # 기본값 유지
 
 
 # ── Half-Kelly 계산 테스트 ─────────────────────────────────
@@ -135,22 +135,22 @@ def test_calculate_zero_price():
 
 
 def test_calculate_high_existing_weight():
-    """이미 25% 보유 → 추가 매수 불가."""
+    """이미 30% 보유 → 추가 매수 불가."""
     sizer = PositionSizer(account_value=200_000_000)
     result = sizer.calculate(
         ticker="005930", current_price=75000,
-        existing_weight=0.25,
+        existing_weight=0.30,
     )
     assert result.shares == 0
     assert "한도" in result.reason
 
 
 def test_calculate_sector_limit():
-    """섹터 40% 초과 → 추가 매수 불가."""
+    """섹터 50% 초과 → 추가 매수 불가."""
     sizer = PositionSizer(account_value=200_000_000)
     result = sizer.calculate(
         ticker="005930", current_price=75000,
-        sector_weight=0.40,
+        sector_weight=0.50,
     )
     assert result.shares == 0
     assert "한도" in result.reason
@@ -348,7 +348,7 @@ def test_concentration_normal():
         {"ticker": "035420", "name": "NAVER", "eval_amount": 20_000_000},
     ]
     warnings = sizer.analyze_concentration(holdings)
-    assert len(warnings) == 0  # 각 25%로 한도 이하
+    assert len(warnings) == 0  # 각 25%로 한도(30%) 이하
 
 
 def test_concentration_single_stock_violation():
@@ -365,13 +365,13 @@ def test_concentration_single_stock_violation():
 
 
 def test_concentration_sector_violation():
-    """2차전지 섹터 60% → 경고."""
+    """2차전지 섹터 70% → 경고 (한도 50%)."""
     sizer = PositionSizer()
     holdings = [
         {"ticker": "086520", "name": "에코프로", "eval_amount": 50_000_000},
         {"ticker": "247540", "name": "에코프로비엠", "eval_amount": 30_000_000},
-        {"ticker": "006400", "name": "삼성SDI", "eval_amount": 10_000_000},
-        {"ticker": "005930", "name": "삼성전자", "eval_amount": 10_000_000},
+        {"ticker": "006400", "name": "삼성SDI", "eval_amount": 20_000_000},
+        {"ticker": "005930", "name": "삼성전자", "eval_amount": 10_000_000},  # 반도체 9%
     ]
     warnings = sizer.analyze_concentration(holdings)
     assert any("2차전지" in w or "섹터" in w for w in warnings)
@@ -430,7 +430,7 @@ def test_format_concentration_warnings_empty():
 
 def test_format_concentration_warnings_with_data():
     warnings = [
-        "⚠️ 에코프로 비중 50.0% (한도 25%, 25%p 초과)",
+        "⚠️ 에코프로 비중 50.0% (한도 30%, 20%p 초과)",
     ]
     msg = format_concentration_warnings(warnings)
     assert "집중도" in msg
@@ -476,8 +476,8 @@ def test_trailing_stop_config():
 
 
 def test_default_limits():
-    assert DEFAULT_LIMITS["max_single_weight"] == 0.25
-    assert DEFAULT_LIMITS["max_sector_weight"] == 0.40
+    assert DEFAULT_LIMITS["max_single_weight"] == 0.30
+    assert DEFAULT_LIMITS["max_sector_weight"] == 0.50
     assert DEFAULT_LIMITS["min_kelly_fraction"] == 0.03
     assert DEFAULT_LIMITS["max_kelly_fraction"] == 0.25
 
