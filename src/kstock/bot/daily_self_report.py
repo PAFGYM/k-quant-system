@@ -16,7 +16,7 @@ KST = timezone(timedelta(hours=9))
 USER_NAME = "주호님"
 
 
-async def generate_daily_self_report(db, macro_client=None) -> str:
+async def generate_daily_self_report(db, macro_client=None, ws=None) -> str:
     """봇 자가진단 + 개선 제안 보고서 생성.
 
     Args:
@@ -70,6 +70,8 @@ async def generate_daily_self_report(db, macro_client=None) -> str:
     lines.append("\u26a0\ufe0f 2. 부족한 점")
     issues = []
 
+    holdings = []
+    no_fin_count = 0
     try:
         holdings = db.get_active_holdings()
         no_fin_count = 0
@@ -125,8 +127,12 @@ async def generate_daily_self_report(db, macro_client=None) -> str:
         except Exception:
             suggestions.append("  \u2192 매크로 데이터 갱신 실패 \u2192 점검 필요")
 
-    suggestions.append("  \u2192 KIS API 키 만료 시 재발급 필요 (한국투자증권 홈페이지)")
-    suggestions.append("  \u2192 pykis 패키지 설치 시 실시간 호가/체결 가능")
+    # 동적 추천 (상태 기반)
+    if ws and not getattr(ws, 'is_connected', False):
+        suggestions.append("  \u2192 WebSocket 미연결 → 재연결 필요")
+    lstm_path = os.path.join(os.getcwd(), "models", "lstm_stock.pt")
+    if not os.path.exists(lstm_path):
+        suggestions.append("  \u2192 LSTM 모델 파일 없음 → 재학습 필요")
 
     lines.extend(suggestions)
     lines.append("")
@@ -161,16 +167,21 @@ async def generate_daily_self_report(db, macro_client=None) -> str:
 
     lines.append("")
 
-    # 5. 외부 도구/스킬 추천
+    # 5. 추천 사항 (동적)
     lines.append("\U0001f680 5. 추천 사항")
-    lines.append("  \u2192 GitHub한국주식분석 도구 탐색 제안")
-    lines.append("  \u2192 OpenDART 공시 연동으로 실적 알림 강화 가능")
-    lines.append("  \u2192 네이버 금융 크롤링으로 실시간 수급 데이터 확보 가능")
+    openai_ok = bool(os.getenv("OPENAI_API_KEY"))
+    gemini_ok = bool(os.getenv("GEMINI_API_KEY"))
+    if not openai_ok:
+        lines.append("  \u2192 OpenAI API 키 미설정 → Multi-AI 불완전")
+    if not gemini_ok:
+        lines.append("  \u2192 Gemini API 키 미설정 → Multi-AI 불완전")
+    if openai_ok and gemini_ok and anthropic_configured:
+        lines.append("  \u2192 3엔진 Multi-AI 정상 가동 중")
 
     lines.extend([
         "",
         "\u2500" * 25,
-        f"\U0001f916 K-Quant v3.5 | {now.strftime('%H:%M')} 자가진단 완료",
+        f"\U0001f916 K-Quant v3.10 | {now.strftime('%H:%M')} 자가진단 완료",
     ])
 
     return "\n".join(lines)

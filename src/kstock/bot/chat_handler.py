@@ -141,7 +141,7 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory) -> s
     system_prompt = build_system_prompt(context)
 
     # Assemble conversation messages from history + new question
-    history = chat_memory.get_recent(limit=10)
+    history = chat_memory.get_recent(limit=20)
     messages: list[dict[str, str]] = []
     for msg in history:
         messages.append({"role": msg["role"], "content": msg["content"]})

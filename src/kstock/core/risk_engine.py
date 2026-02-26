@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -158,9 +159,10 @@ async def _fetch_price_histories(
     tickers: list[dict],
     period: str = "6mo",
 ) -> dict[str, pd.Series]:
-    """yfinance에서 종목별 종가 히스토리 가져오기."""
+    """yfinance에서 종목별 종가 히스토리 가져오기 (비동기)."""
     import yfinance as yf
 
+    loop = asyncio.get_event_loop()
     result = {}
     for t in tickers:
         ticker = t.get("ticker", "")
@@ -168,7 +170,9 @@ async def _fetch_price_histories(
         suffix = ".KS" if market.upper() == "KOSPI" else ".KQ"
         symbol = f"{ticker}{suffix}"
         try:
-            hist = yf.Ticker(symbol).history(period=period)
+            hist = await loop.run_in_executor(
+                None, lambda s=symbol: yf.Ticker(s).history(period=period)
+            )
             if not hist.empty and len(hist) >= 20:
                 result[ticker] = hist["Close"]
         except Exception as e:

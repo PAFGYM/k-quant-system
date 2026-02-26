@@ -333,6 +333,17 @@ CREATE TABLE IF NOT EXISTS supply_demand (
     UNIQUE(ticker, date)
 );
 
+CREATE TABLE IF NOT EXISTS dart_events (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker            TEXT    NOT NULL,
+    date              TEXT    NOT NULL,
+    title             TEXT    NOT NULL DEFAULT '',
+    event_type        TEXT    DEFAULT '',
+    url               TEXT    DEFAULT '',
+    created_at        TEXT    NOT NULL,
+    UNIQUE(ticker, date, title)
+);
+
 CREATE TABLE IF NOT EXISTS chat_history (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     role              TEXT    NOT NULL,
@@ -2114,6 +2125,33 @@ class SQLiteStore:
             rows = conn.execute(
                 "SELECT * FROM supply_demand WHERE ticker=? AND date >= ? ORDER BY date DESC",
                 (ticker, cutoff),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- dart_events (v3.10) ---------------------------------------------------
+
+    def add_dart_event(
+        self, ticker: str, date: str, title: str,
+        event_type: str = "", url: str = "",
+    ) -> int | None:
+        now = datetime.utcnow().isoformat()
+        try:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """INSERT OR IGNORE INTO dart_events
+                       (ticker, date, title, event_type, url, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (ticker, date, title, event_type, url, now),
+                )
+                return cursor.lastrowid if cursor.rowcount > 0 else None
+        except Exception:
+            return None
+
+    def get_dart_events(self, ticker: str, date: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM dart_events WHERE ticker=? AND date=? ORDER BY created_at DESC",
+                (ticker, date),
             ).fetchall()
         return [dict(r) for r in rows]
 

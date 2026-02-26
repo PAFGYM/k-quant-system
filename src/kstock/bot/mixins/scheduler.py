@@ -206,24 +206,12 @@ class SchedulerMixin:
                 f"- 장기(long): 3개월+, 수익 30~100% 목표\n\n"
                 f"볼드(**) 사용 금지. 이모지로 가독성 확보. 한 문장 최대 25자."
             )
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": self.anthropic_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-haiku-4-5-20251001",
-                        "max_tokens": 1200,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    return data["content"][0]["text"]
-                logger.warning("Morning v2 Claude API returned %d", resp.status_code)
+            result = await self.ai.analyze(
+                "morning_briefing", prompt, max_tokens=1200,
+            )
+            if result and not result.startswith("[AI 응답 불가]"):
+                return result
+            logger.warning("Morning v2 AI router returned empty/error")
         except Exception as e:
             logger.warning("Morning v2 briefing failed: %s, falling back", e)
         # fallback to simple briefing
@@ -502,25 +490,21 @@ class SchedulerMixin:
             f"   - 신규 매수 고려 종목 (있다면)\n"
         )
 
-        import anthropic
-        client = anthropic.AsyncAnthropic(api_key=self.anthropic_key)
-        response = await client.messages.create(
-            model="claude-sonnet-4-5-20250929",
-            max_tokens=3500,
-            temperature=0.3,
-            system=(
-                "너는 CFA/CAIA 자격을 보유한 20년 경력 한국 주식 전문 애널리스트 QuantBot이다. "
-                "주호님 전용 비서로, 매일 장 마감 후 4000자 수준의 전문 시장 분석을 제공한다. "
-                "볼드(**) 사용 금지. 마크다운 헤딩(#) 사용 금지. "
-                "이모지로 섹션을 구분하고, 번호 매기기를 사용해 가독성을 높인다. "
-                "반드시 구체적 수치와 근거를 제시하라. "
-                "추상적 표현(예: '관심 필요', '주시 필요') 대신 명확한 액션을 제시. "
-                "글로벌 투자은행 리서치 수준의 분석 깊이를 목표로 한다. "
-                "보유종목에 대해서는 특히 구체적으로 분석하라."
-            ),
-            messages=[{"role": "user", "content": prompt}],
+        eod_system = (
+            "너는 CFA/CAIA 자격을 보유한 20년 경력 한국 주식 전문 애널리스트 QuantBot이다. "
+            "주호님 전용 비서로, 매일 장 마감 후 4000자 수준의 전문 시장 분석을 제공한다. "
+            "볼드(**) 사용 금지. 마크다운 헤딩(#) 사용 금지. "
+            "이모지로 섹션을 구분하고, 번호 매기기를 사용해 가독성을 높인다. "
+            "반드시 구체적 수치와 근거를 제시하라. "
+            "추상적 표현(예: '관심 필요', '주시 필요') 대신 명확한 액션을 제시. "
+            "글로벌 투자은행 리서치 수준의 분석 깊이를 목표로 한다. "
+            "보유종목에 대해서는 특히 구체적으로 분석하라."
         )
-        analysis = response.content[0].text.strip().replace("**", "")
+        analysis = await self.ai.analyze(
+            "eod_report", prompt,
+            system=eod_system, max_tokens=3500, temperature=0.3,
+        )
+        analysis = analysis.strip().replace("**", "")
 
         import re
         analysis = re.sub(r'\n{3,}', '\n\n', analysis)
@@ -838,6 +822,25 @@ class SchedulerMixin:
                     f"💰 내 포트폴리오: {pnl_sign}{total_pnl:,.0f}원 ({pnl_sign}{total_rate:.1f}%)\n"
                     f"   오늘 변동: {day_sign}{total_day_pnl:,.0f}원"
                 )
+                # 포트폴리오 스냅샷 저장
+                try:
+                    import json as _json
+                    daily_pnl_pct = (total_day_pnl / total_eval * 100) if total_eval > 0 else 0
+                    self.db.add_portfolio_snapshot(
+                        date_str=now.strftime("%Y-%m-%d"),
+                        total_value=total_eval,
+                        holdings_count=len(holdings),
+                        daily_pnl_pct=daily_pnl_pct,
+                        total_pnl_pct=total_rate,
+                        holdings_json=_json.dumps(
+                            [{"ticker": h.get("ticker"), "name": h.get("name"),
+                              "pnl_pct": h.get("pnl_pct", 0)} for h in holdings],
+                            ensure_ascii=False,
+                        ),
+                    )
+                    logger.info("Portfolio snapshot saved: %s, value=%.0f", now.strftime("%Y-%m-%d"), total_eval)
+                except Exception as e:
+                    logger.warning("Failed to save portfolio snapshot: %s", e)
             else:
                 portfolio_line = "💰 포트폴리오: 보유종목 없음"
 
@@ -900,71 +903,66 @@ class SchedulerMixin:
                     parts.append(f"{name}({pnl:+.1f}%)")
                 holdings_ctx = f"\n보유종목: {', '.join(parts)}"
 
-            if self.anthropic_key:
-                import anthropic
-                client = anthropic.AsyncAnthropic(api_key=self.anthropic_key)
+            prompt = (
+                f"새벽 미국 시장 마감 결과를 분석하고, "
+                f"오늘 한국 시장에 미칠 영향을 알려줘.\n\n"
+                f"[미국 시장 마감 데이터]\n"
+                f"S&P500: {macro.spx_change_pct:+.2f}%\n"
+                f"나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
+                f"다우: {getattr(macro, 'dow_change_pct', 0):+.2f}%\n"
+                f"VIX: {macro.vix:.1f} ({macro.vix_change_pct:+.1f}%)\n"
+                f"USD/KRW: {macro.usdkrw:,.0f}원 ({macro.usdkrw_change_pct:+.1f}%)\n"
+                f"미국 10년물: {macro.us10y:.2f}%\n"
+                f"미국 2년물: {getattr(macro, 'us2y', 0):.2f}%\n"
+                f"DXY: {macro.dxy:.1f}\n"
+                f"BTC: ${macro.btc_price:,.0f} ({macro.btc_change_pct:+.1f}%)\n"
+                f"금: ${macro.gold_price:,.0f} ({macro.gold_change_pct:+.1f}%)\n"
+                f"유가: ${getattr(macro, 'wti_price', 0):.1f}\n"
+                f"시장체제: {macro.regime}\n"
+                f"{holdings_ctx}\n\n"
+                f"아래 형식으로 분석:\n\n"
+                f"1. 미국 시장 마감 요약 (2-3줄)\n"
+                f"   - 3대 지수 동향 + 주요 원인\n\n"
+                f"2. 주요 이슈 & 이벤트\n"
+                f"   - 실적 발표, FOMC, 경제지표 등\n"
+                f"   - 빅테크/반도체 등 핵심 종목 동향\n\n"
+                f"3. 한국 시장 영향 분석\n"
+                f"   - 코스피/코스닥 예상 방향\n"
+                f"   - 반도체/2차전지/바이오 등 주도 섹터 영향\n"
+                f"   - 외국인 수급 방향 예상\n\n"
+                f"4. 환율/금리/원자재 시그널\n"
+                f"   - 원화 방향 + 수출주 영향\n"
+                f"   - 국채 금리 → 성장주/가치주 영향\n\n"
+                f"5. 오늘 주호님 참고 포인트\n"
+                f"   - 장 시작 전 확인할 지표/이벤트\n"
+                f"   - 보유종목 관련 섹터 영향 (매도 지시 금지, 정보만 제공)\n"
+                f"   - 주시할 가격대/지지선 (참고용)\n"
+            )
 
-                prompt = (
-                    f"새벽 미국 시장 마감 결과를 분석하고, "
-                    f"오늘 한국 시장에 미칠 영향을 알려줘.\n\n"
-                    f"[미국 시장 마감 데이터]\n"
-                    f"S&P500: {macro.spx_change_pct:+.2f}%\n"
-                    f"나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
-                    f"다우: {getattr(macro, 'dow_change_pct', 0):+.2f}%\n"
-                    f"VIX: {macro.vix:.1f} ({macro.vix_change_pct:+.1f}%)\n"
-                    f"USD/KRW: {macro.usdkrw:,.0f}원 ({macro.usdkrw_change_pct:+.1f}%)\n"
-                    f"미국 10년물: {macro.us10y:.2f}%\n"
-                    f"미국 2년물: {getattr(macro, 'us2y', 0):.2f}%\n"
-                    f"DXY: {macro.dxy:.1f}\n"
-                    f"BTC: ${macro.btc_price:,.0f} ({macro.btc_change_pct:+.1f}%)\n"
-                    f"금: ${macro.gold_price:,.0f} ({macro.gold_change_pct:+.1f}%)\n"
-                    f"유가: ${getattr(macro, 'wti_price', 0):.1f}\n"
-                    f"시장체제: {macro.regime}\n"
-                    f"{holdings_ctx}\n\n"
-                    f"아래 형식으로 분석:\n\n"
-                    f"1. 미국 시장 마감 요약 (2-3줄)\n"
-                    f"   - 3대 지수 동향 + 주요 원인\n\n"
-                    f"2. 주요 이슈 & 이벤트\n"
-                    f"   - 실적 발표, FOMC, 경제지표 등\n"
-                    f"   - 빅테크/반도체 등 핵심 종목 동향\n\n"
-                    f"3. 한국 시장 영향 분석\n"
-                    f"   - 코스피/코스닥 예상 방향\n"
-                    f"   - 반도체/2차전지/바이오 등 주도 섹터 영향\n"
-                    f"   - 외국인 수급 방향 예상\n\n"
-                    f"4. 환율/금리/원자재 시그널\n"
-                    f"   - 원화 방향 + 수출주 영향\n"
-                    f"   - 국채 금리 → 성장주/가치주 영향\n\n"
-                    f"5. 오늘 주호님 참고 포인트\n"
-                    f"   - 장 시작 전 확인할 지표/이벤트\n"
-                    f"   - 보유종목 관련 섹터 영향 (매도 지시 금지, 정보만 제공)\n"
-                    f"   - 주시할 가격대/지지선 (참고용)\n"
-                )
+            us_premarket_system = (
+                "너는 한국 주식 전문 애널리스트 QuantBot이다. "
+                "주호님 전용 비서. 매일 아침 7시에 새벽 미국 시장 분석을 전달한다.\n\n"
+                "[절대 규칙]\n"
+                "1. 매도/매수 지시 절대 금지. '매도하세요', '팔아라', '전량 매도', "
+                "'무조건 매도', '시초가에 매도' 같은 표현 금지.\n"
+                "2. 장기투자 종목에 시장 하락을 이유로 매도 권유 절대 금지. "
+                "'잘 버티고 계세요', '장기 관점에서 문제없습니다' 식으로 안심.\n"
+                "3. 공포 유발 표현 금지: '긴급', '심각', '무조건', '1초도 망설이지 마세요', "
+                "'알람 맞춰두세요', '날리면 안 됩니다'.\n"
+                "4. 분석만 하라. 행동 지시가 아닌 정보 전달.\n\n"
+                "[형식 규칙]\n"
+                "볼드(**) 사용 금지. 이모지로 구분. "
+                "구체적 수치 필수. 추상적 표현 금지. "
+                "한국 시장 영향에 초점."
+            )
 
-                response = await client.messages.create(
-                    model="claude-sonnet-4-5-20250929",
-                    max_tokens=2000,
-                    temperature=0.3,
-                    system=(
-                        "너는 한국 주식 전문 애널리스트 QuantBot이다. "
-                        "주호님 전용 비서. 매일 아침 7시에 새벽 미국 시장 분석을 전달한다.\n\n"
-                        "[절대 규칙]\n"
-                        "1. 매도/매수 지시 절대 금지. '매도하세요', '팔아라', '전량 매도', "
-                        "'무조건 매도', '시초가에 매도' 같은 표현 금지.\n"
-                        "2. 장기투자 종목에 시장 하락을 이유로 매도 권유 절대 금지. "
-                        "'잘 버티고 계세요', '장기 관점에서 문제없습니다' 식으로 안심.\n"
-                        "3. 공포 유발 표현 금지: '긴급', '심각', '무조건', '1초도 망설이지 마세요', "
-                        "'알람 맞춰두세요', '날리면 안 됩니다'.\n"
-                        "4. 분석만 하라. 행동 지시가 아닌 정보 전달.\n\n"
-                        "[형식 규칙]\n"
-                        "볼드(**) 사용 금지. 이모지로 구분. "
-                        "구체적 수치 필수. 추상적 표현 금지. "
-                        "한국 시장 영향에 초점."
-                    ),
-                    messages=[{"role": "user", "content": prompt}],
+            if hasattr(self, 'ai') and self.ai:
+                raw = await self.ai.analyze(
+                    "us_premarket", prompt,
+                    system=us_premarket_system, max_tokens=2000, temperature=0.3,
                 )
-                # [v3.6.6] 코드 기반 매도 지시 필터링 적용
                 from kstock.bot.chat_handler import _sanitize_response
-                analysis = _sanitize_response(response.content[0].text.strip())
+                analysis = _sanitize_response(raw.strip())
 
                 msg = (
                     f"🇺🇸 미국 시장 프리마켓 브리핑\n"
@@ -1010,7 +1008,7 @@ class SchedulerMixin:
             return
         try:
             from kstock.bot.daily_self_report import generate_daily_self_report
-            report = await generate_daily_self_report(self.db, self.macro_client)
+            report = await generate_daily_self_report(self.db, self.macro_client, ws=self.ws)
             await context.bot.send_message(chat_id=self.chat_id, text=report)
 
             # 개선 제안 분석 후 업데이트 제안
@@ -1268,6 +1266,114 @@ class SchedulerMixin:
                 chat_id=self.chat_id, text=result_msg,
             )
             return
+
+    async def job_dart_check(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """08:30 평일: 보유/관심종목 공시 체크."""
+        try:
+            from kstock.ingest.dart_client import DartClient
+            dart = DartClient()
+            if not dart.available:
+                logger.debug("DART API key not set, skipping")
+                return
+
+            holdings = self.db.get_active_holdings()
+            watchlist = self.db.get_watchlist() if hasattr(self.db, "get_watchlist") else []
+
+            # 종목명 → ticker 매핑
+            name_to_ticker = {}
+            for h in holdings:
+                name = h.get("name", "")
+                ticker = h.get("ticker", "")
+                if name and ticker:
+                    name_to_ticker[name] = ticker
+            for w in watchlist:
+                name = w.get("name", "")
+                ticker = w.get("ticker", "")
+                if name and ticker:
+                    name_to_ticker[name] = ticker
+
+            disclosures = await dart.get_today_disclosures()
+            today_str = datetime.now(KST).strftime("%Y-%m-%d")
+            saved = 0
+            alerts = []
+
+            for d in disclosures:
+                corp_name = d.get("corp_name", "")
+                # 공시 기업명이 보유/관심종목에 있는지 확인
+                ticker = name_to_ticker.get(corp_name)
+                if not ticker:
+                    continue
+                title = d.get("report_nm", "")
+                rcept_no = d.get("rcept_no", "")
+                url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}" if rcept_no else ""
+                self.db.add_dart_event(
+                    ticker=ticker, date=today_str,
+                    title=title, url=url,
+                )
+                saved += 1
+                alerts.append(f"  \u2192 {corp_name}: {title}")
+
+            if alerts and self.chat_id:
+                msg = (
+                    f"\U0001f4e2 공시 알림 ({today_str})\n"
+                    f"\u2500" * 22 + "\n\n"
+                    + "\n".join(alerts[:10])
+                )
+                await context.bot.send_message(chat_id=self.chat_id, text=msg)
+
+            self.db.upsert_job_run("dart_check", today_str, status="success")
+            logger.info("DART check: %d events saved", saved)
+        except Exception as e:
+            logger.error("DART check failed: %s", e)
+            today_str = datetime.now(KST).strftime("%Y-%m-%d")
+            self.db.upsert_job_run("dart_check", today_str, status="error", message=str(e))
+
+    async def job_supply_demand_collect(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """16:10 평일: 보유종목 수급 데이터 수집."""
+        try:
+            holdings = self.db.get_active_holdings()
+            tickers = [h.get("ticker", "") for h in holdings if h.get("ticker")]
+            today_str = datetime.now(KST).strftime("%Y-%m-%d")
+            collected = 0
+
+            for ticker in tickers[:20]:
+                try:
+                    frgn = await self.kis.get_foreign_flow(ticker, days=1)
+                    inst = await self.kis.get_institution_flow(ticker, days=1)
+
+                    # mock 데이터인지 확인 (실제 데이터만 저장)
+                    frgn_net = 0
+                    inst_net = 0
+                    is_mock = False
+
+                    if not frgn.empty:
+                        frgn_net = int(frgn.iloc[0].get("net_buy", 0))
+                    if not inst.empty:
+                        inst_net = int(inst.iloc[0].get("net_buy", 0))
+
+                    # mock 데이터 판별: 실수로 mock이 저장되지 않도록 체크
+                    if hasattr(frgn, "attrs") and frgn.attrs.get("mock"):
+                        is_mock = True
+
+                    if not is_mock and (frgn_net != 0 or inst_net != 0):
+                        self.db.add_supply_demand(
+                            ticker=ticker,
+                            date_str=today_str,
+                            foreign_net=frgn_net,
+                            institution_net=inst_net,
+                        )
+                        collected += 1
+                except Exception as e:
+                    logger.debug("Supply demand collect failed for %s: %s", ticker, e)
+
+            self.db.upsert_job_run("supply_demand_collect", today_str, status="success")
+            logger.info("Supply demand collected for %d tickers", collected)
+        except Exception as e:
+            logger.error("Supply demand collect failed: %s", e)
+            today_str = datetime.now(KST).strftime("%Y-%m-%d")
+            self.db.upsert_job_run(
+                "supply_demand_collect", today_str, status="error", message=str(e),
+            )
 
     async def job_weekly_learning(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Weekly learning report - runs Saturday 09:00 KST."""

@@ -630,18 +630,26 @@ class CommandsMixin:
         """30억 목표 대시보드."""
         from kstock.bot.messages import format_goal_dashboard
 
-        # Get current asset from screenshot or holdings
-        last_ss = self.db.get_last_screenshot()
+        # Get current asset from portfolio snapshot → screenshot → fallback
+        import json
         current_asset = 175_000_000
         holdings_list = []
-        if last_ss:
-            current_asset = last_ss.get("total_eval", 175_000_000) or 175_000_000
-            import json
+        snapshots = self.db.get_portfolio_snapshots(limit=1)
+        if snapshots:
+            current_asset = snapshots[0].get("total_value", 0) or 175_000_000
             try:
-                h_json = last_ss.get("holdings_json", "[]")
-                holdings_list = json.loads(h_json) if h_json else []
+                holdings_list = json.loads(snapshots[0].get("holdings_json", "[]") or "[]")
             except (json.JSONDecodeError, TypeError):
                 holdings_list = []
+        else:
+            last_ss = self.db.get_last_screenshot()
+            if last_ss:
+                current_asset = last_ss.get("total_eval", 175_000_000) or 175_000_000
+                try:
+                    h_json = last_ss.get("holdings_json", "[]")
+                    holdings_list = json.loads(h_json) if h_json else []
+                except (json.JSONDecodeError, TypeError):
+                    holdings_list = []
 
         progress = compute_goal_progress(current_asset)
         tenbagger_count = len(self.db.get_active_tenbagger_candidates())

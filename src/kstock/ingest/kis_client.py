@@ -307,6 +307,7 @@ class KISClient:
             except Exception as e:
                 logger.warning("KIS foreign flow failed for %s: %s", ticker, e)
 
+        logger.warning("Using mock foreign flow data for %s", ticker)
         return _generate_mock_foreign_flow(ticker, days)
 
     async def get_institution_flow(self, ticker: str, days: int = 5) -> pd.DataFrame:
@@ -322,6 +323,7 @@ class KISClient:
             except Exception as e:
                 logger.warning("KIS inst flow failed for %s: %s", ticker, e)
 
+        logger.warning("Using mock institution flow data for %s", ticker)
         return _generate_mock_institution_flow(ticker, days)
 
     async def get_balance(self) -> dict | None:

@@ -138,6 +138,13 @@ TASK_ROUTING: dict[str, dict[str, Any]] = {
         "fallback": "gpt",
         "description": "장 마감 분석 리포트",
     },
+    # ─ v3.10 추가 ─
+    "us_premarket": {
+        "provider": "gpt",
+        "model_tier": "standard",
+        "fallback": "claude",
+        "description": "미국 프리마켓 브리핑",
+    },
 }
 
 

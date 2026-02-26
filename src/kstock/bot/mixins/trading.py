@@ -1089,12 +1089,14 @@ class TradingMixin:
         if not self.kis_broker.connected:
             await query.edit_message_text("\u26a0\ufe0f KIS 미연결. /setup_kis 로 설정하세요.")
             return
-        # 안전장치: 모의투자 모드만 자동매매 허용
-        if not getattr(self.kis, '_is_virtual', True):
+        # 안전장치: 실전매매 환경변수 체크
+        real_trade = os.getenv("REAL_TRADE_ENABLED", "false").lower() == "true"
+        is_virtual = getattr(self.kis, '_is_virtual', True)
+        if not is_virtual and not real_trade:
             await query.edit_message_text(
-                "🚫 실전투자 모드에서는 자동매매가 비활성화되어 있습니다.\n\n"
-                "현재 테스트 기간으로, 모의투자 모드에서만 자동매매가 가능합니다.\n"
-                "📡 KIS설정 → ⚙️ 안전 설정에서 확인하세요."
+                "\U0001f6ab 실전투자 모드에서 자동매매가 비활성화되어 있습니다.\n\n"
+                ".env에 REAL_TRADE_ENABLED=true 설정 필요.\n"
+                "\U0001f4e1 KIS설정 → 안전 설정에서 확인하세요."
             )
             return
         result = self._find_cached_result(ticker)
@@ -1116,6 +1118,17 @@ class TradingMixin:
         if not can:
             await query.edit_message_text(f"\u26a0\ufe0f 안전 제한: {reason}")
             return
+        # 실전 모드 1회 주문 한도: 투자금 10% 또는 500만원 중 작은 값
+        if not is_virtual:
+            order_amount = price * qty
+            max_amount = min(total_eval * 0.1, 5_000_000)
+            if order_amount > max_amount:
+                await query.edit_message_text(
+                    f"\u26a0\ufe0f 실전매매 1회 한도 초과\n\n"
+                    f"주문금액: {order_amount:,.0f}원\n"
+                    f"한도: {max_amount:,.0f}원 (투자금 10% / 500만원 중 작은 값)"
+                )
+                return
         order = self.kis_broker.buy(ticker, qty)
         if order.success:
             self.db.add_order(

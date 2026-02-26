@@ -52,6 +52,7 @@ class CoreHandlersMixin:
             Application.builder()
             .token(self.token)
             .post_init(self._post_init)
+            .post_shutdown(self._post_shutdown)
             .build()
         )
         app.add_handler(CommandHandler("start", self.cmd_start))
@@ -120,6 +121,13 @@ class CoreHandlersMixin:
             BotCommand("balance", "잔고 조회"),
             BotCommand("claude", "Claude Code 원격 실행"),
         ])
+
+    async def _post_shutdown(self, app: Application) -> None:
+        """Graceful shutdown: WebSocket 정리."""
+        try:
+            await self.ws.disconnect()
+        except Exception as e:
+            logger.warning("WebSocket shutdown error: %s", e)
 
     def schedule_jobs(self, app: Application) -> None:
         jq = app.job_queue
@@ -214,6 +222,20 @@ class CoreHandlersMixin:
             time=dt_time(hour=8, minute=20, tzinfo=KST),
             days=(0, 1, 2, 3, 4),
             name="report_crawl",
+        )
+        # v3.10: DART 공시 체크 (08:30, 평일)
+        jq.run_daily(
+            self.job_dart_check,
+            time=dt_time(hour=8, minute=30, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="dart_check",
+        )
+        # v3.10: 수급 데이터 수집 (16:10, 평일)
+        jq.run_daily(
+            self.job_supply_demand_collect,
+            time=dt_time(hour=16, minute=10, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="supply_demand_collect",
         )
         # KIS WebSocket: 장 시작 전 연결 (08:50), 장 종료 후 해제 (15:35)
         jq.run_daily(
@@ -836,10 +858,13 @@ class CoreHandlersMixin:
                     await self._execute_claude_prompt(update, prompt)
                     return
 
-            # 1. 자연어 보유종목 등록 감지: "삼성전자 50주 76000원", "에코프로 100주 샀어"
+            # 1. 자연어 보유종목 등록/매도 감지
             trade = self._detect_trade_input(text)
             if trade:
-                await self._propose_trade_addition(update, context, trade)
+                if trade.get("action") == "sell":
+                    await self._propose_trade_sell(update, context, trade)
+                else:
+                    await self._propose_trade_addition(update, context, trade)
                 return
 
             # 2. 자연어 종목 감지 — 종목명만 입력해도 바로 분석
@@ -917,22 +942,28 @@ class CoreHandlersMixin:
         return None
 
     def _detect_trade_input(self, text: str) -> dict | None:
-        """자연어에서 매수 등록 패턴을 감지합니다.
+        """자연어에서 매수/매도 등록 패턴을 감지합니다.
 
         지원 패턴:
           - "삼성전자 50주 76000원"
           - "에코프로 100주 178500원에 샀어"
           - "005930 30주 매수"
           - "삼성전자 추가 50주 76000원"
+          - "삼성전자 50주 80000원에 팔았어"
+          - "에코프로 익절 100주 200000원"
 
         Returns:
-            dict with 'ticker', 'name', 'quantity', 'price' or None.
+            dict with 'ticker', 'name', 'quantity', 'price', 'action' or None.
         """
         import re
 
+        # 매도 관련 키워드
+        sell_keywords = ["팔았", "매도", "청산", "익절", "손절"]
+        is_sell = any(kw in text for kw in sell_keywords)
+
         # 매수 관련 키워드가 포함되었거나, 수량+가격 패턴이 있는 경우만
         trade_keywords = ["샀", "매수", "추가", "편입", "담았", "들어갔"]
-        has_keyword = any(kw in text for kw in trade_keywords)
+        has_keyword = any(kw in text for kw in trade_keywords) or is_sell
 
         # 수량(주) + 가격(원) 패턴 감지
         qty_price_pat = re.search(
@@ -963,6 +994,7 @@ class CoreHandlersMixin:
             "name": name,
             "quantity": trade.quantity,
             "price": trade.price,
+            "action": "sell" if is_sell else "buy",
         }
 
     async def _propose_trade_addition(
@@ -997,6 +1029,101 @@ class CoreHandlersMixin:
             f"매수가: {price_str}\n\n"
             f"포트폴리오에 추가해드릴까요?",
             reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _propose_trade_sell(
+        self, update: Update, context, trade: dict,
+    ) -> None:
+        """감지된 매도 정보를 확인 후 포트폴리오에서 매도 기록 제안."""
+        ticker = trade["ticker"]
+        name = trade["name"]
+        qty = trade.get("quantity", 0)
+        sell_price = trade.get("price", 0)
+
+        # 보유종목에서 매수가 조회
+        holding = None
+        try:
+            holdings = self.db.get_active_holdings()
+            for h in holdings:
+                if h.get("ticker") == ticker:
+                    holding = h
+                    break
+        except Exception:
+            pass
+
+        buy_price = holding.get("avg_price", 0) if holding else 0
+        pnl_pct = ((sell_price - buy_price) / buy_price * 100) if buy_price > 0 and sell_price > 0 else 0
+
+        context.user_data["pending_sell"] = {
+            **trade,
+            "buy_price": buy_price,
+            "pnl_pct": pnl_pct,
+        }
+
+        qty_str = f"{qty}주 " if qty else ""
+        price_str = f"{sell_price:,.0f}원" if sell_price else "가격 미지정"
+        pnl_str = f"{pnl_pct:+.1f}%" if buy_price > 0 and sell_price > 0 else "산출 불가"
+        pnl_emoji = "\U0001f4c8" if pnl_pct > 0 else "\U0001f4c9" if pnl_pct < 0 else "\u2796"
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    "\u2705 매도 기록", callback_data="sell_confirm:yes",
+                ),
+                InlineKeyboardButton(
+                    "\u274c 취소", callback_data="sell_confirm:no",
+                ),
+            ],
+        ]
+        await update.message.reply_text(
+            f"\U0001f4cb 매도 기록 감지!\n\n"
+            f"종목: {name} ({ticker})\n"
+            f"수량: {qty_str}\n"
+            f"매도가: {price_str}\n"
+            f"매수가: {buy_price:,.0f}원\n"
+            f"{pnl_emoji} 수익률: {pnl_str}\n\n"
+            f"매도를 기록할까요?",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _action_confirm_sell(self, query, context, payload: str) -> None:
+        """매도 기록 확인 콜백."""
+        if payload != "yes":
+            await query.edit_message_text("\u274c 매도 기록을 취소했습니다.")
+            return
+
+        sell = context.user_data.pop("pending_sell", None)
+        if not sell:
+            await query.edit_message_text("\u26a0\ufe0f 매도 정보가 만료되었습니다.")
+            return
+
+        ticker = sell["ticker"]
+        name = sell["name"]
+        sell_price = sell.get("price", 0)
+        pnl_pct = sell.get("pnl_pct", 0)
+
+        try:
+            self.db.add_trade(
+                ticker=ticker, name=name, action="sell",
+                action_price=sell_price, pnl_pct=pnl_pct,
+            )
+        except Exception as e:
+            logger.warning("Failed to record sell trade: %s", e)
+
+        # 보유종목 상태를 sold로 변경
+        try:
+            h = self.db.get_holding_by_ticker(ticker)
+            if h:
+                self.db.update_holding(h["id"], status="sold")
+        except Exception as e:
+            logger.warning("Failed to update holding after sell: %s", e)
+
+        pnl_emoji = "\U0001f4c8" if pnl_pct > 0 else "\U0001f4c9" if pnl_pct < 0 else "\u2796"
+        await query.edit_message_text(
+            f"\u2705 매도 기록 완료!\n\n"
+            f"종목: {name} ({ticker})\n"
+            f"매도가: {sell_price:,.0f}원\n"
+            f"{pnl_emoji} 수익률: {pnl_pct:+.1f}%"
         )
 
     async def _show_stock_actions(
@@ -1204,6 +1331,7 @@ class CoreHandlersMixin:
                 "quick_q": self._handle_quick_question,
                 "add_ss": self._action_add_from_screenshot,
                 "add_txt": self._action_confirm_text_holding,
+                "sell_confirm": self._action_confirm_sell,
                 "stock_act": self._action_stock_action,
                 "bal": self._action_balance,
                 "selfupd": self._action_self_update,

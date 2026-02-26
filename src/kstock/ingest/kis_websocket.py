@@ -229,9 +229,14 @@ class KISWebSocket:
         self._connected = False
         if self._recv_task:
             self._recv_task.cancel()
+            try:
+                await self._recv_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._ws:
             await self._ws.close()
         self._subscriptions.clear()
+        self._approval_key = None
         logger.info("KIS WebSocket disconnected")
 
     async def subscribe(self, ticker: str, tr_type: str = "both") -> bool:
