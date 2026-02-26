@@ -4,34 +4,41 @@ from __future__ import annotations
 from kstock.bot.bot_imports import *  # noqa: F403
 
 
+def _admin_buttons() -> list:
+    """관리자 메뉴 인라인 버튼 생성."""
+    return [
+        [
+            InlineKeyboardButton("\U0001f41b 오류 신고", callback_data="adm:bug"),
+            InlineKeyboardButton("\U0001f4ca 봇 상태", callback_data="adm:status"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4cb 보유종목 DB", callback_data="adm:holdings"),
+            InlineKeyboardButton("\U0001f6a8 에러 로그", callback_data="adm:logs"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4a1 업데이트 요청", callback_data="adm:request"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f512 보안 감사", callback_data="adm:security"),
+            InlineKeyboardButton("\U0001f916 AI 상태", callback_data="ai:status"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f512 메뉴 닫기", callback_data="adm:close"),
+        ],
+    ]
+
+
 class AdminExtrasMixin:
     async def _menu_admin(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """🛠 관리자 메뉴 버튼 — 인라인 버튼으로 관리 기능 제공."""
-        buttons = [
-            [
-                InlineKeyboardButton("\U0001f41b 오류 신고", callback_data="adm:bug"),
-                InlineKeyboardButton("\U0001f4ca 봇 상태", callback_data="adm:status"),
-            ],
-            [
-                InlineKeyboardButton("\U0001f4cb 보유종목 DB", callback_data="adm:holdings"),
-                InlineKeyboardButton("\U0001f6a8 에러 로그", callback_data="adm:logs"),
-            ],
-            [
-                InlineKeyboardButton("\U0001f4a1 업데이트 요청", callback_data="adm:request"),
-            ],
-            [
-                InlineKeyboardButton("\U0001f512 보안 감사", callback_data="adm:security"),
-                InlineKeyboardButton("\U0001f916 AI 상태", callback_data="ai:status"),
-            ],
-        ]
         await update.message.reply_text(
             "\U0001f6e0 관리자 모드 (v3.6)\n\n"
             "아래 버튼을 눌러주세요.\n"
             "오류 신고 시 메시지나 스크린샷을\n"
             "바로 보내면 됩니다!",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            reply_markup=InlineKeyboardMarkup(_admin_buttons()),
         )
 
     async def _handle_admin_callback(
@@ -45,6 +52,8 @@ class AdminExtrasMixin:
 
         subcmd = payload.split(":")[0] if payload else ""
 
+        back_btn = [[InlineKeyboardButton("\U0001f519 관리자 메뉴", callback_data="adm:menu")]]
+
         if subcmd == "bug":
             # 오류 신고 모드 진입 — 다음 메시지/이미지를 버그로 기록
             context.user_data["admin_mode"] = "bug_report"
@@ -54,7 +63,8 @@ class AdminExtrasMixin:
                 "  \U0001f4dd 텍스트로 오류 설명\n"
                 "  \U0001f4f7 오류 화면 스크린샷\n\n"
                 "보내시면 자동으로 기록됩니다.\n"
-                "Claude Code에서 바로 확인 후 수정!"
+                "Claude Code에서 바로 확인 후 수정!",
+                reply_markup=InlineKeyboardMarkup(back_btn),
             )
 
         elif subcmd == "request":
@@ -64,13 +74,29 @@ class AdminExtrasMixin:
                 "\U0001f4a1 업데이트 요청 모드\n\n"
                 "원하는 기능이나 개선사항을\n"
                 "메시지로 보내주세요!\n\n"
-                "Claude Code에서 확인 후 구현합니다."
+                "Claude Code에서 확인 후 구현합니다.",
+                reply_markup=InlineKeyboardMarkup(back_btn),
             )
+
+        elif subcmd == "menu":
+            # 관리자 메뉴로 복귀
+            await query.edit_message_text(
+                "\U0001f6e0 관리자 모드 (v3.6)\n\n"
+                "아래 버튼을 눌러주세요.",
+                reply_markup=InlineKeyboardMarkup(_admin_buttons()),
+            )
+
+        elif subcmd == "close":
+            # 관리자 메뉴 닫기
+            await query.edit_message_text("\U0001f6e0 관리자 메뉴를 닫았습니다.")
 
         elif subcmd == "security":
             # v3.6: 보안 감사
             audit_result = security_audit()
-            await query.edit_message_text(audit_result)
+            await query.edit_message_text(
+                audit_result,
+                reply_markup=InlineKeyboardMarkup(back_btn),
+            )
 
         elif subcmd == "status":
             holdings = self.db.get_active_holdings()
@@ -97,14 +123,16 @@ class AdminExtrasMixin:
                 f"\U0001f9e0 AI 엔진: {ai_text}\n"
                 f"\U0001f4e1 WebSocket: {ws_text} ({ws_subs}종목)\n"
                 f"\U0001f310 KIS: {'연결' if self.kis_broker.connected else '미연결'}\n"
-                f"\U0001f4c5 날짜: {datetime.now(KST).strftime('%m/%d %H:%M')}"
+                f"\U0001f4c5 날짜: {datetime.now(KST).strftime('%m/%d %H:%M')}",
+                reply_markup=InlineKeyboardMarkup(back_btn),
             )
 
         elif subcmd == "holdings":
             holdings = self.db.get_active_holdings()
             if not holdings:
                 await query.edit_message_text(
-                    "\U0001f4ad DB에 보유종목 없음\n잔고 스크린샷을 보내주세요!"
+                    "\U0001f4ad DB에 보유종목 없음\n잔고 스크린샷을 보내주세요!",
+                    reply_markup=InlineKeyboardMarkup(back_btn),
                 )
                 return
             lines = [f"\U0001f4ca 보유종목 ({len(holdings)}개)\n"]
@@ -114,7 +142,10 @@ class AdminExtrasMixin:
                 lines.append(
                     f"{e} {h.get('name', '')} {pnl:+.1f}%"
                 )
-            await query.edit_message_text("\n".join(lines))
+            await query.edit_message_text(
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(back_btn),
+            )
 
         elif subcmd == "logs":
             try:
@@ -130,12 +161,19 @@ class AdminExtrasMixin:
                 ][-8:]
                 if errors:
                     await query.edit_message_text(
-                        "\U0001f6a8 최근 에러\n\n" + "\n\n".join(errors)
+                        "\U0001f6a8 최근 에러\n\n" + "\n\n".join(errors),
+                        reply_markup=InlineKeyboardMarkup(back_btn),
                     )
                 else:
-                    await query.edit_message_text("\u2705 에러 없음!")
+                    await query.edit_message_text(
+                        "\u2705 에러 없음!",
+                        reply_markup=InlineKeyboardMarkup(back_btn),
+                    )
             except Exception as e:
-                await query.edit_message_text(f"\u26a0\ufe0f 로그 확인 실패: {e}")
+                await query.edit_message_text(
+                    f"\u26a0\ufe0f 로그 확인 실패: {e}",
+                    reply_markup=InlineKeyboardMarkup(back_btn),
+                )
 
     async def _save_admin_report(
         self, update: Update, report_type: str, text: str, has_image: bool = False,
@@ -168,7 +206,7 @@ class AdminExtrasMixin:
             f"\u23f0 {datetime.now(KST).strftime('%H:%M:%S')}\n\n"
             f"Claude Code에서 확인 후\n"
             f"즉시 수정/반영됩니다!",
-            reply_markup=MAIN_MENU,
+            reply_markup=InlineKeyboardMarkup(_admin_buttons()),
         )
 
     async def cmd_admin(
