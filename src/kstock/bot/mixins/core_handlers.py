@@ -294,6 +294,27 @@ class CoreHandlersMixin:
             first=60,
             name="health_check",
         )
+        # v4.3: 주간 매매일지 AI 복기 (일요일 10:00)
+        jq.run_daily(
+            self.job_weekly_journal_review,
+            time=dt_time(hour=10, minute=0, tzinfo=KST),
+            days=(6,),
+            name="weekly_journal_review",
+        )
+        # v4.3: 섹터 로테이션 체크 (평일 09:05)
+        jq.run_daily(
+            self.job_sector_rotation_check,
+            time=dt_time(hour=9, minute=5, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="sector_rotation_check",
+        )
+        # v4.3: 역발상 시그널 스캔 (평일 14:00)
+        jq.run_daily(
+            self.job_contrarian_scan,
+            time=dt_time(hour=14, minute=0, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="contrarian_scan",
+        )
         logger.info(
             "Scheduled: buy_planner(weekday 07:50), us_premarket(07:00), "
             "morning(07:30), intraday(1min), "
@@ -306,7 +327,9 @@ class CoreHandlersMixin:
             "scalp_close(weekday 14:30), short_review(weekday 08:00), "
             "lstm_retrain(Sun 03:00), risk_monitor(5min, trailing only), "
             "eod_risk_report(weekday 15:40), "
-            "health_check(30min) KST"
+            "health_check(30min), "
+            "journal_review(Sun 10:00), sector_rotation(weekday 09:05), "
+            "contrarian_scan(weekday 14:00) KST"
         )
 
     # == Command & Menu Handlers =============================================
@@ -1371,6 +1394,11 @@ class CoreHandlersMixin:
                 "bubble": self._action_bubble_check,
                 # v4.1: 차익실현 콜백
                 "pt": self._action_profit_taking,
+                # v4.3: 매매일지/섹터로테이션/역발상
+                "journal": self._action_journal_view,
+                "sector_rotate": self._action_sector_rotate,
+                "contrarian": self._action_contrarian_view,
+                "bt_adv": self._action_backtest_advanced,
             }
             handler = dispatch.get(action)
             if handler:

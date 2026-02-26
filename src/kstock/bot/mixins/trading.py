@@ -2166,6 +2166,175 @@ class TradingMixin:
             logger.error("Position sizing error: %s", e, exc_info=True)
             return f"⚠️ 포지션 사이징 계산 중 오류: {str(e)[:100]}"
 
-    # == Scheduled Jobs ======================================================
+    # == Phase 2+3 Callback Handlers (v4.3) ===================================
 
+    async def _action_journal_view(self, query, context, payload: str) -> None:
+        """매매일지 콜백: journal:detail:weekly / journal:detail:monthly."""
+        parts = payload.split(":")
+        period = parts[0] if parts else "weekly"
+        period_label = "주간" if period == "weekly" else "월간"
+
+        try:
+            reports = self.db.get_journal_reports(period=period, limit=1)
+            if not reports:
+                await query.edit_message_text(
+                    f"📋 {period_label} 매매일지가 아직 없습니다."
+                )
+                return
+
+            r = reports[0]
+            text = (
+                f"📋 {period_label} 매매일지 상세\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📅 기간: {r.get('date_range', 'N/A')}\n"
+                f"📊 거래: {r.get('total_trades', 0)}회\n"
+                f"🎯 승률: {r.get('win_rate', 0):.0f}%\n"
+                f"💰 평균 수익: {r.get('avg_pnl', 0):+.1f}%\n"
+            )
+
+            ai_review = r.get("ai_review", "")
+            if ai_review:
+                text += f"\n🤖 AI 복기\n{ai_review[:800]}"
+
+            await query.edit_message_text(text)
+
+        except Exception as e:
+            logger.error("Journal view error: %s", e, exc_info=True)
+            await query.edit_message_text("⚠️ 매매일지 조회 중 오류 발생")
+
+    async def _action_sector_rotate(self, query, context, payload: str) -> None:
+        """섹터 로테이션 콜백: sector_rotate:detail."""
+        try:
+            snapshots = self.db.get_sector_snapshots(limit=1)
+            if not snapshots:
+                await query.edit_message_text(
+                    "🔄 섹터 로테이션 데이터가 아직 없습니다.\n"
+                    "매일 09:05에 자동 분석됩니다."
+                )
+                return
+
+            import json
+            snap = snapshots[0]
+            sectors = json.loads(snap.get("sectors_json", "[]"))
+            signals = json.loads(snap.get("signals_json", "[]"))
+            portfolio = json.loads(snap.get("portfolio_json", "{}"))
+
+            lines = [
+                "🔄 섹터 로테이션 상세",
+                f"📅 {snap.get('snapshot_date', '')}",
+                "━" * 25,
+                "",
+                "📊 섹터 모멘텀",
+            ]
+
+            for i, s in enumerate(sectors, 1):
+                score = s.get("momentum", 0)
+                emoji = "🔥" if score > 5 else "❄️" if score < -5 else "➖"
+                lines.append(
+                    f"  {i}. {emoji} {s['sector']} "
+                    f"[1주 {s.get('1w', 0):+.1f}% | 1개월 {s.get('1m', 0):+.1f}%]"
+                )
+
+            if portfolio:
+                lines.extend(["", "💼 내 섹터 비중"])
+                for sector, weight in portfolio.items():
+                    lines.append(f"  {sector}: {weight:.0f}%")
+
+            if signals:
+                lines.extend(["", "📡 시그널"])
+                for sig in signals:
+                    dir_emoji = "🟢" if sig.get("direction") in ("overweight", "rotate_in") else "🔴"
+                    lines.append(f"  {dir_emoji} {sig['sector']} → {sig['direction']}")
+
+            await query.edit_message_text("\n".join(lines))
+
+        except Exception as e:
+            logger.error("Sector rotation view error: %s", e, exc_info=True)
+            await query.edit_message_text("⚠️ 섹터 로테이션 조회 중 오류 발생")
+
+    async def _action_contrarian_view(self, query, context, payload: str) -> None:
+        """역발상 시그널 콜백: contrarian:history."""
+        try:
+            signals = self.db.get_contrarian_signals(limit=10)
+            if not signals:
+                await query.edit_message_text(
+                    "🔮 역발상 시그널 이력이 없습니다.\n"
+                    "매일 14:00에 자동 스캔됩니다."
+                )
+                return
+
+            lines = ["🔮 최근 역발상 시그널 이력", "━" * 25, ""]
+            for s in signals:
+                emoji = "🟢" if s.get("direction") == "BUY" else "🔴"
+                strength = s.get("strength", 0)
+                lines.append(
+                    f"{emoji} {s.get('name', '')} ({s.get('signal_type', '')})\n"
+                    f"  강도: {strength:.0%} | {s.get('created_at', '')[:16]}"
+                )
+
+            await query.edit_message_text("\n".join(lines))
+
+        except Exception as e:
+            logger.error("Contrarian view error: %s", e, exc_info=True)
+            await query.edit_message_text("⚠️ 역발상 시그널 조회 중 오류 발생")
+
+    async def _action_backtest_advanced(self, query, context, payload: str) -> None:
+        """고급 백테스트 콜백: bt_adv:mc:{ticker} / bt_adv:wf:{ticker}."""
+        parts = payload.split(":")
+        mode = parts[0] if parts else "mc"
+        ticker = parts[1] if len(parts) > 1 else ""
+
+        try:
+            from kstock.backtest.engine import run_backtest
+            from kstock.backtest.advanced import (
+                AdvancedBacktester, format_monte_carlo,
+                format_walk_forward, format_risk_metrics,
+            )
+
+            await query.edit_message_text(f"⏳ {ticker} 고급 백테스트 실행 중...")
+
+            # 기본 백테스트 실행
+            result = run_backtest(ticker, period="1y")
+            if not result or not result.trades:
+                await query.edit_message_text(
+                    f"⚠️ {ticker} 백테스트 데이터 부족"
+                )
+                return
+
+            pnls = [t.pnl_pct for t in result.trades]
+            bt = AdvancedBacktester()
+
+            if mode == "mc":
+                mc = bt.run_monte_carlo(pnls, n_simulations=3000, seed=42)
+                text = format_monte_carlo(mc)
+            elif mode == "wf":
+                wf = bt.run_walk_forward(pnls)
+                text = format_walk_forward(wf)
+            else:
+                metrics = bt.compute_risk_metrics(pnls)
+                text = format_risk_metrics(metrics)
+
+            # 다른 분석 버튼
+            buttons = []
+            if mode != "mc":
+                buttons.append(InlineKeyboardButton(
+                    "🎲 Monte Carlo", callback_data=f"bt_adv:mc:{ticker}",
+                ))
+            if mode != "wf":
+                buttons.append(InlineKeyboardButton(
+                    "🔄 Walk-Forward", callback_data=f"bt_adv:wf:{ticker}",
+                ))
+            if mode != "risk":
+                buttons.append(InlineKeyboardButton(
+                    "📐 리스크 지표", callback_data=f"bt_adv:risk:{ticker}",
+                ))
+
+            keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
+            await query.edit_message_text(text, reply_markup=keyboard)
+
+        except Exception as e:
+            logger.error("Advanced backtest error: %s", e, exc_info=True)
+            await query.edit_message_text("⚠️ 고급 백테스트 실행 중 오류 발생")
+
+    # == Scheduled Jobs ======================================================
 

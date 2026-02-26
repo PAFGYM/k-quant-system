@@ -751,6 +751,48 @@ CREATE TABLE IF NOT EXISTS trade_lessons (
     lesson          TEXT    DEFAULT '',
     created_at      TEXT    NOT NULL
 );
+
+-- v4.3: 매매일지 AI 복기
+CREATE TABLE IF NOT EXISTS trade_journal (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    period          TEXT    NOT NULL DEFAULT 'weekly',
+    date_range      TEXT    NOT NULL,
+    total_trades    INTEGER DEFAULT 0,
+    win_rate        REAL    DEFAULT 0,
+    avg_pnl         REAL    DEFAULT 0,
+    best_trade_json TEXT,
+    worst_trade_json TEXT,
+    patterns_json   TEXT,
+    ai_review       TEXT    DEFAULT '',
+    tips_json       TEXT,
+    mistakes_json   TEXT,
+    created_at      TEXT    NOT NULL
+);
+
+-- v4.3: 섹터 로테이션 스냅샷
+CREATE TABLE IF NOT EXISTS sector_snapshots (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_date   TEXT    NOT NULL,
+    sectors_json    TEXT    NOT NULL,
+    signals_json    TEXT,
+    portfolio_json  TEXT,
+    recommendations_json TEXT,
+    created_at      TEXT    NOT NULL
+);
+
+-- v4.3: 역발상 시그널 이력
+CREATE TABLE IF NOT EXISTS contrarian_signals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_type     TEXT    NOT NULL,
+    ticker          TEXT    NOT NULL,
+    name            TEXT    NOT NULL,
+    direction       TEXT    NOT NULL,
+    strength        REAL    DEFAULT 0,
+    score_adj       INTEGER DEFAULT 0,
+    reasons_json    TEXT,
+    data_json       TEXT,
+    created_at      TEXT    NOT NULL
+);
 """
 
 
@@ -3325,3 +3367,121 @@ class SQLiteStore:
             "style": style,
             "risk_tolerance": risk,
         }
+
+    # -- trade_journal (v4.3) --------------------------------------------------
+
+    def add_journal_report(
+        self,
+        period: str,
+        date_range: str,
+        total_trades: int = 0,
+        win_rate: float = 0,
+        avg_pnl: float = 0,
+        best_trade_json: str = "",
+        worst_trade_json: str = "",
+        patterns_json: str = "",
+        ai_review: str = "",
+        tips_json: str = "",
+        mistakes_json: str = "",
+    ) -> int:
+        """매매일지 복기 리포트 저장."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO trade_journal "
+                "(period, date_range, total_trades, win_rate, avg_pnl, "
+                " best_trade_json, worst_trade_json, patterns_json, "
+                " ai_review, tips_json, mistakes_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (period, date_range, total_trades, win_rate, avg_pnl,
+                 best_trade_json, worst_trade_json, patterns_json,
+                 ai_review, tips_json, mistakes_json, now),
+            )
+            return cur.lastrowid
+
+    def get_journal_reports(self, period: str = "weekly", limit: int = 10) -> list[dict]:
+        """최근 매매일지 반환."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM trade_journal WHERE period=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (period, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- sector_snapshots (v4.3) -----------------------------------------------
+
+    def add_sector_snapshot(
+        self,
+        snapshot_date: str,
+        sectors_json: str,
+        signals_json: str = "",
+        portfolio_json: str = "",
+        recommendations_json: str = "",
+    ) -> int:
+        """섹터 로테이션 스냅샷 저장."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO sector_snapshots "
+                "(snapshot_date, sectors_json, signals_json, portfolio_json, "
+                " recommendations_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (snapshot_date, sectors_json, signals_json, portfolio_json,
+                 recommendations_json, now),
+            )
+            return cur.lastrowid
+
+    def get_sector_snapshots(self, limit: int = 10) -> list[dict]:
+        """최근 섹터 스냅샷 반환."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sector_snapshots ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- contrarian_signals (v4.3) ---------------------------------------------
+
+    def add_contrarian_signal(
+        self,
+        signal_type: str,
+        ticker: str,
+        name: str,
+        direction: str,
+        strength: float = 0,
+        score_adj: int = 0,
+        reasons_json: str = "",
+        data_json: str = "",
+    ) -> int:
+        """역발상 시그널 기록."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO contrarian_signals "
+                "(signal_type, ticker, name, direction, strength, "
+                " score_adj, reasons_json, data_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (signal_type, ticker, name, direction, strength,
+                 score_adj, reasons_json, data_json, now),
+            )
+            return cur.lastrowid
+
+    def get_contrarian_signals(self, limit: int = 20) -> list[dict]:
+        """최근 역발상 시그널 반환."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM contrarian_signals ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_contrarian_signals_by_ticker(self, ticker: str, limit: int = 10) -> list[dict]:
+        """종목별 역발상 시그널 반환."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM contrarian_signals WHERE ticker=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (ticker, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]

@@ -2421,6 +2421,261 @@ class SchedulerMixin:
         except Exception as e:
             logger.debug("Health check job error: %s", e)
 
+    # == Phase 2+3 Jobs (v4.3) ================================================
+
+    async def job_weekly_journal_review(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """주간 매매일지 AI 복기 (일요일 10:00).
+
+        v4.3: 지난 주 매매를 분석하고 AI 복기 리포트 생성.
+        """
+        if not self.chat_id:
+            return
+        try:
+            import json
+            from kstock.core.trade_journal import (
+                TradeJournal, format_journal_report, format_journal_short,
+            )
+
+            journal = TradeJournal(db=self.db)
+            trades = journal.collect_trades(days=7)
+
+            if not trades:
+                logger.debug("Weekly journal: no trades in past 7 days")
+                return
+
+            patterns = journal.analyze_patterns(trades)
+            prompt = journal.build_review_prompt(trades, patterns, period="weekly")
+
+            # AI 복기 생성
+            ai_review = ""
+            if prompt:
+                try:
+                    ai_review = await self.ai_router.analyze(
+                        task="deep_analysis",
+                        prompt=prompt,
+                        system="당신은 숙련된 주식 투자 코치입니다. 한국어로 친근하게 답변하세요.",
+                        max_tokens=1500,
+                    )
+                except Exception as e:
+                    logger.warning("AI journal review failed: %s", e)
+
+            report = journal.generate_report(trades, patterns, ai_review=ai_review)
+
+            # DB 저장
+            try:
+                self.db.add_journal_report(
+                    period="weekly",
+                    date_range=report.date_range,
+                    total_trades=report.total_trades,
+                    win_rate=report.win_rate,
+                    avg_pnl=report.avg_pnl,
+                    best_trade_json=json.dumps(report.best_trade, ensure_ascii=False) if report.best_trade else "",
+                    worst_trade_json=json.dumps(report.worst_trade, ensure_ascii=False) if report.worst_trade else "",
+                    ai_review=ai_review,
+                )
+            except Exception as e:
+                logger.debug("Journal DB save error: %s", e)
+
+            # 텔레그램 발송
+            text = format_journal_report(report)
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(
+                        "📊 상세 보기", callback_data="journal:detail:weekly",
+                    ),
+                ]]),
+            )
+            logger.info("Weekly journal review sent (%d trades)", report.total_trades)
+            self.db.upsert_job_run("weekly_journal_review", _today(), status="success")
+
+        except Exception as e:
+            logger.error("Weekly journal review error: %s", e, exc_info=True)
+
+    async def job_sector_rotation_check(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """섹터 로테이션 체크 (매일 09:05, 평일).
+
+        v4.3: 섹터 모멘텀 분석 + 포트폴리오 리밸런싱 제안.
+        """
+        if not self.chat_id:
+            return
+        now = datetime.now(KST)
+        if now.weekday() >= 5:
+            return
+
+        try:
+            import json
+            from kstock.core.sector_rotation import (
+                SectorRotationEngine, SECTOR_ETF_MAP,
+                format_sector_dashboard,
+            )
+
+            engine = SectorRotationEngine(db=self.db, yf_client=self.yf_client)
+
+            # 섹터 ETF OHLCV 수집
+            ohlcv_map = {}
+            for sector, etf_code in SECTOR_ETF_MAP.items():
+                try:
+                    df = await self.yf_client.get_ohlcv(etf_code, "KOSPI")
+                    if df is not None and not df.empty:
+                        ohlcv_map[etf_code] = df
+                except Exception:
+                    pass
+
+            if not ohlcv_map:
+                logger.debug("Sector rotation: no ETF data available")
+                return
+
+            # 보유종목 가져오기
+            holdings = self.db.get_active_holdings()
+
+            # 대시보드 생성
+            dashboard = engine.create_dashboard(ohlcv_map, holdings)
+
+            # 시그널이 있을 때만 발송 (매일 알림 → 시그널 있을 때만)
+            if dashboard.signals:
+                text = format_sector_dashboard(dashboard)
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=text,
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            "📊 섹터 상세", callback_data="sector_rotate:detail",
+                        ),
+                    ]]),
+                )
+
+                # DB 저장
+                try:
+                    self.db.add_sector_snapshot(
+                        snapshot_date=now.strftime("%Y-%m-%d"),
+                        sectors_json=json.dumps(
+                            [{"sector": s.sector, "momentum": s.momentum_score,
+                              "1w": s.return_1w_pct, "1m": s.return_1m_pct}
+                             for s in dashboard.sectors],
+                            ensure_ascii=False,
+                        ),
+                        signals_json=json.dumps(
+                            [{"type": s.signal_type, "sector": s.sector,
+                              "direction": s.direction}
+                             for s in dashboard.signals],
+                            ensure_ascii=False,
+                        ),
+                        portfolio_json=json.dumps(dashboard.portfolio_sectors, ensure_ascii=False),
+                    )
+                except Exception as e:
+                    logger.debug("Sector snapshot save error: %s", e)
+
+            logger.info("Sector rotation check: %d sectors, %d signals",
+                        len(dashboard.sectors), len(dashboard.signals))
+            self.db.upsert_job_run("sector_rotation_check", _today(), status="success")
+
+        except Exception as e:
+            logger.error("Sector rotation check error: %s", e, exc_info=True)
+
+    async def job_contrarian_scan(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """역발상 시그널 스캔 (14:00 평일 — 장 후반 1회).
+
+        v4.3: 시장 + 보유종목 역발상 분석, 강한 시그널만 알림.
+        """
+        if not self.chat_id:
+            return
+        now = datetime.now(KST)
+        if now.weekday() >= 5:
+            return
+
+        try:
+            import json
+            from kstock.signal.contrarian_signal import (
+                ContrarianEngine, format_contrarian_dashboard,
+                format_contrarian_alert,
+            )
+
+            engine = ContrarianEngine()
+
+            # 시장 전체 분석
+            snap = None
+            try:
+                snap = await self.macro_client.get_snapshot()
+            except Exception:
+                pass
+
+            vix = getattr(snap, 'vix', 20.0) if snap else 20.0
+            fear_greed = getattr(snap, 'regime', '중립') if snap else '중립'
+
+            dashboard = engine.analyze_market(
+                vix=vix,
+                fear_greed_label=fear_greed,
+            )
+
+            # 보유종목별 역발상 분석
+            holdings = self.db.get_active_holdings()
+            strong_signals = []
+
+            for h in holdings:
+                ticker = h.get("ticker", "")
+                name = h.get("name", "")
+                try:
+                    signals = engine.analyze(
+                        ticker=ticker,
+                        name=name,
+                        vix=vix,
+                        rsi=h.get("rsi", 50),
+                        volume_ratio=h.get("volume_ratio", 1.0),
+                        foreign_net_days=h.get("foreign_net_buy_days", 0),
+                        per=h.get("per", 15),
+                        pbr=h.get("pbr", 1.0),
+                        roe=h.get("roe", 10),
+                        price_change_pct=h.get("change_pct", 0),
+                        bb_pctb=h.get("bb_pctb", 0.5),
+                    )
+                    for sig in signals:
+                        if sig.strength >= 0.5:
+                            strong_signals.append(sig)
+                            # DB 저장
+                            try:
+                                self.db.add_contrarian_signal(
+                                    signal_type=sig.signal_type,
+                                    ticker=sig.ticker,
+                                    name=sig.name,
+                                    direction=sig.direction,
+                                    strength=sig.strength,
+                                    score_adj=sig.score_adj,
+                                    reasons_json=json.dumps(sig.reasons, ensure_ascii=False),
+                                    data_json=json.dumps(sig.data, ensure_ascii=False),
+                                )
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.debug("Contrarian scan error for %s: %s", ticker, e)
+
+            # 시장 시그널 or 강한 종목 시그널이 있을 때만 발송
+            if dashboard.signals or strong_signals:
+                text = format_contrarian_dashboard(dashboard)
+                if strong_signals:
+                    text += "\n\n📡 보유종목 역발상 시그널"
+                    for sig in strong_signals[:5]:
+                        text += f"\n  {'🟢' if sig.direction == 'BUY' else '🔴'} "
+                        text += f"{sig.name}: {sig.reasons[0] if sig.reasons else ''}"
+
+                await context.bot.send_message(
+                    chat_id=self.chat_id, text=text,
+                )
+
+            logger.info("Contrarian scan: market=%d, holdings=%d signals",
+                        len(dashboard.signals), len(strong_signals))
+            self.db.upsert_job_run("contrarian_scan", _today(), status="success")
+
+        except Exception as e:
+            logger.error("Contrarian scan error: %s", e, exc_info=True)
+
     # == Core Logic ==========================================================
 
     async def _update_sector_strengths(self) -> None:
