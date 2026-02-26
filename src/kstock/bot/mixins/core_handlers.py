@@ -1304,7 +1304,10 @@ class CoreHandlersMixin:
             ctx = await build_full_context_with_macro(
                 self.db, self.macro_client, self.yf_client,
             )
-            answer = await handle_ai_question(enriched_question, ctx, self.db, chat_mem)
+            answer = await handle_ai_question(
+                enriched_question, ctx, self.db, chat_mem,
+                verified_names={name},
+            )
 
             # 후속 질문 파싱 → 버튼 변환
             stock_data = {"code": code, "name": name, "market": market}

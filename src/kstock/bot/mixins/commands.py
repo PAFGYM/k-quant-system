@@ -772,7 +772,8 @@ class CommandsMixin:
             ctx = await build_full_context_with_macro(
                 self.db, self.macro_client, self.yf_client,
             )
-            answer = await handle_ai_question(enriched, ctx, self.db, chat_mem)
+            v_names = {stock.get("name", "")} if stock and stock.get("name") else None
+            answer = await handle_ai_question(enriched, ctx, self.db, chat_mem, verified_names=v_names)
 
             # AI 응답에서 후속 질문 파싱 → 버튼 변환
             answer, followup_buttons = self._parse_followup_buttons(answer)

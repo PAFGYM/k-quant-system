@@ -91,7 +91,7 @@ def _sanitize_response(answer: str) -> str:
     return answer
 
 
-async def handle_ai_question(question: str, context: dict, db, chat_memory) -> str:
+async def handle_ai_question(question: str, context: dict, db, chat_memory, verified_names: set | None = None) -> str:
     """Process a user question via Claude API.
 
     Builds a system prompt from live portfolio/market context, appends
@@ -203,6 +203,8 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory) -> s
         # 2) 비보유 종목 가격 교체
         holdings = db.get_active_holdings()
         known_names = {h.get("name", "") for h in holdings if h.get("name")}
+        if verified_names:
+            known_names |= verified_names
         answer = strip_unverified_prices(answer, known_names)
     except Exception as e:
         logger.error("환각 가드 적용 실패: %s", e)
