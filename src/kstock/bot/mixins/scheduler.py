@@ -31,13 +31,21 @@ def _get_vix_regime(vix: float) -> str:
 
 class SchedulerMixin:
     # 급등 감지 + 매도 가이드 상태
-    _surge_cooldown: dict = {}
     _SURGE_COOLDOWN_SEC = 1800
-    _SELL_TARGET_COOLDOWN_SEC = 3600
+    _SELL_TARGET_COOLDOWN_SEC = 86400  # 24시간 (기존 1시간 → 반복 알림 방지)
     _SURGE_THRESHOLD_PCT = 3.0
     _surge_callback_registered: bool = False
-    _holdings_cache: list = []
-    _holdings_index: dict = {}  # ticker → holding dict (O(1) 조회)
+
+    def __init_scheduler_state__(self):
+        """인스턴스별 mutable 상태 초기화 (class 속성 공유 문제 방지)."""
+        if not hasattr(self, '_surge_cooldown'):
+            self._surge_cooldown = {}
+        if not hasattr(self, '_muted_tickers'):
+            self._muted_tickers = {}  # ticker → mute_until (timestamp)
+        if not hasattr(self, '_holdings_cache'):
+            self._holdings_cache = []
+        if not hasattr(self, '_holdings_index'):
+            self._holdings_index = {}  # ticker → holding dict (O(1) 조회)
 
     async def job_premarket_buy_planner(
         self, context: ContextTypes.DEFAULT_TYPE,
@@ -92,11 +100,54 @@ class SchedulerMixin:
                 msg = "\u2600\ufe0f 오전 브리핑\n\n" + format_market_status(macro, regime_mode)
 
             await context.bot.send_message(chat_id=self.chat_id, text=msg)
+
+            # v3.9: 매니저별 보유종목 분석 (holding_type별 그룹핑)
+            await self._send_manager_briefings(context, macro)
             self.db.upsert_job_run("morning_briefing", _today(), status="success")
             logger.info("Morning briefing sent")
         except Exception as e:
             logger.error("Morning briefing failed: %s", e)
             self.db.upsert_job_run("morning_briefing", _today(), status="error", message=str(e))
+
+    async def _send_manager_briefings(self, context, macro) -> None:
+        """매니저별 보유종목 분석 메시지 발송 (보유종목 있는 매니저만)."""
+        try:
+            from collections import defaultdict
+            from kstock.bot.investment_managers import get_manager_analysis, MANAGERS
+
+            holdings = self.db.get_active_holdings()
+            if not holdings:
+                return
+
+            # holding_type별 그룹핑
+            by_type = defaultdict(list)
+            for h in holdings:
+                ht = h.get("holding_type", "auto")
+                if ht == "auto":
+                    ht = "swing"  # auto는 스윙으로 기본 배정
+                by_type[ht].append(h)
+
+            market_text = (
+                f"VIX={macro.vix:.1f}, S&P={macro.spx_change_pct:+.2f}%, "
+                f"나스닥={macro.nasdaq_change_pct:+.2f}%, "
+                f"환율={macro.usdkrw:,.0f}원, 레짐={macro.regime}"
+            )
+
+            for mtype, mholdings in by_type.items():
+                if mtype not in MANAGERS or not mholdings:
+                    continue
+                try:
+                    report = await get_manager_analysis(mtype, mholdings, market_text)
+                    if report:
+                        await context.bot.send_message(
+                            chat_id=self.chat_id, text=report[:4000],
+                        )
+                except Exception as e:
+                    logger.debug("Manager briefing %s error: %s", mtype, e)
+
+            logger.info("Manager briefings sent: %s", list(by_type.keys()))
+        except Exception as e:
+            logger.debug("Manager briefings error: %s", e)
 
     async def _generate_morning_briefing_v2(
         self, macro: MacroSnapshot, regime_mode: dict
@@ -753,6 +804,7 @@ class SchedulerMixin:
                 holdings=holdings,
                 sell_plans=sell_plans,
                 pulse_history=self.market_pulse.get_recent_history(minutes=360),
+                yf_client=self.yf_client,
             )
 
             # ── 4. 결론 위주 간결한 텍스트 메시지 1건 ──
@@ -1619,6 +1671,7 @@ class SchedulerMixin:
         self, ticker: str, data, now: float, loop=None,
     ) -> None:
         """보유종목 목표가/손절가 도달 여부 확인. O(1) ticker 조회."""
+        self.__init_scheduler_state__()
         h = self._holdings_index.get(ticker)
         if not h:
             return
@@ -1631,11 +1684,16 @@ class SchedulerMixin:
         if price <= 0:
             return
 
+        # 사용자가 뮤트한 종목이면 무시
+        mute_until = self._muted_tickers.get(ticker, 0)
+        if now < mute_until:
+            return
+
         change_from_buy = (price - buy_price) / buy_price * 100
         holding_type = h.get("holding_type", "auto")
         name = h.get("name", ticker)
 
-        # 쿨다운
+        # 쿨다운 (24시간)
         alert_key = f"sell:{ticker}"
         if now - self._surge_cooldown.get(alert_key, 0) < self._SELL_TARGET_COOLDOWN_SEC:
             return
@@ -1675,15 +1733,12 @@ class SchedulerMixin:
         buy_price: float, change_pct: float,
         alert_type: str, holding_type: str,
     ) -> None:
-        """매도 가이드 알림."""
+        """매도 가이드 알림 (무시/뮤트 버튼 포함)."""
         if not self.chat_id or not hasattr(self, '_application'):
             return
 
-        type_labels = {
-            "scalp": "⚡ 초단기", "swing": "🔥 단기",
-            "position": "📊 중기", "long_term": "💎 장기", "auto": "📌 자동",
-        }
-        type_label = type_labels.get(holding_type, "📌")
+        from kstock.bot.investment_managers import get_manager_label
+        mgr_label = get_manager_label(holding_type)
 
         if alert_type == "target":
             emoji, title = "🎯", "목표가 도달"
@@ -1696,17 +1751,55 @@ class SchedulerMixin:
             f"{emoji} {title}: {name} ({ticker})\n\n"
             f"현재가: {current_price:,.0f}원 ({change_pct:+.1f}%)\n"
             f"매수가: {buy_price:,.0f}원\n"
-            f"유형: {type_label}\n\n"
+            f"담당: {mgr_label}\n\n"
             f"💡 {action}"
         )
 
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔍 상세분석", callback_data=f"detail:{ticker}",
+                ),
+                InlineKeyboardButton(
+                    "🔇 24시간 무시", callback_data=f"mute:24h:{ticker}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🔕 이 종목 알림 끄기", callback_data=f"mute:off:{ticker}",
+                ),
+            ],
+        ])
+
         try:
             await self._application.bot.send_message(
-                chat_id=self.chat_id, text=text,
+                chat_id=self.chat_id, text=text, reply_markup=keyboard,
             )
             logger.info("Sell guide: %s %s %.1f%%", ticker, alert_type, change_pct)
         except Exception as e:
             logger.error("Sell guide error: %s", e)
+
+    async def _action_mute_alert(self, query, context, payload: str) -> None:
+        """mute:{duration}:{ticker} 콜백 처리. 알림 뮤트."""
+        self.__init_scheduler_state__()
+        duration, _, ticker = payload.partition(":")
+        import time
+        now = time.time()
+
+        if duration == "24h":
+            self._muted_tickers[ticker] = now + 86400  # 24시간
+            await query.edit_message_text(
+                f"🔇 {ticker} 매도 알림을 24시간 동안 무시합니다.\n"
+                f"내일 이 시간 이후 다시 알림이 올 수 있습니다."
+            )
+            logger.info("Muted sell alert: %s for 24h", ticker)
+        elif duration == "off":
+            self._muted_tickers[ticker] = now + 86400 * 365  # 사실상 영구
+            await query.edit_message_text(
+                f"🔕 {ticker} 매도 알림을 끕니다.\n"
+                f"종목을 매도하거나 봇을 재시작하면 다시 활성화됩니다."
+            )
+            logger.info("Muted sell alert: %s permanently", ticker)
 
     async def job_scalp_close_reminder(
         self, context: ContextTypes.DEFAULT_TYPE,

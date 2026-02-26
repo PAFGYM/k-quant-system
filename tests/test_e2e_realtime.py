@@ -110,6 +110,7 @@ class TestSellTargetReached:
         obj = MagicMock()
         obj._SELL_TARGET_COOLDOWN_SEC = 3600
         obj._surge_cooldown = {}
+        obj._muted_tickers = {}
         obj._holdings_index = {
             "005930": {
                 "ticker": "005930",
@@ -118,6 +119,7 @@ class TestSellTargetReached:
                 "holding_type": "swing",
             }
         }
+        obj.__init_scheduler_state__ = MagicMock()
 
         data = _make_data(price=10510)  # +5.1%
         now = _time.time()
@@ -139,6 +141,7 @@ class TestStopLossReached:
         obj = MagicMock()
         obj._SELL_TARGET_COOLDOWN_SEC = 3600
         obj._surge_cooldown = {}
+        obj._muted_tickers = {}
         obj._holdings_index = {
             "005930": {
                 "ticker": "005930",
@@ -147,6 +150,7 @@ class TestStopLossReached:
                 "holding_type": "swing",
             }
         }
+        obj.__init_scheduler_state__ = MagicMock()
 
         data = _make_data(price=9690)  # -3.1%
         now = _time.time()

@@ -119,23 +119,23 @@ def _create_styles(font_name: str) -> dict:
     custom_styles["section"] = ParagraphStyle(
         name="SectionHeader",
         fontName=font_name,
-        fontSize=12,
-        spaceBefore=4 * mm,
-        spaceAfter=2 * mm,
+        fontSize=13,          # 12→13
+        spaceBefore=5 * mm,   # 4→5
+        spaceAfter=3 * mm,    # 2→3
         textColor=colors.HexColor("#16213e"),
     )
     custom_styles["body"] = ParagraphStyle(
         name="ReportBody",
         fontName=font_name,
-        fontSize=9,
-        leading=14,
+        fontSize=10,          # 9→10 (스마트폰 가독성)
+        leading=15,           # 14→15
         textColor=colors.HexColor("#333333"),
     )
     custom_styles["small"] = ParagraphStyle(
         name="SmallBody",
         fontName=font_name,
-        fontSize=8,
-        leading=11,
+        fontSize=9,           # 8→9
+        leading=13,           # 11→13
         textColor=colors.HexColor("#555555"),
     )
 
@@ -143,20 +143,24 @@ def _create_styles(font_name: str) -> dict:
 
 
 def _table_style(font_name: str = "Korean"):
-    """표준 테이블 스타일 (한글 폰트 적용)."""
+    """표준 테이블 스타일 (한글 폰트 적용, 스마트폰 최적화)."""
     if not HAS_REPORTLAB:
         return None
     return TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a1a2e")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, -1), font_name),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("FONTSIZE", (0, 0), (-1, 0), 7),       # 헤더: 8→7
+        ("FONTSIZE", (0, 1), (-1, -1), 7),       # 본문: 8→7
         ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
+        ("ALIGN", (0, 0), (0, -1), "LEFT"),      # 첫 컬럼 좌측
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1),
          [colors.white, colors.HexColor("#f8f9fa")]),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),     # 3→4
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),  # 3→4
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
     ])
 
 
@@ -245,6 +249,7 @@ async def generate_daily_pdf(
     sector_data: list | None = None,
     pulse_history: list | None = None,
     date: datetime | None = None,
+    yf_client=None,
 ) -> str | None:
     """일일 PDF 리포트 생성.
 
@@ -264,6 +269,29 @@ async def generate_daily_pdf(
         return await _generate_text_report(
             macro_snapshot, holdings, sell_plans, sector_data, date,
         )
+
+    # 보유종목 현재가 실시간 갱신 (PDF 신뢰성 보장)
+    if holdings and yf_client:
+        for h in holdings:
+            ticker = h.get("ticker", "")
+            if not ticker:
+                continue
+            try:
+                fresh_price = await yf_client.get_current_price(ticker)
+                if fresh_price and fresh_price > 0:
+                    old_price = h.get("current_price", 0)
+                    h["current_price"] = fresh_price
+                    buy_price = h.get("buy_price", 0)
+                    if buy_price > 0:
+                        h["pnl_pct"] = (fresh_price - buy_price) / buy_price * 100
+                    if old_price > 0 and abs(fresh_price - old_price) / old_price > 0.05:
+                        logger.warning(
+                            "PDF 가격 갭: %s %s→%s (%.1f%%)",
+                            h.get("name", ticker), old_price, fresh_price,
+                            (fresh_price - old_price) / old_price * 100,
+                        )
+            except Exception as e:
+                logger.debug("PDF 가격 갱신 실패 %s: %s", ticker, e)
 
     if date is None:
         date = datetime.now(KST)
@@ -333,7 +361,7 @@ async def generate_daily_pdf(
     ]
     idx_table = Table(
         index_data,
-        colWidths=[25 * mm, 30 * mm, 22 * mm, 22 * mm],
+        colWidths=[35 * mm, 35 * mm, 30 * mm, 30 * mm],
     )
     idx_table.setStyle(_table_style(font_name))
     elements.append(idx_table)
@@ -393,6 +421,7 @@ async def generate_daily_pdf(
         h_rows = [h_header]
         for h in holdings[:15]:
             pnl = h.get("pnl_pct", 0)
+            cur_price = h.get("current_price", 0)
             verdict = "홀드"
             if pnl > 15:
                 verdict = "익절 고려"
@@ -403,7 +432,7 @@ async def generate_daily_pdf(
             h_rows.append([
                 h.get("name", "")[:8],
                 f"{h.get('buy_price', 0):,.0f}",
-                f"{h.get('current_price', 0):,.0f}",
+                f"{cur_price:,.0f}" if cur_price > 0 else "미확인",
                 f"{pnl:+.1f}%",
                 h.get("horizon", "swing")[:4],
                 verdict,
@@ -411,7 +440,7 @@ async def generate_daily_pdf(
 
         ht = Table(
             h_rows,
-            colWidths=[25 * mm, 22 * mm, 22 * mm, 18 * mm, 15 * mm, 18 * mm],
+            colWidths=[30 * mm, 25 * mm, 25 * mm, 20 * mm, 18 * mm, 22 * mm],
         )
         ht.setStyle(_table_style(font_name))
         elements.append(ht)
@@ -464,7 +493,7 @@ async def generate_daily_pdf(
             ])
         spt = Table(
             sp_rows,
-            colWidths=[25 * mm, 15 * mm, 22 * mm, 22 * mm, 40 * mm],
+            colWidths=[28 * mm, 18 * mm, 25 * mm, 25 * mm, 50 * mm],
         )
         spt.setStyle(_table_style(font_name))
         elements.append(spt)
@@ -588,10 +617,12 @@ async def _generate_ai_analysis(
         holdings_text = ""
         if holdings:
             for h in holdings[:15]:
+                cp = h.get('current_price', 0)
+                price_tag = f"{cp:,.0f}원 (실시간)" if cp > 0 else "현재가 없음"
                 holdings_text += (
                     f"  {h.get('name', '')}: 수익률 {h.get('pnl_pct', 0):+.1f}%, "
                     f"매수가 {h.get('buy_price', 0):,.0f}원, "
-                    f"현재가 {h.get('current_price', 0):,.0f}원, "
+                    f"현재가 {price_tag}, "
                     f"시계 {h.get('horizon', 'swing')}\n"
                 )
 
@@ -667,7 +698,13 @@ async def _generate_ai_analysis(
                 "작성합니다. 모든 분석은 데이터에 기반하며, 구체적 수치와 "
                 "논리적 근거를 반드시 포함합니다. 추상적 표현 대신 "
                 "실행 가능한 투자 인사이트를 제공합니다. "
-                "볼드(**), HTML 태그 사용 금지."
+                "볼드(**), HTML 태그 사용 금지.\n\n"
+                "절대 규칙:\n"
+                "1. 제공된 [보유종목] 데이터의 현재가만 사용하라.\n"
+                "2. 학습 데이터의 과거 주가를 절대 사용하지 마라.\n"
+                "3. 가격 데이터 없는 종목은 '현재가 확인 필요'로 표시.\n"
+                "4. 구체적 주가 언급 시 반드시 제공된 데이터에서 가져와라.\n"
+                "5. 추정/기억/학습된 가격 정보 사용 절대 금지."
             ),
             messages=[{"role": "user", "content": prompt}],
         )

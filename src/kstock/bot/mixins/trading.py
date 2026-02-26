@@ -517,7 +517,7 @@ class TradingMixin:
     async def _action_set_holding_type(
         self, query, context, payload: str,
     ) -> None:
-        """ht:{type}:{id_or_all} 콜백 처리."""
+        """ht:{type}:{id_or_all} 콜백 처리 + 매니저 인사."""
         hold_type, _, target = payload.partition(":")
 
         if hold_type == "skip":
@@ -525,13 +525,7 @@ class TradingMixin:
             context.user_data.pop("recent_holding_ids", None)
             return
 
-        type_labels = {
-            "scalp": "⚡ 초단기",
-            "swing": "🔥 단기",
-            "position": "📊 중기",
-            "long_term": "💎 장기투자",
-        }
-        label = type_labels.get(hold_type, hold_type)
+        from kstock.bot.investment_managers import get_manager_greeting, get_manager_label
 
         if target == "all":
             ids = context.user_data.get("recent_holding_ids", [])
@@ -540,8 +534,10 @@ class TradingMixin:
                     self.db.update_holding_type(hid, hold_type)
                 except Exception:
                     pass
+            label = get_manager_label(hold_type)
             await query.edit_message_text(
-                f"✅ {len(ids)}종목 → {label} 설정 완료"
+                f"✅ {len(ids)}종목 → {label} 배정 완료\n\n"
+                f"📌 이 종목들은 {label}이 관리합니다."
             )
             context.user_data.pop("recent_holding_ids", None)
         else:
@@ -550,12 +546,54 @@ class TradingMixin:
                 self.db.update_holding_type(hid, hold_type)
                 holding = self.db.get_holding(hid)
                 name = holding.get("name", "") if holding else ""
-                await query.edit_message_text(
-                    f"✅ {name} → {label} 설정 완료"
-                )
+                ticker = holding.get("ticker", "") if holding else ""
+
+                # 매니저 인사 메시지
+                greeting = await get_manager_greeting(hold_type, name, ticker)
+                await query.edit_message_text(greeting)
             except Exception as e:
                 logger.error("holding_type 설정 실패: %s", e)
                 await query.edit_message_text("⚠️ 투자 전략 설정 실패")
+
+    async def _action_manager_view(
+        self, query, context, payload: str,
+    ) -> None:
+        """mgr:{type} 콜백 — 매니저에게 담당 종목 분석 요청."""
+        from kstock.bot.investment_managers import get_manager_analysis, MANAGERS
+
+        manager = MANAGERS.get(payload)
+        if not manager:
+            await query.edit_message_text("⚠️ 알 수 없는 매니저 유형")
+            return
+
+        holdings = self.db.get_active_holdings()
+        type_holdings = [
+            h for h in holdings
+            if h.get("holding_type", "auto") == payload
+            or (payload == "swing" and h.get("holding_type", "auto") == "auto")
+        ]
+
+        if not type_holdings:
+            await query.edit_message_text(
+                f"{manager['emoji']} {manager['name']}: 담당 종목이 없습니다."
+            )
+            return
+
+        await query.edit_message_text(
+            f"{manager['emoji']} {manager['name']} 분석 중..."
+        )
+
+        try:
+            macro = await self.macro_client.get_snapshot()
+            market_text = (
+                f"VIX={macro.vix:.1f}, S&P={macro.spx_change_pct:+.2f}%, "
+                f"환율={macro.usdkrw:,.0f}원"
+            )
+        except Exception:
+            market_text = ""
+
+        report = await get_manager_analysis(payload, type_holdings, market_text)
+        await query.message.reply_text(report[:4000])
 
     async def _action_balance(
         self, query, context, payload: str,

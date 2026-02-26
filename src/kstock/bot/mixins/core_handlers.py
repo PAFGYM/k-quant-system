@@ -1220,6 +1220,10 @@ class CoreHandlersMixin:
                 "bt": self._action_backtest_pro,
                 # v3.8: 고급 리스크
                 "risk": self._action_risk_advanced,
+                # v3.9: 매도 알림 뮤트
+                "mute": self._action_mute_alert,
+                # v3.9: 매니저 조회
+                "mgr": self._action_manager_view,
             }
             handler = dispatch.get(action)
             if handler:
