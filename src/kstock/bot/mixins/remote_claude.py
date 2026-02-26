@@ -405,24 +405,52 @@ class RemoteClaudeMixin:
 
         output, return_code, elapsed = await self._run_claude_cli(prompt)
 
-        status = "✅ 수정 완료" if return_code == 0 else "⚠️ 수정 실패"
+        status = "\u2705 수정 완료" if return_code == 0 else "\u26a0\ufe0f 수정 실패"
+        separator = "\u2500" * 20
         header = (
-            f"🔧 Claude Code {status}\n"
-            f"📍 {error_source}\n"
-            f"⏱ {elapsed:.1f}초 소요\n"
-            f"{'─' * 20}\n\n"
+            f"\U0001f527 Claude Code {status}\n"
+            f"\U0001f4cd {error_source}\n"
+            f"\u23f1 {elapsed:.1f}\ucd08 \uc18c\uc694\n"
+            f"{separator}\n\n"
         )
 
         if not output:
-            output = "(출력 없음)"
+            output = "(\ucd9c\ub825 \uc5c6\uc74c)"
 
         result = header + output
         chunks = self._split_message(result)
 
-        for chunk in chunks:
-            await context.bot.send_message(
-                chat_id=self.chat_id,
-                text=chunk,
+        # 마지막 청크에 승인/거부 버튼 추가
+        for i, chunk in enumerate(chunks):
+            if i == len(chunks) - 1 and return_code == 0:
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "\u2705 \uc2b9\uc778", callback_data="autofix:approve",
+                        ),
+                        InlineKeyboardButton(
+                            "\u274c \ubb34\uc2dc", callback_data="autofix:dismiss",
+                        ),
+                    ],
+                ])
+                await context.bot.send_message(
+                    chat_id=self.chat_id, text=chunk,
+                    reply_markup=keyboard,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=self.chat_id, text=chunk,
+                )
+
+    async def _action_autofix(self, query, context, payload: str) -> None:
+        """오류 자동수정 승인/거부 콜백."""
+        if payload == "approve":
+            await query.edit_message_text(
+                query.message.text + "\n\n\u2705 \uc2b9\uc778 \uc644\ub8cc \u2014 \uc218\uc815\uc774 \uc801\uc6a9\ub418\uc5c8\uc2b5\ub2c8\ub2e4."
+            )
+        else:
+            await query.edit_message_text(
+                query.message.text + "\n\n\u274c \ubb34\uc2dc\ub428 \u2014 \uc218\uc815\uc744 \uc801\uc6a9\ud558\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4."
             )
 
     async def _on_error_with_auto_fix(
