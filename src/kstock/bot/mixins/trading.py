@@ -595,6 +595,85 @@ class TradingMixin:
         report = await get_manager_analysis(payload, type_holdings, market_text)
         await query.message.reply_text(report[:4000])
 
+    async def _action_bubble_check(
+        self, query, context, payload: str,
+    ) -> None:
+        """bubble:{ticker} 콜백 — 거품 판별 실행."""
+        from kstock.signal.bubble_detector import (
+            analyze_bubble, format_bubble_analysis, get_bubble_data_from_yfinance,
+        )
+
+        ticker = payload
+        if not ticker:
+            # 보유종목 선택 리스트 표시
+            holdings = self.db.get_active_holdings()
+            if not holdings:
+                await query.edit_message_text("📦 보유종목이 없습니다.")
+                return
+
+            buttons = []
+            row = []
+            for h in holdings[:10]:
+                t = h.get("ticker", "")
+                n = h.get("name", "")[:6]
+                row.append(
+                    InlineKeyboardButton(n, callback_data=f"bubble:{t}"),
+                )
+                if len(row) == 2:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+
+            await query.edit_message_text(
+                "🫧 거품 판별할 종목을 선택하세요:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        await query.edit_message_text(f"🫧 {ticker} 거품 분석 중...")
+
+        # yfinance에서 데이터 조회
+        data = await get_bubble_data_from_yfinance(ticker, self.yf_client)
+
+        if data["eps"] == 0 or data["current_price"] == 0:
+            # EPS나 현재가가 없으면 분석 불가
+            await query.message.reply_text(
+                f"⚠️ {ticker} 데이터 부족\n\n"
+                f"PER/EPS 데이터를 가져올 수 없습니다.\n"
+                f"yfinance에서 지원하지 않는 종목이거나\n"
+                f"데이터가 아직 업데이트되지 않았습니다."
+            )
+            return
+
+        # 종목명 찾기
+        name = ticker
+        holding = self._holdings_index.get(ticker) if hasattr(self, '_holdings_index') else None
+        if holding:
+            name = holding.get("name", ticker)
+        else:
+            for item in self.all_tickers:
+                if item.get("code") == ticker:
+                    name = item.get("name", ticker)
+                    break
+
+        result = analyze_bubble(
+            ticker=ticker,
+            name=name,
+            current_price=data["current_price"],
+            trailing_per=data["trailing_per"],
+            forward_per=data["forward_per"],
+            eps=data["eps"],
+            sector_avg_per=data["sector_avg_per"],
+            kospi_avg_per=data["kospi_avg_per"],
+            revenue_yoy=data["revenue_yoy"],
+            op_profit_yoy=data["op_profit_yoy"],
+            earnings_cagr_2y=data["earnings_cagr_2y"],
+        )
+
+        text = format_bubble_analysis(result)
+        await query.message.reply_text(text)
+
     async def _action_balance(
         self, query, context, payload: str,
     ) -> None:

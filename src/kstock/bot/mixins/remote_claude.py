@@ -285,6 +285,95 @@ class RemoteClaudeMixin:
             turn_num = context.user_data.get("claude_turn", 1)
             logger.info("Claude Code 대화 모드: turn %d 완료", turn_num)
 
+    # ── 관리자 모드 이미지 처리 ──
+
+    async def _handle_claude_mode_image(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """관리자 모드에서 이미지를 Claude Vision API로 분석."""
+        if not self.anthropic_key:
+            await update.message.reply_text(
+                "⚠️ Anthropic API 키 없음",
+                reply_markup=CLAUDE_MODE_MENU,
+            )
+            return
+
+        caption = update.message.caption or "이 이미지를 분석해줘"
+        await update.message.reply_text(
+            f"💻 이미지 분석 중...\n📝 {caption[:80]}",
+        )
+
+        try:
+            import base64
+            import httpx
+
+            photo = update.message.photo[-1]
+            file = await context.bot.get_file(photo.file_id)
+            img_bytes = await file.download_as_bytearray()
+            img_b64 = base64.b64encode(bytes(img_bytes)).decode()
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": self.anthropic_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-sonnet-4-5-20250929",
+                        "max_tokens": 2000,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/jpeg",
+                                        "data": img_b64,
+                                    },
+                                },
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        f"주호님의 관리자 모드 이미지 분석 요청입니다.\n\n"
+                                        f"질문/요청: {caption}\n\n"
+                                        f"이미지가 주식 차트/데이터라면 투자 관점에서 분석해주세요.\n"
+                                        f"코드나 에러 스크린샷이면 원인 분석 + 해결책을 제시해주세요.\n"
+                                        f"볼드(**) 사용 금지. 이모지로 가독성 확보."
+                                    ),
+                                },
+                            ],
+                        }],
+                    },
+                )
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    analysis = data["content"][0]["text"].strip().replace("**", "")
+                else:
+                    analysis = f"API 오류: {resp.status_code}"
+
+            # 턴 카운트 증가
+            turn = context.user_data.get("claude_turn", 0)
+            context.user_data["claude_turn"] = turn + 1
+
+            header = f"💻 이미지 분석 완료\n{'─' * 20}\n\n"
+            full = header + analysis
+            chunks = self._split_message(full)
+
+            for i, chunk in enumerate(chunks):
+                rm = CLAUDE_MODE_MENU if i == len(chunks) - 1 else None
+                await update.message.reply_text(chunk, reply_markup=rm)
+
+        except Exception as e:
+            logger.error("Claude mode image error: %s", e)
+            await update.message.reply_text(
+                f"⚠️ 이미지 분석 실패: {str(e)[:200]}",
+                reply_markup=CLAUDE_MODE_MENU,
+            )
+
     # ── 오류 자동 감지 → Claude Code 수정 요청 ──
 
     async def _auto_fix_error(

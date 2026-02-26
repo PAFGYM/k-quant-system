@@ -443,17 +443,9 @@ class CoreHandlersMixin:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle screenshot image messages for account analysis."""
-        # Claude Code 대화 모드: 이미지는 지원 안 됨 → 안내
+        # Claude Code 대화 모드: 이미지를 Vision API로 분석
         if context.user_data.get("claude_mode"):
-            from kstock.bot.mixins.remote_claude import CLAUDE_MODE_MENU
-            await update.message.reply_text(
-                "💻 Claude Code 모드에서는\n"
-                "이미지 전송이 불가합니다.\n\n"
-                "텍스트로 질문해주세요.\n"
-                "스크린샷 분석은 대화 종료 후\n"
-                "다시 보내주세요.",
-                reply_markup=CLAUDE_MODE_MENU,
-            )
+            await self._handle_claude_mode_image(update, context)
             return
 
         # 관리자 모드: 오류 스크린샷 접수
@@ -1224,6 +1216,8 @@ class CoreHandlersMixin:
                 "mute": self._action_mute_alert,
                 # v3.9: 매니저 조회
                 "mgr": self._action_manager_view,
+                # v3.9: 거품 판별
+                "bubble": self._action_bubble_check,
             }
             handler = dispatch.get(action)
             if handler:
