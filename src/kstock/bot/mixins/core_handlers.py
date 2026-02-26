@@ -1403,6 +1403,7 @@ class CoreHandlersMixin:
                 "autofix": self._action_autofix,
                 # AI 후속 질문
                 "followup": self._action_followup,
+                "followup_q": self._action_followup_dynamic,
             }
             handler = dispatch.get(action)
             if handler:

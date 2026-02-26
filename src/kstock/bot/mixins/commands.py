@@ -774,8 +774,10 @@ class CommandsMixin:
             )
             answer = await handle_ai_question(enriched, ctx, self.db, chat_mem)
 
-            # 후속 질문 버튼 생성
-            followup_buttons = self._build_followup_buttons(question, stock)
+            # AI 응답에서 후속 질문 파싱 → 버튼 변환
+            answer, followup_buttons = self._parse_followup_buttons(answer)
+            if not followup_buttons:
+                followup_buttons = self._build_followup_buttons(question, stock)
             markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None
 
             try:
@@ -796,6 +798,44 @@ class CommandsMixin:
                     "주호님, AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
                     reply_markup=MAIN_MENU,
                 )
+
+    def _parse_followup_buttons(self, answer: str) -> tuple:
+        """AI 응답에서 ---followup--- 섹션을 파싱하여 버튼으로 변환.
+
+        Returns:
+            (cleaned_answer, buttons_list) — 버튼이 없으면 빈 리스트.
+        """
+        separator = "---followup---"
+        if separator not in answer:
+            return answer, []
+
+        parts = answer.split(separator, 1)
+        clean_answer = parts[0].rstrip()
+        followup_text = parts[1].strip()
+
+        questions = [
+            q.strip().lstrip("- ").strip()
+            for q in followup_text.splitlines()
+            if q.strip() and len(q.strip()) >= 2
+        ][:4]  # 최대 4개
+
+        if not questions:
+            return clean_answer, []
+
+        # 2개씩 행으로 묶어서 버튼 생성
+        buttons = []
+        row = []
+        for i, q in enumerate(questions):
+            # callback_data에 질문 텍스트를 넣되 64바이트 제한 고려
+            cb_data = f"followup_q:{q[:50]}"
+            row.append(InlineKeyboardButton(q[:20], callback_data=cb_data))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+
+        return clean_answer, buttons
 
     def _build_followup_buttons(self, question: str, stock: dict | None) -> list:
         """AI 응답 후 후속 질문 인라인 버튼 생성."""
@@ -918,9 +958,11 @@ class CommandsMixin:
             )
             answer = await handle_ai_question(enriched, ctx, self.db, chat_mem)
 
-            # 다음 후속 버튼도 생성
-            stock_data = {"code": ticker, "name": name, "market": "KOSPI"} if ticker else None
-            followup_buttons = self._build_followup_buttons(question, stock_data)
+            # 후속 질문 파싱 → 버튼
+            answer, followup_buttons = self._parse_followup_buttons(answer)
+            if not followup_buttons:
+                stock_data = {"code": ticker, "name": name, "market": "KOSPI"} if ticker else None
+                followup_buttons = self._build_followup_buttons(question, stock_data)
             markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None
 
             await context.bot.send_message(
@@ -930,6 +972,69 @@ class CommandsMixin:
             )
         except Exception as e:
             logger.error("Followup AI error: %s", e, exc_info=True)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="\u26a0\ufe0f AI 응답 중 오류가 발생했습니다.",
+            )
+
+    async def _action_followup_dynamic(self, query, context, payload: str) -> None:
+        """AI가 생성한 동적 후속 질문 버튼 콜백."""
+        question = payload  # payload가 곧 질문 텍스트
+
+        await query.edit_message_text(
+            query.message.text + f"\n\n\U0001f4ad {question}..."
+        )
+
+        try:
+            from kstock.bot.chat_handler import handle_ai_question
+            from kstock.bot.context_builder import build_full_context_with_macro
+            from kstock.bot.chat_memory import ChatMemory
+
+            # 질문에 종목명이 있으면 가격 주입
+            enriched = question
+            stock = None
+            try:
+                stock = self._detect_stock_query(question)
+                if stock:
+                    code = stock.get("code", "")
+                    name = stock.get("name", code)
+                    market = stock.get("market", "KOSPI")
+                    ohlcv = await self.yf_client.get_ohlcv(code, market)
+                    if ohlcv is not None and not ohlcv.empty:
+                        from kstock.core.technical import compute_indicators
+                        tech = compute_indicators(ohlcv)
+                        close = ohlcv["close"].astype(float)
+                        cur = float(close.iloc[-1])
+                        if cur > 0:
+                            enriched = (
+                                f"{question}\n\n"
+                                f"[{name}({code}) 실시간 데이터]\n"
+                                f"현재가: {cur:,.0f}원\n"
+                                f"RSI: {tech.rsi:.1f}\n"
+                                f"[절대 규칙] 위 실시간 데이터의 가격만 참고하라."
+                            )
+            except Exception:
+                pass
+
+            chat_mem = ChatMemory(self.db)
+            ctx = await build_full_context_with_macro(
+                self.db, self.macro_client, self.yf_client,
+            )
+            answer = await handle_ai_question(enriched, ctx, self.db, chat_mem)
+
+            # 후속 질문 파싱 → 버튼
+            answer, followup_buttons = self._parse_followup_buttons(answer)
+            if not followup_buttons:
+                followup_buttons = self._build_followup_buttons(question, stock)
+            markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None
+
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=answer,
+                reply_markup=markup,
+            )
+        except Exception as e:
+            logger.error("Dynamic followup AI error: %s", e, exc_info=True)
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
                 text="\u26a0\ufe0f AI 응답 중 오류가 발생했습니다.",
