@@ -273,12 +273,19 @@ class CoreHandlersMixin:
             days=(6,),
             name="lstm_retrain",
         )
-        # v4.0: 실시간 리스크 모니터링 (5분마다)
+        # v4.2: 리스크 모니터링 (5분마다, 트레일링 스탑 추적 + 긴급 알림만)
         jq.run_repeating(
             self.job_risk_monitor,
             interval=300,
             first=30,
             name="risk_monitor",
+        )
+        # v4.2: 장 마감 리스크 종합 리포트 (1일 1회, 15:40)
+        jq.run_daily(
+            self.job_eod_risk_report,
+            time=dt_time(hour=15, minute=40, tzinfo=KST),
+            days=tuple(range(5)),
+            name="eod_risk_report",
         )
         # v4.0: 시스템 헬스체크 (30분마다)
         jq.run_repeating(
@@ -297,7 +304,8 @@ class CoreHandlersMixin:
             "report_crawl(weekday 08:20), "
             "ws_connect(weekday 08:50), ws_disconnect(weekday 15:35), "
             "scalp_close(weekday 14:30), short_review(weekday 08:00), "
-            "lstm_retrain(Sun 03:00), risk_monitor(5min), "
+            "lstm_retrain(Sun 03:00), risk_monitor(5min, trailing only), "
+            "eod_risk_report(weekday 15:40), "
             "health_check(30min) KST"
         )
 

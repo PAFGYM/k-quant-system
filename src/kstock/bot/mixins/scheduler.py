@@ -2036,22 +2036,16 @@ class SchedulerMixin:
     ) -> None:
         """실시간 포트폴리오 리스크 + 차익실현 모니터링 (매 5분).
 
-        v4.1: Position Sizer 통합
-        - 리스크 위반 감시 (집중도, MDD, 일간 손실)
-        - 차익실현 자동 알림 (+50% 1/3 매도, +100% 원금 회수)
-        - 트레일링 스탑 추적 (고점 대비 하락 감지)
-        - 집중도 강화 경고 (종목 30%, 섹터 50%)
+        v4.2: 알림 빈도 최적화
+        - 리스크/집중도 경고 → 장 마감(EOD) 리포트에 통합 (1일 1회)
+        - 손절/트레일링 스탑 → 긴급만 즉시 발송
+        - 차익실현 알림 → 1일 1회 (종목별)
+        - 트레일링 스탑 고점 추적 → 매 5분 (알림 없이 백그라운드)
         """
         if not self.chat_id:
             return
         try:
-            from kstock.core.risk_manager import (
-                calculate_mdd, RISK_LIMITS,
-            )
-            from kstock.core.position_sizer import (
-                PositionSizer, format_concentration_warnings,
-                format_profit_taking_summary,
-            )
+            from kstock.core.position_sizer import PositionSizer
 
             holdings = self.db.get_active_holdings()
             if not holdings or len(holdings) < 1:
@@ -2075,63 +2069,18 @@ class SchedulerMixin:
 
             sizer = self._position_sizer
 
-            # 종목별 비중 계산
-            weights = {}
-            for h in holdings:
-                cp = h.get("current_price", 0) or h.get("buy_price", 0)
-                qty = h.get("quantity", 1)
-                w = (cp * qty) / total_value if total_value > 0 else 0
-                weights[h.get("ticker", "")] = w
-
-            # === 1. 리스크 위반 체크 ===
-            violations = []
-
-            # 종목 집중도 (30% 경고 + 50% 긴급)
+            # === 백그라운드: 트레일링 스탑 고점 추적 (알림 없음) ===
             for h in holdings:
                 ticker = h.get("ticker", "")
-                w = weights.get(ticker, 0)
-                name = h.get("name", ticker)
-                if w > 0.50:
-                    violations.append(
-                        f"🚨 종목 극집중: {name} "
-                        f"비중 {w*100:.1f}% (긴급 한도 50% 초과)"
-                    )
-                elif w > 0.30:
-                    violations.append(
-                        f"⚠️ 종목 집중: {name} "
-                        f"비중 {w*100:.1f}% (경고 한도 30% 초과)"
+                buy_price = h.get("buy_price", 0)
+                current_price = h.get("current_price", 0)
+                holding_type = h.get("holding_type", "auto")
+                if buy_price > 0 and current_price > 0:
+                    sizer._update_trailing_stop(
+                        ticker, current_price, buy_price, holding_type,
                     )
 
-            # 일간 손실률 체크
-            for h in holdings:
-                pnl = h.get("pnl_pct", 0) or 0
-                if pnl < -5.0:
-                    violations.append(
-                        f"🔴 {h['name']}: 수익률 {pnl:+.1f}% "
-                        f"(일간 손실 한도 초과)"
-                    )
-
-            # 포트폴리오 MDD 체크
-            try:
-                snapshots = self.db.get_portfolio_snapshots(days=30)
-                if snapshots and len(snapshots) >= 2:
-                    peak = max(s.get("total_value", 0) for s in snapshots)
-                    if peak > 0:
-                        mdd = calculate_mdd(total_value, peak)
-                        if mdd < RISK_LIMITS.get("max_portfolio_mdd", -0.15):
-                            violations.append(
-                                f"📉 포트폴리오 MDD {mdd*100:.1f}% "
-                                f"(한도 {RISK_LIMITS['max_portfolio_mdd']*100:.0f}%)"
-                            )
-                        if mdd < RISK_LIMITS.get("emergency_mdd", -0.20):
-                            violations.append(
-                                "🚨 긴급: MDD 20% 초과 — 전량 매도 검토 필요"
-                            )
-            except Exception:
-                pass
-
-            # === 2. 차익실현 체크 (v4.1 신규) ===
-            profit_alerts = []
+            # === 긴급 알림만 즉시 발송: 손절 + 트레일링 스탑 발동 ===
             for h in holdings:
                 ticker = h.get("ticker", "")
                 name = h.get("name", ticker)
@@ -2152,19 +2101,120 @@ class SchedulerMixin:
                     holding_type=holding_type,
                     sold_pct=sold_pct / 100 if sold_pct > 1 else sold_pct,
                 )
-                if alert:
-                    # 중복 방지: 같은 타입 알림 8시간 내 재발송 안 함
+
+                # 손절/트레일링 스탑만 즉시 발송 (1일 1회 제한)
+                if alert and alert.alert_type in ("stop_loss", "trailing_stop"):
                     if not self.db.has_recent_alert(
-                        ticker, f"profit_{alert.alert_type}", hours=8,
+                        ticker, f"profit_{alert.alert_type}", hours=24,
                     ):
-                        profit_alerts.append(alert)
                         self.db.insert_alert(
-                            ticker,
-                            f"profit_{alert.alert_type}",
+                            ticker, f"profit_{alert.alert_type}",
                             alert.message[:200],
                         )
+                        buttons = [
+                            [
+                                InlineKeyboardButton(
+                                    "🔴 매도" if alert.alert_type == "stop_loss" else "⚠️ 매도",
+                                    callback_data=f"pt:sell:{alert.ticker}:{alert.sell_shares}",
+                                ),
+                                InlineKeyboardButton(
+                                    "💎 홀드",
+                                    callback_data=f"pt:ignore:{alert.ticker}",
+                                ),
+                            ],
+                        ]
+                        await context.bot.send_message(
+                            chat_id=self.chat_id,
+                            text=sizer.format_profit_alert(alert),
+                            reply_markup=InlineKeyboardMarkup(buttons),
+                        )
+                        logger.info(
+                            "Urgent alert: %s %s (%+.1f%%)",
+                            alert.name, alert.alert_type, alert.pnl_pct,
+                        )
 
-            # === 3. 집중도 강화 분석 (v4.1 신규) ===
+            logger.debug("Risk monitor: trailing stop tracking updated")
+
+        except Exception as e:
+            logger.debug("Risk monitor error: %s", e)
+
+    async def job_eod_risk_report(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """장 마감 리스크 + 차익실현 종합 리포트 (1일 1회, 15:40).
+
+        v4.2: 기존 5분마다 반복되던 경고를 장 마감 1회로 통합.
+        - 포트폴리오 집중도 분석
+        - 리스크 위반 (MDD, 일간 손실)
+        - 차익실현 알림 (+50%, +100%)
+        - 트레일링 스탑 현황
+        """
+        if not self.chat_id:
+            return
+        now = datetime.now(KST)
+        if now.weekday() >= 5:
+            return
+        try:
+            from kstock.core.risk_manager import (
+                calculate_mdd, RISK_LIMITS,
+            )
+            from kstock.core.position_sizer import (
+                PositionSizer, format_concentration_warnings,
+            )
+
+            holdings = self.db.get_active_holdings()
+            if not holdings:
+                return
+
+            # 포트폴리오 가치
+            total_value = 0.0
+            for h in holdings:
+                cp = h.get("current_price", 0) or h.get("buy_price", 0)
+                qty = h.get("quantity", 1)
+                total_value += cp * qty
+
+            if total_value <= 0:
+                return
+
+            if not hasattr(self, '_position_sizer'):
+                self._position_sizer = PositionSizer(account_value=total_value)
+            else:
+                self._position_sizer.account_value = total_value
+            sizer = self._position_sizer
+
+            lines = [
+                "🛡️ 장 마감 리스크 리포트",
+                "━" * 22,
+                "",
+                f"💰 포트폴리오: {total_value:,.0f}원",
+                "",
+            ]
+
+            has_issues = False
+
+            # === 1. 종목/섹터 집중도 ===
+            weights = {}
+            for h in holdings:
+                cp = h.get("current_price", 0) or h.get("buy_price", 0)
+                qty = h.get("quantity", 1)
+                w = (cp * qty) / total_value if total_value > 0 else 0
+                weights[h.get("ticker", "")] = w
+
+            conc_issues = []
+            for h in holdings:
+                ticker = h.get("ticker", "")
+                w = weights.get(ticker, 0)
+                name = h.get("name", ticker)
+                if w > 0.50:
+                    conc_issues.append(
+                        f"  🚨 {name} 비중 {w*100:.1f}% (긴급 한도 50% 초과)"
+                    )
+                elif w > 0.30:
+                    conc_issues.append(
+                        f"  ⚠️ {name} 비중 {w*100:.1f}% (경고 한도 30% 초과)"
+                    )
+
+            # 섹터 집중도
             conc_holdings = [
                 {
                     "ticker": h.get("ticker", ""),
@@ -2176,93 +2226,142 @@ class SchedulerMixin:
                 }
                 for h in holdings
             ]
-            concentration_warnings = sizer.analyze_concentration(conc_holdings)
+            sector_warnings = sizer.analyze_concentration(conc_holdings)
 
-            # === 알림 발송 ===
+            if conc_issues or sector_warnings:
+                has_issues = True
+                lines.append("📊 집중도 분석")
+                lines.extend(conc_issues)
+                for sw in sector_warnings:
+                    if "섹터" in sw:
+                        lines.append(f"  {sw}")
+                lines.append("")
 
-            # 리스크 위반
-            if violations:
-                text = (
-                    "🛡️ 리스크 경고\n"
-                    f"{'━' * 22}\n\n"
-                    + "\n".join(violations)
-                    + f"\n\n💰 포트폴리오: {total_value:,.0f}원"
+            # === 2. MDD / 일간 손실 ===
+            risk_issues = []
+            try:
+                snapshots = self.db.get_portfolio_snapshots(days=30)
+                if snapshots and len(snapshots) >= 2:
+                    peak = max(s.get("total_value", 0) for s in snapshots)
+                    if peak > 0:
+                        mdd = calculate_mdd(total_value, peak)
+                        if mdd < RISK_LIMITS.get("max_portfolio_mdd", -0.15):
+                            risk_issues.append(
+                                f"  📉 MDD {mdd*100:.1f}% "
+                                f"(한도 {RISK_LIMITS['max_portfolio_mdd']*100:.0f}%)"
+                            )
+                        if mdd < RISK_LIMITS.get("emergency_mdd", -0.20):
+                            risk_issues.append(
+                                "  🚨 긴급: MDD 20% 초과 — 전량 매도 검토"
+                            )
+            except Exception:
+                pass
+
+            for h in holdings:
+                pnl = h.get("pnl_pct", 0) or 0
+                if pnl < -5.0:
+                    risk_issues.append(
+                        f"  🔴 {h['name']}: {pnl:+.1f}% (일간 손실 한도 초과)"
+                    )
+
+            if risk_issues:
+                has_issues = True
+                lines.append("🚨 리스크 위반")
+                lines.extend(risk_issues)
+                lines.append("")
+
+            # === 3. 차익실현 대상 ===
+            profit_items = []
+            for h in holdings:
+                ticker = h.get("ticker", "")
+                name = h.get("name", ticker)
+                buy_price = h.get("buy_price", 0)
+                current_price = h.get("current_price", 0)
+                quantity = h.get("quantity", 1)
+                holding_type = h.get("holding_type", "auto")
+                sold_pct = h.get("sold_pct", 0) or 0
+
+                if buy_price <= 0 or current_price <= 0:
+                    continue
+
+                alert = sizer.check_profit_taking(
+                    ticker=ticker, name=name,
+                    buy_price=buy_price,
+                    current_price=current_price,
+                    quantity=quantity,
+                    holding_type=holding_type,
+                    sold_pct=sold_pct / 100 if sold_pct > 1 else sold_pct,
                 )
-                await context.bot.send_message(chat_id=self.chat_id, text=text)
-                logger.warning("Risk violations: %d", len(violations))
-                for v in violations:
-                    try:
-                        self.db.add_risk_violation(
-                            violation_type="realtime_monitor",
-                            severity="warning" if "⚠️" in v else "error",
-                            details=v,
-                        )
-                    except Exception:
-                        pass
+                if alert and alert.alert_type.startswith("stage"):
+                    pnl_pct = (current_price - buy_price) / buy_price * 100
+                    profit_items.append(
+                        f"  {alert.name}: +{pnl_pct:.0f}% → {alert.action} "
+                        f"({alert.sell_shares}주)"
+                    )
 
-            # 차익실현 알림 (개별 발송 — 인라인 키보드 포함)
-            for pa in profit_alerts:
-                keyboard = None
-                if pa.alert_type != "stop_loss":
-                    buttons = [
-                        [
+            if profit_items:
+                has_issues = True
+                lines.append("💰 차익실현 대상")
+                lines.extend(profit_items)
+                lines.append("")
+
+            # === 4. 트레일링 스탑 현황 ===
+            trail_items = []
+            for ticker, state in sizer.get_all_trailing_states().items():
+                if state.is_active:
+                    name = next(
+                        (h["name"] for h in holdings if h.get("ticker") == ticker),
+                        ticker,
+                    )
+                    trail_items.append(
+                        f"  {name}: 고점 {state.high_price:,.0f}원 "
+                        f"→ 스탑 {state.stop_price:,.0f}원 "
+                        f"(-{state.trail_pct*100:.0f}%)"
+                    )
+
+            if trail_items:
+                lines.append("📈 트레일링 스탑 활성")
+                lines.extend(trail_items)
+                lines.append("")
+
+            # === 발송 ===
+            if not has_issues and not trail_items:
+                lines.append("✅ 리스크 위반 없음. 포트폴리오 정상.")
+                lines.append("")
+
+            lines.append("주호님, 안전한 투자 되세요.")
+
+            # 차익실현 대상이 있으면 버튼 추가
+            keyboard = None
+            if profit_items:
+                buttons = []
+                for h in holdings:
+                    bp = h.get("buy_price", 0)
+                    cp = h.get("current_price", 0)
+                    if bp > 0 and cp > 0 and (cp - bp) / bp >= 0.50:
+                        buttons.append([
                             InlineKeyboardButton(
-                                "✅ 매도 실행",
-                                callback_data=f"pt:sell:{pa.ticker}:{pa.sell_shares}",
+                                f"💰 {h['name']} 익절 실행",
+                                callback_data=f"pt:sell:{h['ticker']}:{h.get('quantity',0)//3}",
                             ),
-                            InlineKeyboardButton(
-                                "❌ 무시",
-                                callback_data=f"pt:ignore:{pa.ticker}",
-                            ),
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                "⏰ 1시간 뒤 다시",
-                                callback_data=f"pt:snooze:{pa.ticker}",
-                            ),
-                        ],
-                    ]
+                        ])
+                if buttons:
+                    buttons.append([
+                        InlineKeyboardButton(
+                            "👌 확인", callback_data="pt:ignore:all",
+                        ),
+                    ])
                     keyboard = InlineKeyboardMarkup(buttons)
-                else:
-                    buttons = [
-                        [
-                            InlineKeyboardButton(
-                                "🔴 손절 매도",
-                                callback_data=f"pt:sell:{pa.ticker}:{pa.sell_shares}",
-                            ),
-                            InlineKeyboardButton(
-                                "💎 홀드",
-                                callback_data=f"pt:ignore:{pa.ticker}",
-                            ),
-                        ],
-                    ]
-                    keyboard = InlineKeyboardMarkup(buttons)
 
-                await context.bot.send_message(
-                    chat_id=self.chat_id,
-                    text=sizer.format_profit_alert(pa),
-                    reply_markup=keyboard,
-                )
-                logger.info(
-                    "Profit alert: %s %s (%+.1f%%)",
-                    pa.name, pa.alert_type, pa.pnl_pct,
-                )
-
-            # 집중도 경고 (1일 1회)
-            if concentration_warnings:
-                conc_alert_key = f"concentration_{datetime.now(KST).strftime('%Y%m%d')}"
-                if not hasattr(self, '_conc_alert_sent'):
-                    self._conc_alert_sent = set()
-                if conc_alert_key not in self._conc_alert_sent:
-                    self._conc_alert_sent.add(conc_alert_key)
-                    conc_text = format_concentration_warnings(concentration_warnings)
-                    if conc_text:
-                        await context.bot.send_message(
-                            chat_id=self.chat_id, text=conc_text,
-                        )
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text="\n".join(lines),
+                reply_markup=keyboard,
+            )
+            logger.info("EOD risk report sent")
 
         except Exception as e:
-            logger.debug("Risk monitor error: %s", e)
+            logger.error("EOD risk report error: %s", e)
 
     async def job_health_check(
         self, context: ContextTypes.DEFAULT_TYPE,
