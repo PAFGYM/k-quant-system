@@ -800,35 +800,82 @@ class CommandsMixin:
                 )
 
     def _parse_followup_buttons(self, answer: str) -> tuple:
-        """AI 응답에서 ---followup--- 섹션을 파싱하여 버튼으로 변환.
+        """AI 응답에서 후속 질문을 파싱하여 버튼으로 변환.
+
+        1순위: ---followup--- 구분자
+        2순위: 텍스트 A/B/C/D 패턴 감지 (AI가 형식 안 따를 때)
 
         Returns:
             (cleaned_answer, buttons_list) — 버튼이 없으면 빈 리스트.
         """
+        import re
+
+        clean_answer = answer
+        questions = []
+
+        # 1순위: ---followup--- 구분자
         separator = "---followup---"
-        if separator not in answer:
-            return answer, []
+        if separator in answer:
+            parts = answer.split(separator, 1)
+            clean_answer = parts[0].rstrip()
+            followup_text = parts[1].strip()
+            questions = [
+                q.strip().lstrip("- ").strip()
+                for q in followup_text.splitlines()
+                if q.strip() and len(q.strip()) >= 2
+            ][:4]
 
-        parts = answer.split(separator, 1)
-        clean_answer = parts[0].rstrip()
-        followup_text = parts[1].strip()
+        # 2순위: "다음 궁금하실 것들" / "A. ... B. ..." 패턴 감지
+        if not questions:
+            # "📌 다음 궁금하실 것들" 같은 헤더 이후의 A~F 항목 추출
+            section_patterns = [
+                r'(?:다음 궁금하실|더 궁금하|추가 질문|골라주|선택해).*?\n',
+                r'💬.*?(?:뭐가 필요|궁금하|골라주).*?\n',
+                r'📌.*?(?:다음|궁금|질문).*?\n',
+            ]
+            section_start = -1
+            for pat in section_patterns:
+                m = re.search(pat, answer)
+                if m:
+                    section_start = m.start()
+                    break
 
-        questions = [
-            q.strip().lstrip("- ").strip()
-            for q in followup_text.splitlines()
-            if q.strip() and len(q.strip()) >= 2
-        ][:4]  # 최대 4개
+            # A. / B. / C. 패턴 또는 🔴 A. / 🟡 B. 패턴 추출
+            abc_pattern = re.compile(
+                r'(?:^|\n)\s*(?:[\U0001f534\U0001f7e1\U0001f7e2\U0001f535\u26aa\u2753]\s*)?'
+                r'[A-F]\.\s*(.+?)(?:\n\s*(?:→|  ).*)?$',
+                re.MULTILINE,
+            )
+            matches = list(abc_pattern.finditer(answer))
+            if matches:
+                # 첫 매치 위치 이전까지가 본문
+                first_match_start = matches[0].start()
+                # 섹션 헤더가 있으면 그 앞부터 자르기
+                cut_start = section_start if section_start >= 0 and section_start < first_match_start else first_match_start
+                clean_answer = answer[:cut_start].rstrip()
+                # 뒤에 남는 "뭐든 좋아요!" 같은 꼬리도 제거
+                clean_answer = re.sub(
+                    r'\n\s*(?:뭐든|편하게|골라주|위 [A-F]).*$', '',
+                    clean_answer, flags=re.DOTALL,
+                ).rstrip()
+                questions = [m.group(1).strip().rstrip('?!') + '?' for m in matches][:4]
 
         if not questions:
-            return clean_answer, []
+            return answer, []
 
         # 2개씩 행으로 묶어서 버튼 생성
         buttons = []
         row = []
-        for i, q in enumerate(questions):
-            # callback_data에 질문 텍스트를 넣되 64바이트 제한 고려
-            cb_data = f"followup_q:{q[:50]}"
-            row.append(InlineKeyboardButton(q[:20], callback_data=cb_data))
+        for q in questions:
+            # callback_data 64바이트 제한: UTF-8 기준으로 자르기
+            label = q[:18]
+            cb_q = q[:40]
+            cb_data = f"followup_q:{cb_q}"
+            # callback_data가 64바이트 초과하면 더 자르기
+            while len(cb_data.encode('utf-8')) > 64:
+                cb_q = cb_q[:-1]
+                cb_data = f"followup_q:{cb_q}"
+            row.append(InlineKeyboardButton(label, callback_data=cb_data))
             if len(row) == 2:
                 buttons.append(row)
                 row = []
