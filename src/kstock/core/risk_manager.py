@@ -1,7 +1,9 @@
-"""Portfolio risk management with hard limits (core/risk_manager.py).
+"""Portfolio risk management with hard limits (core/risk_manager.py) — v5.1.
 
 Monitors MDD, concentration, sector weight, correlation, margin ratio.
 Generates violations and recommended actions.
+
+v5.1: RiskPolicy 단일 소스 참조 — 임계치 중복 해소.
 """
 
 from __future__ import annotations
@@ -14,18 +16,30 @@ logger = logging.getLogger(__name__)
 USER_NAME = "주호님"
 
 # ---------------------------------------------------------------------------
-# Risk limit defaults
+# Risk limit defaults — v5.1: RiskPolicy에서 읽되 하위호환 유지
 # ---------------------------------------------------------------------------
-RISK_LIMITS = {
-    "max_portfolio_mdd": -0.15,
-    "emergency_mdd": -0.20,
-    "max_daily_loss": -0.05,
-    "max_single_stock_weight": 0.40,
-    "max_sector_weight": 0.60,
-    "max_correlation": 0.85,
-    "max_margin_ratio": 0.20,
-    "max_single_margin": 0.30,
-}
+def _get_risk_limits() -> dict:
+    """RiskPolicy 단일 소스에서 한도를 읽는다 (v5.1)."""
+    try:
+        from kstock.core.risk_policy import get_risk_policy
+        return get_risk_policy().to_risk_limits_dict()
+    except Exception:
+        pass
+    # 폴백: 하드코딩 (RiskPolicy 모듈 없을 때)
+    return {
+        "max_portfolio_mdd": -0.15,
+        "emergency_mdd": -0.20,
+        "max_daily_loss": -0.05,
+        "max_single_stock_weight": 0.40,
+        "max_sector_weight": 0.60,
+        "max_correlation": 0.85,
+        "max_margin_ratio": 0.20,
+        "max_single_margin": 0.30,
+    }
+
+
+# 하위호환 유지: 기존 코드에서 RISK_LIMITS를 직접 참조하는 경우
+RISK_LIMITS = _get_risk_limits()
 
 # ---------------------------------------------------------------------------
 # Sector mapping for common Korean tickers

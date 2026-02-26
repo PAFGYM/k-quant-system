@@ -1,4 +1,4 @@
-"""Data source router for K-Quant v5.0.
+"""Data source router for K-Quant v5.1.
 
 Priority:
 1. KIS API (real-time, if connected)
@@ -8,6 +8,7 @@ Priority:
 5. Naver Finance (secondary fallback when yfinance fails)
 
 v5.0: PIT(Point-in-Time) 소스 태깅 + 지연 추적 통합.
+v5.1: 폴백 데이터 매수 차단 — 지연 소스(yfinance/naver)로 신규 매수 의사결정 금지.
 """
 
 from __future__ import annotations
@@ -20,6 +21,22 @@ from datetime import datetime, timezone, timedelta
 logger = logging.getLogger(__name__)
 
 KST = timezone(timedelta(hours=9))
+
+# v5.1: 실시간 소스 (매수 의사결정 허용)
+REALTIME_SOURCES = {"kis_realtime"}
+
+# v5.1: 지연 소스 (매수 의사결정 금지 — 정보 표시/알림만 허용)
+DELAYED_SOURCES = {"yfinance", "naver"}
+
+# v5.1: 소스별 추정 지연 시간 (초)
+SOURCE_DELAY_SECONDS = {
+    "kis_realtime": 0.5,
+    "database": 0,        # 수동 입력이라 시점 불확실
+    "yfinance": 900,      # ~15분
+    "naver": 1200,        # ~20분
+    "manual": 0,
+    "none": 0,
+}
 
 
 @dataclass
@@ -81,6 +98,38 @@ class DataRouter:
     @property
     def kis_connected(self) -> bool:
         return self.kis is not None and self.kis.connected
+
+    @property
+    def is_realtime(self) -> bool:
+        """v5.1: 마지막 데이터가 실시간 소스인지 확인."""
+        return self._last_source_used in REALTIME_SOURCES
+
+    @property
+    def is_delayed(self) -> bool:
+        """v5.1: 마지막 데이터가 지연 소스(폴백)인지 확인."""
+        return self._last_source_used in DELAYED_SOURCES
+
+    @property
+    def estimated_delay_seconds(self) -> float:
+        """v5.1: 마지막 소스의 추정 지연 시간 (초)."""
+        return SOURCE_DELAY_SECONDS.get(self._last_source_used, 0)
+
+    def can_buy_with_current_data(self) -> tuple[bool, str]:
+        """v5.1: 현재 데이터 소스로 매수 의사결정이 가능한지 판단.
+
+        Returns:
+            (허용 여부, 사유 메시지)
+        """
+        src = self._last_source_used
+        if not src:
+            return False, "데이터 소스 미확인 — 매수 불가"
+        if src in REALTIME_SOURCES:
+            return True, ""
+        delay = SOURCE_DELAY_SECONDS.get(src, 0)
+        return False, (
+            f"지연 데이터 소스({src}, ~{delay // 60:.0f}분 지연) 사용 중 — "
+            f"신규 매수 차단 (매도/정보조회는 허용)"
+        )
 
     def refresh_source(self) -> str:
         """Re-detect the best available data source."""

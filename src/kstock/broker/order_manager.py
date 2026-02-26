@@ -1,4 +1,4 @@
-"""주문 상태머신 + 멱등성 키 — v5.0-2.
+"""주문 상태머신 + 멱등성 키 — v5.1.
 
 모든 주문을 상태머신으로 관리하여 중복주문을 차단하고,
 주문 라이프사이클을 추적한다.
@@ -298,6 +298,7 @@ class PreTradeValidator:
         self.safety = safety_limits
         self.guard = idempotency_guard or IdempotencyGuard()
         self._kill_switch_active = False
+        self._data_source_checker = None  # v5.1: DataRouter.can_buy_with_current_data
 
     @property
     def kill_switch_active(self) -> bool:
@@ -310,6 +311,14 @@ class PreTradeValidator:
             logger.warning("킬스위치 활성화 — 모든 신규 주문 차단")
         else:
             logger.info("킬스위치 해제")
+
+    def set_data_source_checker(self, checker) -> None:
+        """v5.1: DataRouter의 can_buy_with_current_data 메서드를 연결.
+
+        Args:
+            checker: callable returning (bool, str) — e.g. DataRouter.can_buy_with_current_data
+        """
+        self._data_source_checker = checker
 
     def validate(
         self,
@@ -338,7 +347,16 @@ class PreTradeValidator:
             result.add_block("킬스위치 활성 — 모든 주문 차단")
             return result
 
-        # 2. SafetyLimits 체크
+        # 2. v5.1: 데이터 품질 체크 (매수만 — 매도는 지연 데이터여도 허용)
+        if side == "buy" and self._data_source_checker:
+            try:
+                can_buy, reason = self._data_source_checker()
+                if not can_buy:
+                    result.add_block(f"데이터품질: {reason}")
+            except Exception as e:
+                logger.debug("데이터 소스 체크 실패 (무시): %s", e)
+
+        # 3. SafetyLimits 체크
         if self.safety and total_eval > 0:
             order_amount = quantity * price
             order_pct = order_amount / total_eval * 100
@@ -346,13 +364,13 @@ class PreTradeValidator:
             if not can_order:
                 result.add_block(f"SafetyLimits: {msg}")
 
-        # 3. 멱등성 체크
+        # 4. 멱등성 체크
         idem_key = IdempotencyGuard.generate_key(ticker, side, quantity)
         allowed, msg = self.guard.check_and_register(idem_key)
         if not allowed:
             result.add_block(msg)
 
-        # 4. 기본 유효성
+        # 5. 기본 유효성
         if quantity <= 0:
             result.add_block(f"수량 오류: {quantity}주")
         if price < 0:

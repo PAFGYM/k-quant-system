@@ -1,4 +1,4 @@
-"""통합 이벤트 로그 — v5.0-6.
+"""통합 이벤트 로그 — v5.1.
 
 시스템의 모든 중요 이벤트(주문, 시그널, 리컨실, 안전모드 등)를
 단일 시계열 로그로 기록한다.
@@ -7,6 +7,8 @@
   1. EventLog — 이벤트 기록 + 조회
   2. EventType — 이벤트 유형 분류
   3. EventQuery — 필터링 + 집계
+
+v5.1: CRITICAL/ERROR 이벤트 즉시 DB flush + 데이터 품질 이벤트 추가.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ class EventType(str, Enum):
     DATA_FALLBACK = "data.fallback"
     DATA_STALE = "data.stale"
     DATA_PIT_VIOLATION = "data.pit_violation"
+    DATA_BUY_BLOCKED = "data.buy_blocked"       # v5.1: 지연 데이터로 매수 차단
 
     # 리스크 관련
     RISK_VIOLATION = "risk.violation"
@@ -114,13 +117,20 @@ class EventLog:
     빠른 조회는 메모리, 영속 저장은 DB.
     """
 
+    # v5.1: 즉시 flush 대상 심각도 (크래시 시 손실 방지)
+    IMMEDIATE_FLUSH_SEVERITIES = {EventSeverity.ERROR, EventSeverity.CRITICAL}
+
     def __init__(self, db=None, max_memory: int = MAX_MEMORY_EVENTS):
         self.db = db
         self._events: deque[Event] = deque(maxlen=max_memory)
         self._listeners: list = []
+        self._pending_flush: list[Event] = []  # v5.1: 미저장 이벤트 버퍼
 
     def log(self, event: Event) -> None:
-        """이벤트 기록."""
+        """이벤트 기록.
+
+        v5.1: CRITICAL/ERROR 이벤트는 즉시 DB flush.
+        """
         self._events.append(event)
 
         # Python 로거 연동
@@ -140,8 +150,17 @@ class EventLog:
             f" | ticker={event.ticker}" if event.ticker else "",
         )
 
-        # DB 저장
-        self._save_to_db(event)
+        # DB 저장 — v5.1: 중요 이벤트는 즉시 flush
+        saved = self._save_to_db(event)
+        if not saved:
+            self._pending_flush.append(event)
+
+        # v5.1: 리스너 알림
+        for listener in self._listeners:
+            try:
+                listener(event)
+            except Exception:
+                pass
 
     def log_quick(
         self,
@@ -216,12 +235,42 @@ class EventLog:
     def total_events(self) -> int:
         return len(self._events)
 
+    def add_listener(self, callback) -> None:
+        """v5.1: 이벤트 리스너 등록."""
+        self._listeners.append(callback)
+
+    def flush_pending(self) -> int:
+        """v5.1: 미저장 이벤트를 DB에 일괄 저장.
+
+        Returns:
+            저장된 이벤트 수.
+        """
+        if not self._pending_flush or not self.db:
+            return 0
+        saved = 0
+        remaining = []
+        for event in self._pending_flush:
+            if self._save_to_db(event):
+                saved += 1
+            else:
+                remaining.append(event)
+        self._pending_flush = remaining
+        if saved > 0:
+            logger.info("미저장 이벤트 %d건 flush 완료", saved)
+        return saved
+
     # ── DB 저장 ──────────────────────────────────────────
 
-    def _save_to_db(self, event: Event) -> None:
-        """이벤트를 DB에 저장."""
+    def _save_to_db(self, event: Event) -> bool:
+        """이벤트를 DB에 저장.
+
+        v5.1: 성공 여부를 반환하여 flush 재시도 지원.
+
+        Returns:
+            저장 성공 여부.
+        """
         if not self.db:
-            return
+            return False
         try:
             with self.db._connect() as conn:
                 conn.execute(
@@ -240,9 +289,11 @@ class EventLog:
                         event.timestamp,
                     ),
                 )
+            return True
         except Exception as e:
             # DB 에러가 이벤트 로깅을 막지 않도록
             logger.debug("이벤트 DB 저장 실패: %s", e)
+            return False
 
 
 # ── 글로벌 인스턴스 ───────────────────────────────────────
