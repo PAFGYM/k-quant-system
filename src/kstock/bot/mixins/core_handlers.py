@@ -1361,6 +1361,8 @@ class CoreHandlersMixin:
                 "mgr": self._action_manager_view,
                 # v3.9: 거품 판별
                 "bubble": self._action_bubble_check,
+                # v4.1: 차익실현 콜백
+                "pt": self._action_profit_taking,
             }
             handler = dispatch.get(action)
             if handler:
@@ -1599,6 +1601,66 @@ class CoreHandlersMixin:
             logger.error("Solution detail callback failed: %s", e, exc_info=True)
             try:
                 await query.edit_message_text("\u26a0\ufe0f 솔루션 조회 중 오류가 발생했습니다.")
+            except Exception:
+                pass
+
+    # == v4.1: Profit-Taking callbacks ==========================================
+
+    async def _action_profit_taking(self, query, context, payload: str) -> None:
+        """차익실현 알림 콜백.
+
+        콜백: pt:sell:{ticker}:{shares}, pt:ignore:{ticker}, pt:snooze:{ticker}
+        """
+        try:
+            parts = payload.split(":")
+            action = parts[0] if parts else ""
+
+            if action == "sell":
+                ticker = parts[1] if len(parts) > 1 else ""
+                shares = int(parts[2]) if len(parts) > 2 else 0
+                name = ""
+                for h in self.db.get_active_holdings():
+                    if h.get("ticker") == ticker:
+                        name = h.get("name", ticker)
+                        break
+
+                # 매도 기록
+                if shares > 0 and ticker:
+                    self.db.add_trade(
+                        ticker=ticker, name=name, action="sell",
+                        strategy_type="profit_taking",
+                        recommended_price=0, action_price=0,
+                        quantity_pct=0,
+                    )
+                    # 트레일링 스탑 리셋
+                    if hasattr(self, '_position_sizer'):
+                        self._position_sizer.reset_trailing_stop(ticker)
+
+                await query.edit_message_text(
+                    f"✅ {name or ticker} {shares}주 매도 기록 완료\n\n"
+                    f"실제 매도는 증권사 앱에서 진행하세요."
+                )
+
+            elif action == "ignore":
+                ticker = parts[1] if len(parts) > 1 else ""
+                await query.edit_message_text(
+                    f"👌 확인했습니다. 알림을 무시합니다."
+                )
+
+            elif action == "snooze":
+                ticker = parts[1] if len(parts) > 1 else ""
+                # 1시간 뮤트
+                if hasattr(self, '_muted_tickers'):
+                    import time
+                    self._muted_tickers[ticker] = time.time() + 3600
+                await query.edit_message_text(
+                    f"⏰ 1시간 뒤에 다시 알려드릴게요."
+                )
+
+        except Exception as e:
+            logger.error("Profit taking callback error: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text("⚠️ 처리 중 오류가 발생했습니다.")
             except Exception:
                 pass
 

@@ -2054,6 +2054,90 @@ class TradingMixin:
                 "\u26a0\ufe0f 리스크 분석 실행 중 오류가 발생했습니다."
             )
 
+    # == v4.1: Position Sizing Integration ====================================
+
+    async def _calculate_position_size_for_ticker(
+        self, ticker: str, name: str = "", budget: float = 0,
+    ) -> str:
+        """특정 종목의 최적 포지션 사이즈를 계산하고 텔레그램 메시지로 반환."""
+        try:
+            from kstock.core.position_sizer import PositionSizer
+            from kstock.core.risk_manager import SECTOR_MAP
+
+            # 계좌 규모 파악
+            holdings = self.db.get_active_holdings()
+            total_value = budget
+            if not total_value:
+                total_value = sum(
+                    (h.get("current_price", 0) or h.get("buy_price", 0))
+                    * h.get("quantity", 1)
+                    for h in holdings
+                )
+            if total_value <= 0:
+                total_value = 200_000_000  # 기본값
+
+            sizer = PositionSizer(account_value=total_value)
+
+            # 종목 데이터 가져오기
+            result = self._find_cached_result(ticker)
+            if not result:
+                result = await self._scan_single_stock(ticker)
+
+            if not result:
+                return f"⚠️ {name or ticker} 데이터를 가져올 수 없습니다."
+
+            price = getattr(result.info, 'current_price', 0) or 0
+            atr_pct = getattr(result.tech, 'atr_pct', 1.5) or 1.5
+            rsi = getattr(result.tech, 'rsi', 50)
+
+            # 기존 보유 비중 계산
+            existing_weight = 0.0
+            sector_weight = 0.0
+            target_sector = SECTOR_MAP.get(ticker, "기타")
+            total_port = sum(
+                (h.get("current_price", 0) or h.get("buy_price", 0))
+                * h.get("quantity", 1)
+                for h in holdings
+            ) or total_value
+
+            for h in holdings:
+                hval = (
+                    (h.get("current_price", 0) or h.get("buy_price", 0))
+                    * h.get("quantity", 1)
+                )
+                if h.get("ticker") == ticker:
+                    existing_weight = hval / total_port
+                h_sector = SECTOR_MAP.get(h.get("ticker", ""), "기타")
+                if h_sector == target_sector:
+                    sector_weight += hval / total_port
+
+            # 승률/목표/손절 추정
+            score = result.score.composite
+            if score >= 80:
+                win_rate, target_pct, stop_pct = 0.65, 0.12, -0.05
+            elif score >= 60:
+                win_rate, target_pct, stop_pct = 0.55, 0.10, -0.05
+            else:
+                win_rate, target_pct, stop_pct = 0.45, 0.08, -0.05
+
+            pos = sizer.calculate(
+                ticker=ticker,
+                current_price=price,
+                atr_pct=atr_pct,
+                win_rate=win_rate,
+                target_pct=target_pct,
+                stop_pct=stop_pct,
+                existing_weight=existing_weight,
+                sector_weight=sector_weight,
+                name=name or result.name,
+            )
+
+            return sizer.format_position_advice(pos)
+
+        except Exception as e:
+            logger.error("Position sizing error: %s", e, exc_info=True)
+            return f"⚠️ 포지션 사이징 계산 중 오류: {str(e)[:100]}"
+
     # == Scheduled Jobs ======================================================
 
 
