@@ -1647,17 +1647,13 @@ class SchedulerMixin:
 
             logger.info("WebSocket connected: %d tickers subscribed", subscribed)
 
+        except Exception as e:
+            logger.error("WebSocket connect job failed: %s", e)
             if self.chat_id:
                 await context.bot.send_message(
                     chat_id=self.chat_id,
-                    text=(
-                        f"📡 실시간 시세 연결 완료\n"
-                        f"구독 종목: {subscribed}개\n"
-                        f"{self.ws.get_status()}"
-                    ),
+                    text="\u26a0\ufe0f 실시간 시세 연결 실패\nWebSocket 연결에 문제가 있습니다.",
                 )
-        except Exception as e:
-            logger.error("WebSocket connect job failed: %s", e)
 
     async def job_ws_disconnect(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """장 종료 후 WebSocket 연결 해제."""
