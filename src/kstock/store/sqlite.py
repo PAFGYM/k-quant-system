@@ -793,6 +793,48 @@ CREATE TABLE IF NOT EXISTS contrarian_signals (
     data_json       TEXT,
     created_at      TEXT    NOT NULL
 );
+
+-- v5.0: 통합 이벤트 로그
+CREATE TABLE IF NOT EXISTS event_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type      TEXT    NOT NULL,
+    severity        TEXT    NOT NULL DEFAULT 'info',
+    message         TEXT    NOT NULL,
+    source          TEXT    DEFAULT '',
+    ticker          TEXT    DEFAULT '',
+    order_id        TEXT    DEFAULT '',
+    data_json       TEXT,
+    created_at      TEXT    NOT NULL
+);
+
+-- v5.0: 리컨실레이션 이력
+CREATE TABLE IF NOT EXISTS reconciliation_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    status          TEXT    NOT NULL DEFAULT 'ok',
+    internal_count  INTEGER DEFAULT 0,
+    broker_count    INTEGER DEFAULT 0,
+    matched_count   INTEGER DEFAULT 0,
+    mismatch_count  INTEGER DEFAULT 0,
+    safety_level    TEXT    DEFAULT 'NORMAL',
+    mismatches_json TEXT,
+    created_at      TEXT    NOT NULL
+);
+
+-- v5.0: Execution Replay 이력
+CREATE TABLE IF NOT EXISTS execution_replay (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker              TEXT    NOT NULL,
+    strategy            TEXT    DEFAULT '',
+    side                TEXT    NOT NULL,
+    signal_price        REAL    DEFAULT 0,
+    execution_price     REAL    DEFAULT 0,
+    slippage_pct        REAL    DEFAULT 0,
+    pnl_pct             REAL    DEFAULT 0,
+    bt_predicted_return REAL,
+    bt_win_prob         REAL,
+    direction_match     INTEGER,
+    created_at          TEXT    NOT NULL
+);
 """
 
 
@@ -3483,5 +3525,109 @@ class SQLiteStore:
                 "SELECT * FROM contrarian_signals WHERE ticker=? "
                 "ORDER BY created_at DESC LIMIT ?",
                 (ticker, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- event_log (v5.0) -------------------------------------------------------
+
+    def add_event(
+        self, event_type: str, severity: str, message: str,
+        source: str = "", ticker: str = "", order_id: str = "",
+        data_json: str = "",
+    ) -> None:
+        """이벤트 로그 저장."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO event_log "
+                "(event_type, severity, message, source, ticker, order_id, data_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (event_type, severity, message, source, ticker, order_id,
+                 data_json or None, now),
+            )
+
+    def get_events(self, event_type: str = "", limit: int = 50) -> list[dict]:
+        """이벤트 로그 조회."""
+        with self._connect() as conn:
+            if event_type:
+                rows = conn.execute(
+                    "SELECT * FROM event_log WHERE event_type=? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (event_type, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM event_log ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- reconciliation_log (v5.0) -----------------------------------------------
+
+    def add_reconciliation(
+        self, status: str, internal_count: int, broker_count: int,
+        matched_count: int, mismatch_count: int, safety_level: str,
+        mismatches_json: str = "",
+    ) -> None:
+        """리컨실레이션 결과 저장."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO reconciliation_log "
+                "(status, internal_count, broker_count, matched_count, "
+                "mismatch_count, safety_level, mismatches_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (status, internal_count, broker_count, matched_count,
+                 mismatch_count, safety_level, mismatches_json or None, now),
+            )
+
+    def get_reconciliations(self, limit: int = 10) -> list[dict]:
+        """리컨실레이션 이력 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM reconciliation_log ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- execution_replay (v5.0) -----------------------------------------------
+
+    def add_execution_replay(
+        self, ticker: str, strategy: str, side: str,
+        signal_price: float, execution_price: float,
+        slippage_pct: float, pnl_pct: float,
+        bt_predicted_return: float = 0.0, bt_win_prob: float = 0.0,
+        direction_match: int | None = None,
+    ) -> None:
+        """Execution Replay 기록 저장."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO execution_replay "
+                "(ticker, strategy, side, signal_price, execution_price, "
+                "slippage_pct, pnl_pct, bt_predicted_return, bt_win_prob, "
+                "direction_match, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (ticker, strategy, side, signal_price, execution_price,
+                 slippage_pct, pnl_pct, bt_predicted_return, bt_win_prob,
+                 direction_match, now),
+            )
+
+    def get_execution_replays(self, limit: int = 50) -> list[dict]:
+        """Execution Replay 이력 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM execution_replay ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_execution_replays_by_strategy(self, strategy: str, limit: int = 50) -> list[dict]:
+        """전략별 Execution Replay 이력 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM execution_replay WHERE strategy=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (strategy, limit),
             ).fetchall()
         return [dict(r) for r in rows]

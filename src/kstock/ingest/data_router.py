@@ -1,4 +1,4 @@
-"""Data source router for K-Quant v4.0.
+"""Data source router for K-Quant v5.0.
 
 Priority:
 1. KIS API (real-time, if connected)
@@ -6,14 +6,20 @@ Priority:
 3. Button records (manual input)
 4. yfinance (primary fallback)
 5. Naver Finance (secondary fallback when yfinance fails)
+
+v5.0: PIT(Point-in-Time) 소스 태깅 + 지연 추적 통합.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
+
+KST = timezone(timedelta(hours=9))
 
 
 @dataclass
@@ -28,6 +34,7 @@ class DataRouter:
     """Routes data requests to the best available source.
 
     v4.0: Naver Finance 폴백 추가로 yfinance 장애 시에도 가격/OHLCV 제공.
+    v5.0: PIT 소스 태깅 + SourceRegistry 연동.
     """
 
     def __init__(self, kis_broker=None, yf_client=None, db=None) -> None:
@@ -37,6 +44,7 @@ class DataRouter:
         self._naver = None  # lazy init
         self._source = self._detect_source()
         self._fallback_count = 0  # Naver 폴백 사용 횟수
+        self._last_source_used: str = ""  # v5.0: 마지막 사용 소스
 
     def _get_naver_client(self):
         """NaverFinanceClient lazy 초기화."""
@@ -48,6 +56,14 @@ class DataRouter:
                 logger.debug("NaverFinanceClient init failed: %s", e)
         return self._naver
 
+    def _get_registry(self):
+        """PIT SourceRegistry lazy import."""
+        try:
+            from kstock.ingest.point_in_time import get_registry
+            return get_registry()
+        except Exception:
+            return None
+
     def _detect_source(self) -> DataSource:
         if self.kis and self.kis.connected:
             return DataSource(name="kis", connected=True)
@@ -58,6 +74,11 @@ class DataRouter:
         return self._source.name
 
     @property
+    def last_source_used(self) -> str:
+        """v5.0: 마지막으로 실제 데이터를 반환한 소스."""
+        return self._last_source_used
+
+    @property
     def kis_connected(self) -> bool:
         return self.kis is not None and self.kis.connected
 
@@ -66,18 +87,31 @@ class DataRouter:
         self._source = self._detect_source()
         return self._source.name
 
+    def _record_fetch(self, source: str, ticker: str, success: bool,
+                      latency_ms: float, record_count: int = 1) -> None:
+        """PIT SourceRegistry에 수집 결과 기록."""
+        registry = self._get_registry()
+        if registry:
+            registry.record_fetch(
+                source=source, ticker=ticker, success=success,
+                latency_ms=latency_ms, record_count=record_count,
+            )
+
     async def get_portfolio(self) -> dict | None:
         """Get portfolio from best available source."""
         # 1. KIS API
         if self.kis_connected:
             balance = self.kis.get_balance()
             if balance:
+                balance["_pit_source"] = "kis_realtime"
+                self._last_source_used = "kis_realtime"
                 return balance
 
         # 2. SQLite (screenshot/button records)
         if self.db:
             holdings = self.db.get_active_holdings()
             if holdings:
+                self._last_source_used = "database"
                 return {
                     "holdings": [
                         {
@@ -95,41 +129,60 @@ class DataRouter:
                     "total_profit": 0,
                     "cash": 0,
                     "source": "database",
+                    "_pit_source": "manual",
                 }
 
         return None
 
     async def get_price(self, ticker: str, market: str = "KOSPI") -> float:
-        """Get current price from best source (3-tier fallback)."""
+        """Get current price from best source (3-tier fallback).
+
+        v5.0: 소스 태깅 + 지연 추적.
+        """
         # 1. KIS
         if self.kis_connected:
+            t0 = time.monotonic()
             price = self.kis.get_realtime_price(ticker)
+            elapsed = (time.monotonic() - t0) * 1000
             if price > 0:
+                self._last_source_used = "kis_realtime"
+                self._record_fetch("kis_realtime", ticker, True, elapsed)
                 return price
+            self._record_fetch("kis_realtime", ticker, False, elapsed)
 
         # 2. yfinance
         if self.yf:
             try:
+                t0 = time.monotonic()
                 price = await self.yf.get_current_price(ticker, market)
+                elapsed = (time.monotonic() - t0) * 1000
                 if price > 0:
+                    self._last_source_used = "yfinance"
+                    self._record_fetch("yfinance", ticker, True, elapsed)
                     return price
+                self._record_fetch("yfinance", ticker, False, elapsed)
             except Exception:
-                pass
+                self._record_fetch("yfinance", ticker, False, 0)
 
         # 3. Naver Finance (새로운 폴백)
         naver = self._get_naver_client()
         if naver:
             try:
+                t0 = time.monotonic()
                 price = await naver.get_current_price(ticker)
+                elapsed = (time.monotonic() - t0) * 1000
                 if price > 0:
                     self._fallback_count += 1
+                    self._last_source_used = "naver"
+                    self._record_fetch("naver", ticker, True, elapsed)
                     logger.debug(
                         "Naver fallback price for %s: %s (count=%d)",
                         ticker, price, self._fallback_count,
                     )
                     return price
+                self._record_fetch("naver", ticker, False, elapsed)
             except Exception:
-                pass
+                self._record_fetch("naver", ticker, False, 0)
 
         return 0.0
 
@@ -138,33 +191,63 @@ class DataRouter:
     ) -> "pd.DataFrame":
         """Get OHLCV data with fallback.
 
+        v5.0: PIT 소스 태깅 자동 적용.
+
         Returns:
             DataFrame with columns: date, open, high, low, close, volume
+            + _pit_source, _pit_ingest_time (v5.0)
         """
         import pandas as pd
 
         # 1. yfinance
         if self.yf:
             try:
+                t0 = time.monotonic()
                 df = await self.yf.get_ohlcv(ticker, market, period)
+                elapsed = (time.monotonic() - t0) * 1000
                 if not df.empty:
+                    self._last_source_used = "yfinance"
+                    self._record_fetch(
+                        "yfinance", ticker, True, elapsed,
+                        record_count=len(df),
+                    )
+                    df = self._tag_ohlcv(df, "yfinance", ticker)
                     return df
+                self._record_fetch("yfinance", ticker, False, elapsed)
             except Exception:
-                pass
+                self._record_fetch("yfinance", ticker, False, 0)
 
         # 2. Naver Finance
         naver = self._get_naver_client()
         if naver:
             try:
+                t0 = time.monotonic()
                 period_days = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365}.get(period, 120)
                 df = await naver.get_ohlcv(ticker, period_days)
+                elapsed = (time.monotonic() - t0) * 1000
                 if not df.empty:
                     self._fallback_count += 1
+                    self._last_source_used = "naver"
+                    self._record_fetch(
+                        "naver", ticker, True, elapsed,
+                        record_count=len(df),
+                    )
+                    df = self._tag_ohlcv(df, "naver", ticker)
                     return df
+                self._record_fetch("naver", ticker, False, elapsed)
             except Exception:
-                pass
+                self._record_fetch("naver", ticker, False, 0)
 
         return pd.DataFrame()
+
+    def _tag_ohlcv(self, df: "pd.DataFrame", source: str, ticker: str) -> "pd.DataFrame":
+        """OHLCV DataFrame에 PIT 메타 컬럼 추가."""
+        try:
+            from kstock.ingest.point_in_time import AsOfJoinEngine
+            return AsOfJoinEngine.tag_dataframe(df, source=source, ticker=ticker)
+        except Exception:
+            # PIT 모듈 없어도 동작
+            return df
 
     async def get_stock_info(
         self, ticker: str, name: str = "", market: str = "KOSPI"
@@ -173,26 +256,39 @@ class DataRouter:
         # 1. yfinance
         if self.yf:
             try:
+                t0 = time.monotonic()
                 info = await self.yf.get_stock_info(ticker, name, market)
+                elapsed = (time.monotonic() - t0) * 1000
                 if info.get("current_price", 0) > 0:
+                    info["_pit_source"] = "yfinance"
+                    self._last_source_used = "yfinance"
+                    self._record_fetch("yfinance", ticker, True, elapsed)
                     return info
+                self._record_fetch("yfinance", ticker, False, elapsed)
             except Exception:
-                pass
+                self._record_fetch("yfinance", ticker, False, 0)
 
         # 2. Naver Finance
         naver = self._get_naver_client()
         if naver:
             try:
+                t0 = time.monotonic()
                 info = await naver.get_stock_info(ticker, name)
+                elapsed = (time.monotonic() - t0) * 1000
                 if info.get("current_price", 0) > 0:
                     self._fallback_count += 1
+                    info["_pit_source"] = "naver"
+                    self._last_source_used = "naver"
+                    self._record_fetch("naver", ticker, True, elapsed)
                     return info
+                self._record_fetch("naver", ticker, False, elapsed)
             except Exception:
-                pass
+                self._record_fetch("naver", ticker, False, 0)
 
         return {
             "ticker": ticker, "name": name or ticker, "market": market,
             "current_price": 0, "per": 0, "pbr": 0, "roe": 0,
+            "_pit_source": "none",
         }
 
     async def get_investor_data(self, ticker: str) -> dict | None:
