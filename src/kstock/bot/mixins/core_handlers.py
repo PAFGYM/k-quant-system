@@ -1306,10 +1306,19 @@ class CoreHandlersMixin:
             )
             answer = await handle_ai_question(enriched_question, ctx, self.db, chat_mem)
 
+            # 후속 질문 파싱 → 버튼 변환
+            stock_data = {"code": code, "name": name, "market": market}
+            answer, followup_buttons = self._parse_followup_buttons(answer)
+            if not followup_buttons:
+                followup_buttons = self._build_followup_buttons(original_text, stock_data)
+            markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None
+
             try:
-                await placeholder.edit_text(answer)
+                await placeholder.edit_text(answer, reply_markup=markup)
             except Exception:
-                await update.message.reply_text(answer, reply_markup=MAIN_MENU)
+                await update.message.reply_text(
+                    answer, reply_markup=markup or MAIN_MENU,
+                )
         except Exception as e:
             logger.error("Stock analysis error: %s", e, exc_info=True)
             try:
