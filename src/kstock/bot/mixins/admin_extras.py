@@ -838,15 +838,17 @@ class AdminExtrasMixin:
         return fallback if fallback and fallback != ticker else ticker
 
     async def _build_favorites_view(self) -> tuple[str, InlineKeyboardMarkup] | None:
-        """즐겨찾기 데이터 빌드 → (text, markup) 반환. 없으면 None.
+        """즐겨찾기 UI 빌드 → (text, markup).
 
-        v5.8: 메시지 축약, AI 투자유형 추천, 닫기 버튼, 뉴스 버튼.
+        v5.8.1 UX 재설계:
+        - 텍스트: 종목명 + 현재가 + 오늘등락 + 추천수익률
+        - 버튼: [종목명] [분류(현재유형)] [❌]
+        - 분류 누르면 AI추천 + 4개 유형 한번에 표시
         """
         from kstock.bot.investment_managers import MANAGERS
 
         watchlist = self.db.get_watchlist()
 
-        # [v3.6.2] 비어있으면 보유종목 자동 등록
         if not watchlist:
             holdings = await self._load_holdings_with_fallback()
             for h in holdings:
@@ -856,11 +858,10 @@ class AdminExtrasMixin:
                 ht = h.get("holding_type", "")
                 if ticker and name:
                     try:
-                        mgr = _horizon_to_manager(ht)
-                        hz = _holding_type_to_horizon(ht)
                         self.db.add_watchlist(
                             ticker, name, rec_price=bp,
-                            horizon=hz, manager=mgr,
+                            horizon=_holding_type_to_horizon(ht),
+                            manager=_horizon_to_manager(ht),
                         )
                     except Exception:
                         pass
@@ -869,14 +870,13 @@ class AdminExtrasMixin:
         if not watchlist:
             return None
 
-        # 종목별 데이터 수집 (최대 12개 — 메시지 길이 방어)
+        # ── 종목 데이터 수집 ──
         items = []
         for w in watchlist[:12]:
             ticker = w.get("ticker", "")
             name = w.get("name", ticker)
             rec_price = w.get("rec_price", 0) or 0
             horizon = w.get("horizon", "") or ""
-            manager = w.get("manager", "") or ""
 
             if name == ticker or not name:
                 name = self._resolve_name(ticker, name)
@@ -898,7 +898,6 @@ class AdminExtrasMixin:
             rec_pnl = 0.0
             if rec_price > 0 and cur > 0:
                 rec_pnl = (cur - rec_price) / rec_price * 100
-
             if rec_price <= 0 and cur > 0:
                 rec_price = cur
                 try:
@@ -910,26 +909,23 @@ class AdminExtrasMixin:
                 "ticker": ticker, "name": name, "price": cur,
                 "dc_pct": dc_pct, "rec_price": rec_price,
                 "rec_pnl": rec_pnl, "horizon": horizon,
-                "manager": manager,
             })
 
-        # ── 투자유형 상수 ──
-        hz_tags = {
-            "scalp": "⚡단타", "swing": "🔥스윙",
-            "position": "📊포지션", "long_term": "💎장기",
-        }
-        hz_labels = {
+        # ── 상수 ──
+        hz_tag = {"scalp": "⚡단타", "swing": "🔥스윙", "position": "📊포지션", "long_term": "💎장기"}
+        hz_hdr = {
             "scalp": "⚡ 단타 — 제시 리버모어",
             "swing": "🔥 스윙 — 윌리엄 오닐",
             "position": "📊 포지션 — 피터 린치",
             "long_term": "💎 장기 — 워렌 버핏",
         }
 
+        # ── 그룹핑 ──
         grouped = {}
         ungrouped = []
         for item in items:
             hz = item["horizon"]
-            if hz and hz in hz_labels:
+            if hz and hz in hz_hdr:
                 grouped.setdefault(hz, []).append(item)
             else:
                 ungrouped.append(item)
@@ -937,66 +933,57 @@ class AdminExtrasMixin:
         lines = ["⭐ 내 즐겨찾기\n"]
         buttons = []
 
-        def _fmt(item):
-            n = item["name"]
-            c = item["price"]
-            dp = item["dc_pct"]
-            rp = item["rec_pnl"]
+        def _price_line(item):
+            c, dp, rp = item["price"], item["dc_pct"], item["rec_pnl"]
             if c <= 0:
-                return f"─ {n}"
+                return f"  ─ {item['name']}"
+            de = "📈" if dp > 0 else ("📉" if dp < 0 else "➖")
             ds = "+" if dp > 0 else ""
-            de = "📈" if dp > 0 else ("📉" if dp < 0 else "─")
             pnl = ""
             if item["rec_price"] > 0:
                 pe = "🟢" if rp > 0 else ("🔴" if rp < 0 else "⚪")
                 ps = "+" if rp > 0 else ""
-                pnl = f" {pe}{ps}{rp:.1f}%"
-            return f"{de} {n}: {c:,.0f}원 ({ds}{dp:.1f}%){pnl}"
+                pnl = f" | 추천{pe}{ps}{rp:.1f}%"
+            return f"  {de} {item['name']}: {c:,.0f}원 ({ds}{dp:.1f}%){pnl}"
 
-        # ── 그룹별 출력 ──
+        def _item_buttons(item, has_type=True):
+            """종목 1개에 대한 버튼 행: [종목명] [분류] [❌]"""
+            tk = item["ticker"]
+            hz = item["horizon"]
+            # 분류 버튼 라벨
+            if has_type and hz in hz_tag:
+                cls_label = f"{hz_tag[hz]} 변경"
+            else:
+                cls_label = "🔄 분류하기"
+            return [
+                InlineKeyboardButton(
+                    f"📋 {item['name'][:6]}",
+                    callback_data=f"fav:news:{tk}",
+                ),
+                InlineKeyboardButton(
+                    cls_label,
+                    callback_data=f"fav:classify:{tk}",
+                ),
+                InlineKeyboardButton("❌", callback_data=f"fav:rm:{tk}"),
+            ]
+
+        # ── 분류된 종목 출력 ──
         for hz_key in ["scalp", "swing", "position", "long_term"]:
             if hz_key not in grouped:
                 continue
-            lines.append(f"\n{hz_labels[hz_key]}")
+            lines.append(f"\n{hz_hdr[hz_key]}")
             for item in grouped[hz_key]:
-                lines.append(f"  {_fmt(item)}")
-                tag = hz_tags.get(hz_key, "")
-                buttons.append([
-                    InlineKeyboardButton(
-                        f"{tag} 변경",
-                        callback_data=f"fav:classify:{item['ticker']}",
-                    ),
-                    InlineKeyboardButton(
-                        "📰 뉴스",
-                        callback_data=f"fav:news:{item['ticker']}",
-                    ),
-                    InlineKeyboardButton(
-                        "❌",
-                        callback_data=f"fav:rm:{item['ticker']}",
-                    ),
-                ])
+                lines.append(_price_line(item))
+                buttons.append(_item_buttons(item, has_type=True))
 
         # ── 미분류 종목 ──
         if ungrouped:
-            lines.append("\n📌 미분류 (분류 필요!)")
+            lines.append("\n📌 미분류")
             for item in ungrouped:
-                lines.append(f"  {_fmt(item)}")
-                buttons.append([
-                    InlineKeyboardButton(
-                        "🤖 AI추천",
-                        callback_data=f"fav:ai_rec:{item['ticker']}",
-                    ),
-                    InlineKeyboardButton(
-                        "🔄 분류",
-                        callback_data=f"fav:classify:{item['ticker']}",
-                    ),
-                    InlineKeyboardButton(
-                        "❌",
-                        callback_data=f"fav:rm:{item['ticker']}",
-                    ),
-                ])
+                lines.append(_price_line(item))
+                buttons.append(_item_buttons(item, has_type=False))
 
-        # ── 하단 버튼 ──
+        # ── 하단 ──
         buttons.append([
             InlineKeyboardButton("➕ 종목 추가", callback_data="fav:add_mode"),
             InlineKeyboardButton("🔄 새로고침", callback_data="fav:refresh"),
@@ -1004,15 +991,13 @@ class AdminExtrasMixin:
         buttons.append([
             InlineKeyboardButton("👨‍💼 매니저 현황", callback_data="fav:managers"),
         ])
-        buttons.append(make_feedback_row("즐겨찾기"))
         buttons.append([
             InlineKeyboardButton("❌ 닫기", callback_data="dismiss:fav"),
         ])
 
         text = "\n".join(lines)
-        # 텔레그램 4096자 제한 방어
         if len(text) > 3900:
-            text = text[:3900] + "\n\n... (종목이 많아 일부 생략)"
+            text = text[:3900] + "\n..."
 
         return text, InlineKeyboardMarkup(buttons)
 
@@ -1129,9 +1114,22 @@ class AdminExtrasMixin:
             return
 
         if action == "classify":
-            # 종목 투자유형 분류 → 4개 버튼 표시
+            # 종목 투자유형 분류 → AI 추천 + 4개 유형 한 화면
             ticker = parts[1] if len(parts) > 1 else ""
             name = self._resolve_name(ticker, ticker)
+
+            # AI 추천 비동기로 시도
+            ai_line = ""
+            try:
+                from kstock.bot.investment_managers import recommend_investment_type, MANAGERS
+                await query.edit_message_text(f"🤖 {name} 분석 중...")
+                rec_hz = await recommend_investment_type(ticker, name)
+                if rec_hz:
+                    mgr = MANAGERS.get(rec_hz, {})
+                    ai_line = f"\n🤖 AI 추천: {mgr.get('emoji', '')} {mgr.get('title', rec_hz)} ({mgr.get('name', '')})\n"
+            except Exception:
+                pass
+
             buttons = [
                 [
                     InlineKeyboardButton("⚡ 단타", callback_data=f"fav:set_hz:scalp:{ticker}"),
@@ -1141,14 +1139,15 @@ class AdminExtrasMixin:
                     InlineKeyboardButton("📊 포지션", callback_data=f"fav:set_hz:position:{ticker}"),
                     InlineKeyboardButton("💎 장기", callback_data=f"fav:set_hz:long_term:{ticker}"),
                 ],
+                [InlineKeyboardButton("⭐ 돌아가기", callback_data="fav:refresh")],
             ]
             await query.edit_message_text(
-                f"🔄 {name} 투자유형 분류\n\n"
+                f"🔄 {name} 투자유형 분류\n"
+                f"{ai_line}\n"
                 f"⚡ 단타: 1~3일 (제시 리버모어)\n"
                 f"🔥 스윙: 1~4주 (윌리엄 오닐)\n"
                 f"📊 포지션: 1~6개월 (피터 린치)\n"
-                f"💎 장기: 6개월+ (워렌 버핏)\n\n"
-                f"투자유형을 선택하세요:",
+                f"💎 장기: 6개월+ (워렌 버핏)",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
             return
