@@ -297,14 +297,19 @@ def format_recommendations(results: list) -> str:
     medals = {1: "\U0001f947", 2: "\U0001f948", 3: "\U0001f949"}
 
     for item in results:
-        if len(item) >= 6:
+        if len(item) >= 7:
+            rank, name, ticker, score_val, signal, strat, price = item
+        elif len(item) >= 6:
             rank, name, ticker, score_val, signal, strat = item
+            price = 0
         else:
             rank, name, ticker, score_val, signal = item
             strat = "A"
+            price = 0
         medal = medals.get(rank, f"{rank}.")
         tag = _strategy_tag(strat)
-        line = f"{medal} {name} {score_val:.1f}점 {tag}"
+        price_str = f" {_won(price)}" if price and price > 0 else ""
+        line = f"{medal} {name}{price_str} {score_val:.1f}점 {tag}"
         if signal == "BUY":
             buy_items.append(line)
         elif signal == "WATCH":

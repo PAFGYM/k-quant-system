@@ -216,20 +216,22 @@ class CommandsMixin:
         return await self._analyze_stock(ticker, name, macro, market=market, sector=sector)
 
     async def _get_price(self, ticker: str, base_price: float = 0) -> float:
-        """Get current price. KIS → Naver → yfinance 순 (v5.2)."""
+        """Get current price. KIS → Naver → yfinance 순 (v5.3)."""
         # 1순위: KIS API (실시간, 정확도 최우선)
         try:
             price = await self.kis.get_current_price(ticker, 0)
             if price > 0:
+                logger.debug("Price %s: KIS=%s", ticker, price)
                 return price
         except Exception:
             pass
-        # 2순위: Naver Finance (장중 실시간, ~20분 지연이지만 yfinance보다 정확)
+        # 2순위: Naver Finance (장중 ~수분 지연)
         try:
             from kstock.ingest.naver_finance import NaverFinanceClient
             naver = NaverFinanceClient()
             price = await naver.get_current_price(ticker)
             if price > 0:
+                logger.debug("Price %s: Naver=%s", ticker, price)
                 return price
         except Exception:
             pass
@@ -242,11 +244,13 @@ class CommandsMixin:
         try:
             price = await self.yf_client.get_current_price(ticker, market)
             if price > 0:
+                logger.debug("Price %s: yfinance=%s", ticker, price)
                 return price
         except Exception:
             pass
         # 4순위: base_price fallback
         if base_price > 0:
+            logger.debug("Price %s: fallback=%s", ticker, base_price)
             return base_price
         return 0.0
 
@@ -724,9 +728,10 @@ class CommandsMixin:
             [InlineKeyboardButton("💼 내 포트폴리오 조언", callback_data="quick_q:portfolio")],
             [InlineKeyboardButton("🔥 지금 매수할 종목", callback_data="quick_q:buy_pick")],
             [InlineKeyboardButton("⚠️ 리스크 점검", callback_data="quick_q:risk")],
+            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
         ]
         msg = (
-            "🤖 주호님, 무엇이든 물어보세요!\n\n"
+            "🤖 Claude AI가 대기 중입니다\n\n"
             "⬇️ 자주하는 질문을 바로 선택하거나,\n"
             "💬 채팅창에 직접 입력하세요.\n\n"
             "예시: 에코프로 어떻게 보여? / 반도체 전망은?"
@@ -748,7 +753,7 @@ class CommandsMixin:
 
         # 즉시 "처리 중..." 메시지 → edit로 교체
         placeholder = await update.message.reply_text(
-            "\U0001f4ad 주호님의 질문을 분석하고 있습니다..."
+            "🤖 Claude가 분석 중입니다..."
         )
         try:
             from kstock.bot.chat_handler import handle_ai_question
@@ -768,8 +773,15 @@ class CommandsMixin:
                     if ohlcv is not None and not ohlcv.empty:
                         from kstock.core.technical import compute_indicators
                         tech = compute_indicators(ohlcv)
+                        # v5.3: KIS→Naver→yfinance 순 실시간 현재가
                         close = ohlcv["close"].astype(float)
                         cur = float(close.iloc[-1])
+                        try:
+                            live = await self._get_price(code, base_price=cur)
+                            if live > 0:
+                                cur = live
+                        except Exception:
+                            pass
                         if cur > 0:
                             enriched = (
                                 f"{question}\n\n"

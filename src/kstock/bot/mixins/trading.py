@@ -984,6 +984,7 @@ class TradingMixin:
                         callback_data=f"bal:remove:{ticker}",
                     ),
                 ])
+        buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
         return buttons
 
     async def _action_watch(self, query, context, ticker: str) -> None:

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 _naver_price_cache: dict[str, tuple[datetime, float]] = {}
 _naver_ohlcv_cache: dict[str, tuple[datetime, pd.DataFrame]] = {}
 _naver_info_cache: dict[str, tuple[datetime, dict]] = {}
-_CACHE_TTL = timedelta(minutes=10)
+_CACHE_TTL = timedelta(minutes=3)
 
 # ── 상수 ──────────────────────────────────────────────────
 _SISE_JSON_URL = "https://api.finance.naver.com/siseJson.naver"

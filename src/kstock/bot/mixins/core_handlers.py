@@ -1416,6 +1416,8 @@ class CoreHandlersMixin:
                 # AI 후속 질문
                 "followup": self._action_followup,
                 "followup_q": self._action_followup_dynamic,
+                # v5.3: 범용 닫기 버튼
+                "dismiss": self._action_dismiss,
             }
             handler = dispatch.get(action)
             if handler:
@@ -1426,6 +1428,18 @@ class CoreHandlersMixin:
                 await query.edit_message_text("\u26a0\ufe0f 오류가 발생했습니다.")
             except Exception:
                 pass
+
+    # == Dismiss (generic close button) =======================================
+
+    async def _action_dismiss(self, query, context, payload: str) -> None:
+        """범용 닫기 버튼 — 메뉴를 닫고 상태 정리."""
+        # 진행 중인 상태 클리어
+        for key in ("admin_mode", "admin_faq_type", "agent_mode", "agent_type"):
+            context.user_data.pop(key, None)
+        try:
+            await query.edit_message_text("✅ 메뉴를 닫았습니다.")
+        except Exception:
+            pass
 
     # == Horizon selection ====================================================
 

@@ -30,7 +30,7 @@ except Exception:
 # Cache for yfinance data to avoid repeated API calls
 _price_cache: dict[str, tuple[datetime, pd.DataFrame]] = {}
 _info_cache: dict[str, tuple[datetime, dict]] = {}
-_CACHE_TTL = timedelta(minutes=30)
+_CACHE_TTL = timedelta(minutes=10)
 
 
 def _yf_ticker(code: str, market: str = "KOSPI") -> str:

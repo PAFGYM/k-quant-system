@@ -572,7 +572,8 @@ class AdminExtrasMixin:
                     )
                 ])
 
-        keyboard = InlineKeyboardMarkup(buttons) if buttons else MAIN_MENU
+        buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+        keyboard = InlineKeyboardMarkup(buttons)
         await update.message.reply_text(
             "\n".join(lines),
             reply_markup=keyboard,
@@ -633,6 +634,7 @@ class AdminExtrasMixin:
                 InlineKeyboardButton("📊 호가조회", callback_data="orderbook:select"),
                 InlineKeyboardButton("🤖 AI상태", callback_data="ai:status"),
             ],
+            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
         ]
         await update.message.reply_text(
             "📊 분석 허브\n\n"
@@ -867,6 +869,7 @@ class AdminExtrasMixin:
             InlineKeyboardButton("➕ 종목 추가", callback_data="fav:add_mode"),
             InlineKeyboardButton("🔄 새로고침", callback_data="fav:refresh"),
         ])
+        buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
         await update.message.reply_text(
             "\n".join(lines),
             reply_markup=InlineKeyboardMarkup(buttons),
