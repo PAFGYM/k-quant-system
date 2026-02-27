@@ -808,10 +808,20 @@ class AdminExtrasMixin:
 
     # ── 즐겨찾기 메뉴 ──────────────────────────────────────────────
 
+    def _resolve_name(self, ticker: str, fallback: str = "") -> str:
+        """종목코드 → 종목명 변환. universe에서 조회."""
+        for item in self.all_tickers:
+            if item.get("code") == ticker:
+                return item.get("name", fallback or ticker)
+        return fallback if fallback and fallback != ticker else ticker
+
     async def _menu_favorites(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """⭐ 즐겨찾기 — watchlist 종목 표시 + 빠른 액션."""
+        """⭐ 즐겨찾기 — watchlist 종목 표시 + 빠른 액션.
+
+        v5.4: 종목명 표시 (코드 미표시), 투자기간별 분류, 매수 점수 표시.
+        """
         watchlist = self.db.get_watchlist()
 
         # [v3.6.2] 비어있으면 보유종목 자동 등록
@@ -836,34 +846,115 @@ class AdminExtrasMixin:
             )
             return
 
-        lines = ["⭐ 내 즐겨찾기\n"]
-        buttons = []
+        # 종목명 미등록 자동 복구 + 종목별 데이터 수집
+        items = []
         for w in watchlist[:15]:
             ticker = w.get("ticker", "")
             name = w.get("name", ticker)
+            # 이름이 코드와 같으면 universe에서 이름 찾기
+            if name == ticker or not name:
+                name = self._resolve_name(ticker, name)
+                # DB도 업데이트
+                if name != ticker:
+                    try:
+                        self.db.add_watchlist(ticker, name)
+                    except Exception:
+                        pass
+
+            # 실시간 가격 조회
+            cur = 0
+            dc_pct = 0.0
             try:
                 detail = await self._get_price_detail(ticker, 0)
                 cur = detail["price"]
                 dc_pct = detail["day_change_pct"]
-                dc = detail["day_change"]
-                if cur > 0:
-                    dc_sign = "+" if dc_pct > 0 else ""
-                    dc_emoji = "📈" if dc_pct > 0 else "📉" if dc_pct < 0 else "─"
-                    lines.append(
-                        f"{dc_emoji} {name}: {cur:,.0f}원 ({dc_sign}{dc_pct:.1f}%)"
-                    )
-                else:
-                    lines.append(f"─ {name}: 가격 미확인")
             except Exception:
-                lines.append(f"─ {name}")
-            buttons.append([
-                InlineKeyboardButton(
-                    f"📋 {name}", callback_data=f"detail:{ticker}",
-                ),
-                InlineKeyboardButton(
-                    "❌", callback_data=f"fav:rm:{ticker}",
-                ),
-            ])
+                pass
+
+            # 스캔 점수 (캐시에서)
+            score = 0.0
+            if hasattr(self, '_last_scan_results') and self._last_scan_results:
+                for r in self._last_scan_results:
+                    if r.ticker == ticker:
+                        score = r.score.composite
+                        break
+
+            # 투자기간 (portfolio_horizon에서)
+            horizon = ""
+            try:
+                ph = self.db.get_portfolio_horizon(ticker)
+                if ph:
+                    horizon = ph.get("horizon", "")
+            except Exception:
+                pass
+
+            items.append({
+                "ticker": ticker, "name": name, "price": cur,
+                "dc_pct": dc_pct, "score": score, "horizon": horizon,
+            })
+
+        # 투자기간별 그룹핑
+        horizon_labels = {
+            "danta": "⚡ 단타 (1~3일)",
+            "swing": "🔥 스윙 (1~4주)",
+            "dangi": "📊 단기~중기",
+            "junggi": "📊 중기 (1~6개월)",
+            "janggi": "💎 장기 (6개월+)",
+        }
+        grouped = {}
+        ungrouped = []
+        for item in items:
+            hz = item["horizon"]
+            if hz and hz in horizon_labels:
+                grouped.setdefault(hz, []).append(item)
+            else:
+                ungrouped.append(item)
+
+        lines = ["⭐ 내 즐겨찾기\n"]
+        buttons = []
+
+        def _format_item(item):
+            name = item["name"]
+            cur = item["price"]
+            dc_pct = item["dc_pct"]
+            score = item["score"]
+            if cur > 0:
+                dc_sign = "+" if dc_pct > 0 else ""
+                dc_emoji = "📈" if dc_pct > 0 else "📉" if dc_pct < 0 else "─"
+                score_str = f" | {score:.0f}점" if score > 0 else ""
+                return f"{dc_emoji} {name}: {cur:,.0f}원 ({dc_sign}{dc_pct:.1f}%){score_str}"
+            return f"─ {name}"
+
+        # 그룹별 출력
+        for hz_key in ["danta", "swing", "dangi", "junggi", "janggi"]:
+            if hz_key not in grouped:
+                continue
+            lines.append(f"\n{horizon_labels[hz_key]}")
+            for item in grouped[hz_key]:
+                lines.append(f"  {_format_item(item)}")
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"📋 {item['name']}", callback_data=f"detail:{item['ticker']}",
+                    ),
+                    InlineKeyboardButton(
+                        "❌", callback_data=f"fav:rm:{item['ticker']}",
+                    ),
+                ])
+
+        # 미분류 종목
+        if ungrouped:
+            if grouped:
+                lines.append("\n📌 미분류")
+            for item in ungrouped:
+                lines.append(f"  {_format_item(item)}")
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"📋 {item['name']}", callback_data=f"detail:{item['ticker']}",
+                    ),
+                    InlineKeyboardButton(
+                        "❌", callback_data=f"fav:rm:{item['ticker']}",
+                    ),
+                ])
 
         buttons.append([
             InlineKeyboardButton("➕ 종목 추가", callback_data="fav:add_mode"),
@@ -904,43 +995,64 @@ class AdminExtrasMixin:
         if action == "rm":
             ticker = parts[1] if len(parts) > 1 else ""
             if ticker:
+                name = self._resolve_name(ticker, ticker)
                 self.db.remove_watchlist(ticker)
-                await query.edit_message_text(f"⭐ {ticker} 즐겨찾기에서 삭제되었습니다.")
+                await query.edit_message_text(f"⭐ {name} 즐겨찾기에서 삭제되었습니다.")
             return
 
         if action == "refresh":
-            await query.edit_message_text("⭐ 즐겨찾기 새로고침 중...")
+            await query.edit_message_text("⭐ 새로고침 중...")
+            # _menu_favorites를 직접 호출하여 중복 코드 제거
             watchlist = self.db.get_watchlist()
             if not watchlist:
                 await query.message.reply_text("⭐ 즐겨찾기가 비어있습니다.")
                 return
 
-            lines = ["⭐ 내 즐겨찾기\n"]
-            buttons = []
+            # 동일한 로직으로 실시간 데이터 포함 표시
+            items = []
             for w in watchlist[:15]:
                 ticker = w.get("ticker", "")
                 name = w.get("name", ticker)
+                if name == ticker or not name:
+                    name = self._resolve_name(ticker, name)
+                cur = 0
+                dc_pct = 0.0
                 try:
                     detail = await self._get_price_detail(ticker, 0)
                     cur = detail["price"]
                     dc_pct = detail["day_change_pct"]
-                    if cur > 0:
-                        dc_sign = "+" if dc_pct > 0 else ""
-                        dc_emoji = "📈" if dc_pct > 0 else "📉" if dc_pct < 0 else "─"
-                        lines.append(
-                            f"{dc_emoji} {name}: {cur:,.0f}원 ({dc_sign}{dc_pct:.1f}%)"
-                        )
-                    else:
-                        lines.append(f"─ {name}")
                 except Exception:
+                    pass
+                score = 0.0
+                if hasattr(self, '_last_scan_results') and self._last_scan_results:
+                    for r in self._last_scan_results:
+                        if r.ticker == ticker:
+                            score = r.score.composite
+                            break
+                items.append({"ticker": ticker, "name": name, "price": cur, "dc_pct": dc_pct, "score": score})
+
+            lines = ["⭐ 내 즐겨찾기\n"]
+            buttons = []
+            for item in items:
+                name = item["name"]
+                cur = item["price"]
+                dc_pct = item["dc_pct"]
+                score = item["score"]
+                if cur > 0:
+                    dc_sign = "+" if dc_pct > 0 else ""
+                    dc_emoji = "📈" if dc_pct > 0 else "📉" if dc_pct < 0 else "─"
+                    score_str = f" | {score:.0f}점" if score > 0 else ""
+                    lines.append(f"{dc_emoji} {name}: {cur:,.0f}원 ({dc_sign}{dc_pct:.1f}%){score_str}")
+                else:
                     lines.append(f"─ {name}")
                 buttons.append([
-                    InlineKeyboardButton(f"📋 {name}", callback_data=f"detail:{ticker}"),
-                    InlineKeyboardButton("❌", callback_data=f"fav:rm:{ticker}"),
+                    InlineKeyboardButton(f"📋 {name}", callback_data=f"detail:{item['ticker']}"),
+                    InlineKeyboardButton("❌", callback_data=f"fav:rm:{item['ticker']}"),
                 ])
             buttons.append([
                 InlineKeyboardButton("🔄 새로고침", callback_data="fav:refresh"),
             ])
+            buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
             await query.message.reply_text(
                 "\n".join(lines),
                 reply_markup=InlineKeyboardMarkup(buttons),

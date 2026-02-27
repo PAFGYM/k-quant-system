@@ -312,20 +312,48 @@ def check_data_staleness(db_path: str | Path, max_hours: int = 2) -> HealthCheck
 
         conn = sqlite3.connect(str(db_path), timeout=5)
         try:
-            # job_runs 테이블에서 마지막 성공 시각 확인
-            cursor = conn.execute(
-                "SELECT MAX(ended_at) FROM job_runs WHERE status = 'success'"
-            )
-            row = cursor.fetchone()
-            last_run_str = row[0] if row and row[0] else None
+            # v5.4: 여러 테이블에서 최신 타임스탬프 확인 (가장 최근 것 사용)
+            candidates = []
 
-            if last_run_str is None:
-                # job_runs가 없으면 portfolio updated_at 확인
+            # 1. job_runs 성공
+            try:
+                cursor = conn.execute(
+                    "SELECT MAX(ended_at) FROM job_runs WHERE status = 'success'"
+                )
+                row = cursor.fetchone()
+                if row and row[0]:
+                    candidates.append(row[0])
+            except Exception:
+                pass
+
+            # 2. portfolio updated_at
+            try:
                 cursor = conn.execute("SELECT MAX(updated_at) FROM portfolio")
                 row = cursor.fetchone()
-                last_run_str = row[0] if row and row[0] else None
+                if row and row[0]:
+                    candidates.append(row[0])
+            except Exception:
+                pass
 
-            if last_run_str is None:
+            # 3. chat_history (봇 활동 증거)
+            try:
+                cursor = conn.execute("SELECT MAX(created_at) FROM chat_history")
+                row = cursor.fetchone()
+                if row and row[0]:
+                    candidates.append(row[0])
+            except Exception:
+                pass
+
+            # 4. holdings updated_at
+            try:
+                cursor = conn.execute("SELECT MAX(updated_at) FROM holdings WHERE active=1")
+                row = cursor.fetchone()
+                if row and row[0]:
+                    candidates.append(row[0])
+            except Exception:
+                pass
+
+            if not candidates:
                 check.status = "warning"
                 check.message = (
                     f"{USER_NAME}, DB에 업데이트 기록이 없습니다. "
@@ -334,27 +362,34 @@ def check_data_staleness(db_path: str | Path, max_hours: int = 2) -> HealthCheck
                 logger.warning("DB 업데이트 기록 없음: %s", db_path)
                 return check
 
+            # 가장 최근 타임스탬프 사용
+            last_run_str = max(candidates)
             last_run = datetime.fromisoformat(last_run_str)
-            age = datetime.now() - last_run
+
+            # v5.4: timezone-aware 비교 (DB가 UTC일 수 있음)
+            now = datetime.now()
+            if last_run.tzinfo is not None:
+                now = datetime.now(last_run.tzinfo)
+
+            age = now - last_run
             age_hours = age.total_seconds() / 3600.0
 
             if age_hours > max_hours * 3:
                 check.status = "error"
                 check.message = (
-                    f"{USER_NAME}, 마지막 데이터 업데이트가 {age_hours:.1f}시간 전입니다. "
-                    f"데이터 수집 파이프라인에 문제가 있을 수 있습니다."
+                    f"{USER_NAME}, 마지막 활동이 {age_hours:.1f}시간 전입니다. "
+                    f"데이터 수집 파이프라인을 확인해주세요."
                 )
                 logger.error("데이터 심각하게 오래됨: %.1f시간", age_hours)
             elif age_hours > max_hours:
                 check.status = "warning"
                 check.message = (
-                    f"{USER_NAME}, 마지막 데이터 업데이트가 {age_hours:.1f}시간 전입니다. "
-                    f"데이터가 다소 오래되었습니다."
+                    f"마지막 활동: {age_hours:.1f}시간 전"
                 )
                 logger.warning("데이터 오래됨: %.1f시간", age_hours)
             else:
                 check.status = "ok"
-                check.message = f"마지막 업데이트: {age_hours:.1f}시간 전 ({last_run_str})"
+                check.message = f"마지막 활동: {age_hours:.1f}시간 전"
         finally:
             conn.close()
     except sqlite3.OperationalError as exc:

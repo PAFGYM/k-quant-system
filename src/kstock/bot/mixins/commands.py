@@ -988,14 +988,16 @@ class CommandsMixin:
                 name = item["name"]
                 break
 
+        # market/portfolio/risk는 실시간 데이터 주입 경로로 전달
+        if qtype in ("market", "portfolio", "risk"):
+            await self._handle_quick_question(query, context, qtype)
+            return
+
         question_map = {
             "buy_timing": f"{name} 지금 매수 타이밍이야? 기술적 지표 기준으로 진입 시점 알려줘",
             "target": f"{name} 목표가와 손절가를 구체적으로 알려줘. 근거도 같이",
             "chart": f"{name} 차트 분석해줘. 이동평균선, RSI, MACD, 거래량 종합 판단",
             "compare": f"{name}과 같은 섹터 경쟁사 비교해줘. 어디가 더 매력적인지",
-            "portfolio": "내 보유종목 전체 점검하고 각 종목별 행동(홀딩/추매/익절) 알려줘",
-            "market": "오늘 시장 전체 흐름과 앞으로 전략 알려줘",
-            "risk": "내 포트폴리오 리스크 점검해줘. 집중도, 섹터 편중, 대응 방안",
         }
 
         question = question_map.get(qtype, f"{name} 더 자세히 분석해줘")
@@ -1135,18 +1137,14 @@ class CommandsMixin:
     async def _handle_quick_question(
         self, query, context: ContextTypes.DEFAULT_TYPE, question_type: str
     ) -> None:
-        """Handle quick question buttons from AI chat menu."""
+        """Handle quick question buttons from AI chat menu.
+
+        v5.4: 모든 질문 유형에 실시간 데이터 주입. 목업/학습 데이터 사용 완전 차단.
+        """
         # buy_pick은 실시간 스캔 데이터를 직접 사용 (AI 환각 방지)
         if question_type == "buy_pick":
             await self._handle_buy_pick_with_live_data(query, context)
             return
-
-        questions = {
-            "market": "오늘 미국/한국 시장 전체 흐름을 분석하고, 지금 어떤 전략이 유효한지 판단해줘",
-            "portfolio": "내 보유종목 전체를 점검하고, 각 종목별로 지금 해야 할 행동(홀딩/추매/익절/손절)을 구체적으로 알려줘",
-            "risk": "내 포트폴리오의 리스크를 점검해줘. 집중도, 섹터 편중, 손실 종목, 전체 시장 리스크를 분석하고 대응 방안을 알려줘",
-        }
-        question = questions.get(question_type, "오늘 시장 어때?")
 
         if not self.anthropic_key:
             await query.edit_message_text(
@@ -1155,21 +1153,119 @@ class CommandsMixin:
             return
 
         await query.edit_message_text(
-            "🤖 Claude가 분석 중입니다..."
+            "🤖 Claude가 실시간 데이터 수집 + 분석 중..."
         )
 
         try:
             from kstock.bot.chat_handler import handle_ai_question
             from kstock.bot.context_builder import build_full_context_with_macro
             from kstock.bot.chat_memory import ChatMemory
+            from datetime import datetime, timezone, timedelta
+            KST_TZ = timezone(timedelta(hours=9))
+            now = datetime.now(KST_TZ)
+
+            # 1. 실시간 매크로 데이터 수집
+            macro_block = ""
+            try:
+                snap = await self.macro_client.get_snapshot()
+                parts = []
+                if hasattr(snap, 'vix') and snap.vix:
+                    parts.append(f"VIX: {snap.vix:.1f}")
+                if hasattr(snap, 'spx_change_pct') and snap.spx_change_pct:
+                    parts.append(f"S&P500: {snap.spx_change_pct:+.2f}%")
+                if hasattr(snap, 'nasdaq_change_pct') and snap.nasdaq_change_pct:
+                    parts.append(f"나스닥: {snap.nasdaq_change_pct:+.2f}%")
+                if hasattr(snap, 'usdkrw') and snap.usdkrw:
+                    parts.append(f"원/달러: {snap.usdkrw:,.0f}원")
+                if hasattr(snap, 'fear_greed_score') and snap.fear_greed_score:
+                    parts.append(f"공포탐욕: {snap.fear_greed_score:.0f}")
+                if hasattr(snap, 'us10y') and snap.us10y:
+                    parts.append(f"미국10Y: {snap.us10y:.2f}%")
+                if parts:
+                    macro_block = " | ".join(parts)
+            except Exception:
+                macro_block = "매크로 데이터 조회 실패"
+
+            # 2. KOSPI/KOSDAQ 실시간 지수
+            index_block = ""
+            try:
+                for idx_code, idx_name in [("0001", "KOSPI"), ("2001", "KOSDAQ")]:
+                    p = await self._get_price(idx_code, base_price=0)
+                    if p > 0:
+                        index_block += f"{idx_name}: {p:,.2f} | "
+            except Exception:
+                pass
+
+            # 3. 보유종목 실시간 가격
+            holdings = self.db.get_active_holdings()
+            portfolio_block = ""
+            v_names = set()
+            if holdings and question_type in ("portfolio", "risk"):
+                pf_lines = []
+                for h in holdings[:10]:
+                    ticker = h.get("ticker", "")
+                    hname = h.get("name", ticker)
+                    buy_price = h.get("buy_price", 0) or h.get("avg_price", 0) or 0
+                    qty = h.get("quantity", 0)
+                    if not ticker:
+                        continue
+                    v_names.add(hname)
+                    try:
+                        live = await self._get_price(ticker, base_price=buy_price)
+                        if live > 0:
+                            pnl = ((live - buy_price) / buy_price * 100) if buy_price > 0 else 0
+                            pf_lines.append(
+                                f"- {hname}({ticker}): 현재가 {live:,.0f}원 | "
+                                f"매수가 {buy_price:,.0f}원 | 수량 {qty}주 | "
+                                f"수익률 {pnl:+.1f}%"
+                            )
+                        else:
+                            pf_lines.append(f"- {hname}({ticker}): 매수가 {buy_price:,.0f}원 | 수량 {qty}주")
+                    except Exception:
+                        pf_lines.append(f"- {hname}({ticker}): 매수가 {buy_price:,.0f}원 | 수량 {qty}주")
+                if pf_lines:
+                    portfolio_block = "\n".join(pf_lines)
+
+            # 4. 질문 + 실시간 데이터 조합
+            base_questions = {
+                "market": "오늘 시장 전체 흐름을 분석하고, 지금 어떤 전략이 유효한지 판단해줘",
+                "portfolio": "내 보유종목 전체를 점검하고, 각 종목별로 지금 해야 할 행동(홀딩/추매/익절/손절)을 구체적으로 알려줘",
+                "risk": "내 포트폴리오의 리스크를 점검해줘. 집중도, 섹터 편중, 손실 종목, 전체 시장 리스크를 분석하고 대응 방안을 알려줘",
+            }
+            base_q = base_questions.get(question_type, "오늘 시장 어때?")
+
+            data_sections = [f"[실시간 데이터 — {now.strftime('%Y-%m-%d %H:%M')} KST]"]
+            if macro_block:
+                data_sections.append(f"글로벌: {macro_block}")
+            if index_block:
+                data_sections.append(f"지수: {index_block.rstrip(' | ')}")
+            if portfolio_block:
+                data_sections.append(f"\n[보유종목 실시간 현황]\n{portfolio_block}")
+
+            enriched = (
+                f"{base_q}\n\n"
+                + "\n".join(data_sections)
+                + "\n\n[절대 규칙] 위 실시간 데이터만 사용하라. 학습 데이터의 과거 주가/지수 절대 사용 금지."
+            )
 
             chat_mem = ChatMemory(self.db)
             ctx = await build_full_context_with_macro(self.db, self.macro_client, self.yf_client)
-            answer = await handle_ai_question(question, ctx, self.db, chat_mem)
+            answer = await handle_ai_question(enriched, ctx, self.db, chat_mem, verified_names=v_names or None)
+
+            # 후속 버튼
+            answer, followup_buttons = self._parse_followup_buttons(answer)
+            if not followup_buttons:
+                followup_buttons = self._build_followup_buttons(base_q, None)
+            markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None
+
             try:
-                await query.edit_message_text(answer)
+                await query.edit_message_text(answer, reply_markup=markup)
             except Exception:
-                await query.message.reply_text(answer, reply_markup=MAIN_MENU)
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=answer,
+                    reply_markup=markup,
+                )
         except Exception as e:
             logger.error("Quick question error: %s", e, exc_info=True)
             try:

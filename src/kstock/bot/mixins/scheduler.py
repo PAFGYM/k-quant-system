@@ -2397,14 +2397,28 @@ class SchedulerMixin:
                             pass
 
                 # 에러 항목만 알림 (warning은 로그만)
+                # v5.4: 동일 알림 반복 방지 — 4시간 쿨다운
                 errors = [c for c in failed if c.status == "error"]
                 if errors:
-                    lines = ["🏥 시스템 헬스체크 알림", "━" * 22, ""]
+                    if not hasattr(self, '_health_alert_cache'):
+                        self._health_alert_cache = {}
+                    from datetime import datetime, timezone, timedelta
+                    now = datetime.now(timezone(timedelta(hours=9)))
+                    new_errors = []
                     for c in errors:
-                        lines.append(f"🔴 {c.name}: {c.message}")
-                    await context.bot.send_message(
-                        chat_id=self.chat_id, text="\n".join(lines),
-                    )
+                        last_sent = self._health_alert_cache.get(c.name)
+                        if last_sent and (now - last_sent).total_seconds() < 14400:
+                            continue  # 4시간 내 이미 전송됨
+                        new_errors.append(c)
+                        self._health_alert_cache[c.name] = now
+
+                    if new_errors:
+                        lines = ["🏥 시스템 헬스체크 알림", "━" * 22, ""]
+                        for c in new_errors:
+                            lines.append(f"🔴 {c.name}: {c.message}")
+                        await context.bot.send_message(
+                            chat_id=self.chat_id, text="\n".join(lines),
+                        )
 
             # 서킷 브레이커 상태 로그
             try:
