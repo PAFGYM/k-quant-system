@@ -579,7 +579,7 @@ class CommandsMixin:
                 lines.append(format_calibration_report(calibrations, name))
 
             await update.message.reply_text(
-                "\n".join(lines), reply_markup=MAIN_MENU,
+                "\n".join(lines), reply_markup=get_reply_markup(context),
             )
         else:
             # No ticker: show portfolio overview
@@ -588,7 +588,7 @@ class CommandsMixin:
                 await update.message.reply_text(
                     "\U0001f4f8 먼저 계좌 스크린샷을 전송해주세요.\n"
                     "또는: /short [종목코드]\n예) /short 005930",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
                 return
 
@@ -600,7 +600,7 @@ class CommandsMixin:
 
             if not holdings:
                 await update.message.reply_text(
-                    "\U0001f4ca 보유 종목이 없습니다.", reply_markup=MAIN_MENU,
+                    "\U0001f4ca 보유 종목이 없습니다.", reply_markup=get_reply_markup(context),
                 )
                 return
 
@@ -638,7 +638,7 @@ class CommandsMixin:
             lines.append("상세 분석: /short [종목코드]")
 
             await update.message.reply_text(
-                "\n".join(lines), reply_markup=MAIN_MENU,
+                "\n".join(lines), reply_markup=get_reply_markup(context),
             )
 
     async def cmd_goal(
@@ -694,7 +694,7 @@ class CommandsMixin:
             tenbagger_count=tenbagger_count,
             swing_count=swing_count,
         )
-        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
     async def _menu_swing(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -715,7 +715,7 @@ class CommandsMixin:
             msg = "\n".join(lines)
         else:
             msg = "\u26a1 현재 활성 스윙 거래가 없습니다.\n\n스캔 중 조건 충족 종목 발견 시 알려드리겠습니다."
-        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
     # -- v3.5 handlers ---------------------------------------------------------
 
@@ -748,7 +748,7 @@ class CommandsMixin:
         if not self.anthropic_key:
             await update.message.reply_text(
                 "주호님, AI 기능을 사용하려면 ANTHROPIC_API_KEY 설정이 필요합니다.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
             return
 
@@ -817,7 +817,7 @@ class CommandsMixin:
             except Exception:
                 await update.message.reply_text(
                     answer,
-                    reply_markup=markup or MAIN_MENU,
+                    reply_markup=markup or get_reply_markup(context),
                 )
         except Exception as e:
             logger.error("AI chat error: %s", e, exc_info=True)
@@ -828,7 +828,7 @@ class CommandsMixin:
             except Exception:
                 await update.message.reply_text(
                     "주호님, AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
 
     def _parse_followup_buttons(self, answer: str) -> tuple:
@@ -1360,7 +1360,7 @@ class CommandsMixin:
             try:
                 await query.edit_message_text(answer, reply_markup=markup)
             except Exception:
-                await query.message.reply_text(answer, reply_markup=markup or MAIN_MENU)
+                await query.message.reply_text(answer, reply_markup=markup or get_reply_markup(context))
         except Exception as e:
             logger.error("Buy pick with live data error: %s", e, exc_info=True)
             try:
@@ -1388,7 +1388,7 @@ class CommandsMixin:
             msg = "\n".join(lines)
         else:
             msg = "\U0001f4cb 수집된 리포트가 없습니다.\n리포트 수집이 시작되면 여기에 표시됩니다."
-        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
     async def _menu_financial(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1401,7 +1401,7 @@ class CommandsMixin:
             "예) /finance 005930\n\n"
             "보유 종목의 성장성, 수익성, 안정성, 밸류에이션을 분석합니다."
         )
-        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
     async def cmd_finance(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1411,7 +1411,7 @@ class CommandsMixin:
         if not args:
             await update.message.reply_text(
                 "사용법: /finance [종목코드]\n예) /finance 005930",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
             return
         query = args[0].strip()
@@ -1450,7 +1450,7 @@ class CommandsMixin:
             msg = format_financial_report(fd, score)
         else:
             msg = f"\U0001f4ca {name} 재무 데이터가 아직 수집되지 않았습니다."
-        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
     async def cmd_consensus(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1460,7 +1460,7 @@ class CommandsMixin:
         if not args:
             await update.message.reply_text(
                 "사용법: /consensus [종목코드 또는 종목명]\n예) /consensus 에코프로",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
             return
         query = args[0].strip()
@@ -1478,7 +1478,7 @@ class CommandsMixin:
             msg = format_consensus_from_dict(consensus_data)
         else:
             msg = f"\U0001f4ca {name} 컨센서스 데이터가 아직 수집되지 않았습니다."
-        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
     async def _menu_short(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1632,7 +1632,7 @@ class CommandsMixin:
                         details=[],
                     )
                 msg = format_sector_detail(sector_key, scores or None)
-                await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+                await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
                 return
 
             # Full overview
@@ -1670,13 +1670,13 @@ class CommandsMixin:
                 triggers=triggers or None,
                 future_weight_pct=future_pct,
             )
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
         except Exception as e:
             logger.error("Future tech command error: %s", e, exc_info=True)
             await update.message.reply_text(
                 "\u26a0\ufe0f 미래기술 워치리스트 조회 중 오류가 발생했습니다.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
 
@@ -1699,12 +1699,12 @@ class CommandsMixin:
                 msg += f"실행율: {stats['execution_rate']:.0%}\n"
                 msg += f"효과율: {stats['effectiveness_rate']:.0%}\n"
 
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("History command error: %s", e, exc_info=True)
             await update.message.reply_text(
                 "\u26a0\ufe0f 계좌 추이 조회 중 오류가 발생했습니다.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
 
@@ -1718,7 +1718,7 @@ class CommandsMixin:
             if not last_ss:
                 await update.message.reply_text(
                     "\u26a0\ufe0f 포트폴리오 데이터가 없습니다. 스크린샷을 먼저 보내주세요.",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
                 return
             import json
@@ -1733,12 +1733,12 @@ class CommandsMixin:
                 cash=last_ss.get("cash", 0) or 0,
             )
             msg = format_risk_report(report)
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Risk command error: %s", e, exc_info=True)
             await update.message.reply_text(
                 "\u26a0\ufe0f 리스크 조회 중 오류가 발생했습니다.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
     async def cmd_health(
@@ -1749,12 +1749,12 @@ class CommandsMixin:
             self._persist_chat_id(update)
             checks = run_health_checks(db_path=self.db.db_path)
             msg = format_system_report(checks, db_path=self.db.db_path)
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Health command error: %s", e, exc_info=True)
             await update.message.reply_text(
                 "\u26a0\ufe0f 시스템 상태 조회 중 오류가 발생했습니다.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
     async def cmd_performance(
@@ -1783,12 +1783,12 @@ class CommandsMixin:
                 tracks.append(t)
             summary = compute_performance_summary(tracks, start_date="2026-02-24")
             msg = format_performance_report(summary)
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Performance command error: %s", e, exc_info=True)
             await update.message.reply_text(
                 "\u26a0\ufe0f 성과 조회 중 오류가 발생했습니다.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
     async def cmd_scenario(
@@ -1815,7 +1815,7 @@ class CommandsMixin:
             logger.error("Scenario command error: %s", e, exc_info=True)
             await update.message.reply_text(
                 "\u26a0\ufe0f 시나리오 분석 오류.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
     async def _action_multi_run(self, query, context, payload: str) -> None:
@@ -1994,7 +1994,7 @@ class CommandsMixin:
             if not ml_records:
                 await update.message.reply_text(
                     "\U0001f916 ML 모델 성능 기록이 없습니다.\n재학습 후 자동 기록됩니다.",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
                 return
             latest = ml_records[0]
@@ -2008,12 +2008,12 @@ class CommandsMixin:
                 "val_scores": monthly_vals,
             }
             msg = format_ml_report(cv_result, None, drift)
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("ML command error: %s", e, exc_info=True)
             await update.message.reply_text(
                 "\u26a0\ufe0f ML 상태 조회 오류.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
 
@@ -2029,7 +2029,7 @@ class CommandsMixin:
             if not args:
                 await update.message.reply_text(
                     "사용법: /multi <종목명 또는 종목코드>\n예: /multi 삼성전자",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
                 return
             query = " ".join(args)
@@ -2103,11 +2103,11 @@ class CommandsMixin:
             try:
                 await placeholder.edit_text(msg)
             except Exception:
-                await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+                await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Multi-agent command error: %s", e, exc_info=True)
             await update.message.reply_text(
-                "\u26a0\ufe0f 멀티 에이전트 분석 오류.", reply_markup=MAIN_MENU,
+                "\u26a0\ufe0f 멀티 에이전트 분석 오류.", reply_markup=get_reply_markup(context),
             )
 
     async def cmd_surge(
@@ -2201,11 +2201,11 @@ class CommandsMixin:
             try:
                 await placeholder.edit_text("\n".join(lines))
             except Exception:
-                await update.message.reply_text("\n".join(lines), reply_markup=MAIN_MENU)
+                await update.message.reply_text("\n".join(lines), reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Surge command error: %s", e, exc_info=True)
             await update.message.reply_text(
-                "\u26a0\ufe0f 급등주 스캔 중 오류가 발생했습니다.", reply_markup=MAIN_MENU,
+                "\u26a0\ufe0f 급등주 스캔 중 오류가 발생했습니다.", reply_markup=get_reply_markup(context),
             )
 
     async def cmd_feedback(
@@ -2220,11 +2220,11 @@ class CommandsMixin:
             )
             report = generate_weekly_feedback(self.db, period_days=90)
             msg = format_feedback_report(report)
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Feedback command error: %s", e, exc_info=True)
             await update.message.reply_text(
-                "\u26a0\ufe0f 피드백 조회 오류.", reply_markup=MAIN_MENU,
+                "\u26a0\ufe0f 피드백 조회 오류.", reply_markup=get_reply_markup(context),
             )
 
     async def cmd_stats(
@@ -2237,7 +2237,7 @@ class CommandsMixin:
             if not stats:
                 await update.message.reply_text(
                     "\U0001f4ca 추천 성적 데이터가 아직 없습니다.",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
                 return
             lines = ["\U0001f4ca 전체 추천 성적표\n"]
@@ -2247,11 +2247,11 @@ class CommandsMixin:
                     f"({s.get('win_count', 0)}/{s.get('total_count', 0)}), "
                     f"평균 {s.get('avg_return', 0):+.1f}%"
                 )
-            await update.message.reply_text("\n".join(lines), reply_markup=MAIN_MENU)
+            await update.message.reply_text("\n".join(lines), reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Stats command error: %s", e, exc_info=True)
             await update.message.reply_text(
-                "\u26a0\ufe0f 성적표 조회 오류.", reply_markup=MAIN_MENU,
+                "\u26a0\ufe0f 성적표 조회 오류.", reply_markup=get_reply_markup(context),
             )
 
     async def cmd_accumulation(
@@ -2362,11 +2362,11 @@ class CommandsMixin:
             try:
                 await placeholder.edit_text("\n".join(lines))
             except Exception:
-                await update.message.reply_text("\n".join(lines), reply_markup=MAIN_MENU)
+                await update.message.reply_text("\n".join(lines), reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Accumulation command error: %s", e, exc_info=True)
             await update.message.reply_text(
-                "\u26a0\ufe0f 매집 탐지 중 오류가 발생했습니다.", reply_markup=MAIN_MENU,
+                "\u26a0\ufe0f 매집 탐지 중 오류가 발생했습니다.", reply_markup=get_reply_markup(context),
             )
 
 

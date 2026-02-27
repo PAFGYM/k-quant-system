@@ -910,6 +910,19 @@ class SQLiteStore:
                         conn.execute(sql)
                     except sqlite3.OperationalError:
                         pass
+            # Migrate: watchlist — rec_price, horizon, manager
+            for col, sql in [
+                ("rec_price", "ALTER TABLE watchlist ADD COLUMN rec_price REAL DEFAULT 0"),
+                ("horizon", "ALTER TABLE watchlist ADD COLUMN horizon TEXT DEFAULT ''"),
+                ("manager", "ALTER TABLE watchlist ADD COLUMN manager TEXT DEFAULT ''"),
+            ]:
+                try:
+                    conn.execute(f"SELECT {col} FROM watchlist LIMIT 1")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass
 
     # -- job_runs ---------------------------------------------------------------
 
@@ -1167,16 +1180,38 @@ class SQLiteStore:
         name: str,
         target_price: float | None = None,
         target_rsi: float = 30,
+        rec_price: float = 0,
+        horizon: str = "",
+        manager: str = "",
     ) -> None:
         now = datetime.utcnow().isoformat()
         with self._connect() as conn:
+            # 기존 데이터 보존: rec_price/horizon/manager가 비어있으면 기존 값 유지
+            existing = conn.execute(
+                "SELECT rec_price, horizon, manager FROM watchlist WHERE ticker=?",
+                (ticker,),
+            ).fetchone()
+            if existing:
+                rec_price = rec_price or (existing["rec_price"] if existing["rec_price"] else 0)
+                horizon = horizon or (existing["horizon"] if existing["horizon"] else "")
+                manager = manager or (existing["manager"] if existing["manager"] else "")
             conn.execute(
                 """
                 INSERT OR REPLACE INTO watchlist
-                    (ticker, name, target_price, target_rsi, active, created_at)
-                VALUES (?, ?, ?, ?, 1, ?)
+                    (ticker, name, target_price, target_rsi, active, created_at,
+                     rec_price, horizon, manager)
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
                 """,
-                (ticker, name, target_price, target_rsi, now),
+                (ticker, name, target_price, target_rsi, now,
+                 rec_price, horizon, manager),
+            )
+
+    def update_watchlist_horizon(self, ticker: str, horizon: str, manager: str = "") -> None:
+        """즐겨찾기 종목의 투자유형/매니저 변경."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE watchlist SET horizon=?, manager=? WHERE ticker=?",
+                (horizon, manager, ticker),
             )
 
     def get_watchlist(self) -> list[dict]:

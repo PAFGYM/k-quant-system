@@ -393,14 +393,14 @@ class TradingMixin:
                     enriched_question, ctx, self.db, chat_mem,
                 )
                 try:
-                    await query.message.reply_text(answer, reply_markup=MAIN_MENU)
+                    await query.message.reply_text(answer, reply_markup=get_reply_markup(context))
                 except Exception:
                     await query.message.reply_text(answer)
             except Exception as e:
                 logger.error("Stock action analyze error: %s", e, exc_info=True)
                 await query.message.reply_text(
                     f"⚠️ {name} 분석 중 오류가 발생했습니다.",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
 
         elif action == "add":
@@ -694,7 +694,7 @@ class TradingMixin:
                 if not holdings:
                     await query.message.reply_text(
                         "💰 등록된 보유종목이 없습니다.\n📸 스크린샷을 보내주세요!",
-                        reply_markup=MAIN_MENU,
+                        reply_markup=get_reply_markup(context),
                     )
                     return
 
@@ -708,7 +708,7 @@ class TradingMixin:
             except Exception as e:
                 logger.error("Balance refresh error: %s", e, exc_info=True)
                 await query.message.reply_text(
-                    "⚠️ 잔고 새로고침 실패.", reply_markup=MAIN_MENU,
+                    "⚠️ 잔고 새로고침 실패.", reply_markup=get_reply_markup(context),
                 )
 
         elif payload.startswith("remove:"):

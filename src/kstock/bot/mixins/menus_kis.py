@@ -129,7 +129,7 @@ class MenusKisMixin:
             "아무 질문이나 하면 AI가 답변\n"
             "62개 종목 실시간 WebSocket 감시"
         )
-        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
     # == Notification settings =================================================
 
@@ -391,12 +391,12 @@ class MenusKisMixin:
             try:
                 from kstock.bot.weekly_report import generate_weekly_report
                 telegram_msg, doc_url = await generate_weekly_report(self.db)
-                await query.message.reply_text(telegram_msg, reply_markup=MAIN_MENU)
+                await query.message.reply_text(telegram_msg, reply_markup=get_reply_markup(context))
             except Exception as e:
                 logger.error("Weekly report generation failed: %s", e, exc_info=True)
                 await query.message.reply_text(
                     "\u26a0\ufe0f 주간 보고서 생성 실패. 잠시 후 다시 시도해주세요.",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
 
     # == Menu implementations ================================================
@@ -404,7 +404,7 @@ class MenusKisMixin:
     async def _menu_alerts(self, update: Update, context) -> None:
         alerts = self.db.get_recent_alerts(limit=10)
         await update.message.reply_text(
-            format_alerts_summary(alerts), reply_markup=MAIN_MENU
+            format_alerts_summary(alerts), reply_markup=get_reply_markup(context)
         )
 
     async def _menu_recommendations(self, update: Update, context) -> None:
@@ -529,7 +529,7 @@ class MenusKisMixin:
         try:
             await placeholder.edit_text(msg)
         except Exception:
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
         # Phase 8: 실시간 보고서도 별도 전송 (AI 요약 포함)
         if live_report:
@@ -583,7 +583,7 @@ class MenusKisMixin:
                 f"승률 {win_rate:.0f}% ({profit_cnt}승 {stop_cnt}패)\n"
                 f"\U0001f449 [추천 성과] 메뉴에서 상세 확인"
             )
-        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
     async def _menu_reco_performance(self, update: Update, context) -> None:
         active = self.db.get_active_recommendations()
@@ -600,7 +600,7 @@ class MenusKisMixin:
             except Exception:
                 pass
         msg = format_reco_performance(active, completed, watch, stats)
-        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
     async def _menu_strategy_view(self, update: Update, context) -> None:
         buttons = [
@@ -658,15 +658,15 @@ class MenusKisMixin:
             "/backtest [종목코드] 로 백테스트를 실행하세요.\n"
             "예) /backtest 005930\n\n"
             "1년 히스토리 기반 전략 시뮬레이션 결과를 보여줍니다.",
-            reply_markup=MAIN_MENU,
+            reply_markup=get_reply_markup(context),
         )
 
     async def _menu_help(self, update: Update, context) -> None:
-        await update.message.reply_text(format_help(), reply_markup=MAIN_MENU)
+        await update.message.reply_text(format_help(), reply_markup=get_reply_markup(context))
 
     async def _menu_account_analysis(self, update: Update, context) -> None:
         msg = format_screenshot_reminder()
-        await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+        await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
     async def _menu_kis_setup(self, update: Update, context) -> None:
         # KIS API 토큰 연결 확인 (실제 API 호출)

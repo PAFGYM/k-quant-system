@@ -360,7 +360,7 @@ class CoreHandlersMixin:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         self._persist_chat_id(update)
-        await update.message.reply_text(format_welcome(), reply_markup=MAIN_MENU)
+        await update.message.reply_text(format_welcome(), reply_markup=get_reply_markup(context))
 
     async def cmd_backtest(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -369,7 +369,7 @@ class CoreHandlersMixin:
         if not args:
             await update.message.reply_text(
                 "사용법: /backtest [종목코드]\n예) /backtest 005930",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
             return
 
@@ -391,7 +391,7 @@ class CoreHandlersMixin:
             result = run_backtest(ticker, name=name, market=market)
             if result:
                 msg = format_backtest_result(result)
-                await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+                await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
                 # Backtest Pro 버튼 추가
                 bt_buttons = [
                     [
@@ -413,12 +413,12 @@ class CoreHandlersMixin:
                 )
             else:
                 msg = f"\u26a0\ufe0f {name} 백테스트 실패\n데이터가 부족하거나 종목코드를 확인해주세요."
-                await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+                await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Backtest error: %s", e, exc_info=True)
             await update.message.reply_text(
                 f"\u26a0\ufe0f 백테스트 오류: {str(e)[:100]}",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
     async def cmd_optimize(
@@ -457,13 +457,13 @@ class CoreHandlersMixin:
             else:
                 await update.message.reply_text(
                     "\u26a0\ufe0f 최적화 실패 - 데이터 부족",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
         except Exception as e:
             logger.error("Optimize error: %s", e, exc_info=True)
             await update.message.reply_text(
                 f"\u26a0\ufe0f 최적화 오류: {str(e)[:100]}",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
     async def cmd_setup_kis(
@@ -473,7 +473,7 @@ class CoreHandlersMixin:
         args = context.args or []
         if not args:
             msg = format_kis_setup_guide()
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
             return
 
         # Parse KIS credentials from message text
@@ -495,7 +495,7 @@ class CoreHandlersMixin:
                 "\u26a0\ufe0f 형식이 올바르지 않습니다.\n\n"
                 "KIS_ID: 홍길동\nKIS_KEY: Pa0knAM6...\n"
                 "KIS_SECRET: V9J3YG...\nKIS_ACCOUNT: 12345678-01",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
             return
 
@@ -506,12 +506,12 @@ class CoreHandlersMixin:
                 "\u2705 KIS API 연결 완료!\n"
                 "모의투자 모드로 설정되었습니다.\n"
                 "이제 자동매매가 가능합니다.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
         else:
             await update.message.reply_text(
                 "\u274c KIS 연결 실패.\n인증 정보를 확인해주세요.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
     async def handle_screenshot(
@@ -534,7 +534,7 @@ class CoreHandlersMixin:
         if not self.anthropic_key:
             await update.message.reply_text(
                 "\u26a0\ufe0f Anthropic API 키가 설정되지 않았습니다.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
             return
 
@@ -642,7 +642,7 @@ class CoreHandlersMixin:
 
             # Format and send summary
             msg = format_screenshot_summary(parsed, comparison, prev_diagnoses)
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
             # 포트폴리오 자동 추가 제안 (스크린샷에서 인식된 종목)
             if holdings:
@@ -706,7 +706,7 @@ class CoreHandlersMixin:
             logger.error("Screenshot analysis failed: %s", e, exc_info=True)
             await update.message.reply_text(
                 "\u26a0\ufe0f 스크린샷 분석 실패. 다시 시도해주세요.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
     async def handle_menu_text(
@@ -765,8 +765,13 @@ class CoreHandlersMixin:
             # 메뉴 이동 시 진행 중인 상태 클리어
             context.user_data.pop("kis_setup", None)
             context.user_data.pop("awaiting_optimize_ticker", None)
-            # Claude Code 대화 모드도 해제 (💻 클로드, 🔙 대화 종료 제외)
-            if text not in ("💻 클로드", "🔙 대화 종료"):
+            # Claude 대화 모드: CLAUDE_MODE_MENU에 포함된 버튼은 모드 유지
+            _claude_safe_buttons = {
+                "💻 클로드", "🔙 대화 종료",
+                "📊 분석", "📈 시황", "💰 잔고", "⭐ 즐겨찾기",
+                "💬 AI질문", "📋 리포트",
+            }
+            if text not in _claude_safe_buttons:
                 context.user_data.pop("claude_mode", None)
                 context.user_data.pop("claude_turn", None)
             try:
@@ -775,7 +780,7 @@ class CoreHandlersMixin:
                 logger.error("Menu handler error: %s", e, exc_info=True)
                 await update.message.reply_text(
                     "\u26a0\ufe0f 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
         else:
             # 매수 플래너: 금액 입력 대기 → 장바구니 모드 진입
@@ -811,12 +816,12 @@ class CoreHandlersMixin:
                         self.db.add_watchlist(ticker, name)
                         await update.message.reply_text(
                             f"⭐ {name}({ticker})을 즐겨찾기에 등록했습니다!",
-                            reply_markup=MAIN_MENU,
+                            reply_markup=get_reply_markup(context),
                         )
                         return
                 await update.message.reply_text(
                     f"⚠️ '{text}' 종목을 찾을 수 없습니다. 정확한 종목명을 입력해주세요.",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
                 return
 
@@ -871,7 +876,7 @@ class CoreHandlersMixin:
                     f"✅ 접수 완료!\n\n"
                     f"📝 [{agent_type}] {text[:60]}{'...' if len(text) > 60 else ''}\n\n"
                     f"다음 업데이트에 반영하겠습니다. 감사합니다! 🙏",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
                 return
 
@@ -1328,7 +1333,7 @@ class CoreHandlersMixin:
                 await placeholder.edit_text(answer, reply_markup=markup)
             except Exception:
                 await update.message.reply_text(
-                    answer, reply_markup=markup or MAIN_MENU,
+                    answer, reply_markup=markup or get_reply_markup(context),
                 )
         except Exception as e:
             logger.error("Stock analysis error: %s", e, exc_info=True)
@@ -1339,7 +1344,7 @@ class CoreHandlersMixin:
             except Exception:
                 await update.message.reply_text(
                     f"\u26a0\ufe0f {name} 분석 중 오류가 발생했습니다.",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
 
     async def handle_callback(
@@ -1567,7 +1572,7 @@ class CoreHandlersMixin:
             )
             pairs = list(zip(holdings, diagnoses))
             diag_msg = format_diagnosis_report(pairs)
-            await query.message.reply_text(diag_msg, reply_markup=MAIN_MENU)
+            await query.message.reply_text(diag_msg, reply_markup=get_reply_markup(context))
 
             # Save to DB
             if screenshot_id:
@@ -1652,7 +1657,7 @@ class CoreHandlersMixin:
         )
 
         report = format_horizon_report(results)
-        await query.message.reply_text(report, reply_markup=MAIN_MENU)
+        await query.message.reply_text(report, reply_markup=get_reply_markup(context))
 
         # Save to DB
         if screenshot_id:
@@ -1725,7 +1730,7 @@ class CoreHandlersMixin:
                 total_eval=total_eval,
             )
             report = format_account_diagnosis(diag)
-            await query.message.reply_text(report, reply_markup=MAIN_MENU)
+            await query.message.reply_text(report, reply_markup=get_reply_markup(context))
 
             # Save solutions to DB
             if diag.solutions and screenshot_id:

@@ -4,6 +4,28 @@ from __future__ import annotations
 from kstock.bot.bot_imports import *  # noqa: F403
 
 
+def _holding_type_to_horizon(ht: str) -> str:
+    """holding_type → watchlist horizon 변환."""
+    mapping = {
+        "scalp": "scalp", "danta": "scalp",
+        "swing": "swing",
+        "position": "position", "dangi": "position", "junggi": "position",
+        "long_term": "long_term", "janggi": "long_term",
+    }
+    return mapping.get(ht, "")
+
+
+def _horizon_to_manager(ht: str) -> str:
+    """holding_type → manager key 변환."""
+    mapping = {
+        "scalp": "scalp", "danta": "scalp",
+        "swing": "swing",
+        "position": "position", "dangi": "position", "junggi": "position",
+        "long_term": "long_term", "janggi": "long_term",
+    }
+    return mapping.get(ht, "")
+
+
 def _admin_buttons() -> list:
     """관리자 메뉴 인라인 버튼 생성."""
     return [
@@ -305,7 +327,7 @@ class AdminExtrasMixin:
                 "/admin holdings — 보유종목 현황\n\n"
                 "\U0001f4a1 버그를 보고하면 Claude Code가\n"
                 "자동으로 감지하고 수정합니다.",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
             return
 
@@ -348,7 +370,7 @@ class AdminExtrasMixin:
                 f"시간: {datetime.now(KST).strftime('%H:%M:%S')}\n\n"
                 f"\U0001f4c1 data/admin_reports.jsonl에 기록됨\n"
                 f"Claude Code에서 확인 후 수정 예정",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
         elif subcmd == "status":
@@ -381,7 +403,7 @@ class AdminExtrasMixin:
                 f"\U0001f310 KIS: {'연결됨' if self.kis_broker.connected else '미연결'}",
             ]
             await update.message.reply_text(
-                "\n".join(lines), reply_markup=MAIN_MENU,
+                "\n".join(lines), reply_markup=get_reply_markup(context),
             )
 
         elif subcmd == "logs":
@@ -400,15 +422,15 @@ class AdminExtrasMixin:
                 if error_lines:
                     await update.message.reply_text(
                         "\U0001f6a8 최근 에러/경고\n\n" + "\n".join(error_lines),
-                        reply_markup=MAIN_MENU,
+                        reply_markup=get_reply_markup(context),
                     )
                 else:
                     await update.message.reply_text(
-                        "\u2705 최근 에러 없음!", reply_markup=MAIN_MENU,
+                        "\u2705 최근 에러 없음!", reply_markup=get_reply_markup(context),
                     )
             except Exception as e:
                 await update.message.reply_text(
-                    f"\u26a0\ufe0f 로그 확인 실패: {e}", reply_markup=MAIN_MENU,
+                    f"\u26a0\ufe0f 로그 확인 실패: {e}", reply_markup=get_reply_markup(context),
                 )
 
         elif subcmd == "holdings":
@@ -418,7 +440,7 @@ class AdminExtrasMixin:
                 await update.message.reply_text(
                     "\U0001f4ad DB에 보유종목이 없습니다.\n"
                     "잔고 스크린샷을 찍어주세요!",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
                 return
             lines = [f"\U0001f4ca 보유종목 DB ({len(holdings)}개)\n"]
@@ -432,14 +454,14 @@ class AdminExtrasMixin:
                     f"{pnl:+.1f}%"
                 )
             await update.message.reply_text(
-                "\n".join(lines), reply_markup=MAIN_MENU,
+                "\n".join(lines), reply_markup=get_reply_markup(context),
             )
 
         else:
             await update.message.reply_text(
                 f"\u26a0\ufe0f 알 수 없는 명령: {subcmd}\n"
                 "/admin 으로 도움말 확인",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
     async def cmd_register(
@@ -453,7 +475,7 @@ class AdminExtrasMixin:
                 await update.message.reply_text(
                     "사용법: /register <매수 내용>\n"
                     "예: /register 삼성전자 50주 76000원",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
                 return
             text = " ".join(args)
@@ -462,7 +484,7 @@ class AdminExtrasMixin:
                 await update.message.reply_text(
                     "\u26a0\ufe0f 매수 정보를 파싱하지 못했습니다.\n"
                     "예: /register 삼성전자 50주 76000원",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
                 return
             msg = format_trade_confirmation(trade)
@@ -474,11 +496,11 @@ class AdminExtrasMixin:
                 total_amount=trade.total_amount,
                 source="text",
             )
-            await update.message.reply_text(msg, reply_markup=MAIN_MENU)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Register command error: %s", e, exc_info=True)
             await update.message.reply_text(
-                "\u26a0\ufe0f 매수 등록 오류.", reply_markup=MAIN_MENU,
+                "\u26a0\ufe0f 매수 등록 오류.", reply_markup=get_reply_markup(context),
             )
 
     async def cmd_balance(
@@ -527,7 +549,7 @@ class AdminExtrasMixin:
         except Exception as e:
             logger.error("Balance command error: %s", e, exc_info=True)
             await update.message.reply_text(
-                "\u26a0\ufe0f 잔고 조회 중 오류가 발생했습니다.", reply_markup=MAIN_MENU,
+                "\u26a0\ufe0f 잔고 조회 중 오류가 발생했습니다.", reply_markup=get_reply_markup(context),
             )
 
     # -- Phase 7 menu handlers ---------------------------------------------------
@@ -614,7 +636,7 @@ class AdminExtrasMixin:
         """메인 메뉴로 복귀."""
         await update.message.reply_text(
             "\U0001f3e0 메인 메뉴로 돌아왔습니다.",
-            reply_markup=MAIN_MENU,
+            reply_markup=get_reply_markup(context),
         )
 
     async def _menu_analysis_hub(
@@ -820,8 +842,10 @@ class AdminExtrasMixin:
     ) -> None:
         """⭐ 즐겨찾기 — watchlist 종목 표시 + 빠른 액션.
 
-        v5.4: 종목명 표시 (코드 미표시), 투자기간별 분류, 매수 점수 표시.
+        v5.7: 추천시점 대비 수익률, 투자유형별 분류 필수, 담당 매니저 표시.
         """
+        from kstock.bot.investment_managers import MANAGERS
+
         watchlist = self.db.get_watchlist()
 
         # [v3.6.2] 비어있으면 보유종목 자동 등록
@@ -830,9 +854,17 @@ class AdminExtrasMixin:
             for h in holdings:
                 ticker = h.get("ticker", "")
                 name = h.get("name", "")
+                bp = h.get("buy_price", 0)
+                ht = h.get("holding_type", "")
                 if ticker and name:
                     try:
-                        self.db.add_watchlist(ticker, name)
+                        # 매수가를 추천가격으로 기록
+                        mgr = _horizon_to_manager(ht)
+                        hz = _holding_type_to_horizon(ht)
+                        self.db.add_watchlist(
+                            ticker, name, rec_price=bp,
+                            horizon=hz, manager=mgr,
+                        )
                     except Exception:
                         pass
             watchlist = self.db.get_watchlist()
@@ -842,19 +874,22 @@ class AdminExtrasMixin:
                 "⭐ 즐겨찾기가 비어있습니다.\n\n"
                 "종목명을 입력하면 자동으로 추가할 수 있습니다.\n"
                 "예: 삼성전자",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
             return
 
-        # 종목명 미등록 자동 복구 + 종목별 데이터 수집
+        # 종목별 데이터 수집
         items = []
         for w in watchlist[:15]:
             ticker = w.get("ticker", "")
             name = w.get("name", ticker)
+            rec_price = w.get("rec_price", 0) or 0
+            horizon = w.get("horizon", "") or ""
+            manager = w.get("manager", "") or ""
+
             # 이름이 코드와 같으면 universe에서 이름 찾기
             if name == ticker or not name:
                 name = self._resolve_name(ticker, name)
-                # DB도 업데이트
                 if name != ticker:
                     try:
                         self.db.add_watchlist(ticker, name)
@@ -871,35 +906,32 @@ class AdminExtrasMixin:
             except Exception:
                 pass
 
-            # 스캔 점수 (캐시에서)
-            score = 0.0
-            if hasattr(self, '_last_scan_results') and self._last_scan_results:
-                for r in self._last_scan_results:
-                    if r.ticker == ticker:
-                        score = r.score.composite
-                        break
+            # 추천가 대비 수익률
+            rec_pnl = 0.0
+            if rec_price > 0 and cur > 0:
+                rec_pnl = (cur - rec_price) / rec_price * 100
 
-            # 투자기간 (portfolio_horizon에서)
-            horizon = ""
-            try:
-                ph = self.db.get_portfolio_horizon(ticker)
-                if ph:
-                    horizon = ph.get("horizon", "")
-            except Exception:
-                pass
+            # 추천가 없으면 현재가를 기록
+            if rec_price <= 0 and cur > 0:
+                rec_price = cur
+                try:
+                    self.db.add_watchlist(ticker, name, rec_price=cur)
+                except Exception:
+                    pass
 
             items.append({
                 "ticker": ticker, "name": name, "price": cur,
-                "dc_pct": dc_pct, "score": score, "horizon": horizon,
+                "dc_pct": dc_pct, "rec_price": rec_price,
+                "rec_pnl": rec_pnl, "horizon": horizon,
+                "manager": manager,
             })
 
-        # 투자기간별 그룹핑
+        # 투자유형별 그룹핑
         horizon_labels = {
-            "danta": "⚡ 단타 (1~3일)",
-            "swing": "🔥 스윙 (1~4주)",
-            "dangi": "📊 단기~중기",
-            "junggi": "📊 중기 (1~6개월)",
-            "janggi": "💎 장기 (6개월+)",
+            "scalp": "⚡ 단타 (1~3일) — 제시 리버모어",
+            "swing": "🔥 스윙 (1~4주) — 윌리엄 오닐",
+            "position": "📊 포지션 (1~6개월) — 피터 린치",
+            "long_term": "💎 장기 (6개월+) — 워렌 버핏",
         }
         grouped = {}
         ungrouped = []
@@ -917,24 +949,35 @@ class AdminExtrasMixin:
             name = item["name"]
             cur = item["price"]
             dc_pct = item["dc_pct"]
-            score = item["score"]
+            rec_pnl = item["rec_pnl"]
             if cur > 0:
                 dc_sign = "+" if dc_pct > 0 else ""
                 dc_emoji = "📈" if dc_pct > 0 else "📉" if dc_pct < 0 else "─"
-                score_str = f" | {score:.0f}점" if score > 0 else ""
-                return f"{dc_emoji} {name}: {cur:,.0f}원 ({dc_sign}{dc_pct:.1f}%){score_str}"
+                # 추천 대비 수익률
+                pnl_sign = "+" if rec_pnl > 0 else ""
+                pnl_emoji = "🟢" if rec_pnl > 0 else "🔴" if rec_pnl < 0 else "⚪"
+                pnl_str = f" {pnl_emoji}{pnl_sign}{rec_pnl:.1f}%" if item["rec_price"] > 0 else ""
+                return (
+                    f"{dc_emoji} {name}: {cur:,.0f}원 "
+                    f"(오늘 {dc_sign}{dc_pct:.1f}%){pnl_str}"
+                )
             return f"─ {name}"
 
         # 그룹별 출력
-        for hz_key in ["danta", "swing", "dangi", "junggi", "janggi"]:
+        for hz_key in ["scalp", "swing", "position", "long_term"]:
             if hz_key not in grouped:
                 continue
+            mgr = MANAGERS.get(hz_key, {})
+            mgr_name = mgr.get("name", "") if mgr else ""
             lines.append(f"\n{horizon_labels[hz_key]}")
             for item in grouped[hz_key]:
                 lines.append(f"  {_format_item(item)}")
                 buttons.append([
                     InlineKeyboardButton(
-                        f"📋 {item['name']}", callback_data=f"detail:{item['ticker']}",
+                        f"📋 {item['name'][:8]}", callback_data=f"detail:{item['ticker']}",
+                    ),
+                    InlineKeyboardButton(
+                        "🔄 분류", callback_data=f"fav:classify:{item['ticker']}",
                     ),
                     InlineKeyboardButton(
                         "❌", callback_data=f"fav:rm:{item['ticker']}",
@@ -943,13 +986,15 @@ class AdminExtrasMixin:
 
         # 미분류 종목
         if ungrouped:
-            if grouped:
-                lines.append("\n📌 미분류")
+            lines.append("\n📌 미분류 (분류 필요!)")
             for item in ungrouped:
                 lines.append(f"  {_format_item(item)}")
                 buttons.append([
                     InlineKeyboardButton(
-                        f"📋 {item['name']}", callback_data=f"detail:{item['ticker']}",
+                        f"📋 {item['name'][:8]}", callback_data=f"detail:{item['ticker']}",
+                    ),
+                    InlineKeyboardButton(
+                        "🔄 분류", callback_data=f"fav:classify:{item['ticker']}",
                     ),
                     InlineKeyboardButton(
                         "❌", callback_data=f"fav:rm:{item['ticker']}",
@@ -959,6 +1004,9 @@ class AdminExtrasMixin:
         buttons.append([
             InlineKeyboardButton("➕ 종목 추가", callback_data="fav:add_mode"),
             InlineKeyboardButton("🔄 새로고침", callback_data="fav:refresh"),
+        ])
+        buttons.append([
+            InlineKeyboardButton("👨‍💼 매니저 현황", callback_data="fav:managers"),
         ])
         buttons.append(make_feedback_row("즐겨찾기"))
         await update.message.reply_text(
@@ -1000,63 +1048,89 @@ class AdminExtrasMixin:
                 await query.edit_message_text(f"⭐ {name} 즐겨찾기에서 삭제되었습니다.")
             return
 
-        if action == "refresh":
-            await query.edit_message_text("⭐ 새로고침 중...")
-            # _menu_favorites를 직접 호출하여 중복 코드 제거
+        if action == "classify":
+            # 종목 투자유형 분류 → 4개 버튼 표시
+            ticker = parts[1] if len(parts) > 1 else ""
+            name = self._resolve_name(ticker, ticker)
+            buttons = [
+                [
+                    InlineKeyboardButton("⚡ 단타", callback_data=f"fav:set_hz:scalp:{ticker}"),
+                    InlineKeyboardButton("🔥 스윙", callback_data=f"fav:set_hz:swing:{ticker}"),
+                ],
+                [
+                    InlineKeyboardButton("📊 포지션", callback_data=f"fav:set_hz:position:{ticker}"),
+                    InlineKeyboardButton("💎 장기", callback_data=f"fav:set_hz:long_term:{ticker}"),
+                ],
+            ]
+            await query.edit_message_text(
+                f"🔄 {name} 투자유형 분류\n\n"
+                f"⚡ 단타: 1~3일 (제시 리버모어)\n"
+                f"🔥 스윙: 1~4주 (윌리엄 오닐)\n"
+                f"📊 포지션: 1~6개월 (피터 린치)\n"
+                f"💎 장기: 6개월+ (워렌 버핏)\n\n"
+                f"투자유형을 선택하세요:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        if action == "set_hz":
+            # 투자유형 설정 확정
+            horizon = parts[1] if len(parts) > 1 else ""
+            ticker = parts[2] if len(parts) > 2 else ""
+            name = self._resolve_name(ticker, ticker)
+            manager = horizon  # horizon과 manager가 같은 키
+            self.db.update_watchlist_horizon(ticker, horizon, manager)
+
+            from kstock.bot.investment_managers import MANAGERS
+            mgr = MANAGERS.get(horizon, {})
+            mgr_name = mgr.get("name", "알 수 없음") if mgr else "알 수 없음"
+            mgr_emoji = mgr.get("emoji", "📌") if mgr else "📌"
+
+            await query.edit_message_text(
+                f"✅ {name} 투자유형 설정 완료\n\n"
+                f"유형: {mgr_emoji} {mgr.get('title', horizon)}\n"
+                f"담당: {mgr_name}\n\n"
+                f"⭐ 즐겨찾기에서 확인하세요."
+            )
+            return
+
+        if action == "managers":
+            # 4명의 매니저 현황 대시보드
+            from kstock.bot.investment_managers import MANAGERS
             watchlist = self.db.get_watchlist()
-            if not watchlist:
-                await query.message.reply_text("⭐ 즐겨찾기가 비어있습니다.")
-                return
 
-            # 동일한 로직으로 실시간 데이터 포함 표시
-            items = []
-            for w in watchlist[:15]:
-                ticker = w.get("ticker", "")
-                name = w.get("name", ticker)
-                if name == ticker or not name:
-                    name = self._resolve_name(ticker, name)
-                cur = 0
-                dc_pct = 0.0
-                try:
-                    detail = await self._get_price_detail(ticker, 0)
-                    cur = detail["price"]
-                    dc_pct = detail["day_change_pct"]
-                except Exception:
-                    pass
-                score = 0.0
-                if hasattr(self, '_last_scan_results') and self._last_scan_results:
-                    for r in self._last_scan_results:
-                        if r.ticker == ticker:
-                            score = r.score.composite
-                            break
-                items.append({"ticker": ticker, "name": name, "price": cur, "dc_pct": dc_pct, "score": score})
-
-            lines = ["⭐ 내 즐겨찾기\n"]
-            buttons = []
-            for item in items:
-                name = item["name"]
-                cur = item["price"]
-                dc_pct = item["dc_pct"]
-                score = item["score"]
-                if cur > 0:
-                    dc_sign = "+" if dc_pct > 0 else ""
-                    dc_emoji = "📈" if dc_pct > 0 else "📉" if dc_pct < 0 else "─"
-                    score_str = f" | {score:.0f}점" if score > 0 else ""
-                    lines.append(f"{dc_emoji} {name}: {cur:,.0f}원 ({dc_sign}{dc_pct:.1f}%){score_str}")
+            lines = ["👨‍💼 투자 매니저 현황\n"]
+            for mgr_key in ["scalp", "swing", "position", "long_term"]:
+                mgr = MANAGERS[mgr_key]
+                stocks = [w for w in watchlist if w.get("manager") == mgr_key]
+                lines.append(f"{mgr['emoji']} {mgr['name']} ({mgr['title']})")
+                if stocks:
+                    for s in stocks[:5]:
+                        name = s.get("name", s.get("ticker", ""))
+                        lines.append(f"  - {name}")
+                    lines.append(f"  총 {len(stocks)}종목 관리 중")
                 else:
-                    lines.append(f"─ {name}")
+                    lines.append("  배정된 종목 없음")
+                lines.append("")
+
+            buttons = []
+            for mgr_key in ["scalp", "swing", "position", "long_term"]:
+                mgr = MANAGERS[mgr_key]
                 buttons.append([
-                    InlineKeyboardButton(f"📋 {name}", callback_data=f"detail:{item['ticker']}"),
-                    InlineKeyboardButton("❌", callback_data=f"fav:rm:{item['ticker']}"),
+                    InlineKeyboardButton(
+                        f"{mgr['emoji']} {mgr['name']} 분석 요청",
+                        callback_data=f"mgr:{mgr_key}",
+                    ),
                 ])
-            buttons.append([
-                InlineKeyboardButton("🔄 새로고침", callback_data="fav:refresh"),
-            ])
-            buttons.append(make_feedback_row("즐겨찾기"))
-            await query.message.reply_text(
+            buttons.append(make_feedback_row("매니저"))
+            await query.edit_message_text(
                 "\n".join(lines),
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
+            return
+
+        if action == "refresh":
+            await query.edit_message_text("⭐ 새로고침 중... ⭐ 메뉴에서 다시 확인하세요.")
             return
 
     # ── 에이전트 대화 메뉴 ─────────────────────────────────────────

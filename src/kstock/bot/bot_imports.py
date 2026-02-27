@@ -286,6 +286,18 @@ def make_feedback_row(menu_name: str) -> list:
     ]
 
 
+def get_reply_markup(context) -> ReplyKeyboardMarkup:
+    """현재 모드에 맞는 ReplyKeyboardMarkup 반환.
+
+    Claude 대화 모드에서는 CLAUDE_MODE_MENU, 아니면 MAIN_MENU.
+    모든 메시지 응답에 이 함수를 사용하면 클로드 메뉴가 절대 사라지지 않는다.
+    """
+    from kstock.bot.mixins.remote_claude import CLAUDE_MODE_MENU
+    if context and hasattr(context, 'user_data') and context.user_data.get("claude_mode"):
+        return CLAUDE_MODE_MENU
+    return MAIN_MENU
+
+
 def _load_universe() -> dict:
     """Load full universe config with stocks + ETFs."""
     config_path = Path("config/universe.yaml")
