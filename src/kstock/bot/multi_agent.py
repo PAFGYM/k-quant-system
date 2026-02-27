@@ -43,14 +43,15 @@ AGENTS = {
             "2. RSI 과매수/과매도 판단\n"
             "3. MACD 시그널 (골든크로스/데드크로스)\n"
             "4. 거래량 추세 (20일 평균 대비)\n"
-            "5. 볼린저밴드 위치\n"
-            "6. 52주 고점/저점 대비 현재 위치\n"
-            "7. 지지선/저항선\n\n"
-            "출력 형식:\n"
-            "  기술적 점수: 0~100\n"
-            "  신호: 강한매수/매수/중립/매도/강한매도\n"
-            "  핵심 근거: 2~3줄\n"
-            "  주의사항: 1줄"
+            "5. 52주 고점/저점 대비 현재 위치\n"
+            "6. 지지선/저항선\n\n"
+            "반드시 아래 형식으로 출력하세요:\n"
+            "기술적 점수: [숫자] (0~100 사이)\n"
+            "신호: [강한매수/매수/중립/매도/강한매도]\n"
+            "핵심 근거: [2~3줄]\n"
+            "주의사항: [1줄]\n\n"
+            "데이터가 None인 항목은 '데이터 없음'으로 표기하되, "
+            "있는 데이터만으로 분석하세요. 분석 불가라고 하지 마세요."
         ),
     },
     "fundamental": {
@@ -64,14 +65,15 @@ AGENTS = {
             "2. 매출/영업이익 성장률 추세\n"
             "3. ROE/ROA 추세\n"
             "4. 부채비율 안정성\n"
-            "5. 현금흐름 (FCF)\n"
-            "6. 배당 수익률\n"
-            "7. 컨센서스 대비 실적 서프라이즈 여부\n\n"
-            "출력 형식:\n"
-            "  기본적 점수: 0~100\n"
-            "  밸류에이션: 저평가/적정/고평가\n"
-            "  핵심 근거: 2~3줄\n"
-            "  리스크: 1줄"
+            "5. 배당 수익률\n"
+            "6. 컨센서스 대비 실적 서프라이즈 여부\n\n"
+            "반드시 아래 형식으로 출력하세요:\n"
+            "기본적 점수: [숫자] (0~100 사이)\n"
+            "밸류에이션: [저평가/적정/고평가]\n"
+            "핵심 근거: [2~3줄]\n"
+            "리스크: [1줄]\n\n"
+            "데이터가 None이거나 0인 항목은 '데이터 없음'으로 표기하되, "
+            "있는 데이터만으로 분석하세요. 분석 불가라고 하지 마세요."
         ),
     },
     "sentiment": {
@@ -88,11 +90,12 @@ AGENTS = {
             "5. 섹터 전체 분위기\n"
             "6. 정책/규제 영향\n"
             "7. 글로벌 이벤트 영향\n\n"
-            "출력 형식:\n"
-            "  센티먼트 점수: 0~100\n"
-            "  시장 심리: 탐욕/낙관/중립/비관/공포\n"
-            "  핵심 이슈: 2~3줄\n"
-            "  변수: 1줄"
+            "반드시 아래 형식으로 출력하세요:\n"
+            "센티먼트 점수: [숫자] (0~100 사이)\n"
+            "시장 심리: [탐욕/낙관/중립/비관/공포]\n"
+            "핵심 이슈: [2~3줄]\n"
+            "변수: [1줄]\n\n"
+            "데이터가 부족하더라도 있는 정보를 바탕으로 반드시 점수를 매기세요."
         ),
     },
     "strategist": {
@@ -108,13 +111,13 @@ AGENTS = {
             "호칭: 반드시 '주호님'\n"
             "볼드(**) 사용 금지\n"
             "이모지 사용 금지\n\n"
-            "출력 형식:\n"
-            "  종합 점수: 0~215\n"
-            "  판단: 매수/홀딩/매도/관망\n"
-            "  확신도: 상/중/하\n"
-            "  근거 요약: 3~5줄\n"
-            "  액션: 구체적 행동 제안 1~2줄\n"
-            "  리스크: 1줄"
+            "반드시 아래 형식으로 출력하세요:\n"
+            "종합 점수: [숫자] (0~215 사이)\n"
+            "판단: [매수/홀딩/매도/관망]\n"
+            "확신도: [상/중/하]\n"
+            "근거 요약: [3~5줄]\n"
+            "액션: [구체적 행동 제안 1~2줄]\n"
+            "리스크: [1줄]"
         ),
     },
 }
@@ -216,7 +219,12 @@ def format_data_for_agent(agent_key: str, stock_data: dict) -> str:
 # Response parsing
 # ---------------------------------------------------------------------------
 
-_SCORE_PATTERN = re.compile(r"(?:점수|score)\s*[:\uff1a]?\s*(\d{1,3})", re.IGNORECASE)
+_SCORE_PATTERN = re.compile(
+    r"(?:기술적\s*)?(?:기본적\s*)?(?:센티먼트\s*)?(?:종합\s*)?(?:점수|score)\s*[:\uff1a]?\s*(\d{1,3})",
+    re.IGNORECASE,
+)
+# 폴백: 줄 앞부분에 숫자+점 패턴 (예: "72점", "65/100")
+_SCORE_FALLBACK = re.compile(r"(\d{1,3})\s*(?:점|/\s*100)", re.IGNORECASE)
 _SIGNAL_PATTERN = re.compile(
     r"(?:신호|signal|판단|밸류에이션|시장\s*심리)\s*[:\uff1a]?\s*"
     r"(강한매수|매수|중립|매도|강한매도|저평가|적정|고평가|탐욕|낙관|비관|공포)",
@@ -230,6 +238,12 @@ def parse_agent_score(response_text: str) -> int:
         if match:
             score = int(match.group(1))
             return max(0, min(100, score))
+        # 폴백: "72점" 또는 "65/100" 패턴
+        fallback = _SCORE_FALLBACK.search(response_text)
+        if fallback:
+            score = int(fallback.group(1))
+            return max(0, min(100, score))
+        logger.warning("점수 추출 실패 — 응답 앞 200자: %s", response_text[:200])
         return 50  # default
     except Exception:
         return 50
@@ -493,48 +507,54 @@ async def run_multi_agent_analysis(
         agent_config = AGENTS[agent_key]
         data_text = format_data_for_agent(agent_key, stock_data)
         prompt = f"종목: {name} ({ticker})\n현재가: {price:,.0f}원\n\n{data_text}"
+        model = agent_config["model"]
         try:
+            logger.info("[멀티분석] %s 에이전트 호출 시작 (model=%s)", agent_key, model)
             response = await client.messages.create(
-                model=agent_config["model"],
-                max_tokens=500,
+                model=model,
+                max_tokens=800,
                 system=agent_config["system_prompt"],
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = response.content[0].text
+            score = parse_agent_score(raw)
+            signal = parse_agent_signal(raw)
+            logger.info(
+                "[멀티분석] %s 에이전트 완료: score=%d, signal=%s, 응답길이=%d",
+                agent_key, score, signal, len(raw),
+            )
             return AgentResult(
                 agent_key=agent_key,
                 agent_name=agent_config["name"],
-                score=parse_agent_score(raw),
-                signal=parse_agent_signal(raw),
-                summary=raw[:200],
+                score=score,
+                signal=signal,
+                summary=raw[:300],
                 raw_response=raw,
             )
         except Exception as e:
-            logger.error("Agent %s failed: %s", agent_key, e)
+            logger.error(
+                "[멀티분석] %s 에이전트 실패: %s (model=%s)",
+                agent_key, e, model, exc_info=True,
+            )
             return AgentResult(
                 agent_key=agent_key,
                 agent_name=agent_config["name"],
                 score=50,
                 signal="중립",
-                summary="분석 실패",
+                summary=f"API 호출 실패: {str(e)[:100]}",
             )
 
-    # 2개 에이전트 병렬 호출 (기술적 + 펀더멘털)
-    tech_result, fund_result = await asyncio.gather(
+    # 3개 에이전트 병렬 호출 (기술적 + 펀더멘털 + 센티먼트)
+    tech_result, fund_result, sent_result = await asyncio.gather(
         _call_agent("technical"),
         _call_agent("fundamental"),
+        _call_agent("sentiment"),
     )
 
     results = {
         "technical": tech_result,
         "fundamental": fund_result,
-        "sentiment": AgentResult(
-            agent_key="sentiment",
-            agent_name=AGENTS["sentiment"]["name"],
-            score=50,
-            signal="중립",
-            summary="수급 데이터 기반 중립 판단",
-        ),
+        "sentiment": sent_result,
     }
 
     combined_score, verdict, confidence = synthesize_scores(results)
@@ -572,7 +592,11 @@ async def run_multi_agent_analysis(
             agent_name="종합 전략",
             score=combined_score,
             signal=verdict,
-            summary=f"기술적 {tech_result.score}점 + 펀더멘털 {fund_result.score}점 종합",
+            summary=(
+                f"기술적 {tech_result.score}점 + "
+                f"펀더멘털 {fund_result.score}점 + "
+                f"센티먼트 {sent_result.score}점 종합"
+            ),
         ),
         combined_score=combined_score,
         verdict=verdict,
@@ -584,11 +608,13 @@ async def run_multi_agent_analysis(
 
 
 def format_multi_agent_report_v2(report: MultiAgentReport) -> str:
-    """과제 4 형식: 멀티 분석 리포트 (이모지 + 구조화)."""
+    """멀티 분석 리포트 v2 (이모지 + 구조화 + 3 에이전트)."""
     try:
         now = report.created_at or datetime.now(tz=KST).strftime("%Y.%m.%d %H:%M")
+        price_str = f"{report.price:,.0f}원" if report.price > 0 else "가격정보 없음"
         lines = [
             f"\U0001f4ca [{report.name}] 멀티 분석 리포트",
+            f"현재가: {price_str}",
             "\u2500" * 25,
         ]
 
@@ -596,9 +622,11 @@ def format_multi_agent_report_v2(report: MultiAgentReport) -> str:
         tech = report.results.get("technical")
         if tech:
             lines.append(f"\U0001f535 기술적 분석 (Agent 1)")
-            if tech.summary:
+            if tech.summary and tech.summary not in ("분석 실패", "데이터 부족으로 분석 불가"):
                 for line in tech.summary.split("\n")[:3]:
-                    lines.append(f"  {line.strip()}")
+                    stripped = line.strip()
+                    if stripped:
+                        lines.append(f"  {stripped}")
             lines.append(f"  판단: {tech.signal} {tech.score}점")
             lines.append("")
 
@@ -606,10 +634,24 @@ def format_multi_agent_report_v2(report: MultiAgentReport) -> str:
         fund = report.results.get("fundamental")
         if fund:
             lines.append(f"\U0001f7e2 펀더멘털 분석 (Agent 2)")
-            if fund.summary:
+            if fund.summary and fund.summary not in ("분석 실패", "데이터 부족으로 분석 불가"):
                 for line in fund.summary.split("\n")[:3]:
-                    lines.append(f"  {line.strip()}")
+                    stripped = line.strip()
+                    if stripped:
+                        lines.append(f"  {stripped}")
             lines.append(f"  판단: {fund.signal} {fund.score}점")
+            lines.append("")
+
+        # 센티먼트 분석 (Agent 3)
+        sent = report.results.get("sentiment")
+        if sent:
+            lines.append(f"\U0001f7e1 센티먼트 분석 (Agent 3)")
+            if sent.summary and sent.summary not in ("분석 실패", "데이터 부족으로 분석 불가", "수급 데이터 기반 중립 판단"):
+                for line in sent.summary.split("\n")[:3]:
+                    stripped = line.strip()
+                    if stripped:
+                        lines.append(f"  {stripped}")
+            lines.append(f"  판단: {sent.signal} {sent.score}점")
             lines.append("")
 
         # 종합 판단
@@ -628,7 +670,7 @@ def format_multi_agent_report_v2(report: MultiAgentReport) -> str:
 
         lines.append("")
         lines.append(f"분석 시각: {now}")
-        lines.append(f"{USER_NAME}, 2개 에이전트 종합 분석 결과입니다.")
+        lines.append(f"{USER_NAME}, 3개 에이전트 종합 분석 결과입니다.")
 
         return "\n".join(lines)
     except Exception as e:

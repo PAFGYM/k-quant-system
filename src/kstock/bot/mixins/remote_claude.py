@@ -179,7 +179,7 @@ class RemoteClaudeMixin:
     ) -> None:
         """💻 클로드 메뉴 버튼 핸들러 — AI 에이전트 종합 허브.
 
-        v5.2: 단순 원격 실행 → AI 에이전트 전체 기능 허브로 확장.
+        v5.6: 세션비용, WebSocket 상태, 필수 버튼 모두 표시.
         """
         context.user_data["claude_mode"] = True
         context.user_data["claude_turn"] = 0
@@ -200,20 +200,60 @@ class RemoteClaudeMixin:
         except Exception:
             holdings_count = 0
 
-        # 스케줄 잡 수
-        job_count = 27  # 현재 등록된 잡 수
+        # 스케줄 잡 수 (실제 집계)
+        job_count = 27
+        try:
+            if hasattr(self, '_job_queue') and self._job_queue:
+                jobs = self._job_queue.jobs()
+                job_count = len(jobs)
+        except Exception:
+            pass
+
+        # WebSocket 상태 (실제 확인)
+        ws_status = self.ws.get_status()
+
+        # 세션 비용 추정 (오늘 사용한 AI 호출 기반)
+        session_cost = 0.0
+        try:
+            today_stats = self.db.get_today_feedback()
+            # 대략적 비용: 피드백 수 기반은 아니고, 실제 AI 호출 횟수 추정
+            job_runs = self.db.get_job_runs_today() if hasattr(self.db, 'get_job_runs_today') else []
+            ai_calls = 0
+            for jr in job_runs:
+                if jr.get("job_name") in ("morning_briefing", "us_premarket_briefing",
+                                           "daily_self_report", "sentiment_analysis"):
+                    ai_calls += 1
+            # 채팅 기반 AI 호출 추정
+            chat_count = len(self.db.get_recent_chats(limit=50)) if hasattr(self.db, 'get_recent_chats') else 0
+            session_cost = ai_calls * 0.01 + chat_count * 0.005
+        except Exception:
+            pass
+        cost_str = f"${session_cost:.4f}" if session_cost > 0 else "집계 중"
+
+        # 업타임 계산
+        uptime_str = ""
+        try:
+            uptime = datetime.now(KST) - self._start_time
+            hours = int(uptime.total_seconds() // 3600)
+            minutes = int((uptime.total_seconds() % 3600) // 60)
+            uptime_str = f"{hours}시간 {minutes}분"
+        except Exception:
+            uptime_str = "알 수 없음"
 
         await update.message.reply_text(
             f"🤖 주호님의 AI 에이전트\n\n"
-            f"━━ 현재 상태 ━━\n"
+            f"━━ 시스템 상태 ━━\n"
             f"🧠 AI 엔진: {ai_text}\n"
             f"💼 보유종목: {holdings_count}개 모니터링\n"
-            f"⏰ 자동 작업: {job_count}개 가동 중\n\n"
-            f"━━ AI가 하고 있는 일 ━━\n"
+            f"⏰ 자동 작업: {job_count}개 가동 중\n"
+            f"📡 실시간: {ws_status}\n"
+            f"💰 세션비용: {cost_str}\n"
+            f"🕐 업타임: {uptime_str}\n\n"
+            f"━━ AI 스케줄 ━━\n"
             f"☀️ 07:00 미국장 분석\n"
             f"📊 07:30 모닝 브리핑\n"
             f"🛒 07:50 매수 플래너\n"
-            f"📡 08:50 실시간 WebSocket 감시\n"
+            f"📡 08:50~15:35 WebSocket 실시간 감시\n"
             f"🔍 장중 1분마다 시장 모니터링\n"
             f"📋 16:00 장마감 PDF 리포트\n"
             f"🧠 21:00 자가진단\n"

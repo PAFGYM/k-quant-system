@@ -1469,17 +1469,65 @@ class CoreHandlersMixin:
             except Exception:
                 pass
         elif fb_type == "dislike":
-            # 싫어요 → 어떤 문제인지 기록 + 자동 진단
-            self.db.add_user_feedback(menu_name, "dislike")
+            # 싫어요 → 자동 오류 진단 + 로그 기록
             try:
+                # 원본 메시지 내용 캡처 (진단용)
+                original_msg = query.message.text or ""
+                original_short = original_msg[:500]
+
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.message.reply_text(
-                    f"👎 {menu_name} 기능에 문제가 있군요.\n"
-                    f"이 피드백이 기록되었습니다. 자동으로 문제를 분석합니다.\n\n"
-                    f"구체적인 불만사항이 있으면 메시지로 알려주세요."
+                    f"👎 {menu_name} 기능 오류 감지\n\n"
+                    f"자동 진단을 시작합니다..."
                 )
-            except Exception:
-                pass
+
+                # 자동 오류 진단: 메시지 내용 분석
+                diag_lines = [f"[자동 진단] {menu_name} 기능 오류 리포트"]
+                diag_lines.append(f"시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
+                diag_lines.append("")
+
+                # 메시지 내용 기반 진단
+                issues_found = []
+                if "분석 불가" in original_msg or "데이터 부족" in original_msg:
+                    issues_found.append("AI 분석 데이터 부족 또는 API 호출 실패")
+                if "50점" in original_msg and original_msg.count("50점") >= 2:
+                    issues_found.append("모든 에이전트가 기본값(50점) 반환 — API 응답 파싱 실패 의심")
+                if "중립" in original_msg and original_msg.count("중립") >= 2:
+                    issues_found.append("모든 판단이 중립 — 데이터 미주입 또는 파싱 오류 의심")
+                if "오류" in original_msg or "에러" in original_msg:
+                    issues_found.append("명시적 오류 메시지 포함")
+                if "None" in original_msg:
+                    issues_found.append("None 값 노출 — 데이터 누락")
+                if not issues_found:
+                    issues_found.append("사용자 불만 — 구체적 원인은 로그 분석 필요")
+
+                for issue in issues_found:
+                    diag_lines.append(f"  - {issue}")
+
+                diag_lines.append("")
+                diag_lines.append(f"원본 메시지 (앞 200자):")
+                diag_lines.append(original_short[:200])
+
+                diag_msg = "\n".join(diag_lines)
+                logger.warning("[피드백/싫어요] %s", diag_msg)
+
+                # 진단 결과 전송
+                await query.message.reply_text(
+                    f"🔍 자동 진단 결과\n\n"
+                    f"기능: {menu_name}\n"
+                    f"감지된 문제:\n" +
+                    "\n".join(f"  - {i}" for i in issues_found) +
+                    f"\n\n이 진단은 자동으로 로그에 기록되었습니다.\n"
+                    f"구체적인 문제를 메시지로 알려주시면 더 정확한 수정이 가능합니다."
+                )
+            except Exception as e:
+                logger.error("피드백 자동진단 오류: %s", e)
+                try:
+                    await query.message.reply_text(
+                        f"👎 {menu_name} 피드백이 기록되었습니다."
+                    )
+                except Exception:
+                    pass
 
     async def _action_daily_rate(self, query, context, payload: str) -> None:
         """일일 평가 — rate:상 / rate:중 / rate:하."""

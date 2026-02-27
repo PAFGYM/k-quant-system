@@ -1823,7 +1823,7 @@ class CommandsMixin:
         ticker = payload
         try:
             await query.edit_message_text(
-                f"\U0001f4ca {ticker} 멀티 에이전트 분석 중..."
+                f"\U0001f4ca {ticker} 멀티 에이전트 분석 중... (3개 AI 동시 분석)"
             )
 
             name = ticker
@@ -1834,14 +1834,25 @@ class CommandsMixin:
                     market = item.get("market", "KOSPI")
                     break
 
-            stock_data = {"name": name, "ticker": ticker, "price": 0}
+            # 실시간 가격 가져오기 (KIS → Naver → yfinance 체인)
+            live_price = 0
+            try:
+                live_price = await self._get_price(ticker, base_price=0)
+            except Exception:
+                pass
+
+            stock_data = {"name": name, "ticker": ticker, "price": live_price}
             try:
                 ohlcv = await self.yf_client.get_ohlcv(ticker, market)
                 if ohlcv is not None and not ohlcv.empty:
                     tech = compute_indicators(ohlcv)
                     close = ohlcv["close"].astype(float)
+                    ohlcv_price = float(close.iloc[-1])
+                    # 실시간 가격이 없으면 OHLCV 종가 사용
+                    if live_price <= 0:
+                        live_price = ohlcv_price
+                        stock_data["price"] = live_price
                     stock_data.update({
-                        "price": float(close.iloc[-1]),
                         "ma5": tech.ma5, "ma20": tech.ma20,
                         "ma60": tech.ma60, "ma120": tech.ma120,
                         "rsi": tech.rsi, "macd": tech.macd,
@@ -1852,8 +1863,8 @@ class CommandsMixin:
                         "low_52w": float(close.min()),
                         "prices_5d": [float(x) for x in close.tail(5).tolist()],
                     })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("멀티분석 OHLCV 가져오기 실패 (%s): %s", ticker, e)
 
             fin = self.db.get_financials(ticker)
             if fin:
@@ -1883,11 +1894,39 @@ class CommandsMixin:
                 combined_score=report.combined_score,
                 verdict=report.verdict, confidence=report.confidence,
             )
-            await query.edit_message_text(msg)
+
+            # 후속 버튼: 다른 종목 분석, 피드백, 닫기
+            buttons = []
+            # 보유종목 중 다른 종목 분석 버튼
+            holdings = self.db.get_active_holdings()
+            other_btns = []
+            for h in holdings:
+                hticker = h.get("ticker", "")
+                hname = h.get("name", hticker)
+                if hticker and hticker != ticker:
+                    other_btns.append(
+                        InlineKeyboardButton(
+                            f"\U0001f4ca {hname[:6]}",
+                            callback_data=f"multi_run:{hticker}",
+                        )
+                    )
+                    if len(other_btns) >= 3:
+                        break
+            if other_btns:
+                buttons.append(other_btns)
+            # 피드백 행
+            buttons.append(make_feedback_row("멀티분석"))
+
+            await query.edit_message_text(
+                msg,
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
         except Exception as e:
             logger.error("Multi-run callback error: %s", e, exc_info=True)
             try:
-                await query.edit_message_text("\u26a0\ufe0f 멀티 분석 오류.")
+                await query.edit_message_text(
+                    f"\u26a0\ufe0f 멀티 분석 오류: {str(e)[:100]}"
+                )
             except Exception:
                 pass
 
