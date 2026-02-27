@@ -723,12 +723,13 @@ class CommandsMixin:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """AI 질문 모드 - 자주하는 질문 4개 버튼 + 직접 입력 안내."""
+        from kstock.bot.bot_imports import make_feedback_row
         buttons = [
             [InlineKeyboardButton("📊 오늘 시장 분석", callback_data="quick_q:market")],
             [InlineKeyboardButton("💼 내 포트폴리오 조언", callback_data="quick_q:portfolio")],
             [InlineKeyboardButton("🔥 지금 매수할 종목", callback_data="quick_q:buy_pick")],
             [InlineKeyboardButton("⚠️ 리스크 점검", callback_data="quick_q:risk")],
-            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+            make_feedback_row("AI질문"),
         ]
         msg = (
             "🤖 Claude AI가 대기 중입니다\n\n"
@@ -1084,29 +1085,34 @@ class CommandsMixin:
             from kstock.bot.context_builder import build_full_context_with_macro
             from kstock.bot.chat_memory import ChatMemory
 
-            # 질문에 종목명이 있으면 가격 주입
+            # v5.5: 종목명이 있으면 _get_price로 실시간 가격 주입
             enriched = question
+            v_names = None
             stock = None
             try:
                 stock = self._detect_stock_query(question)
                 if stock:
                     code = stock.get("code", "")
-                    name = stock.get("name", code)
-                    market = stock.get("market", "KOSPI")
-                    ohlcv = await self.yf_client.get_ohlcv(code, market)
-                    if ohlcv is not None and not ohlcv.empty:
-                        from kstock.core.technical import compute_indicators
-                        tech = compute_indicators(ohlcv)
-                        close = ohlcv["close"].astype(float)
-                        cur = float(close.iloc[-1])
-                        if cur > 0:
-                            enriched = (
-                                f"{question}\n\n"
-                                f"[{name}({code}) 실시간 데이터]\n"
-                                f"현재가: {cur:,.0f}원\n"
-                                f"RSI: {tech.rsi:.1f}\n"
-                                f"[절대 규칙] 위 실시간 데이터의 가격만 참고하라."
-                            )
+                    sname = stock.get("name", code)
+                    live = await self._get_price(code, base_price=0)
+                    if live > 0:
+                        v_names = {sname}
+                        rsi_str = ""
+                        try:
+                            ohlcv = await self.yf_client.get_ohlcv(code, "KOSPI")
+                            if ohlcv is not None and not ohlcv.empty:
+                                from kstock.core.technical import compute_indicators
+                                tech = compute_indicators(ohlcv)
+                                rsi_str = f"\nRSI: {tech.rsi:.1f}"
+                        except Exception:
+                            pass
+                        enriched = (
+                            f"{question}\n\n"
+                            f"[{sname}({code}) 실시간 데이터]\n"
+                            f"현재가: {live:,.0f}원{rsi_str}\n"
+                            f"[절대 규칙] 위 실시간 데이터의 가격만 사용하라. "
+                            f"너의 학습 데이터에 있는 과거 주가를 절대 사용 금지."
+                        )
             except Exception:
                 pass
 
@@ -1114,7 +1120,7 @@ class CommandsMixin:
             ctx = await build_full_context_with_macro(
                 self.db, self.macro_client, self.yf_client,
             )
-            answer = await handle_ai_question(enriched, ctx, self.db, chat_mem)
+            answer = await handle_ai_question(enriched, ctx, self.db, chat_mem, verified_names=v_names)
 
             # 후속 질문 파싱 → 버튼
             answer, followup_buttons = self._parse_followup_buttons(answer)

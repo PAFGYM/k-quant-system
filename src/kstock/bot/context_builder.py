@@ -252,13 +252,14 @@ def get_portfolio_context(db) -> str:
                 name = h.get("name", "")
                 ticker = h.get("ticker", "")
                 bp = h.get("buy_price", 0)
-                cp = h.get("current_price", bp)
-                pnl = h.get("pnl_pct", 0)
                 qty = h.get("quantity", 0)
                 lines.append(
-                    f"- {name}({ticker}): 매수 {bp:,.0f}원, "
-                    f"현재 {cp:,.0f}원, {pnl:+.1f}%, {qty}주"
+                    f"- {name}({ticker}): 매수가 {bp:,.0f}원, {qty}주"
                 )
+            lines.append(
+                "\n[주의] 위 매수가는 등록 시점 가격이며 현재가가 아님. "
+                "현재가는 [실시간 데이터] 섹션 참고."
+            )
             return "\n".join(lines)
 
         # 2순위: 스크린샷 기반
@@ -274,12 +275,9 @@ def get_portfolio_context(db) -> str:
         for h in items:
             name = h.get("name", "")
             avg = h.get("avg_price", 0)
-            cur = h.get("current_price", 0)
-            pct = h.get("profit_pct", 0)
             qty = h.get("quantity", 0)
             lines.append(
-                f"- {name}: 매수 {avg:,.0f}원, 현재 {cur:,.0f}원, "
-                f"{pct:+.1f}%, {qty}주"
+                f"- {name}: 매수가 {avg:,.0f}원, {qty}주"
             )
         return "\n".join(lines) if lines else "보유 종목 정보 없음"
     except Exception as e:
@@ -372,11 +370,13 @@ def get_recommendation_context(db, limit: int = 5) -> str:
         for r in recs[:limit]:
             name = r.get("name", "")
             price = r.get("rec_price", 0)
-            pnl = r.get("pnl_pct", 0)
             date = r.get("rec_date", "")
             lines.append(
-                f"- {name}: 추천가 {price:,.0f}원, 수익률 {pnl:+.1f}%, ({date})"
+                f"- {name}: 추천 당시 가격 {price:,.0f}원 ({date})"
             )
+        lines.append(
+            "\n[주의] 위 가격은 추천 당시 가격이며 현재가가 아님."
+        )
         return "\n".join(lines)
     except Exception as e:
         logger.warning("Failed to get recommendation context: %s", e)

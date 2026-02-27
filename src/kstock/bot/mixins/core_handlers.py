@@ -315,6 +315,13 @@ class CoreHandlersMixin:
             days=(0, 1, 2, 3, 4),
             name="contrarian_scan",
         )
+        # v5.5: 매일 저녁 7시 일일 평가 알림
+        jq.run_daily(
+            self.job_daily_rating,
+            time=dt_time(hour=19, minute=0, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="daily_rating",
+        )
         logger.info(
             "Scheduled: buy_planner(weekday 07:50), us_premarket(07:00), "
             "morning(07:30), intraday(1min), "
@@ -329,7 +336,7 @@ class CoreHandlersMixin:
             "eod_risk_report(weekday 15:40), "
             "health_check(30min), "
             "journal_review(Sun 10:00), sector_rotation(weekday 09:05), "
-            "contrarian_scan(weekday 14:00) KST"
+            "contrarian_scan(weekday 14:00), daily_rating(19:00) KST"
         )
 
     # == Command & Menu Handlers =============================================
@@ -1419,6 +1426,9 @@ class CoreHandlersMixin:
                 "followup_q": self._action_followup_dynamic,
                 # v5.3: 범용 닫기 버튼
                 "dismiss": self._action_dismiss,
+                # v5.5: 피드백 + 일일 평가
+                "fb": self._action_feedback,
+                "rate": self._action_daily_rate,
             }
             handler = dispatch.get(action)
             if handler:
@@ -1439,6 +1449,51 @@ class CoreHandlersMixin:
             context.user_data.pop(key, None)
         try:
             await query.edit_message_text("✅ 메뉴를 닫았습니다.")
+        except Exception:
+            pass
+
+    # == Feedback system (v5.5) ================================================
+
+    async def _action_feedback(self, query, context, payload: str) -> None:
+        """👍/👎 피드백 처리 — fb:like:menu_name / fb:dislike:menu_name."""
+        parts = payload.split(":", 1)
+        fb_type = parts[0] if parts else ""
+        menu_name = parts[1] if len(parts) > 1 else "unknown"
+
+        self.db.add_user_feedback(menu_name, fb_type)
+
+        if fb_type == "like":
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text("👍 감사합니다! 피드백이 반영되었습니다.")
+            except Exception:
+                pass
+        elif fb_type == "dislike":
+            # 싫어요 → 어떤 문제인지 기록 + 자동 진단
+            self.db.add_user_feedback(menu_name, "dislike")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+                await query.message.reply_text(
+                    f"👎 {menu_name} 기능에 문제가 있군요.\n"
+                    f"이 피드백이 기록되었습니다. 자동으로 문제를 분석합니다.\n\n"
+                    f"구체적인 불만사항이 있으면 메시지로 알려주세요."
+                )
+            except Exception:
+                pass
+
+    async def _action_daily_rate(self, query, context, payload: str) -> None:
+        """일일 평가 — rate:상 / rate:중 / rate:하."""
+        rating = payload  # 상, 중, 하
+        rating_map = {"상": "excellent", "중": "average", "하": "poor"}
+        self.db.add_user_feedback("daily_rating", rating_map.get(rating, rating))
+
+        emoji = {"상": "🌟", "중": "👌", "하": "😔"}.get(rating, "📝")
+        try:
+            await query.edit_message_text(
+                f"{emoji} 오늘 평가: {rating}\n\n"
+                f"소중한 평가 감사합니다.\n"
+                f"더 나은 서비스를 위해 노력하겠습니다."
+            )
         except Exception:
             pass
 

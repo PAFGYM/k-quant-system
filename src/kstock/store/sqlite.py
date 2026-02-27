@@ -807,6 +807,15 @@ CREATE TABLE IF NOT EXISTS event_log (
     created_at      TEXT    NOT NULL
 );
 
+-- v5.5: 사용자 피드백 (좋아요/싫어요/일일평가)
+CREATE TABLE IF NOT EXISTS user_feedback (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    menu_name       TEXT    NOT NULL,
+    feedback        TEXT    NOT NULL,
+    comment         TEXT    DEFAULT '',
+    created_at      TEXT    NOT NULL
+);
+
 -- v5.0: 리컨실레이션 이력
 CREATE TABLE IF NOT EXISTS reconciliation_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1178,6 +1187,41 @@ class SQLiteStore:
     def remove_watchlist(self, ticker: str) -> None:
         with self._connect() as conn:
             conn.execute("UPDATE watchlist SET active=0 WHERE ticker=?", (ticker,))
+
+    # -- user_feedback ---------------------------------------------------------
+
+    def add_user_feedback(self, menu_name: str, feedback: str, comment: str = "") -> None:
+        """사용자 피드백 저장 (좋아요/싫어요/상/중/하)."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO user_feedback (menu_name, feedback, comment, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (menu_name, feedback, comment, now),
+            )
+
+    def get_today_feedback(self) -> list[dict]:
+        """오늘 피드백 조회."""
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM user_feedback WHERE created_at LIKE ?",
+                (f"{today}%",),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_feedback_stats(self, days: int = 7) -> dict:
+        """최근 N일 피드백 통계."""
+        from datetime import timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT menu_name, feedback, COUNT(*) as cnt "
+                "FROM user_feedback WHERE created_at > ? "
+                "GROUP BY menu_name, feedback ORDER BY cnt DESC",
+                (cutoff,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # -- recommendations -------------------------------------------------------
 

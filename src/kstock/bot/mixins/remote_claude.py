@@ -40,9 +40,14 @@ BLOCKED_PATTERNS = [
 # Prefix trigger
 CLAUDE_PREFIX = "클코"
 
-# Claude Code 대화 모드 키보드
+# Claude 대화 모드 키보드 — 메인 메뉴 기능 유지 + 종료 버튼
 CLAUDE_MODE_MENU = ReplyKeyboardMarkup(
-    [["🔙 대화 종료"]],
+    [
+        ["📊 분석", "📈 시황"],
+        ["💰 잔고", "⭐ 즐겨찾기"],
+        ["💬 AI질문", "📋 리포트"],
+        ["🔙 대화 종료"],
+    ],
     resize_keyboard=True,
 )
 

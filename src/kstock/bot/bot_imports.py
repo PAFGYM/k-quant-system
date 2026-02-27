@@ -276,6 +276,16 @@ MORE_MENU = ReplyKeyboardMarkup(
 )
 
 
+def make_feedback_row(menu_name: str) -> list:
+    """👍👎 피드백 + ❌닫기 버튼 행 생성."""
+    from telegram import InlineKeyboardButton
+    return [
+        InlineKeyboardButton("👍", callback_data=f"fb:like:{menu_name}"),
+        InlineKeyboardButton("👎", callback_data=f"fb:dislike:{menu_name}"),
+        InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+    ]
+
+
 def _load_universe() -> dict:
     """Load full universe config with stocks + ETFs."""
     config_path = Path("config/universe.yaml")

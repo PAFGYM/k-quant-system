@@ -199,7 +199,7 @@ class TestGetRecommendationContext:
         db = _MockDB(recs=recs)
         result = get_recommendation_context(db)
         assert "에코프로" in result
-        assert "+12.5%" in result
+        assert "90,000" in result
 
     def test_limits_output(self) -> None:
         recs = [

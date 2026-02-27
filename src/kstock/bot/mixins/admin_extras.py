@@ -572,7 +572,7 @@ class AdminExtrasMixin:
                     )
                 ])
 
-        buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+        buttons.append(make_feedback_row("멀티분석"))
         keyboard = InlineKeyboardMarkup(buttons)
         await update.message.reply_text(
             "\n".join(lines),
@@ -634,7 +634,7 @@ class AdminExtrasMixin:
                 InlineKeyboardButton("📊 호가조회", callback_data="orderbook:select"),
                 InlineKeyboardButton("🤖 AI상태", callback_data="ai:status"),
             ],
-            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+            make_feedback_row("분석허브"),
         ]
         await update.message.reply_text(
             "📊 분석 허브\n\n"
@@ -960,7 +960,7 @@ class AdminExtrasMixin:
             InlineKeyboardButton("➕ 종목 추가", callback_data="fav:add_mode"),
             InlineKeyboardButton("🔄 새로고침", callback_data="fav:refresh"),
         ])
-        buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+        buttons.append(make_feedback_row("즐겨찾기"))
         await update.message.reply_text(
             "\n".join(lines),
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -1052,7 +1052,7 @@ class AdminExtrasMixin:
             buttons.append([
                 InlineKeyboardButton("🔄 새로고침", callback_data="fav:refresh"),
             ])
-            buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+            buttons.append(make_feedback_row("즐겨찾기"))
             await query.message.reply_text(
                 "\n".join(lines),
                 reply_markup=InlineKeyboardMarkup(buttons),

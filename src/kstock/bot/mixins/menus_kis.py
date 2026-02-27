@@ -154,7 +154,7 @@ class MenusKisMixin:
                     callback_data=f"notif:{key}",
                 ),
             ])
-        buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+        buttons.append(make_feedback_row("알림설정"))
         await update.message.reply_text(
             "\U0001f514 알림 설정\n각 항목을 눌러 ON/OFF를 전환하세요:",
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -177,7 +177,7 @@ class MenusKisMixin:
                     callback_data=f"notif:{key}",
                 ),
             ])
-        buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+        buttons.append(make_feedback_row("알림설정"))
         await query.edit_message_text(
             f"\U0001f514 알림 설정 ({label} \u2192 {status})\n각 항목을 눌러 ON/OFF를 전환하세요:",
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -204,7 +204,7 @@ class MenusKisMixin:
             [InlineKeyboardButton("목표가 하향 종목", callback_data="rpt:downgrade")],
             [InlineKeyboardButton("섹터별 리포트", callback_data="rpt:sector")],
             [InlineKeyboardButton("오늘 신규 리포트", callback_data="rpt:today")],
-            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+            make_feedback_row("리포트"),
         ]
         await update.message.reply_text(
             "\U0001f4cb 증권사 리포트\n조회할 항목을 선택하세요:",
@@ -348,7 +348,7 @@ class MenusKisMixin:
             [InlineKeyboardButton("이번 주 보고서", callback_data="weekly:latest")],
             [InlineKeyboardButton("지난 보고서", callback_data="weekly:history")],
             [InlineKeyboardButton("즉시 생성", callback_data="weekly:generate")],
-            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+            make_feedback_row("주간보고서"),
         ]
         await update.message.reply_text(
             "\U0001f4c5 주간 보고서\n조회할 항목을 선택하세요:",
@@ -431,7 +431,7 @@ class MenusKisMixin:
             ]
             for r in results[:5]
         ]
-        buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+        buttons.append(make_feedback_row("매수추천"))
         keyboard = InlineKeyboardMarkup(buttons)
         await update.message.reply_text(msg, reply_markup=keyboard)
 
@@ -537,7 +537,7 @@ class MenusKisMixin:
                 [InlineKeyboardButton(
                     "\U0001f4cb 매도 계획 보기", callback_data="sell_plans",
                 )],
-                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+                make_feedback_row("시황"),
             ]
             await update.message.reply_text(
                 live_report,
@@ -617,7 +617,7 @@ class MenusKisMixin:
                 InlineKeyboardButton("\U0001f680 모멘텀", callback_data="strat:F"),
                 InlineKeyboardButton("\U0001f4a5 돌파", callback_data="strat:G"),
             ],
-            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+            make_feedback_row("전략"),
         ]
         await update.message.reply_text(
             "\U0001f3af 전략을 선택하세요:",
@@ -640,7 +640,7 @@ class MenusKisMixin:
         buttons.append([
             InlineKeyboardButton("\u270f\ufe0f 직접 입력", callback_data="opt_run:manual"),
         ])
-        buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+        buttons.append(make_feedback_row("최적화"))
         msg = (
             "\u2699\ufe0f 파라미터 최적화\n\n"
             "RSI, BB, EMA 파라미터를 자동 최적화합니다.\n"
@@ -751,7 +751,7 @@ class MenusKisMixin:
                         callback_data="kis:reset",
                     ),
                 ],
-                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+                make_feedback_row("KIS설정"),
             ]
             await update.message.reply_text(
                 "\n".join(lines),

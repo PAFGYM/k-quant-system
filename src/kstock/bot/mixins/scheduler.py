@@ -162,7 +162,7 @@ class SchedulerMixin:
         try:
             import httpx
 
-            # 보유종목 정보 수집
+            # 보유종목 정보 수집 — v5.5: 실시간 가격 조회
             holdings = self.db.get_active_holdings()
             holdings_text = ""
             if holdings:
@@ -170,10 +170,15 @@ class SchedulerMixin:
                     ticker = h.get("ticker", "")
                     name = h.get("name", ticker)
                     buy_price = h.get("buy_price", 0)
-                    current_price = h.get("current_price", 0)
-                    pnl_pct = h.get("pnl_pct", 0)
                     horizon = h.get("horizon", "swing")
                     qty = h.get("quantity", 0)
+                    # v5.5: KIS→Naver→yfinance 순 실시간 가격 조회
+                    current_price = 0
+                    try:
+                        current_price = await self._get_price(ticker, base_price=buy_price)
+                    except Exception:
+                        current_price = h.get("current_price", 0)
+                    pnl_pct = ((current_price - buy_price) / buy_price * 100) if buy_price > 0 and current_price > 0 else 0
                     holdings_text += (
                         f"  {name}({ticker}): "
                         f"매수가 {buy_price:,.0f}원, 현재가 {current_price:,.0f}원, "
@@ -2706,4 +2711,43 @@ class SchedulerMixin:
                 pass
         self._sector_strengths = compute_sector_returns(ohlcv_map)
 
+    # == v5.5: 매일 저녁 7시 일일 평가 알림 ====================================
 
+    async def job_daily_rating(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매일 저녁 7시 — 오늘의 서비스 평가하기 (상/중/하)."""
+        if not self.chat_id:
+            return
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            # 오늘 피드백 요약
+            today_fb = self.db.get_today_feedback()
+            likes = sum(1 for f in today_fb if f.get("feedback") == "like")
+            dislikes = sum(1 for f in today_fb if f.get("feedback") == "dislike")
+            fb_summary = ""
+            if likes or dislikes:
+                fb_summary = f"\n📊 오늘 피드백: 👍 {likes}건 / 👎 {dislikes}건"
+
+            buttons = [
+                [
+                    InlineKeyboardButton("🌟 상", callback_data="rate:상"),
+                    InlineKeyboardButton("👌 중", callback_data="rate:중"),
+                    InlineKeyboardButton("😔 하", callback_data="rate:하"),
+                ],
+            ]
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text=(
+                    f"📋 오늘의 K-Quant 평가하기\n\n"
+                    f"오늘 하루 서비스는 어떠셨나요?{fb_summary}\n\n"
+                    f"🌟 상 — 만족, 잘 활용함\n"
+                    f"👌 중 — 보통, 개선 필요\n"
+                    f"😔 하 — 불만족, 심각한 문제\n\n"
+                    f"솔직한 평가 부탁드립니다."
+                ),
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception as e:
+            logger.debug("Daily rating job error: %s", e)
