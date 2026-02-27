@@ -56,6 +56,13 @@ SECTOR_MAP: dict[str, str] = {
     "352820": "엔터", "009540": "조선", "012450": "방산",
 }
 
+# v5.2: 레거시 보유종목 — 퀀트 시스템 이전부터 보유, 리스크 경고/비중 제한에서 완전 제외
+LEGACY_EXEMPT_TICKERS: set[str] = {
+    "086520",  # 에코프로
+    "247540",  # 에코프로비엠
+    "005380",  # 현대차
+}
+
 # Ticker -> human-readable name for suggestion messages
 TICKER_NAME: dict[str, str] = {
     "005930": "삼성전자", "000660": "SK하이닉스",
@@ -311,11 +318,14 @@ def check_risk_limits(
             report.is_buy_blocked = True
 
         # --- Stock weight (concentration) check ---
+        # v5.2: 레거시 종목 제외한 비중 계산
         stock_weights = calculate_stock_weights(holdings)
         report.stock_weights = stock_weights
         max_stock_w = lim.get("max_single_stock_weight", 0.40)
 
         for ticker, weight in stock_weights.items():
+            if ticker in LEGACY_EXEMPT_TICKERS:
+                continue  # v5.2: 레거시 종목 비중 위반 무시
             if weight > max_stock_w:
                 name = _resolve_name(ticker, holdings)
                 report.violations.append(RiskViolation(
@@ -330,11 +340,14 @@ def check_risk_limits(
                 ))
 
         # --- Sector weight check ---
-        sector_weights = calculate_sector_weights(holdings)
+        # v5.2: 레거시 종목을 제외한 섹터 비중 계산
+        non_legacy_holdings = [h for h in holdings if h.get("ticker", "") not in LEGACY_EXEMPT_TICKERS]
+        sector_weights = calculate_sector_weights(holdings)  # 전체 비중은 리포트용
         report.sector_weights = sector_weights
+        sector_weights_filtered = calculate_sector_weights(non_legacy_holdings)  # 위반 검사용
         max_sector_w = lim.get("max_sector_weight", 0.60)
 
-        for sector, weight in sector_weights.items():
+        for sector, weight in sector_weights_filtered.items():
             if weight > max_sector_w:
                 report.violations.append(RiskViolation(
                     violation_type="SECTOR",
@@ -351,6 +364,9 @@ def check_risk_limits(
         max_corr = lim.get("max_correlation", 0.85)
         pairs = calculate_correlation_proxy(holdings)
         for ticker_a, ticker_b, corr in pairs:
+            # v5.2: 레거시 종목 쌍은 상관관계 경고 제외
+            if ticker_a in LEGACY_EXEMPT_TICKERS or ticker_b in LEGACY_EXEMPT_TICKERS:
+                continue
             if corr > max_corr:
                 name_a = _resolve_name(ticker_a, holdings)
                 name_b = _resolve_name(ticker_b, holdings)

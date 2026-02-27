@@ -70,6 +70,15 @@ class CommandsMixin:
             else:
                 yf_info = await self.yf_client.get_stock_info(ticker, name, market)
 
+            # v5.2: 실시간 현재가 우선 조회 (KIS→Naver→yfinance 순)
+            live_price = yf_info.get("current_price", 0)
+            try:
+                realtime = await self._get_price(ticker, base_price=live_price)
+                if realtime > 0:
+                    live_price = realtime
+            except Exception:
+                pass
+
             info = StockInfo(
                 ticker=ticker, name=name, market=market,
                 market_cap=yf_info.get("market_cap", 0),
@@ -77,7 +86,7 @@ class CommandsMixin:
                 roe=yf_info.get("roe", 0),
                 debt_ratio=yf_info.get("debt_ratio", 0),
                 consensus_target=yf_info.get("consensus_target", 0),
-                current_price=yf_info.get("current_price", 0),
+                current_price=live_price,
             )
 
             tech = compute_indicators(ohlcv)
@@ -207,15 +216,24 @@ class CommandsMixin:
         return await self._analyze_stock(ticker, name, macro, market=market, sector=sector)
 
     async def _get_price(self, ticker: str, base_price: float = 0) -> float:
-        """Get current price. KIS API 우선, yfinance 폴백."""
-        # 1순위: KIS API (정확도 최우선)
+        """Get current price. KIS → Naver → yfinance 순 (v5.2)."""
+        # 1순위: KIS API (실시간, 정확도 최우선)
         try:
             price = await self.kis.get_current_price(ticker, 0)
             if price > 0:
                 return price
         except Exception:
             pass
-        # 2순위: yfinance
+        # 2순위: Naver Finance (장중 실시간, ~20분 지연이지만 yfinance보다 정확)
+        try:
+            from kstock.ingest.naver_finance import NaverFinanceClient
+            naver = NaverFinanceClient()
+            price = await naver.get_current_price(ticker)
+            if price > 0:
+                return price
+        except Exception:
+            pass
+        # 3순위: yfinance (전일 종가 기반, 지연 큼)
         market = "KOSPI"
         for s in self.all_tickers:
             if s["code"] == ticker:
@@ -227,7 +245,7 @@ class CommandsMixin:
                 return price
         except Exception:
             pass
-        # 3순위: base_price fallback
+        # 4순위: base_price fallback
         if base_price > 0:
             return base_price
         return 0.0

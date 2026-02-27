@@ -28,6 +28,22 @@ def _admin_buttons() -> list:
     ]
 
 
+# v5.2: 오류 신고 자주하는 질문(FAQ) 메뉴
+def _bug_faq_buttons() -> list:
+    """오류 신고 FAQ 인라인 버튼 생성."""
+    return [
+        [InlineKeyboardButton("📊 추천 종목 주가 오류", callback_data="adm:faq:price")],
+        [InlineKeyboardButton("💬 AI 응답 이상", callback_data="adm:faq:ai_response")],
+        [InlineKeyboardButton("📈 브리핑/알림 미발송", callback_data="adm:faq:notification")],
+        [InlineKeyboardButton("💰 잔고 데이터 불일치", callback_data="adm:faq:balance")],
+        [InlineKeyboardButton("🔧 기타 오류 (직접 작성)", callback_data="adm:faq:custom")],
+        [
+            InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu"),
+            InlineKeyboardButton("❌ 종료", callback_data="adm:close"),
+        ],
+    ]
+
+
 class AdminExtrasMixin:
     async def _menu_admin(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -55,16 +71,14 @@ class AdminExtrasMixin:
         back_btn = [[InlineKeyboardButton("\U0001f519 관리자 메뉴", callback_data="adm:menu")]]
 
         if subcmd == "bug":
-            # 오류 신고 모드 진입 — 다음 메시지/이미지를 버그로 기록
-            context.user_data["admin_mode"] = "bug_report"
+            # v5.2: 오류 신고 FAQ 메뉴 표시
             await query.edit_message_text(
-                "\U0001f41b 오류 신고 모드\n\n"
-                "아래 내용을 보내주세요:\n"
-                "  \U0001f4dd 텍스트로 오류 설명\n"
-                "  \U0001f4f7 오류 화면 스크린샷\n\n"
-                "보내시면 자동으로 기록됩니다.\n"
-                "Claude Code에서 바로 확인 후 수정!",
-                reply_markup=InlineKeyboardMarkup(back_btn),
+                "\U0001f41b 오류 신고\n\n"
+                "자주 발생하는 오류를 선택하거나\n"
+                "직접 작성해주세요.\n\n"
+                "스크린샷 + 설명을 함께 보내면\n"
+                "더 빠르게 수정됩니다!",
+                reply_markup=InlineKeyboardMarkup(_bug_faq_buttons()),
             )
 
         elif subcmd == "request":
@@ -78,16 +92,72 @@ class AdminExtrasMixin:
                 reply_markup=InlineKeyboardMarkup(back_btn),
             )
 
+        elif subcmd == "faq":
+            # v5.2: FAQ 선택 → 자동 오류 기록 또는 직접 작성 모드
+            faq_type = payload.split(":", 1)[1] if ":" in payload else payload
+            faq_messages = {
+                "price": "추천 종목의 주가가 실제와 다릅니다 (작년 주가 등)",
+                "ai_response": "AI 응답이 엉뚱하거나 프로그래밍 답변이 나옵니다",
+                "notification": "아침 브리핑이나 알림이 발송되지 않았습니다",
+                "balance": "잔고 데이터가 실제와 다릅니다",
+            }
+            if faq_type in faq_messages:
+                # FAQ 선택 → 자동 기록 + 추가 설명 요청
+                auto_msg = faq_messages[faq_type]
+                context.user_data["admin_mode"] = "bug_report"
+                context.user_data["admin_faq_type"] = faq_type
+                # 자동 기록
+                report = {
+                    "type": "bug_report",
+                    "message": f"[FAQ:{faq_type}] {auto_msg}",
+                    "has_image": False,
+                    "timestamp": datetime.now(KST).isoformat(),
+                    "status": "open",
+                    "faq_type": faq_type,
+                }
+                with open(admin_log_path, "a", encoding="utf-8") as f:
+                    f.write(_json.dumps(report, ensure_ascii=False) + "\n")
+                close_btn = [[
+                    InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu"),
+                    InlineKeyboardButton("❌ 종료", callback_data="adm:close"),
+                ]]
+                await query.edit_message_text(
+                    f"\U0001f41b 오류 접수: {auto_msg}\n\n"
+                    f"추가 설명이나 스크린샷을 보내주세요.\n"
+                    f"(캡션에 설명을 넣으면 같이 기록됩니다)\n\n"
+                    f"완료되면 아래 버튼을 눌러주세요.",
+                    reply_markup=InlineKeyboardMarkup(close_btn),
+                )
+            elif faq_type == "custom":
+                # 직접 작성 모드
+                context.user_data["admin_mode"] = "bug_report"
+                close_btn = [[
+                    InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu"),
+                    InlineKeyboardButton("❌ 종료", callback_data="adm:close"),
+                ]]
+                await query.edit_message_text(
+                    "\U0001f41b 오류 신고 모드\n\n"
+                    "오류 내용을 텍스트로 보내주세요.\n"
+                    "스크린샷도 함께 보내면 더 좋습니다!\n"
+                    "(캡션에 설명 추가 가능)\n\n"
+                    "완료되면 아래 버튼을 눌러주세요.",
+                    reply_markup=InlineKeyboardMarkup(close_btn),
+                )
+
         elif subcmd == "menu":
             # 관리자 메뉴로 복귀
+            context.user_data.pop("admin_mode", None)
+            context.user_data.pop("admin_faq_type", None)
             await query.edit_message_text(
-                "\U0001f6e0 관리자 모드 (v3.6)\n\n"
+                "\U0001f6e0 관리자 모드 (v5.2)\n\n"
                 "아래 버튼을 눌러주세요.",
                 reply_markup=InlineKeyboardMarkup(_admin_buttons()),
             )
 
         elif subcmd == "close":
-            # 관리자 메뉴 닫기
+            # 관리자 메뉴 닫기 + 상태 초기화
+            context.user_data.pop("admin_mode", None)
+            context.user_data.pop("admin_faq_type", None)
             await query.edit_message_text("\U0001f6e0 관리자 메뉴를 닫았습니다.")
 
         elif subcmd == "security":

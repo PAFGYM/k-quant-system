@@ -1243,13 +1243,87 @@ class TradingMixin:
               bp:done, bp:confirm, bp:retry, bp:cancel
         """
         if payload in ("yes", "start"):
-            context.user_data["awaiting_buy_amount"] = True
+            # v5.2: 금액 버튼 + 직접 입력
+            buttons = [
+                [
+                    InlineKeyboardButton("50만원", callback_data="bp:amt:50"),
+                    InlineKeyboardButton("100만원", callback_data="bp:amt:100"),
+                ],
+                [
+                    InlineKeyboardButton("200만원", callback_data="bp:amt:200"),
+                    InlineKeyboardButton("300만원", callback_data="bp:amt:300"),
+                ],
+                [
+                    InlineKeyboardButton("500만원", callback_data="bp:amt:500"),
+                    InlineKeyboardButton("직접 입력", callback_data="bp:amt:custom"),
+                ],
+                [InlineKeyboardButton("❌ 취소", callback_data="bp:no")],
+            ]
             await query.edit_message_text(
-                "💰 투자 금액을 입력해주세요\n"
-                "(만원 단위 숫자만 입력)\n\n"
-                "예: 50 → 50만원\n"
-                "예: 300 → 300만원"
+                "💰 주호님, 오늘 매수 금액을 선택해주세요\n"
+                "(만원 단위)",
+                reply_markup=InlineKeyboardMarkup(buttons),
             )
+            return
+
+        if payload.startswith("amt:"):
+            amt_val = payload.split(":")[1]
+            if amt_val == "custom":
+                context.user_data["awaiting_buy_amount"] = True
+                await query.edit_message_text(
+                    "💰 투자 금액을 입력해주세요\n"
+                    "(만원 단위 숫자만 입력)\n\n"
+                    "예: 50 → 50만원"
+                )
+                return
+            amount_만원 = int(amt_val)
+            # 투자 타입 선택 버튼
+            buttons = [
+                [
+                    InlineKeyboardButton("⚡ 단타", callback_data=f"bp:type:scalp:{amount_만원}"),
+                    InlineKeyboardButton("🔥 스윙", callback_data=f"bp:type:short:{amount_만원}"),
+                ],
+                [
+                    InlineKeyboardButton("📊 포지션", callback_data=f"bp:type:mid:{amount_만원}"),
+                    InlineKeyboardButton("💎 장기", callback_data=f"bp:type:long:{amount_만원}"),
+                ],
+                [
+                    InlineKeyboardButton("🤖 AI 추천 (전 기간)", callback_data=f"bp:type:ai:{amount_만원}"),
+                ],
+                [InlineKeyboardButton("🔙 금액 재선택", callback_data="bp:yes")],
+            ]
+            await query.edit_message_text(
+                f"💰 {amount_만원}만원 매수 계획\n\n"
+                f"투자 타입을 선택해주세요.\n"
+                f"선택한 타입의 전담 매니저가\n"
+                f"매수부터 매도까지 관리합니다.\n\n"
+                f"⚡ 단타: 제시 리버모어 (1~3일)\n"
+                f"🔥 스윙: 윌리엄 오닐 (1~2주)\n"
+                f"📊 포지션: 피터 린치 (1~3개월)\n"
+                f"💎 장기: 워렌 버핏 (3개월+)\n"
+                f"🤖 AI 추천: 전 기간 최적 조합",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        if payload.startswith("type:"):
+            parts = payload.split(":")
+            inv_type = parts[1]
+            amount_만원 = int(parts[2])
+            amount_won = amount_만원 * 10000
+            context.user_data["buy_cart"] = {
+                "budget": amount_won,
+                "remaining": amount_won,
+                "items": [],
+                "active": True,
+                "investment_type": inv_type,
+            }
+            if inv_type == "ai":
+                await query.edit_message_text("🤖 AI가 최적 포트폴리오를 분석 중...")
+                await self._show_ai_recommendation(query, context)
+            else:
+                await query.edit_message_text("💭 종목을 분석하고 있습니다...")
+                await self._show_horizon_picks(query, context, inv_type)
             return
 
         if payload == "no":

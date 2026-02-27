@@ -82,7 +82,7 @@ _PATCH_PREFIX = "kstock.bot.mixins.trading"
 
 
 class TestBuyCartStartPromptsAmount:
-    """payload='yes' should ask the user to enter an investment amount."""
+    """payload='yes' should show amount selection buttons (v5.2+)."""
 
     @pytest.mark.asyncio
     async def test_yes_prompts_budget_input(self) -> None:
@@ -98,9 +98,27 @@ class TestBuyCartStartPromptsAmount:
 
         query.edit_message_text.assert_called_once()
         sent = query.edit_message_text.call_args.args[0]
-        assert "만원" in sent, f"Expected '만원' in prompt, got: {sent!r}"
         assert "금액" in sent, f"Expected '금액' in prompt, got: {sent!r}"
-        # Marks awaiting flag
+        # v5.2: shows amount buttons with reply_markup, not awaiting_buy_amount
+        kwargs = query.edit_message_text.call_args.kwargs
+        assert "reply_markup" in kwargs, "Expected InlineKeyboard with amount buttons"
+
+    @pytest.mark.asyncio
+    async def test_yes_custom_amount_sets_awaiting_flag(self) -> None:
+        """payload='amt:custom' sets awaiting_buy_amount for text input."""
+        query = _make_query()
+        context = _make_context()
+
+        from kstock.bot.mixins.trading import TradingMixin
+
+        mixin = TradingMixin.__new__(TradingMixin)
+        _attach_trading_attrs(mixin)
+
+        await mixin._action_buy_plan(query, context, "amt:custom")
+
+        query.edit_message_text.assert_called_once()
+        sent = query.edit_message_text.call_args.args[0]
+        assert "만원" in sent
         assert context.user_data.get("awaiting_buy_amount") is True
 
     @pytest.mark.asyncio
@@ -118,7 +136,27 @@ class TestBuyCartStartPromptsAmount:
 
         query.edit_message_text.assert_called_once()
         sent = query.edit_message_text.call_args.args[0]
-        assert "만원" in sent
+        assert "금액" in sent
+
+    @pytest.mark.asyncio
+    async def test_amt_button_shows_type_selection(self) -> None:
+        """payload='amt:100' should show investment type buttons."""
+        query = _make_query()
+        context = _make_context()
+
+        from kstock.bot.mixins.trading import TradingMixin
+
+        mixin = TradingMixin.__new__(TradingMixin)
+        _attach_trading_attrs(mixin)
+
+        await mixin._action_buy_plan(query, context, "amt:100")
+
+        query.edit_message_text.assert_called_once()
+        sent = query.edit_message_text.call_args.args[0]
+        assert "100만원" in sent
+        assert "투자 타입" in sent
+        kwargs = query.edit_message_text.call_args.kwargs
+        assert "reply_markup" in kwargs
 
 
 class TestBuyCartViewHorizon:

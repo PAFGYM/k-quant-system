@@ -57,13 +57,14 @@ class SchedulerMixin:
         if now.weekday() >= 5:
             return
 
+        # v5.2: 매수 의향 + 금액/타입 안내 개선
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    "📈 매수 계획 있음", callback_data="bp:yes",
+                    "💰 매수 계획 있음", callback_data="bp:yes",
                 ),
                 InlineKeyboardButton(
-                    "🏖️ 오늘은 쉴게", callback_data="bp:no",
+                    "🏖️ 오늘은 관망", callback_data="bp:no",
                 ),
             ],
         ])
@@ -71,7 +72,10 @@ class SchedulerMixin:
             chat_id=self.chat_id,
             text=(
                 "☀️ 주호님, 좋은 아침이에요\n\n"
-                "오늘 추가 매수 계획이 있으신가요?"
+                "오늘 추가 매수 계획이 있으신가요?\n\n"
+                "매수 계획 있음을 누르면\n"
+                "금액 → 투자 타입 선택 후\n"
+                "전담 매니저가 종목을 추천합니다."
             ),
             reply_markup=keyboard,
         )

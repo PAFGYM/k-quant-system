@@ -119,8 +119,13 @@ def analyze_concentration(
     position_weights.sort(key=lambda x: x[2], reverse=True)
     top_position_pct = position_weights[0][2] if position_weights else 0.0
 
+    # v5.2: 레거시 종목 제외 목록
+    from kstock.core.risk_manager import LEGACY_EXEMPT_TICKERS
+
     # Single stock > 40% -> warning
     for ticker, name, pct in position_weights:
+        if ticker in LEGACY_EXEMPT_TICKERS:
+            continue  # v5.2: 레거시 종목은 비중 경고 제외
         if pct > 40:
             alerts.append(ConcentrationAlert(
                 alert_type="single_stock",

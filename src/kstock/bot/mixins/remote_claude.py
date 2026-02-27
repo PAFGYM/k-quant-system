@@ -172,26 +172,52 @@ class RemoteClaudeMixin:
     async def _menu_claude_code(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """💻 클로드 메뉴 버튼 핸들러 — Claude Code 대화 모드 진입."""
+        """💻 클로드 메뉴 버튼 핸들러 — AI 에이전트 종합 허브.
+
+        v5.2: 단순 원격 실행 → AI 에이전트 전체 기능 허브로 확장.
+        """
         context.user_data["claude_mode"] = True
-        context.user_data["claude_turn"] = 0  # 대화 턴 카운터
+        context.user_data["claude_turn"] = 0
+
+        # AI 상태 확인
+        ai_available = []
+        try:
+            for name, provider in self.ai.providers.items():
+                if provider.available:
+                    ai_available.append(name)
+        except Exception:
+            pass
+        ai_text = ", ".join(ai_available) if ai_available else "Claude"
+
+        # 보유종목 수
+        try:
+            holdings_count = len(self.db.get_active_holdings())
+        except Exception:
+            holdings_count = 0
+
+        # 스케줄 잡 수
+        job_count = 27  # 현재 등록된 잡 수
+
         await update.message.reply_text(
-            "💻 맥미니 원격 개발 모드\n\n"
-            "봇 서비스 관리/개발 명령을 내리세요.\n"
-            "연속 대화가 이어집니다.\n\n"
-            "서비스 관리:\n"
-            "  봇 로그 최근 50줄 보여줘\n"
-            "  봇 프로세스 상태 확인해줘\n"
-            "  테스트 전체 돌려줘\n\n"
-            "코드 수정:\n"
-            "  scheduler.py에서 매크로 주기 변경해줘\n"
-            "  새로운 알림 기능 추가해줘\n"
-            "  이 버그 원인 찾아서 고쳐줘\n\n"
-            "시스템 확인:\n"
-            "  디스크 용량 확인해줘\n"
-            "  DB 테이블 목록 보여줘\n"
-            "  현재 스케줄 잡 상태 확인\n\n"
-            "🔙 대화 종료 버튼으로 나갑니다.",
+            f"🤖 주호님의 AI 에이전트\n\n"
+            f"━━ 현재 상태 ━━\n"
+            f"🧠 AI 엔진: {ai_text}\n"
+            f"💼 보유종목: {holdings_count}개 모니터링\n"
+            f"⏰ 자동 작업: {job_count}개 가동 중\n\n"
+            f"━━ AI가 하고 있는 일 ━━\n"
+            f"☀️ 07:00 미국장 분석\n"
+            f"📊 07:30 모닝 브리핑\n"
+            f"🛒 07:50 매수 플래너\n"
+            f"📡 08:50 실시간 WebSocket 감시\n"
+            f"🔍 장중 1분마다 시장 모니터링\n"
+            f"📋 16:00 장마감 PDF 리포트\n"
+            f"🧠 21:00 자가진단\n"
+            f"🤖 일요일 LSTM 재학습\n\n"
+            f"━━ 뭐든 물어보세요 ━━\n"
+            f"종목 분석, 시장 전망, 포트폴리오 조언\n"
+            f"봇 관리, 코드 수정, 시스템 확인\n"
+            f"뭐든 자유롭게 대화하세요!\n\n"
+            f"🔙 대화 종료 버튼으로 나갑니다.",
             reply_markup=CLAUDE_MODE_MENU,
         )
 
