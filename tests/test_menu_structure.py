@@ -20,16 +20,16 @@ class TestMainMenuStructure:
 
     def test_menu_has_rows(self):
         rows = MAIN_MENU.keyboard
-        assert len(rows) == 4  # v3.6.2: 4행 compact
+        assert len(rows) == 5  # v5.3: 5행 (클로드 추가)
 
-    def test_each_row_has_two_columns(self):
+    def test_each_row_has_max_two_columns(self):
         rows = MAIN_MENU.keyboard
         for row in rows:
-            assert len(row) == 2, f"Row has {len(row)} buttons: {row}"
+            assert 1 <= len(row) <= 2, f"Row has {len(row)} buttons: {row}"
 
     def test_main_menu_buttons(self):
         flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        for expected in ["분석", "시황", "잔고", "즐겨찾기", "에이전트", "리포트", "AI질문", "더보기"]:
+        for expected in ["분석", "시황", "잔고", "즐겨찾기", "클로드", "에이전트", "리포트", "AI질문", "더보기"]:
             assert any(expected in b for b in flat), f"Missing: {expected}"
 
 

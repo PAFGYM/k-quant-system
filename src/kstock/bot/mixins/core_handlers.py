@@ -868,7 +868,7 @@ class CoreHandlersMixin:
                 )
                 return
 
-            # 0-4. Claude Code 대화 모드: 메뉴에서 "💻 클로드" 누른 후 연속 대화
+            # 0-4. 클로드 대화 모드: "💻 클로드" 누른 후 자유 대화 (Claude API)
             if context.user_data.get("claude_mode"):
                 # 대화 종료 버튼
                 if text == "🔙 대화 종료":
@@ -876,7 +876,8 @@ class CoreHandlersMixin:
                     return
                 if not self._is_authorized_chat(update):
                     return
-                await self._execute_claude_prompt(update, text, context=context)
+                # v5.3: Claude API 자유 대화 (CLI 실행 아님)
+                await self._handle_claude_free_chat(update, context, text)
                 return
 
             # 0-5. Claude Code 원격 실행: "클코 ..." prefix

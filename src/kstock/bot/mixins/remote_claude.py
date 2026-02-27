@@ -224,16 +224,89 @@ class RemoteClaudeMixin:
     async def _exit_claude_mode(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Claude Code 대화 모드 종료."""
+        """클로드 대화 모드 종료."""
         turns = context.user_data.get("claude_turn", 0)
         context.user_data.pop("claude_mode", None)
         context.user_data.pop("claude_turn", None)
         context.user_data.pop("awaiting_claude_prompt", None)
         await update.message.reply_text(
-            f"💻 Claude Code 대화 종료\n"
+            f"🤖 Claude 대화 종료\n"
             f"총 {turns}회 대화했습니다.",
             reply_markup=MAIN_MENU,
         )
+
+    async def _handle_claude_free_chat(
+        self, update: Update, context, text: str
+    ) -> None:
+        """클로드 자유 대화 — Claude API로 실시간 추론.
+
+        v5.3: CLI 실행이 아닌 Claude API 직접 대화.
+        제한 없이 자유롭게 대화하며, 실시간 데이터도 활용.
+        """
+        turn = context.user_data.get("claude_turn", 0)
+        context.user_data["claude_turn"] = turn + 1
+
+        placeholder = await update.message.reply_text(
+            "🤖 Claude가 생각 중..."
+        )
+
+        try:
+            from kstock.bot.chat_handler import handle_ai_question
+            from kstock.bot.context_builder import build_full_context_with_macro
+            from kstock.bot.chat_memory import ChatMemory
+
+            # 종목 감지 시 실시간 가격 주입
+            enriched = text
+            v_names = None
+            try:
+                stock = self._detect_stock_query(text)
+                if stock:
+                    code = stock.get("code", "")
+                    name = stock.get("name", code)
+                    market = stock.get("market", "KOSPI")
+                    try:
+                        price = await self._get_price(code)
+                        if price > 0:
+                            v_names = {name}
+                            enriched = (
+                                f"{text}\n\n"
+                                f"[{name}({code}) 실시간 현재가: {price:,.0f}원]\n"
+                                f"[절대 규칙] 위 실시간 데이터의 가격만 사용하라."
+                            )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            chat_mem = ChatMemory(self.db)
+            ctx = await build_full_context_with_macro(
+                self.db, self.macro_client, self.yf_client,
+            )
+            answer = await handle_ai_question(
+                enriched, ctx, self.db, chat_mem, verified_names=v_names
+            )
+
+            # 후속 질문 파싱
+            answer, followup_buttons = self._parse_followup_buttons(answer)
+            markup = None
+            if followup_buttons:
+                from telegram import InlineKeyboardMarkup
+                markup = InlineKeyboardMarkup(followup_buttons)
+
+            try:
+                await placeholder.edit_text(answer, reply_markup=markup)
+            except Exception:
+                await update.message.reply_text(
+                    answer, reply_markup=CLAUDE_MODE_MENU,
+                )
+        except Exception as e:
+            logger.error("Claude free chat error: %s", e, exc_info=True)
+            try:
+                await placeholder.edit_text(
+                    "⚠️ 응답 중 오류가 발생했습니다. 다시 시도해주세요."
+                )
+            except Exception:
+                pass
 
     async def _execute_claude_prompt(
         self, update: Update, prompt: str, *, context=None

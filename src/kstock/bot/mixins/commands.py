@@ -58,10 +58,10 @@ class CommandsMixin:
         rs_rank: int = 0, rs_total: int = 1,
     ) -> ScanResult | None:
         try:
+            import asyncio
             ohlcv = self._ohlcv_cache.get(ticker)
             if ohlcv is None or ohlcv.empty:
                 # Fetch OHLCV and stock info in parallel
-                import asyncio
                 ohlcv, yf_info = await asyncio.gather(
                     self.yf_client.get_ohlcv(ticker, market),
                     self.yf_client.get_stock_info(ticker, name, market),
@@ -976,6 +976,11 @@ class CommandsMixin:
         qtype = parts[0] if parts else ""
         ticker = parts[1] if len(parts) > 1 else ""
 
+        # buy_pick은 실시간 스캔 기반으로 처리
+        if qtype == "buy_pick":
+            await self._handle_buy_pick_with_live_data(query, context)
+            return
+
         # 종목명 조회
         name = ticker
         for item in self.all_tickers:
@@ -989,7 +994,6 @@ class CommandsMixin:
             "chart": f"{name} 차트 분석해줘. 이동평균선, RSI, MACD, 거래량 종합 판단",
             "compare": f"{name}과 같은 섹터 경쟁사 비교해줘. 어디가 더 매력적인지",
             "portfolio": "내 보유종목 전체 점검하고 각 종목별 행동(홀딩/추매/익절) 알려줘",
-            "buy_pick": "지금 시장에서 관심 가질 종목 3개 추천해줘. 이유도 같이",
             "market": "오늘 시장 전체 흐름과 앞으로 전략 알려줘",
             "risk": "내 포트폴리오 리스크 점검해줘. 집중도, 섹터 편중, 대응 방안",
         }
@@ -1005,8 +1009,9 @@ class CommandsMixin:
             from kstock.bot.context_builder import build_full_context_with_macro
             from kstock.bot.chat_memory import ChatMemory
 
-            # 종목 관련이면 가격 주입
+            # 종목 관련이면 실시간 가격 주입 (KIS→Naver→yfinance 순)
             enriched = question
+            v_names = None
             if ticker:
                 try:
                     stock = self._detect_stock_query(name)
@@ -1019,13 +1024,22 @@ class CommandsMixin:
                             tech = compute_indicators(ohlcv)
                             close = ohlcv["close"].astype(float)
                             cur = float(close.iloc[-1])
+                            # v5.3: KIS→Naver→yfinance 순 실시간 현재가
+                            try:
+                                live = await self._get_price(code, base_price=cur)
+                                if live > 0:
+                                    cur = live
+                            except Exception:
+                                pass
                             if cur > 0:
+                                v_names = {name}
                                 enriched = (
                                     f"{question}\n\n"
                                     f"[{name}({code}) 실시간 데이터]\n"
                                     f"현재가: {cur:,.0f}원\n"
                                     f"RSI: {tech.rsi:.1f}\n"
-                                    f"[절대 규칙] 위 실시간 데이터의 가격만 참고하라."
+                                    f"[절대 규칙] 위 실시간 데이터의 가격만 사용하라. "
+                                    f"너의 학습 데이터에 있는 과거 주가를 절대 사용 금지."
                                 )
                 except Exception:
                     pass
@@ -1034,7 +1048,7 @@ class CommandsMixin:
             ctx = await build_full_context_with_macro(
                 self.db, self.macro_client, self.yf_client,
             )
-            answer = await handle_ai_question(enriched, ctx, self.db, chat_mem)
+            answer = await handle_ai_question(enriched, ctx, self.db, chat_mem, verified_names=v_names)
 
             # 후속 질문 파싱 → 버튼
             answer, followup_buttons = self._parse_followup_buttons(answer)
@@ -1122,10 +1136,14 @@ class CommandsMixin:
         self, query, context: ContextTypes.DEFAULT_TYPE, question_type: str
     ) -> None:
         """Handle quick question buttons from AI chat menu."""
+        # buy_pick은 실시간 스캔 데이터를 직접 사용 (AI 환각 방지)
+        if question_type == "buy_pick":
+            await self._handle_buy_pick_with_live_data(query, context)
+            return
+
         questions = {
             "market": "오늘 미국/한국 시장 전체 흐름을 분석하고, 지금 어떤 전략이 유효한지 판단해줘",
             "portfolio": "내 보유종목 전체를 점검하고, 각 종목별로 지금 해야 할 행동(홀딩/추매/익절/손절)을 구체적으로 알려줘",
-            "buy_pick": "현재 시장 상황에서 관심 가질 만한 한국 주식 섹터와 종목 3개를 골라줘. 단, 실시간 가격 데이터가 없으니 구체적 현재가/목표가/매수가는 제시하지 말고, 관심 이유와 체크 포인트만 알려줘.",
             "risk": "내 포트폴리오의 리스크를 점검해줘. 집중도, 섹터 편중, 손실 종목, 전체 시장 리스크를 분석하고 대응 방안을 알려줘",
         }
         question = questions.get(question_type, "오늘 시장 어때?")
@@ -1137,7 +1155,7 @@ class CommandsMixin:
             return
 
         await query.edit_message_text(
-            "\U0001f4ad 주호님의 질문을 분석하고 있습니다..."
+            "🤖 Claude가 분석 중입니다..."
         )
 
         try:
@@ -1157,6 +1175,95 @@ class CommandsMixin:
             try:
                 await query.edit_message_text(
                     "주호님, AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+                )
+            except Exception:
+                pass
+
+    async def _handle_buy_pick_with_live_data(self, query, context) -> None:
+        """매수 추천 — 실시간 스캔 데이터 기반 (AI 환각 주가 완전 차단).
+
+        v5.3: AI가 자체 학습 데이터의 옛날 주가를 사용하는 문제를 근본 해결.
+        실시간 스캔 → TOP3 실시간 가격 조회 → 가격 데이터를 AI에 주입.
+        """
+        await query.edit_message_text(
+            "🔍 실시간 종목 스캔 + 가격 조회 중..."
+        )
+
+        try:
+            # 1. 실시간 스캔 (캐시 또는 새로 실행)
+            from datetime import datetime, timezone, timedelta
+            KST = timezone(timedelta(hours=9))
+            now = datetime.now(KST)
+            cache_age = (now - self._scan_cache_time).total_seconds() if hasattr(self, '_scan_cache_time') and self._scan_cache_time else 9999
+            if cache_age < 600 and hasattr(self, '_last_scan_results') and self._last_scan_results:
+                results = self._last_scan_results
+            else:
+                results = await self._scan_all_stocks()
+                self._last_scan_results = results
+                self._scan_cache_time = now
+
+            if not results:
+                await query.edit_message_text(
+                    "⚠️ 현재 스캔 결과가 없습니다. 잠시 후 다시 시도해주세요."
+                )
+                return
+
+            # 2. TOP3 실시간 가격 강제 조회 (KIS→Naver→yfinance)
+            top3 = results[:3]
+            stock_data_lines = []
+            for i, r in enumerate(top3, 1):
+                live_price = r.info.current_price
+                try:
+                    p = await self._get_price(r.ticker, base_price=live_price)
+                    if p > 0:
+                        live_price = p
+                except Exception:
+                    pass
+
+                medals = {1: "1위", 2: "2위", 3: "3위"}
+                signal_kr = {"BUY": "매수", "WATCH": "관심", "HOLD": "홀딩", "SELL": "매도"}.get(r.score.signal, "관심")
+                stock_data_lines.append(
+                    f"{medals.get(i, f'{i}위')}. {r.name}({r.ticker})\n"
+                    f"  현재가: {live_price:,.0f}원 | 점수: {r.score.composite:.1f}/100 | 신호: {signal_kr}\n"
+                    f"  RSI: {r.tech.rsi:.1f} | EMA50/200: {r.tech.ema_50:,.0f}/{r.tech.ema_200:,.0f}"
+                )
+
+            stock_block = "\n".join(stock_data_lines)
+
+            # 3. AI에 실시간 데이터 주입해서 분석 요청
+            enriched_question = (
+                f"아래 3개 종목은 K-Quant 스캔 엔진이 실시간으로 선정한 오늘의 추천종목이다.\n"
+                f"[절대 규칙] 아래 데이터의 현재가만 사용하라. 너의 학습 데이터에 있는 과거 주가를 절대 사용 금지.\n\n"
+                f"[실시간 스캔 결과 — {now.strftime('%Y-%m-%d %H:%M')} 기준]\n"
+                f"{stock_block}\n\n"
+                f"각 종목에 대해 간단히 분석하고, 매수 매력도를 설명해줘.\n"
+                f"현재가는 위 데이터를 그대로 사용하라."
+            )
+
+            from kstock.bot.chat_handler import handle_ai_question
+            from kstock.bot.context_builder import build_full_context_with_macro
+            from kstock.bot.chat_memory import ChatMemory
+
+            chat_mem = ChatMemory(self.db)
+            ctx = await build_full_context_with_macro(self.db, self.macro_client, self.yf_client)
+            v_names = {r.name for r in top3}
+            answer = await handle_ai_question(enriched_question, ctx, self.db, chat_mem, verified_names=v_names)
+
+            # 후속 질문 파싱
+            answer, followup_buttons = self._parse_followup_buttons(answer)
+            if not followup_buttons:
+                followup_buttons = self._build_followup_buttons("매수 추천", None)
+            markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None
+
+            try:
+                await query.edit_message_text(answer, reply_markup=markup)
+            except Exception:
+                await query.message.reply_text(answer, reply_markup=markup or MAIN_MENU)
+        except Exception as e:
+            logger.error("Buy pick with live data error: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text(
+                    "⚠️ 추천 종목 분석 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
                 )
             except Exception:
                 pass
