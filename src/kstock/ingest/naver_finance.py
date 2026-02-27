@@ -317,3 +317,141 @@ def _to_float(text: str) -> float:
         return float(cleaned) if cleaned else 0.0
     except ValueError:
         return 0.0
+
+
+# ── 공매도 크롤링 ─────────────────────────────────────────────
+
+_SHORT_URL = "https://finance.naver.com/item/sise_short.naver?code={code}"
+
+
+async def get_short_selling(code: str, days: int = 20) -> list[dict]:
+    """네이버 금융에서 종목별 공매도 데이터 크롤링.
+
+    Returns:
+        [{date, short_volume, total_volume, short_ratio,
+          short_balance, short_balance_ratio}, ...]
+    """
+    try:
+        import httpx
+        from bs4 import BeautifulSoup
+    except ImportError:
+        logger.debug("httpx/bs4 not available for short selling")
+        return []
+
+    results = []
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(
+                _SHORT_URL.format(code=code),
+                headers=_HEADERS,
+            )
+            if resp.status_code != 200:
+                return []
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            table = soup.find("table", class_="type2")
+            if not table:
+                return []
+
+            rows = table.find_all("tr")
+            for row in rows:
+                cols = row.find_all("td")
+                if len(cols) < 6:
+                    continue
+                date_text = cols[0].get_text(strip=True)
+                if not re.match(r"\d{4}\.\d{2}\.\d{2}", date_text):
+                    continue
+
+                date_str = date_text.replace(".", "-")
+                short_vol = int(_to_float(cols[3].get_text(strip=True)))
+                total_vol = int(_to_float(cols[2].get_text(strip=True)))
+                short_ratio = 0.0
+                if total_vol > 0:
+                    short_ratio = short_vol / total_vol * 100
+
+                results.append({
+                    "date": date_str,
+                    "short_volume": short_vol,
+                    "total_volume": total_vol,
+                    "short_ratio": round(short_ratio, 2),
+                    "short_balance": 0,
+                    "short_balance_ratio": 0.0,
+                })
+
+                if len(results) >= days:
+                    break
+
+    except Exception as e:
+        logger.debug("Short selling crawl error for %s: %s", code, e)
+
+    return results
+
+
+# ── 뉴스 크롤링 ──────────────────────────────────────────────
+
+_NEWS_URL = "https://finance.naver.com/item/news_news.naver?code={code}&page=1"
+
+
+async def get_stock_news(code: str, limit: int = 5) -> list[dict]:
+    """네이버 금융에서 종목별 뉴스 크롤링.
+
+    Returns:
+        [{title, date, source, url}, ...]
+    """
+    try:
+        import httpx
+        from bs4 import BeautifulSoup
+    except ImportError:
+        logger.debug("httpx/bs4 not available for news")
+        return []
+
+    results = []
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(
+                _NEWS_URL.format(code=code),
+                headers=_HEADERS,
+            )
+            if resp.status_code != 200:
+                return []
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            # 관련뉴스 테이블
+            table = soup.find("table", class_="type5")
+            if not table:
+                return []
+
+            rows = table.find_all("tr")
+            for row in rows:
+                cols = row.find_all("td")
+                if len(cols) < 3:
+                    continue
+
+                title_tag = cols[0].find("a")
+                if not title_tag:
+                    continue
+
+                title = title_tag.get_text(strip=True)
+                if not title:
+                    continue
+
+                href = title_tag.get("href", "")
+                url = f"https://finance.naver.com{href}" if href.startswith("/") else href
+
+                source = cols[1].get_text(strip=True) if len(cols) > 1 else ""
+                date = cols[2].get_text(strip=True) if len(cols) > 2 else ""
+
+                results.append({
+                    "title": title,
+                    "date": date,
+                    "source": source,
+                    "url": url,
+                })
+
+                if len(results) >= limit:
+                    break
+
+    except Exception as e:
+        logger.debug("News crawl error for %s: %s", code, e)
+
+    return results

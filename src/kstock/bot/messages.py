@@ -980,6 +980,11 @@ def format_goal_dashboard(
         lines.append("\ud3ec\uc9c0\uc158 \ud604\ud669:")
         for h in holdings[:5]:
             name = h.get("name", "")
+            qty = h.get("quantity", h.get("qty", 0)) or 0
+            eval_amt = h.get("eval_amount", h.get("eval", 0)) or 0
+            # v5.8: 보유수량/평가금액 0인 종목 필터
+            if qty <= 0 and eval_amt <= 0:
+                continue
             pnl = h.get("profit_pct", h.get("pnl_pct", 0))
             lines.append(f"  {name} {pnl:+.1f}%")
 

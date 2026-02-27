@@ -322,6 +322,20 @@ class CoreHandlersMixin:
             days=(0, 1, 2, 3, 4),
             name="daily_rating",
         )
+        # v5.8: 공매도 데이터 수집 (16:15, 평일)
+        jq.run_daily(
+            self.job_short_selling_collect,
+            time=dt_time(hour=16, minute=15, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="short_selling_collect",
+        )
+        # v5.8: 뉴스 모니터링 (30분마다, 09:00~15:30 장중)
+        jq.run_repeating(
+            self.job_news_monitor,
+            interval=1800,
+            first=120,
+            name="news_monitor",
+        )
         logger.info(
             "Scheduled: buy_planner(weekday 07:50), us_premarket(07:00), "
             "morning(07:30), intraday(1min), "
@@ -336,7 +350,8 @@ class CoreHandlersMixin:
             "eod_risk_report(weekday 15:40), "
             "health_check(30min), "
             "journal_review(Sun 10:00), sector_rotation(weekday 09:05), "
-            "contrarian_scan(weekday 14:00), daily_rating(19:00) KST"
+            "contrarian_scan(weekday 14:00), daily_rating(19:00), "
+            "short_selling(weekday 16:15), news_monitor(30min) KST"
         )
 
     # == Command & Menu Handlers =============================================

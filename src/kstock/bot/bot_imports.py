@@ -287,15 +287,17 @@ def make_feedback_row(menu_name: str) -> list:
 
 
 def get_reply_markup(context) -> ReplyKeyboardMarkup:
-    """현재 모드에 맞는 ReplyKeyboardMarkup 반환.
+    """항상 CLAUDE_MODE_MENU 반환.
 
-    Claude 대화 모드에서는 CLAUDE_MODE_MENU, 아니면 MAIN_MENU.
-    모든 메시지 응답에 이 함수를 사용하면 클로드 메뉴가 절대 사라지지 않는다.
+    v5.8: 봇 재시작 시 user_data가 초기화되어 claude_mode가 사라지는 문제 해결.
+    주호님이 유일한 사용자이고 클로드 메뉴가 항상 필요하므로 기본값을 CLAUDE_MODE_MENU로 설정.
+    CLAUDE_MODE_MENU에 분석/시황/잔고/즐겨찾기/AI질문/리포트 모두 포함.
     """
     from kstock.bot.mixins.remote_claude import CLAUDE_MODE_MENU
-    if context and hasattr(context, 'user_data') and context.user_data.get("claude_mode"):
-        return CLAUDE_MODE_MENU
-    return MAIN_MENU
+    # claude_mode를 자동으로 항상 설정 (봇 재시작 후에도 유지)
+    if context and hasattr(context, 'user_data'):
+        context.user_data["claude_mode"] = True
+    return CLAUDE_MODE_MENU
 
 
 def _load_universe() -> dict:

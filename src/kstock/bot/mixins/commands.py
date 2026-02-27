@@ -1556,6 +1556,35 @@ class CommandsMixin:
             await query.edit_message_text(f"🔍 {name} ({ticker}) 공매도 분석 중...")
 
             short_data = self.db.get_short_selling(ticker, days=60)
+
+            # v5.8: 데이터 없으면 실시간 수집 시도
+            if not short_data:
+                try:
+                    from kstock.ingest.naver_finance import get_short_selling
+                    fresh = await get_short_selling(ticker, days=20)
+                    if fresh:
+                        for d in fresh[:10]:
+                            self.db.add_short_selling(
+                                ticker=ticker,
+                                date_str=d["date"],
+                                short_volume=d["short_volume"],
+                                total_volume=d["total_volume"],
+                                short_ratio=d["short_ratio"],
+                                short_balance=d.get("short_balance", 0),
+                                short_balance_ratio=d.get("short_balance_ratio", 0.0),
+                            )
+                        short_data = self.db.get_short_selling(ticker, days=60)
+                except Exception:
+                    pass
+
+            if not short_data:
+                await query.message.reply_text(
+                    f"📊 {name} ({ticker}) 공매도 분석\n\n"
+                    f"공매도 데이터가 아직 수집되지 않았습니다.\n"
+                    f"매일 16:15에 자동 수집됩니다.\n\n"
+                    f"내일 다시 확인해주세요."
+                )
+                return
             margin_data = self.db.get_margin_balance(ticker, days=60)
             lines: list[str] = []
 

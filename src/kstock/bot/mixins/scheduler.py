@@ -2751,3 +2751,136 @@ class SchedulerMixin:
             )
         except Exception as e:
             logger.debug("Daily rating job error: %s", e)
+
+    # ── 공매도 데이터 수집 (v5.8) ─────────────────────────────
+
+    async def job_short_selling_collect(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """16:15 평일: 보유/즐겨찾기 종목 공매도 데이터 수집 + 과열 알림."""
+        try:
+            from kstock.ingest.naver_finance import get_short_selling
+
+            # 보유 + 즐겨찾기 종목 합치기
+            holdings = self.db.get_active_holdings()
+            watchlist = self.db.get_watchlist()
+            tickers = set()
+            for h in holdings:
+                t = h.get("ticker", "")
+                if t:
+                    tickers.add(t)
+            for w in watchlist:
+                t = w.get("ticker", "")
+                if t:
+                    tickers.add(t)
+
+            today_str = datetime.now(KST).strftime("%Y-%m-%d")
+            collected = 0
+            alerts = []
+
+            for ticker in list(tickers)[:20]:
+                try:
+                    data = await get_short_selling(ticker, days=5)
+                    if not data:
+                        continue
+                    for d in data[:3]:
+                        self.db.add_short_selling(
+                            ticker=ticker,
+                            date_str=d["date"],
+                            short_volume=d["short_volume"],
+                            total_volume=d["total_volume"],
+                            short_ratio=d["short_ratio"],
+                            short_balance=d.get("short_balance", 0),
+                            short_balance_ratio=d.get("short_balance_ratio", 0.0),
+                        )
+                    collected += 1
+
+                    # 과열 체크
+                    latest = data[0] if data else {}
+                    ratio = latest.get("short_ratio", 0)
+                    if ratio >= 15:
+                        name = self._resolve_name(ticker, ticker) if hasattr(self, '_resolve_name') else ticker
+                        alerts.append(f"🔴 {name}: 공매도 비중 {ratio:.1f}%")
+
+                    await asyncio.sleep(0.5)  # rate limit
+                except Exception as e:
+                    logger.debug("Short selling collect for %s: %s", ticker, e)
+
+            # 과열 종목 알림
+            if alerts:
+                msg = (
+                    f"⚠️ 공매도 과열 감지 ({today_str})\n"
+                    f"{'━' * 22}\n\n"
+                    + "\n".join(alerts)
+                )
+                await context.bot.send_message(
+                    chat_id=self.admin_chat_id, text=msg,
+                )
+
+            self.db.upsert_job_run("short_selling_collect", today_str, status="success")
+            logger.info("Short selling collected for %d tickers, %d alerts", collected, len(alerts))
+        except Exception as e:
+            logger.error("Short selling collect failed: %s", e)
+
+    # ── 뉴스 모니터링 (v5.8) ─────────────────────────────────
+
+    async def job_news_monitor(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """09:00~15:30 매 30분: 보유/즐겨찾기 종목 뉴스 모니터링."""
+        try:
+            from kstock.ingest.naver_finance import get_stock_news
+
+            # 보유 + 즐겨찾기 종목
+            holdings = self.db.get_active_holdings()
+            watchlist = self.db.get_watchlist()
+            ticker_names = {}
+            for h in holdings:
+                t = h.get("ticker", "")
+                if t:
+                    ticker_names[t] = h.get("name", t)
+            for w in watchlist:
+                t = w.get("ticker", "")
+                if t:
+                    ticker_names[t] = w.get("name", t)
+
+            # 이미 전송한 뉴스 URL 추적
+            sent_news = context.bot_data.setdefault("sent_news", set())
+            # 오래된 항목 정리 (1000개 초과 시)
+            if len(sent_news) > 1000:
+                context.bot_data["sent_news"] = set()
+                sent_news = context.bot_data["sent_news"]
+
+            # 중요 키워드
+            important_kw = [
+                "급등", "급락", "상한가", "하한가", "실적", "어닝",
+                "인수", "합병", "M&A", "공시", "배당", "증자", "감자",
+                "상장폐지", "거래정지", "신고가", "신저가", "목표가",
+                "투자의견", "매수", "매도", "상향", "하향",
+            ]
+
+            alerts = []
+            for ticker, name in list(ticker_names.items())[:15]:
+                try:
+                    news_list = await get_stock_news(ticker, limit=3)
+                    for news in news_list:
+                        url = news.get("url", "")
+                        title = news.get("title", "")
+                        if not url or url in sent_news:
+                            continue
+                        # 중요 뉴스 필터
+                        is_important = any(kw in title for kw in important_kw)
+                        if is_important:
+                            alerts.append(f"📰 {name}: {title}")
+                            sent_news.add(url)
+                    await asyncio.sleep(0.3)
+                except Exception as e:
+                    logger.debug("News monitor for %s: %s", ticker, e)
+
+            if alerts:
+                msg = (
+                    f"📰 종목 뉴스 알림\n{'━' * 22}\n\n"
+                    + "\n\n".join(alerts[:5])
+                )
+                await context.bot.send_message(
+                    chat_id=self.admin_chat_id, text=msg,
+                )
+                logger.info("News alerts sent: %d", len(alerts))
+        except Exception as e:
+            logger.error("News monitor failed: %s", e)

@@ -204,6 +204,60 @@ async def get_manager_analysis(
         return f"{manager['emoji']} {manager['name']}: 분석 오류"
 
 
+async def recommend_investment_type(
+    ticker: str, name: str, price: float = 0, market_cap: str = "",
+) -> str:
+    """AI가 종목 특성 분석 → scalp/swing/position/long_term 중 추천.
+
+    Returns:
+        추천 투자유형 키 (scalp, swing, position, long_term) 또는 "" (실패 시)
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ""
+
+    try:
+        import httpx
+
+        prompt = (
+            f"한국 주식 종목 '{name}'({ticker})의 적합한 투자유형을 하나만 선택해줘.\n"
+            f"현재가: {price:,.0f}원\n" if price > 0 else ""
+        ) + (
+            f"시가총액: {market_cap}\n" if market_cap else ""
+        ) + (
+            "\n선택지:\n"
+            "- scalp: 초단기 1~3일 (변동성 큰 테마주, 소형주)\n"
+            "- swing: 스윙 1~4주 (기술적 반등, 이벤트 드리븐)\n"
+            "- position: 포지션 1~6개월 (실적 턴어라운드, 섹터 성장)\n"
+            "- long_term: 장기 6개월+ (대형 우량주, 배당주, ETF)\n\n"
+            "반드시 scalp, swing, position, long_term 중 하나만 답해. 다른 말 하지마."
+        )
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 20,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if resp.status_code == 200:
+                answer = resp.json()["content"][0]["text"].strip().lower()
+                for key in ["long_term", "position", "swing", "scalp"]:
+                    if key in answer:
+                        return key
+        return ""
+    except Exception as e:
+        logger.debug("recommend_investment_type error: %s", e)
+        return ""
+
+
 async def get_manager_greeting(holding_type: str, name: str, ticker: str) -> str:
     """종목 등록 시 매니저 인사 + 간단 첫 분석."""
     manager = MANAGERS.get(holding_type)
