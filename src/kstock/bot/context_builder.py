@@ -19,9 +19,9 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST, US_EASTERN
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 WEEKDAY_KR = ['월', '화', '수', '목', '금', '토', '일']
 USER_NAME = "주호님"
 
@@ -189,8 +189,7 @@ def build_system_prompt(context: dict) -> str:
     """
     # 현재 시간 + 시장 개장 상태 계산
     now_kst = datetime.now(KST)
-    EST = timezone(timedelta(hours=-5))
-    now_est = datetime.now(EST)
+    now_est = datetime.now(US_EASTERN)
     kst_wd = now_kst.weekday()   # 0=Mon … 6=Sun
     est_wd = now_est.weekday()
 
@@ -204,10 +203,10 @@ def build_system_prompt(context: dict) -> str:
     time_info = (
         f"현재: {now_kst.strftime('%Y-%m-%d %H:%M')} KST "
         f"({WEEKDAY_KR[kst_wd]}요일)\n"
-        f"미국: {now_est.strftime('%Y-%m-%d %H:%M')} EST "
+        f"미국: {now_est.strftime('%Y-%m-%d %H:%M')} ET "
         f"({WEEKDAY_KR[est_wd]}요일)\n"
         f"한국장: {'개장 중' if kr_open else '마감 (평일 09:00~15:30 KST)'}\n"
-        f"미국장: {'개장 중' if us_open else '마감 (평일 09:30~16:00 EST = 23:30~06:00 KST)'}\n"
+        f"미국장: {'개장 중' if us_open else '마감 (평일 09:30~16:00 ET = 23:30~06:00 KST)'}\n"
         f"아래 시장 데이터는 전일 종가 기준입니다."
     )
 

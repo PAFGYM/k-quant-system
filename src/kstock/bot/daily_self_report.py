@@ -10,9 +10,9 @@ import logging
 import os
 from datetime import datetime, timezone, timedelta
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 USER_NAME = "주호님"
 
 
@@ -85,7 +85,7 @@ async def generate_daily_self_report(db, macro_client=None, ws=None) -> str:
                 "\u2192 데이터 수집 필요"
             )
     except Exception:
-        pass
+        logger.debug("holdings financial check failed", exc_info=True)
 
     try:
         job_runs = db.get_job_runs(today_str)
@@ -96,7 +96,7 @@ async def generate_daily_self_report(db, macro_client=None, ws=None) -> str:
                 for e in errors[:3]:
                     issues.append(f"     {e.get('job_name', '')}: {e.get('message', '')[:50]}")
     except Exception:
-        pass
+        logger.debug("job_runs check failed", exc_info=True)
 
     if not issues:
         issues.append("  \u2705 특이사항 없음")
@@ -114,7 +114,7 @@ async def generate_daily_self_report(db, macro_client=None, ws=None) -> str:
                 f"  \u2192 {', '.join(names[:3])} 재무 데이터 수집 필요"
             )
     except Exception:
-        pass
+        logger.debug("financial suggestion build failed", exc_info=True)
 
     # 매크로 데이터 상태
     if macro_client:

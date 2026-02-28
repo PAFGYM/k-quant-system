@@ -287,8 +287,7 @@ def check_data_staleness(db_path: str | Path, max_hours: int = 2) -> HealthCheck
 
     # 비장시간에는 체크 스킵
     try:
-        from datetime import timezone, timedelta
-        KST_TZ = timezone(timedelta(hours=9))
+        from kstock.core.tz import KST as KST_TZ
         now_kst = datetime.now(KST_TZ)
         weekday = now_kst.weekday()  # 0=Mon ... 6=Sun
         hour = now_kst.hour
