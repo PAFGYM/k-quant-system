@@ -252,6 +252,8 @@ class CoreHandlersMixin:
         )
         # 봇 시작 시 장중이면 즉시 WebSocket 연결
         jq.run_once(self.job_ws_connect, when=5, name="ws_connect_startup")
+        # v5.9: 봇 시작 시 클로드 메뉴 자동 발송 (Reply Keyboard 복원)
+        jq.run_once(self._job_send_claude_menu, when=3, name="send_claude_menu")
         # 14:30 초단기 청산 리마인더
         jq.run_daily(
             self.job_scalp_close_reminder,
@@ -336,6 +338,13 @@ class CoreHandlersMixin:
             first=120,
             name="news_monitor",
         )
+        # v5.9: 미국 선물 신호등 모니터링 (장중 1시간마다)
+        jq.run_repeating(
+            self.job_us_futures_signal,
+            interval=3600,
+            first=300,
+            name="us_futures_signal",
+        )
         logger.info(
             "Scheduled: buy_planner(weekday 07:50), us_premarket(07:00), "
             "morning(07:30), intraday(1min), "
@@ -353,6 +362,22 @@ class CoreHandlersMixin:
             "contrarian_scan(weekday 14:00), daily_rating(19:00), "
             "short_selling(weekday 16:15), news_monitor(30min) KST"
         )
+
+    # == 봇 시작 시 클로드 메뉴 자동 발송 ====================================
+
+    async def _job_send_claude_menu(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """v5.9: 봇 시작 시 CLAUDE_MODE_MENU를 자동으로 보내 Reply Keyboard 복원."""
+        if not self.chat_id:
+            return
+        try:
+            from kstock.bot.mixins.remote_claude import CLAUDE_MODE_MENU
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text="🤖 K-Quant 시스템 재시작 완료",
+                reply_markup=CLAUDE_MODE_MENU,
+            )
+        except Exception as e:
+            logger.error("Failed to send Claude menu on startup: %s", e)
 
     # == Command & Menu Handlers =============================================
 
@@ -1449,6 +1474,8 @@ class CoreHandlersMixin:
                 # v5.5: 피드백 + 일일 평가
                 "fb": self._action_feedback,
                 "rate": self._action_daily_rate,
+                # v5.9: 더보기 인라인 메뉴 → 텍스트 메뉴 호출
+                "menu": self._action_menu_dispatch,
             }
             handler = dispatch.get(action)
             if handler:
@@ -1457,6 +1484,55 @@ class CoreHandlersMixin:
             logger.error("Callback error: %s", e, exc_info=True)
             try:
                 await query.edit_message_text("\u26a0\ufe0f 오류가 발생했습니다.")
+            except Exception:
+                pass
+
+    # == 더보기 인라인 메뉴 디스패치 (v5.9) ====================================
+
+    async def _action_menu_dispatch(self, query, context, payload: str) -> None:
+        """더보기 InlineKeyboard → 해당 메뉴 함수 호출.
+
+        v5.9: 더보기를 InlineKeyboard로 전환하여 Reply Keyboard(클로드 메뉴) 유지.
+        """
+        menu_map = {
+            "account_analysis": self._menu_account_analysis,
+            "strategy_view": self._menu_strategy_view,
+            "surge": self._menu_surge,
+            "swing": self._menu_swing,
+            "multi_agent": self._menu_multi_agent,
+            "accumulation": self._menu_accumulation,
+            "weekly_report": self._menu_weekly_report,
+            "short": self._menu_short,
+            "future_tech": self._menu_future_tech,
+            "goal": self._menu_goal,
+            "financial": self._menu_financial,
+            "kis_setup": self._menu_kis_setup,
+            "notification": self._menu_notification_settings,
+            "optimize": self._menu_optimize,
+            "admin": self._menu_admin,
+        }
+        handler = menu_map.get(payload)
+        if not handler:
+            await query.edit_message_text(f"⚠️ 알 수 없는 메뉴: {payload}")
+            return
+        # 더보기 인라인 메시지를 닫음
+        try:
+            await query.edit_message_text("⚙️ 메뉴 이동 중...")
+        except Exception:
+            pass
+        # 메뉴 함수는 update.message를 기대 → SimpleNamespace로 래핑
+        import types
+        fake_update = types.SimpleNamespace(
+            message=query.message,
+            effective_user=query.from_user,
+            effective_chat=query.message.chat,
+        )
+        try:
+            await handler(fake_update, context)
+        except Exception as e:
+            logger.error("Menu dispatch error [%s]: %s", payload, e, exc_info=True)
+            try:
+                await query.message.reply_text(f"⚠️ 메뉴 오류: {e}")
             except Exception:
                 pass
 

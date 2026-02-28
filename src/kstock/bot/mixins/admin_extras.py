@@ -624,10 +624,29 @@ class AdminExtrasMixin:
     async def _menu_more(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """더보기 메뉴 표시."""
+        """더보기 메뉴 — InlineKeyboard로 표시하여 클로드 메뉴(Reply Keyboard) 유지."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        buttons = [
+            [InlineKeyboardButton("📸 계좌분석", callback_data="menu:account_analysis"),
+             InlineKeyboardButton("🎯 전략별 보기", callback_data="menu:strategy_view")],
+            [InlineKeyboardButton("🔥 급등주", callback_data="menu:surge"),
+             InlineKeyboardButton("⚡ 스윙 기회", callback_data="menu:swing")],
+            [InlineKeyboardButton("📊 멀티분석", callback_data="menu:multi_agent"),
+             InlineKeyboardButton("🕵️ 매집탐지", callback_data="menu:accumulation")],
+            [InlineKeyboardButton("📅 주간 보고서", callback_data="menu:weekly_report"),
+             InlineKeyboardButton("📊 공매도", callback_data="menu:short")],
+            [InlineKeyboardButton("🚀 미래기술", callback_data="menu:future_tech"),
+             InlineKeyboardButton("🎯 30억 목표", callback_data="menu:goal")],
+            [InlineKeyboardButton("📊 재무 진단", callback_data="menu:financial"),
+             InlineKeyboardButton("📡 KIS설정", callback_data="menu:kis_setup")],
+            [InlineKeyboardButton("🔔 알림 설정", callback_data="menu:notification"),
+             InlineKeyboardButton("⚙️ 최적화", callback_data="menu:optimize")],
+            [InlineKeyboardButton("🛠 관리자", callback_data="menu:admin")],
+            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:more")],
+        ]
         await update.message.reply_text(
-            "\u2699\ufe0f 더보기 메뉴\n원하는 기능을 선택하세요:",
-            reply_markup=MORE_MENU,
+            "⚙️ 더보기 메뉴\n원하는 기능을 선택하세요:",
+            reply_markup=InlineKeyboardMarkup(buttons),
         )
 
     async def _menu_back_to_main(

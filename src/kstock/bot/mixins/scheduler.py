@@ -5,6 +5,7 @@ import asyncio
 import time as _time
 
 from kstock.bot.bot_imports import *  # noqa: F403
+from kstock.core.market_calendar import is_kr_market_open, market_status_text, next_market_day
 
 # ── 적응형 모니터링: VIX 레짐별 체크 주기 (초) ─────────────────────
 ADAPTIVE_INTERVALS = {
@@ -53,8 +54,7 @@ class SchedulerMixin:
         """매일 07:50 장 시작 전 매수 플래너 질문."""
         if not self.chat_id:
             return
-        now = datetime.now(KST)
-        if now.weekday() >= 5:
+        if not is_kr_market_open():
             return
 
         # v5.2: 매수 의향 + 금액/타입 안내 개선
@@ -83,10 +83,44 @@ class SchedulerMixin:
         logger.info("Premarket buy planner sent")
 
     async def job_morning_briefing(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """07:30 아침 브리핑.
+
+        v5.9: 휴장일이면 간소화 브리핑 (미국 요약 + 다음 개장일),
+              개장일이면 신호등 포함 전체 브리핑.
+        """
         if not self.chat_id:
             return
         try:
+            today = datetime.now(KST).date()
+            market_open = is_kr_market_open(today)
+
             macro = await self.macro_client.get_snapshot()
+            signal_emoji, signal_label = self._market_signal(macro)
+
+            if not market_open:
+                # 휴장일: 간소화 브리핑 — 미국 요약 + 다음 개장일 안내만
+                spx_e = "📈" if macro.spx_change_pct > 0 else "📉"
+                ndx_e = "📈" if macro.nasdaq_change_pct > 0 else "📉"
+                nxt = next_market_day(today)
+                msg = (
+                    f"☀️ 오전 브리핑\n"
+                    f"{'━' * 22}\n"
+                    f"{market_status_text(today)}\n"
+                    f"📅 다음 개장일: {nxt.strftime('%m/%d(%a)')}\n\n"
+                    f"🇺🇸 미국 시장 마감 요약\n"
+                    f"{spx_e} S&P500: {macro.spx_change_pct:+.2f}%\n"
+                    f"{ndx_e} 나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
+                    f"💰 VIX: {macro.vix:.1f}\n"
+                    f"💱 환율: {macro.usdkrw:,.0f}원\n\n"
+                    f"다음 개장일 전망: {signal_emoji} {signal_label}\n"
+                    f"{'━' * 22}\n"
+                    f"🤖 K-Quant | 휴장일 간소 브리핑"
+                )
+                await context.bot.send_message(chat_id=self.chat_id, text=msg)
+                self.db.upsert_job_run("morning_briefing", _today(), status="success")
+                logger.info("Morning briefing sent (market closed)")
+                return
+
             regime_result = detect_regime(macro)
             regime_mode = {
                 "mode": regime_result.mode,
@@ -99,9 +133,15 @@ class SchedulerMixin:
             # 보유종목별 투자 기간 판단 포함 브리핑 생성
             briefing_text = await self._generate_morning_briefing_v2(macro, regime_mode)
             if briefing_text:
-                msg = format_claude_briefing(briefing_text)
+                # 신호등을 AI 브리핑 앞에 추가
+                signal_line = f"오늘 국내 시장 전망: {signal_emoji} {signal_label}"
+                msg = format_claude_briefing(f"{signal_line}\n{'━' * 22}\n{briefing_text}")
             else:
-                msg = "\u2600\ufe0f 오전 브리핑\n\n" + format_market_status(macro, regime_mode)
+                msg = (
+                    f"☀️ 오전 브리핑\n"
+                    f"오늘 국내 시장 전망: {signal_emoji} {signal_label}\n\n"
+                    + format_market_status(macro, regime_mode)
+                )
 
             await context.bot.send_message(chat_id=self.chat_id, text=msg)
 
@@ -230,7 +270,7 @@ class SchedulerMixin:
         if not self.chat_id:
             return
         now = datetime.now(KST)
-        if now.weekday() >= 5:
+        if not is_kr_market_open(now.date()):
             return
         market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
         market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -351,7 +391,7 @@ class SchedulerMixin:
         if not self.chat_id:
             return
         now = datetime.now(KST)
-        if now.weekday() >= 5:
+        if not is_kr_market_open(now.date()):
             return
         try:
             results = await self._scan_all_stocks()
@@ -627,7 +667,7 @@ class SchedulerMixin:
         if not self.chat_id:
             return
         now = datetime.now(KST)
-        if now.weekday() >= 5:
+        if not is_kr_market_open(now.date()):
             return
         market_start = now.replace(hour=9, minute=5, second=0, microsecond=0)
         market_end = now.replace(hour=15, minute=25, second=0, microsecond=0)
@@ -734,7 +774,7 @@ class SchedulerMixin:
         if not self.chat_id:
             return
         now = datetime.now(KST)
-        if now.weekday() >= 5:
+        if not is_kr_market_open(now.date()):
             return
         try:
             # ── 1. 스캔 + 추천 업데이트 + 전략별 저장 ──
@@ -892,16 +932,89 @@ class SchedulerMixin:
             logger.error("Daily PDF report failed: %s", e, exc_info=True)
             self.db.upsert_job_run("eod_scan", _today(), status="error", message=str(e))
 
+    @staticmethod
+    def _market_signal(macro) -> tuple[str, str]:
+        """미국 시장 데이터 기반 한국 시장 신호등 산출.
+
+        Returns: (emoji, label)
+            🟢 원활  — 미국장 양호, 위험지표 안정
+            🟡 주의  — 혼조세 또는 약한 하락
+            🔴 경계  — 미국장 급락 또는 VIX 급등
+        """
+        score = 0
+        # S&P500
+        spx = macro.spx_change_pct
+        if spx > 0.5:
+            score += 2
+        elif spx > 0:
+            score += 1
+        elif spx > -0.5:
+            score -= 1
+        elif spx > -1.5:
+            score -= 2
+        else:
+            score -= 3
+        # 나스닥
+        ndx = macro.nasdaq_change_pct
+        if ndx > 0.5:
+            score += 2
+        elif ndx > 0:
+            score += 1
+        elif ndx > -0.5:
+            score -= 1
+        elif ndx > -1.5:
+            score -= 2
+        else:
+            score -= 3
+        # VIX
+        vix = macro.vix
+        if vix < 15:
+            score += 2
+        elif vix < 20:
+            score += 1
+        elif vix < 25:
+            score -= 1
+        elif vix < 30:
+            score -= 2
+        else:
+            score -= 3
+        # 환율 (원화 약세 = 부정)
+        krw = macro.usdkrw_change_pct
+        if krw > 0.5:
+            score -= 1
+        elif krw < -0.3:
+            score += 1
+
+        if score >= 3:
+            return "🟢", "원활"
+        elif score >= 0:
+            return "🟡", "보통"
+        elif score >= -3:
+            return "🟠", "주의"
+        else:
+            return "🔴", "경계"
+
     async def job_us_premarket_briefing(
         self, context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
-        """매일 07:00 미국 시장 프리마켓 브리핑 (새벽 미국장 분석)."""
+        """매일 07:00 미국 시장 프리마켓 브리핑 (새벽 미국장 분석).
+
+        v5.9: 한국 시장 신호등 추가 + 휴장일 안내.
+        """
         if not self.chat_id:
             return
         try:
             macro = await self.macro_client.get_snapshot()
+            signal_emoji, signal_label = self._market_signal(macro)
 
-            # 보유종목 중 미국 관련 종목 파악
+            # 한국 시장 개장 여부
+            today = datetime.now(KST).date()
+            market_open = is_kr_market_open(today)
+            market_note = ""
+            if not market_open:
+                market_note = f"\n{market_status_text(today)}\n📅 다음 개장일: {next_market_day(today).strftime('%m/%d(%a)')}\n"
+
+            # 보유종목 컨텍스트
             holdings = self.db.get_active_holdings()
             holdings_ctx = ""
             if holdings:
@@ -911,6 +1024,13 @@ class SchedulerMixin:
                     pnl = h.get("pnl_pct", 0)
                     parts.append(f"{name}({pnl:+.1f}%)")
                 holdings_ctx = f"\n보유종목: {', '.join(parts)}"
+
+            # 신호등 헤더
+            signal_header = (
+                f"{'━' * 22}\n"
+                f"오늘 국내 시장 전망: {signal_emoji} {signal_label}\n"
+                f"{'━' * 22}"
+            )
 
             prompt = (
                 f"새벽 미국 시장 마감 결과를 분석하고, "
@@ -928,6 +1048,8 @@ class SchedulerMixin:
                 f"금: ${macro.gold_price:,.0f} ({macro.gold_change_pct:+.1f}%)\n"
                 f"유가: ${getattr(macro, 'wti_price', 0):.1f}\n"
                 f"시장체제: {macro.regime}\n"
+                f"한국시장 전망 신호등: {signal_emoji} {signal_label}\n"
+                f"한국시장 개장여부: {'개장' if market_open else '휴장'}\n"
                 f"{holdings_ctx}\n\n"
                 f"아래 형식으로 분석:\n\n"
                 f"1. 미국 시장 마감 요약 (2-3줄)\n"
@@ -975,18 +1097,19 @@ class SchedulerMixin:
 
                 msg = (
                     f"🇺🇸 미국 시장 프리마켓 브리핑\n"
-                    f"{'━' * 22}\n\n"
+                    f"{signal_header}\n"
+                    f"{market_note}\n"
                     f"{analysis}\n\n"
                     f"{'━' * 22}\n"
                     f"🤖 K-Quant | {datetime.now(KST).strftime('%H:%M')} 분석"
                 )
             else:
-                # AI 없이 기본 데이터만 전달
                 spx_emoji = "📈" if macro.spx_change_pct > 0 else "📉"
                 ndq_emoji = "📈" if macro.nasdaq_change_pct > 0 else "📉"
                 msg = (
                     f"🇺🇸 미국 시장 프리마켓 브리핑\n"
-                    f"{'━' * 22}\n\n"
+                    f"{signal_header}\n"
+                    f"{market_note}\n"
                     f"{spx_emoji} S&P500: {macro.spx_change_pct:+.2f}%\n"
                     f"{ndq_emoji} 나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
                     f"💰 VIX: {macro.vix:.1f} ({macro.vix_change_pct:+.1f}%)\n"
@@ -994,7 +1117,6 @@ class SchedulerMixin:
                     f"📊 미국10년물: {macro.us10y:.2f}%\n"
                     f"🪙 BTC: ${macro.btc_price:,.0f} ({macro.btc_change_pct:+.1f}%)\n"
                     f"🥇 금: ${macro.gold_price:,.0f} ({macro.gold_change_pct:+.1f}%)\n\n"
-                    f"시장체제: {macro.regime}\n\n"
                     f"{'━' * 22}\n"
                     f"🤖 K-Quant | {datetime.now(KST).strftime('%H:%M')}"
                 )
@@ -1010,6 +1132,57 @@ class SchedulerMixin:
                 "us_premarket_briefing", _today(),
                 status="error", message=str(e),
             )
+
+    async def job_us_futures_signal(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """v5.9: 장중 미국 선물 변동 모니터링 (1시간마다).
+
+        미국 선물/VIX가 급변하면 색깔 신호등으로 알림.
+        이전 신호 대비 변동이 있을 때만 알림 발송 (스팸 방지).
+        """
+        if not self.chat_id:
+            return
+        now = datetime.now(KST)
+        # 장중만 (09:00~15:30)
+        if not (9 <= now.hour < 16):
+            return
+        if not is_kr_market_open(now.date()):
+            return
+
+        try:
+            macro = await self.macro_client.get_snapshot()
+            signal_emoji, signal_label = self._market_signal(macro)
+
+            # 이전 신호와 비교
+            prev = getattr(self, '_prev_us_signal', None)
+            if prev == signal_label:
+                return  # 변동 없으면 스킵
+            self._prev_us_signal = signal_label
+
+            # VIX 급변 체크
+            vix_alert = ""
+            vix_chg = macro.vix_change_pct
+            if abs(vix_chg) > 5:
+                vix_dir = "급등" if vix_chg > 0 else "급락"
+                vix_alert = f"\n⚠️ VIX {vix_dir}: {macro.vix:.1f} ({vix_chg:+.1f}%)"
+
+            msg = (
+                f"📡 시장 신호 변경\n"
+                f"{'━' * 22}\n"
+                f"국내 시장 전망: {signal_emoji} {signal_label}\n\n"
+                f"S&P500: {macro.spx_change_pct:+.2f}%\n"
+                f"나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
+                f"VIX: {macro.vix:.1f} ({vix_chg:+.1f}%)\n"
+                f"환율: {macro.usdkrw:,.0f}원 ({macro.usdkrw_change_pct:+.1f}%)"
+                f"{vix_alert}\n\n"
+                f"{'━' * 22}\n"
+                f"🤖 K-Quant | {now.strftime('%H:%M')}"
+            )
+            await context.bot.send_message(chat_id=self.chat_id, text=msg)
+            logger.info("US futures signal changed: %s → %s", prev, signal_label)
+        except Exception as e:
+            logger.error("US futures signal failed: %s", e)
 
     async def job_daily_self_report(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """매일 21:00 자가진단 보고서 + 자동 업데이트 제안."""
@@ -1468,7 +1641,7 @@ class SchedulerMixin:
         if not self.chat_id or not HAS_SENTIMENT or not self.anthropic_key:
             return
         now = datetime.now(KST)
-        if now.weekday() >= 5:
+        if not is_kr_market_open(now.date()):
             return
         try:
             universe = [
@@ -1612,7 +1785,7 @@ class SchedulerMixin:
 
         # 장중 시간 체크 (평일 08:50~15:35)
         now = datetime.now(KST)
-        if now.weekday() >= 5:  # 주말
+        if not is_kr_market_open(now.date()):  # 주말
             return
 
         try:
@@ -2157,7 +2330,7 @@ class SchedulerMixin:
         if not self.chat_id:
             return
         now = datetime.now(KST)
-        if now.weekday() >= 5:
+        if not is_kr_market_open(now.date()):
             return
         try:
             from kstock.core.risk_manager import (
@@ -2524,7 +2697,7 @@ class SchedulerMixin:
         if not self.chat_id:
             return
         now = datetime.now(KST)
-        if now.weekday() >= 5:
+        if not is_kr_market_open(now.date()):
             return
 
         try:
@@ -2607,7 +2780,7 @@ class SchedulerMixin:
         if not self.chat_id:
             return
         now = datetime.now(KST)
-        if now.weekday() >= 5:
+        if not is_kr_market_open(now.date()):
             return
 
         try:

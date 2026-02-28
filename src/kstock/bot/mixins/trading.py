@@ -55,13 +55,13 @@ class TradingMixin:
             else:
                 await message.reply_text(
                     "\u26a0\ufe0f 최적화 실패 - 데이터 부족",
-                    reply_markup=MAIN_MENU,
+                    reply_markup=get_reply_markup(context),
                 )
         except Exception as e:
             logger.error("Optimize error: %s", e, exc_info=True)
             await message.reply_text(
                 f"\u26a0\ufe0f 최적화 오류: {str(e)[:100]}",
-                reply_markup=MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
 
     # == Callback actions ====================================================

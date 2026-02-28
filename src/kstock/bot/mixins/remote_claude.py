@@ -46,7 +46,7 @@ CLAUDE_MODE_MENU = ReplyKeyboardMarkup(
         ["📊 분석", "📈 시황"],
         ["💰 잔고", "⭐ 즐겨찾기"],
         ["💬 AI질문", "📋 리포트"],
-        ["🔙 대화 종료"],
+        ["⚙️ 더보기"],
     ],
     resize_keyboard=True,
 )
@@ -277,7 +277,7 @@ class RemoteClaudeMixin:
         await update.message.reply_text(
             f"🤖 Claude 대화 종료\n"
             f"총 {turns}회 대화했습니다.",
-            reply_markup=MAIN_MENU,
+            reply_markup=get_reply_markup(context),
         )
 
     async def _handle_claude_free_chat(
@@ -363,7 +363,7 @@ class RemoteClaudeMixin:
         if self._is_blocked_prompt(prompt):
             await update.message.reply_text(
                 "🚫 차단된 명령입니다.\n위험한 시스템 명령은 실행할 수 없습니다.",
-                reply_markup=CLAUDE_MODE_MENU if context and context.user_data.get("claude_mode") else MAIN_MENU,
+                reply_markup=get_reply_markup(context),
             )
             return
 
@@ -398,7 +398,7 @@ class RemoteClaudeMixin:
         full_output = header + output
 
         # 대화 모드면 키보드 유지
-        reply_markup = CLAUDE_MODE_MENU if in_claude_mode else MAIN_MENU
+        reply_markup = get_reply_markup(context)
 
         if len(full_output) > MAX_OUTPUT_CHARS:
             summary = (
