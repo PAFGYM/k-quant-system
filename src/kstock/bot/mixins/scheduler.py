@@ -3175,20 +3175,31 @@ class SchedulerMixin:
                 "상장폐지", "거래정지", "신고가", "신저가", "목표가",
                 "투자의견", "매수", "매도", "상향", "하향",
             ]
+            # 시장 전체 뉴스 제외 키워드 (종목과 무관한 뉴스)
+            market_noise = [
+                "코스피", "코스닥", "증시", "지수", "외국인",
+                "기관", "개인", "순매수", "순매도", "국채", "금리",
+            ]
 
             alerts = []
             for ticker, name in list(ticker_names.items())[:15]:
                 try:
-                    news_list = await get_stock_news(ticker, limit=3)
+                    news_list = await get_stock_news(ticker, limit=5)
                     for news in news_list:
                         url = news.get("url", "")
                         title = news.get("title", "")
                         if not url or url in sent_news:
                             continue
+                        # 종목명이 제목에 포함된 뉴스만 (잘못된 매칭 방지)
+                        name_clean = name.replace("우", "").replace("홀딩스", "")
+                        name_variants = {name, name_clean, name_clean[:3], name_clean[:2]}
+                        has_name = any(v in title for v in name_variants if len(v) >= 2)
+                        if not has_name:
+                            continue  # 종목명이 없는 뉴스는 무시
                         # 중요 뉴스 필터
                         is_important = any(kw in title for kw in important_kw)
                         if is_important:
-                            alerts.append(f"📰 {name}: {title}")
+                            alerts.append(f"📰 {name}: {title}\n🔗 {url}")
                             sent_news.add(url)
                     await asyncio.sleep(0.3)
                 except Exception as e:
