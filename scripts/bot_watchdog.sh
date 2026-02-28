@@ -43,16 +43,11 @@ if [ "$PROC_COUNT" -gt 1 ]; then
     exit 0
 fi
 
-# 3. 연속 409 Conflict 감지 (최근 5분)
+# 3. 연속 409 Conflict 감지 (최근 5분) — 로그만 기록
+# 주의: 외부에서 getUpdates/deleteWebhook 호출 시 봇 polling과 경합하여 409 악화됨
 CONFLICT_COUNT=$(tail -100 "$LOG_FILE" 2>/dev/null | grep -c "409 Conflict")
-if [ "$CONFLICT_COUNT" -gt 5 ]; then
-    log "ALERT: Too many 409 Conflicts ($CONFLICT_COUNT in recent logs). Cleaning up..."
-    TOKEN=$(grep TELEGRAM_BOT_TOKEN .env | cut -d'=' -f2 | tr -d '"' | tr -d "'")
-    curl -s "https://api.telegram.org/bot${TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
-    # getUpdates 세션 리셋
-    curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates?offset=-1&timeout=0" > /dev/null 2>&1
-    log "OK: Webhook deleted + session reset"
-    exit 0
+if [ "$CONFLICT_COUNT" -gt 20 ]; then
+    log "ALERT: Too many 409 Conflicts ($CONFLICT_COUNT). Check for duplicate processes."
 fi
 
 # 4. 최근 getUpdates 200 OK 확인 (5분 내)

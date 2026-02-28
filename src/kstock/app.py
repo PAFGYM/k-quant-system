@@ -31,6 +31,7 @@ def main() -> None:
 
     logger.info("K-Quant System v5.9.5 started. Press Ctrl+C to stop.")
     app.run_polling(
+        poll_interval=1.0,
         drop_pending_updates=True,
         allowed_updates=["message", "callback_query"],
     )
