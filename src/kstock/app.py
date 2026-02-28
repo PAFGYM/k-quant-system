@@ -29,8 +29,11 @@ def main() -> None:
     app = bot.build_app()
     bot.schedule_jobs(app)
 
-    logger.info("K-Quant System v3.5.0 started. Press Ctrl+C to stop.")
-    app.run_polling(drop_pending_updates=True)
+    logger.info("K-Quant System v5.9.5 started. Press Ctrl+C to stop.")
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"],
+    )
 
 
 if __name__ == "__main__":

@@ -227,10 +227,18 @@ class AdminExtrasMixin:
                 )
 
         elif subcmd == "close":
-            # 관리자 메뉴 닫기 + 상태 초기화
+            # 관리자 메뉴 닫기 + 상태 초기화 + Reply Keyboard 복구
             context.user_data.pop("admin_mode", None)
             context.user_data.pop("admin_faq_type", None)
             await query.edit_message_text("\U0001f6e0 관리자 메뉴를 닫았습니다.")
+            try:
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="📱 메뉴를 사용하세요.",
+                    reply_markup=get_reply_markup(context),
+                )
+            except Exception:
+                pass
 
         elif subcmd == "security":
             # v3.6: 보안 감사

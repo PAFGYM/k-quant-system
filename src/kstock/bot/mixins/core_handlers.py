@@ -1555,12 +1555,18 @@ class CoreHandlersMixin:
     # == Dismiss (generic close button) =======================================
 
     async def _action_dismiss(self, query, context, payload: str) -> None:
-        """범용 닫기 버튼 — 메뉴를 닫고 상태 정리."""
+        """범용 닫기 버튼 — 메뉴를 닫고 상태 정리 + Reply Keyboard 복구."""
         # 진행 중인 상태 클리어
         for key in ("admin_mode", "admin_faq_type", "agent_mode", "agent_type"):
             context.user_data.pop(key, None)
         try:
             await query.edit_message_text("✅ 메뉴를 닫았습니다.")
+            # Reply Keyboard 복구 (InlineKeyboard 닫은 후 하단 메뉴 보이게)
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="📱 메뉴를 사용하세요.",
+                reply_markup=get_reply_markup(context),
+            )
         except Exception:
             pass
 
@@ -1577,7 +1583,10 @@ class CoreHandlersMixin:
         if fb_type == "like":
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
-                await query.message.reply_text("👍 감사합니다! 피드백이 반영되었습니다.")
+                await query.message.reply_text(
+                    "👍 감사합니다! 피드백이 반영되었습니다.",
+                    reply_markup=get_reply_markup(context),
+                )
             except Exception:
                 pass
         elif fb_type == "dislike":
@@ -1590,7 +1599,8 @@ class CoreHandlersMixin:
                 await query.edit_message_reply_markup(reply_markup=None)
                 await query.message.reply_text(
                     f"👎 {menu_name} 기능 오류 감지\n\n"
-                    f"자동 진단을 시작합니다..."
+                    f"자동 진단을 시작합니다...",
+                    reply_markup=get_reply_markup(context),
                 )
 
                 # 자동 오류 진단: 메시지 내용 분석
@@ -1630,13 +1640,15 @@ class CoreHandlersMixin:
                     f"감지된 문제:\n" +
                     "\n".join(f"  - {i}" for i in issues_found) +
                     f"\n\n이 진단은 자동으로 로그에 기록되었습니다.\n"
-                    f"구체적인 문제를 메시지로 알려주시면 더 정확한 수정이 가능합니다."
+                    f"구체적인 문제를 메시지로 알려주시면 더 정확한 수정이 가능합니다.",
+                    reply_markup=get_reply_markup(context),
                 )
             except Exception as e:
                 logger.error("피드백 자동진단 오류: %s", e)
                 try:
                     await query.message.reply_text(
-                        f"👎 {menu_name} 피드백이 기록되었습니다."
+                        f"👎 {menu_name} 피드백이 기록되었습니다.",
+                        reply_markup=get_reply_markup(context),
                     )
                 except Exception:
                     pass
@@ -1653,6 +1665,12 @@ class CoreHandlersMixin:
                 f"{emoji} 오늘 평가: {rating}\n\n"
                 f"소중한 평가 감사합니다.\n"
                 f"더 나은 서비스를 위해 노력하겠습니다."
+            )
+            # Reply Keyboard 복구
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="📱 메뉴를 사용하세요.",
+                reply_markup=get_reply_markup(context),
             )
         except Exception:
             pass

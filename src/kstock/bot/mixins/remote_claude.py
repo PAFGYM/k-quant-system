@@ -609,18 +609,13 @@ class RemoteClaudeMixin:
         error_source = type(error).__name__
         error_str = str(error)
 
-        # Conflict: 쿨다운 무시하고 즉시 자동 deleteWebhook
+        # Conflict: polling 경합 — 프레임워크 자체 retry에 맡김
         if "conflict" in error_str.lower():
             if not hasattr(self, "_conflict_count"):
                 self._conflict_count = 0
             self._conflict_count += 1
-            if self._conflict_count >= 3:
-                try:
-                    await context.bot.delete_webhook(drop_pending_updates=True)
-                    logger.info("Auto-fix: deleteWebhook (conflict count=%d)", self._conflict_count)
-                    self._conflict_count = 0
-                except Exception as dw_err:
-                    logger.warning("deleteWebhook failed: %s", dw_err)
+            if self._conflict_count % 10 == 0:
+                logger.warning("409 Conflict ongoing (count=%d). Check for duplicate bot processes.", self._conflict_count)
             return
 
         # Telegram 네트워크 오류는 자동 수정 대상 아님
