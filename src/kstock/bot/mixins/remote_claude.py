@@ -606,8 +606,29 @@ class RemoteClaudeMixin:
         if error is None:
             return
 
-        # 무한루프 방지: 최근 60초 내 같은 오류면 건너뛰기
         error_source = type(error).__name__
+        error_str = str(error)
+
+        # Conflict: 쿨다운 무시하고 즉시 자동 deleteWebhook
+        if "conflict" in error_str.lower():
+            if not hasattr(self, "_conflict_count"):
+                self._conflict_count = 0
+            self._conflict_count += 1
+            if self._conflict_count >= 3:
+                try:
+                    await context.bot.delete_webhook(drop_pending_updates=True)
+                    logger.info("Auto-fix: deleteWebhook (conflict count=%d)", self._conflict_count)
+                    self._conflict_count = 0
+                except Exception as dw_err:
+                    logger.warning("deleteWebhook failed: %s", dw_err)
+            return
+
+        # Telegram 네트워크 오류는 자동 수정 대상 아님
+        skip_patterns = ["Timed out", "Network", "Connection"]
+        if any(p.lower() in error_str.lower() for p in skip_patterns):
+            return
+
+        # 무한루프 방지: 최근 60초 내 같은 오류면 건너뛰기
         now = time.monotonic()
         last_fix = getattr(self, "_last_auto_fix", {})
         last_time = last_fix.get(error_source, 0)
@@ -617,13 +638,6 @@ class RemoteClaudeMixin:
         if not hasattr(self, "_last_auto_fix"):
             self._last_auto_fix = {}
         self._last_auto_fix[error_source] = now
-
-        # Conflict / Telegram 네트워크 오류는 자동 수정 대상 아님
-        error_str = str(error)
-        skip_patterns = ["Conflict", "Timed out", "Network", "Connection"]
-        if any(p.lower() in error_str.lower() for p in skip_patterns):
-            logger.warning("Auto-fix skipped (network/conflict): %s", error_source)
-            return
 
         tb = traceback.format_exception(type(error), error, error.__traceback__)
         error_msg = "".join(tb)
