@@ -1,6 +1,8 @@
 """Commands and analysis functions."""
 from __future__ import annotations
 
+import re
+
 from kstock.bot.bot_imports import *  # noqa: F403
 
 
@@ -1281,6 +1283,65 @@ class CommandsMixin:
             except Exception:
                 pass
 
+    @staticmethod
+    def _fix_hallucinated_prices(text: str, price_map: dict[str, float]) -> str:
+        """AI 응답에서 종목별 환각 가격을 실제 가격 기준으로 교체.
+
+        price_map: {종목명: 실시간가격} 매핑.
+        종목명 이후 15줄 내에서 실제 가격 대비 ±30% 범위 밖 가격을
+        '[현재가 XXX,XXX원 기준]'으로 교체.
+        """
+        if not price_map:
+            return text
+
+        lines = text.split("\n")
+        result_lines = []
+        name_ranges = {}
+        for name, price in price_map.items():
+            if price > 0:
+                name_ranges[name] = (price * 0.70, price * 1.30, price)
+
+        current_stock = None
+        stock_line_count = 0
+        for line in lines:
+            for name in name_ranges:
+                if name in line:
+                    current_stock = name
+                    stock_line_count = 0
+                    break
+
+            if current_stock and stock_line_count < 15:
+                stock_line_count += 1
+                lo, hi, actual = name_ranges[current_stock]
+
+                def _replace_bad(m, _lo=lo, _hi=hi, _actual=actual):
+                    price_str = m.group(1)
+                    val = float(price_str.replace(",", ""))
+                    if val < _lo or val > _hi:
+                        return f"[현재가 {_actual:,.0f}원 기준]"
+                    return m.group(0)
+
+                # "73,500~76,500원" 같은 범위 패턴 먼저 처리
+                line = re.sub(
+                    r"(\d{1,3}(?:,\d{3})+)\s*~\s*(\d{1,3}(?:,\d{3})+)\s*원",
+                    lambda m, _lo=lo, _hi=hi, _actual=actual: (
+                        f"[현재가 {_actual:,.0f}원 기준]"
+                        if (float(m.group(1).replace(",", "")) < _lo
+                            or float(m.group(2).replace(",", "")) > _hi)
+                        else m.group(0)
+                    ),
+                    line,
+                )
+                # 단일 가격 패턴
+                line = re.sub(
+                    r"(\d{1,3}(?:,\d{3})+)\s*원",
+                    _replace_bad,
+                    line,
+                )
+            result_lines.append(line)
+
+        return "\n".join(result_lines)
+
     async def _handle_buy_pick_with_live_data(self, query, context) -> None:
         """매수 추천 — 실시간 스캔 데이터 기반 (AI 환각 주가 완전 차단).
 
@@ -1313,6 +1374,7 @@ class CommandsMixin:
             # 2. TOP3 실시간 가격 강제 조회 (KIS→Naver→yfinance)
             top3 = results[:3]
             stock_data_lines = []
+            live_prices = {}  # 종목명 → 실시간 가격 매핑
             for i, r in enumerate(top3, 1):
                 live_price = r.info.current_price
                 try:
@@ -1321,6 +1383,7 @@ class CommandsMixin:
                         live_price = p
                 except Exception:
                     pass
+                live_prices[r.name] = live_price
 
                 medals = {1: "1위", 2: "2위", 3: "3위"}
                 signal_kr = {"BUY": "매수", "WATCH": "관심", "HOLD": "홀딩", "SELL": "매도"}.get(r.score.signal, "관심")
@@ -1335,7 +1398,10 @@ class CommandsMixin:
             # 3. AI에 실시간 데이터 주입해서 분석 요청
             enriched_question = (
                 f"아래 3개 종목은 K-Quant 스캔 엔진이 실시간으로 선정한 오늘의 추천종목이다.\n"
-                f"[절대 규칙] 아래 데이터의 현재가만 사용하라. 너의 학습 데이터에 있는 과거 주가를 절대 사용 금지.\n\n"
+                f"[절대 규칙]\n"
+                f"1. 아래 데이터의 현재가만 사용하라. 너의 학습 데이터에 있는 과거 주가를 절대 사용 금지.\n"
+                f"2. '종가', '시가총액', '시가', '고가', '저가' 등 아래에 없는 가격 정보를 절대 생성 금지.\n"
+                f"3. 목표가/손절가는 반드시 아래 현재가 기준 비율(%)로 산출하라.\n\n"
                 f"[실시간 스캔 결과 — {now.strftime('%Y-%m-%d %H:%M')} 기준]\n"
                 f"{stock_block}\n\n"
                 f"각 종목에 대해 간단히 분석하고, 매수 매력도를 설명해줘.\n"
@@ -1350,6 +1416,9 @@ class CommandsMixin:
             ctx = await build_full_context_with_macro(self.db, self.macro_client, self.yf_client)
             v_names = {r.name for r in top3}
             answer = await handle_ai_question(enriched_question, ctx, self.db, chat_mem, verified_names=v_names)
+
+            # 4. 가격 환각 후처리: AI가 생성한 가격을 실제 가격과 교체
+            answer = self._fix_hallucinated_prices(answer, live_prices)
 
             # 후속 질문 파싱
             answer, followup_buttons = self._parse_followup_buttons(answer)
