@@ -138,6 +138,12 @@ class CoreHandlersMixin:
         self._job_queue = jq
         self._application = app  # WebSocket 콜백에서 bot 접근용
 
+        # v5.9: 매일 06:00 일일 운영 지침 → AI 자율 판단
+        jq.run_daily(
+            self.job_daily_directive,
+            time=dt_time(hour=6, minute=0, tzinfo=KST),
+            name="daily_directive",
+        )
         # 매수 플래너 (07:50 평일)
         jq.run_daily(
             self.job_premarket_buy_planner,
@@ -566,6 +572,13 @@ class CoreHandlersMixin:
         # 관리자 모드: 오류 스크린샷 접수
         admin_mode = context.user_data.get("admin_mode")
         if admin_mode:
+            if admin_mode == "directive_edit":
+                # 지침 수정은 텍스트만 가능
+                await update.message.reply_text(
+                    "📋 운영 지침은 텍스트로만 수정 가능합니다.\n텍스트를 보내주세요.",
+                )
+                context.user_data["admin_mode"] = "directive_edit"  # 유지
+                return
             context.user_data.pop("admin_mode", None)
             caption = update.message.caption or "이미지 첨부"
             await self._save_admin_report(update, admin_mode, caption, has_image=True)
@@ -876,10 +889,13 @@ class CoreHandlersMixin:
                     context.user_data.pop("awaiting_stock_add", None)
                     # 종목 못 찾으면 일반 처리로 진행
 
-            # 0-0.5. 관리자 모드: 오류 신고 / 업데이트 요청
+            # 0-0.5. 관리자 모드: 오류 신고 / 업데이트 요청 / 운영 지침 수정
             admin_mode = context.user_data.get("admin_mode")
             if admin_mode:
                 context.user_data.pop("admin_mode", None)
+                if admin_mode == "directive_edit":
+                    await self._save_directive_edit(update, context, text)
+                    return
                 await self._save_admin_report(update, admin_mode, text)
                 return
 

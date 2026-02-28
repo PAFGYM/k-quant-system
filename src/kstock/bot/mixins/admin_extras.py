@@ -39,6 +39,7 @@ def _admin_buttons() -> list:
         ],
         [
             InlineKeyboardButton("\U0001f4a1 업데이트 요청", callback_data="adm:request"),
+            InlineKeyboardButton("📋 운영 지침", callback_data="adm:directive"),
         ],
         [
             InlineKeyboardButton("\U0001f512 보안 감사", callback_data="adm:security"),
@@ -176,6 +177,55 @@ class AdminExtrasMixin:
                 reply_markup=InlineKeyboardMarkup(_admin_buttons()),
             )
 
+        elif subcmd == "directive":
+            # 운영 지침 조회/수정
+            sub2 = payload.split(":", 1)[1] if ":" in payload else ""
+            directive_path = Path("data/daily_directive.md")
+
+            if sub2 == "edit":
+                # 수정 모드 진입
+                context.user_data["admin_mode"] = "directive_edit"
+                await query.edit_message_text(
+                    "📋 운영 지침 수정 모드\n\n"
+                    "새로운 지침을 메시지로 보내주세요.\n"
+                    "전체 내용이 교체됩니다.\n\n"
+                    "또는 '추가: ...' 형식으로 보내면\n"
+                    "'오늘의 특별 지침' 섹션에 추가됩니다.",
+                    reply_markup=InlineKeyboardMarkup(back_btn),
+                )
+            elif sub2 == "run":
+                # 지금 즉시 실행
+                await query.edit_message_text("📋 운영 지침 실행 중...")
+                try:
+                    await self.job_daily_directive(context)
+                    await query.edit_message_text(
+                        "📋 운영 지침 실행 완료!\n채팅에서 결과를 확인하세요.",
+                        reply_markup=InlineKeyboardMarkup(back_btn),
+                    )
+                except Exception as e:
+                    await query.edit_message_text(
+                        f"⚠️ 실행 실패: {e}",
+                        reply_markup=InlineKeyboardMarkup(back_btn),
+                    )
+            else:
+                # 지침 조회
+                if directive_path.exists():
+                    content = directive_path.read_text(encoding="utf-8")
+                    # 4000자 제한
+                    if len(content) > 3500:
+                        content = content[:3500] + "\n..."
+                else:
+                    content = "(지침 파일 없음)"
+                buttons = [
+                    [InlineKeyboardButton("✏️ 수정", callback_data="adm:directive:edit"),
+                     InlineKeyboardButton("▶️ 지금 실행", callback_data="adm:directive:run")],
+                    [InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu")],
+                ]
+                await query.edit_message_text(
+                    f"📋 현재 운영 지침\n{'━' * 20}\n\n{content}",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+
         elif subcmd == "close":
             # 관리자 메뉴 닫기 + 상태 초기화
             context.user_data.pop("admin_mode", None)
@@ -300,6 +350,42 @@ class AdminExtrasMixin:
             f"즉시 수정/반영됩니다!",
             reply_markup=InlineKeyboardMarkup(_admin_buttons()),
         )
+
+    async def _save_directive_edit(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str,
+    ) -> None:
+        """운영 지침 수정/추가 처리."""
+        directive_path = Path("data/daily_directive.md")
+        directive_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if text.startswith("추가:") or text.startswith("추가 :"):
+            # '오늘의 특별 지침' 섹션에 추가
+            addition = text.split(":", 1)[1].strip()
+            if directive_path.exists():
+                content = directive_path.read_text(encoding="utf-8")
+            else:
+                content = ""
+            # 특별 지침 섹션 찾아서 추가
+            marker = "## 오늘의 특별 지침"
+            if marker in content:
+                content = content.replace(
+                    marker,
+                    f"{marker}\n- {addition}",
+                )
+            else:
+                content += f"\n\n{marker}\n- {addition}\n"
+            directive_path.write_text(content, encoding="utf-8")
+            await update.message.reply_text(
+                f"📋 특별 지침 추가 완료!\n\n➕ {addition}",
+                reply_markup=InlineKeyboardMarkup(_admin_buttons()),
+            )
+        else:
+            # 전체 교체
+            directive_path.write_text(text, encoding="utf-8")
+            await update.message.reply_text(
+                f"📋 운영 지침 전체 교체 완료!\n\n📝 {len(text)}자 저장됨",
+                reply_markup=InlineKeyboardMarkup(_admin_buttons()),
+            )
 
     async def cmd_admin(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

@@ -994,6 +994,154 @@ class SchedulerMixin:
         else:
             return "🔴", "경계"
 
+    async def job_daily_directive(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """v5.9: 매일 06:00 일일 운영 지침 읽기 + AI 자율 판단.
+
+        data/daily_directive.md를 읽고, 시장 데이터 + 보유종목 상황과 결합하여
+        AI가 오늘의 운영 계획을 수립. 결과를 텔레그램으로 전송.
+        """
+        if not self.chat_id:
+            return
+        try:
+            from pathlib import Path
+
+            # 1. 지침 파일 읽기
+            directive_path = Path("data/daily_directive.md")
+            if not directive_path.exists():
+                logger.warning("daily_directive.md not found")
+                return
+            directive = directive_path.read_text(encoding="utf-8")
+
+            # 2. 시장 데이터 수집
+            macro = await self.macro_client.get_snapshot()
+            signal_emoji, signal_label = self._market_signal(macro)
+
+            # 3. 보유종목 상황
+            holdings = self.db.get_active_holdings()
+            holdings_text = ""
+            alert_stocks = []
+            if holdings:
+                for h in holdings:
+                    name = h.get("name", h.get("ticker", ""))
+                    pnl = h.get("pnl_pct", 0)
+                    horizon = h.get("holding_type", "swing")
+                    current = h.get("current_price", 0)
+                    buy = h.get("buy_price", 0)
+                    # 실시간 가격 시도
+                    try:
+                        current = await self._get_price(h.get("ticker", ""), base_price=buy)
+                        if buy > 0 and current > 0:
+                            pnl = (current - buy) / buy * 100
+                    except Exception:
+                        pass
+                    holdings_text += f"  {name}: {pnl:+.1f}% (매수 {buy:,.0f} → 현재 {current:,.0f}, {horizon})\n"
+                    # 알림 대상 감지
+                    if pnl <= -7 and horizon not in ("long", "long_term"):
+                        alert_stocks.append(f"🔴 {name} {pnl:+.1f}% — 손절 검토 필요")
+                    elif pnl >= 10:
+                        alert_stocks.append(f"🟢 {name} {pnl:+.1f}% — 부분 익절 타이밍")
+            else:
+                holdings_text = "  보유종목 없음\n"
+
+            # 4. 즐겨찾기 종목
+            watchlist = self.db.get_watchlist()
+            watch_names = ", ".join(w.get("name", w.get("ticker", ""))[:6] for w in watchlist[:10]) if watchlist else "없음"
+
+            # 5. 시장 개장 여부
+            today = datetime.now(KST).date()
+            market_open = is_kr_market_open(today)
+            market_note = "개장일" if market_open else "휴장일"
+
+            # 6. AI 프롬프트 구성
+            prompt = (
+                f"K-Quant 에이전트 일일 운영 지침을 읽고 오늘의 운영 계획을 수립해주세요.\n\n"
+                f"━━━ 운영 지침 ━━━\n{directive}\n\n"
+                f"━━━ 오늘의 상황 ━━━\n"
+                f"날짜: {today.strftime('%Y-%m-%d (%A)')}\n"
+                f"한국 시장: {market_note}\n"
+                f"시장 신호등: {signal_emoji} {signal_label}\n\n"
+                f"[글로벌 시장]\n"
+                f"S&P500: {macro.spx_change_pct:+.2f}%\n"
+                f"나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
+                f"VIX: {macro.vix:.1f} ({macro.vix_change_pct:+.1f}%)\n"
+                f"환율: {macro.usdkrw:,.0f}원 ({macro.usdkrw_change_pct:+.1f}%)\n"
+                f"BTC: ${macro.btc_price:,.0f} ({macro.btc_change_pct:+.1f}%)\n"
+                f"레짐: {macro.regime}\n"
+                f"공포탐욕: {macro.fear_greed_score:.0f} ({macro.fear_greed_label})\n\n"
+                f"[보유종목 현황]\n{holdings_text}\n"
+                f"[즐겨찾기]\n  {watch_names}\n\n"
+            )
+
+            if alert_stocks:
+                prompt += f"[긴급 알림 대상]\n" + "\n".join(alert_stocks) + "\n\n"
+
+            prompt += (
+                f"아래 형식으로 오늘의 운영 계획을 작성해주세요:\n\n"
+                f"1. 오늘의 시장 모드 (한 줄)\n"
+                f"   예: '🟢 적극 모드 — VIX 안정, 미국장 상승'\n"
+                f"   예: '🔴 방어 모드 — VIX 급등, 미국장 급락'\n"
+                f"   예: '📅 휴장일 — 미국 시장 모니터링만'\n\n"
+                f"2. 보유종목 체크포인트 (종목별 1줄)\n"
+                f"   - 지침의 손절/익절 기준에 해당하는 종목 체크\n"
+                f"   - 오늘 주의할 이벤트가 있는 종목\n\n"
+                f"3. 오늘 모니터링 포인트 (2-3줄)\n"
+                f"   - 주목할 이벤트/지표\n"
+                f"   - 관심 섹터 동향\n\n"
+                f"4. 에이전트 행동 계획\n"
+                f"   - 오늘 어떤 알림을 집중할지\n"
+                f"   - 모니터링 강도 (평상시/강화/최소)\n\n"
+                f"볼드(**) 사용 금지. 이모지로 구분. 전체 300자 이내."
+            )
+
+            system_prompt = (
+                "너는 K-Quant 에이전트다. 주호님의 투자 비서로 매일 아침 6시에 "
+                "운영 지침을 읽고 오늘 하루 어떻게 운영할지 계획을 세운다.\n"
+                "행동 지시가 아닌 정보 전달. 매도 권유 금지. 공포 유발 금지.\n"
+                "간결하고 실용적으로. 볼드(**) 금지."
+            )
+
+            if hasattr(self, 'ai') and self.ai:
+                raw = await self.ai.analyze(
+                    "daily_directive", prompt,
+                    system=system_prompt, max_tokens=800, temperature=0.3,
+                )
+                from kstock.bot.chat_handler import _sanitize_response
+                plan = _sanitize_response(raw.strip())
+            else:
+                # AI 없으면 기본 계획
+                plan = (
+                    f"1. 시장 모드: {signal_emoji} {signal_label}\n"
+                    f"2. VIX {macro.vix:.1f}, 환율 {macro.usdkrw:,.0f}원\n"
+                    f"3. 보유 {len(holdings)}종목, 즐겨찾기 {len(watchlist)}종목\n"
+                    f"4. 모니터링: 평상시"
+                )
+
+            # 7. 긴급 알림이 있으면 별도 강조
+            alert_text = ""
+            if alert_stocks:
+                alert_text = "\n\n⚠️ 긴급 체크\n" + "\n".join(alert_stocks)
+
+            msg = (
+                f"📋 일일 운영 계획\n"
+                f"{'━' * 22}\n\n"
+                f"{plan}"
+                f"{alert_text}\n\n"
+                f"{'━' * 22}\n"
+                f"🤖 K-Quant Agent | {datetime.now(KST).strftime('%m/%d %H:%M')}"
+            )
+
+            await context.bot.send_message(chat_id=self.chat_id, text=msg[:4000])
+            self.db.upsert_job_run("daily_directive", _today(), status="success")
+            logger.info("Daily directive sent")
+        except Exception as e:
+            logger.error("Daily directive failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "daily_directive", _today(),
+                status="error", message=str(e),
+            )
+
     async def job_us_premarket_briefing(
         self, context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
@@ -2985,7 +3133,7 @@ class SchedulerMixin:
                     + "\n".join(alerts)
                 )
                 await context.bot.send_message(
-                    chat_id=self.admin_chat_id, text=msg,
+                    chat_id=self.chat_id, text=msg,
                 )
 
             self.db.upsert_job_run("short_selling_collect", today_str, status="success")
@@ -3052,7 +3200,7 @@ class SchedulerMixin:
                     + "\n\n".join(alerts[:5])
                 )
                 await context.bot.send_message(
-                    chat_id=self.admin_chat_id, text=msg,
+                    chat_id=self.chat_id, text=msg,
                 )
                 logger.info("News alerts sent: %d", len(alerts))
         except Exception as e:
