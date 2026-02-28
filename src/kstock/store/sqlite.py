@@ -844,6 +844,22 @@ CREATE TABLE IF NOT EXISTS execution_replay (
     direction_match     INTEGER,
     created_at          TEXT    NOT NULL
 );
+
+-- v6.0: 글로벌 뉴스 헤드라인
+CREATE TABLE IF NOT EXISTS global_news (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    title           TEXT    NOT NULL,
+    source          TEXT    NOT NULL,
+    url             TEXT    DEFAULT '',
+    category        TEXT    DEFAULT 'market',
+    lang            TEXT    DEFAULT 'ko',
+    impact_score    INTEGER DEFAULT 0,
+    is_urgent       INTEGER DEFAULT 0,
+    published       TEXT    DEFAULT '',
+    created_at      TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_global_news_created ON global_news(created_at);
+CREATE INDEX IF NOT EXISTS idx_global_news_urgent ON global_news(is_urgent, created_at);
 """
 
 
@@ -3710,3 +3726,74 @@ class SQLiteStore:
                 (strategy, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── v6.0: 글로벌 뉴스 ──────────────────────────────────────
+
+    def save_global_news(self, items: list[dict]) -> int:
+        """글로벌 뉴스 저장. 중복 URL 스킵. 저장 건수 반환."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        saved = 0
+        with self._connect() as conn:
+            for item in items:
+                url = item.get("url", "")
+                # URL 기반 중복 체크
+                if url:
+                    existing = conn.execute(
+                        "SELECT id FROM global_news WHERE url=?", (url,)
+                    ).fetchone()
+                    if existing:
+                        continue
+                conn.execute(
+                    "INSERT INTO global_news "
+                    "(title, source, url, category, lang, impact_score, "
+                    "is_urgent, published, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        item.get("title", ""),
+                        item.get("source", ""),
+                        url,
+                        item.get("category", "market"),
+                        item.get("lang", "ko"),
+                        item.get("impact_score", 0),
+                        1 if item.get("is_urgent") else 0,
+                        item.get("published", ""),
+                        now,
+                    ),
+                )
+                saved += 1
+        return saved
+
+    def get_recent_global_news(
+        self, limit: int = 10, hours: int = 24, urgent_only: bool = False,
+    ) -> list[dict]:
+        """최근 글로벌 뉴스 조회."""
+        cutoff = (
+            datetime.now() - timedelta(hours=hours)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            if urgent_only:
+                rows = conn.execute(
+                    "SELECT * FROM global_news "
+                    "WHERE created_at >= ? AND is_urgent = 1 "
+                    "ORDER BY impact_score DESC, created_at DESC LIMIT ?",
+                    (cutoff, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM global_news "
+                    "WHERE created_at >= ? "
+                    "ORDER BY impact_score DESC, created_at DESC LIMIT ?",
+                    (cutoff, limit),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def cleanup_old_news(self, days: int = 7) -> int:
+        """오래된 뉴스 정리."""
+        cutoff = (
+            datetime.now() - timedelta(days=days)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM global_news WHERE created_at < ?", (cutoff,)
+            )
+        return cursor.rowcount

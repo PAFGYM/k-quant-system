@@ -766,6 +766,9 @@ class AdminExtrasMixin:
                 InlineKeyboardButton("🎯 매수추천", callback_data="quick_q:buy_pick"),
             ],
             [
+                InlineKeyboardButton("🎯 4매니저 추천", callback_data="quick_q:mgr4"),
+            ],
+            [
                 InlineKeyboardButton("📊 호가조회", callback_data="orderbook:select"),
                 InlineKeyboardButton("🤖 AI상태", callback_data="ai:status"),
             ],

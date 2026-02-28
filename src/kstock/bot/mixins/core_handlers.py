@@ -351,6 +351,13 @@ class CoreHandlersMixin:
             first=300,
             name="us_futures_signal",
         )
+        # v6.1: 글로벌 뉴스 수집 (30분 기본, 위기 시 5분까지 적응형)
+        jq.run_repeating(
+            self.job_global_news_collect,
+            interval=1800,
+            first=60,
+            name="global_news_collect",
+        )
         logger.info(
             "Scheduled: buy_planner(weekday 07:50), us_premarket(07:00), "
             "morning(07:30), intraday(1min), "
@@ -366,7 +373,8 @@ class CoreHandlersMixin:
             "health_check(30min), "
             "journal_review(Sun 10:00), sector_rotation(weekday 09:05), "
             "contrarian_scan(weekday 14:00), daily_rating(19:00), "
-            "short_selling(weekday 16:15), news_monitor(30min) KST"
+            "short_selling(weekday 16:15), news_monitor(30min), "
+            "global_news(30min adaptive) KST"
         )
 
     # == 봇 시작 시 클로드 메뉴 자동 발송 ====================================

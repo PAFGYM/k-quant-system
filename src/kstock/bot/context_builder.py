@@ -121,6 +121,9 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 [오늘의 시장]
 {market_data}
 
+[글로벌 이슈 — 실시간 뉴스 헤드라인]
+{global_news}
+
 [최근 추천 기록]
 {recent_recommendations}
 
@@ -221,6 +224,7 @@ def build_system_prompt(context: dict) -> str:
         ),
         portfolio_data=context.get("portfolio", "보유 종목 정보 없음"),
         market_data=context.get("market", "시장 데이터 없음"),
+        global_news=context.get("global_news", "글로벌 이슈 없음"),
         recent_recommendations=context.get("recommendations", "최근 추천 없음"),
         active_policies=context.get("policies", "활성 정책 없음"),
         recent_reports=context.get("reports", "최근 리포트 없음"),
@@ -540,6 +544,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
     (
         portfolio, market, recommendations, policies, reports, financials,
         investor_style, portfolio_solutions, trade_lessons_text,
+        global_news_text,
     ) = await asyncio.gather(
         loop.run_in_executor(None, get_portfolio_context, db),
         loop.run_in_executor(None, get_market_context, macro_dict),
@@ -550,6 +555,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
         loop.run_in_executor(None, _get_investor_style_context, db),
         loop.run_in_executor(None, _get_portfolio_solutions_context, db),
         loop.run_in_executor(None, _get_trade_lessons_context, db),
+        loop.run_in_executor(None, _get_global_news_context, db),
     )
 
     # 실시간 주가 데이터 주입 (yf_client가 있으면)
@@ -574,6 +580,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
         "investor_style": investor_style,
         "portfolio_with_solutions": portfolio_solutions,
         "trade_lessons": trade_lessons_text,
+        "global_news": global_news_text,
     }
 
 
@@ -656,3 +663,24 @@ def _get_trade_lessons_context(db) -> str:
     except Exception as e:
         logger.warning("Failed to get trade lessons: %s", e)
         return "매매 교훈 없음"
+
+
+def _get_global_news_context(db) -> str:
+    """v6.0: 글로벌 뉴스 컨텍스트 (DB에서 최근 뉴스 조회)."""
+    try:
+        news = db.get_recent_global_news(limit=8, hours=12)
+        if not news:
+            return "최근 수집된 글로벌 이슈 없음"
+        lines = []
+        for item in news:
+            urgency = "🚨" if item.get("is_urgent") else "📰"
+            impact = item.get("impact_score", 0)
+            impact_tag = f" [영향:{impact}/10]" if impact > 0 else ""
+            lines.append(
+                f"{urgency} [{item.get('source', '')}] "
+                f"{item.get('title', '')}{impact_tag}"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning("Failed to get global news context: %s", e)
+        return "글로벌 뉴스 조회 실패"

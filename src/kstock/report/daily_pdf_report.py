@@ -30,6 +30,7 @@ try:
     from reportlab.platypus import (
         SimpleDocTemplate, Paragraph, Table,
         TableStyle, Spacer, PageBreak, Image,
+        KeepTogether,
     )
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.pdfbase import pdfmetrics
@@ -157,11 +158,23 @@ def _table_style(font_name: str = "Korean"):
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1),
          [colors.white, colors.HexColor("#f8f9fa")]),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),     # 3→4
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),  # 3→4
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),     # 4→6 (한글 폰트 겹침 방지)
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),  # 4→6
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),    # 3→4
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),   # 3→4
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ])
+
+
+def _cell_para(text: str, font_name: str = "Korean", size: int = 7) -> Paragraph:
+    """테이블 셀용 Paragraph (자동 줄바꿈, 한글 CJK wordWrap)."""
+    if not HAS_REPORTLAB:
+        return str(text)
+    style = ParagraphStyle(
+        "cell", fontName=font_name, fontSize=size, leading=size + 4,
+        wordWrap="CJK",
+    )
+    return Paragraph(str(text), style)
 
 
 def _generate_portfolio_pnl_chart(holdings: list[dict]) -> str | None:
@@ -250,6 +263,7 @@ async def generate_daily_pdf(
     pulse_history: list | None = None,
     date: datetime | None = None,
     yf_client=None,
+    global_news: list[dict] | None = None,
 ) -> str | None:
     """일일 PDF 리포트 생성.
 
@@ -260,6 +274,7 @@ async def generate_daily_pdf(
         sector_data: Sector strength data.
         pulse_history: Market pulse history records.
         date: Report date. Defaults to today.
+        global_news: List of global news dicts from DB.
 
     Returns:
         File path of generated PDF, or None if reportlab unavailable.
@@ -362,6 +377,7 @@ async def generate_daily_pdf(
     idx_table = Table(
         index_data,
         colWidths=[35 * mm, 35 * mm, 30 * mm, 30 * mm],
+        rowHeights=[18] + [15] * (len(index_data) - 1),
     )
     idx_table.setStyle(_table_style(font_name))
     elements.append(idx_table)
@@ -370,7 +386,9 @@ async def generate_daily_pdf(
     market_chart = _generate_market_gauge_chart(macro)
     if market_chart and HAS_REPORTLAB:
         elements.append(Spacer(1, 3 * mm))
-        elements.append(Image(market_chart, width=160 * mm, height=60 * mm))
+        elements.append(KeepTogether([
+            Image(market_chart, width=160 * mm, height=60 * mm),
+        ]))
 
     # === 2페이지: 심층 시장 분석 ===
     elements.append(PageBreak())
@@ -398,6 +416,30 @@ async def generate_daily_pdf(
     }.get(macro.regime, "판단 중")
     elements.append(Paragraph(
         f"현재 시장 체제: {regime_kr}", styles["section"]))
+    elements.append(Spacer(1, 4 * mm))
+
+    # v6.1: 글로벌 뉴스 헤드라인 섹션
+    if global_news:
+        elements.append(Paragraph("Global News Headlines", styles["section"]))
+        news_rows = [["구분", "출처", "헤드라인", "영향도"]]
+        for n in global_news[:8]:
+            urgency = "긴급" if n.get("is_urgent") else "일반"
+            impact = n.get("impact_score", 0)
+            impact_str = f"{impact}/10" if impact > 0 else "-"
+            news_rows.append([
+                urgency,
+                str(n.get("source", ""))[:8],
+                _cell_para(str(n.get("title", ""))[:50], font_name),
+                impact_str,
+            ])
+        news_table = Table(
+            news_rows,
+            colWidths=[18 * mm, 22 * mm, 80 * mm, 18 * mm],
+            rowHeights=[18] + [16] * (len(news_rows) - 1),
+        )
+        news_table.setStyle(_table_style(font_name))
+        elements.append(news_table)
+        elements.append(Spacer(1, 3 * mm))
 
     # === 3페이지: 포트폴리오 ===
     elements.append(PageBreak())
@@ -441,6 +483,7 @@ async def generate_daily_pdf(
         ht = Table(
             h_rows,
             colWidths=[30 * mm, 25 * mm, 25 * mm, 20 * mm, 18 * mm, 22 * mm],
+            rowHeights=[18] + [16] * (len(h_rows) - 1),
         )
         ht.setStyle(_table_style(font_name))
         elements.append(ht)
@@ -449,7 +492,9 @@ async def generate_daily_pdf(
         pnl_chart = _generate_portfolio_pnl_chart(holdings)
         if pnl_chart and HAS_REPORTLAB:
             elements.append(Spacer(1, 3 * mm))
-            elements.append(Image(pnl_chart, width=160 * mm, height=65 * mm))
+            elements.append(KeepTogether([
+                Image(pnl_chart, width=160 * mm, height=65 * mm),
+            ]))
     else:
         elements.append(Paragraph("보유종목 없음", styles["body"]))
 
@@ -489,11 +534,11 @@ async def generate_daily_pdf(
                 plan.horizon[:4],
                 str(plan.target),
                 str(plan.stoploss),
-                plan.strategy[:30],
+                _cell_para(plan.strategy[:40], font_name),
             ])
         spt = Table(
             sp_rows,
-            colWidths=[28 * mm, 18 * mm, 25 * mm, 25 * mm, 50 * mm],
+            colWidths=[28 * mm, 18 * mm, 25 * mm, 25 * mm, 52 * mm],
         )
         spt.setStyle(_table_style(font_name))
         elements.append(spt)

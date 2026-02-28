@@ -258,6 +258,143 @@ async def recommend_investment_type(
         return ""
 
 
+async def _analyze_picks_for_manager(
+    manager_key: str,
+    picks: list[dict],
+    market_context: str = "",
+) -> str:
+    """단일 매니저가 자기 horizon 종목을 분석 (Haiku 기반)."""
+    manager = MANAGERS.get(manager_key)
+    if not manager or not picks:
+        if manager:
+            return f"{manager['emoji']} {manager['name']}: 추천 종목 없음"
+        return ""
+
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        # 폴백: AI 없이 기본 포맷
+        lines = [f"{manager['emoji']} {manager['name']} ({manager['title']})"]
+        lines.append(f"{'━' * 20}")
+        for i, p in enumerate(picks[:3], 1):
+            lines.append(
+                f"\n{i}. {p.get('name', '')} ({p.get('ticker', '')})\n"
+                f"   현재가: {p.get('price', 0):,.0f}원 | 점수: {p.get('score', 0):.0f}점"
+            )
+        return "\n".join(lines)
+
+    try:
+        import httpx
+
+        picks_text = ""
+        for i, p in enumerate(picks[:3], 1):
+            picks_text += (
+                f"{i}. {p.get('name', '')} ({p.get('ticker', '')})\n"
+                f"   현재가: {p.get('price', 0):,.0f}원\n"
+                f"   점수: {p.get('score', 0):.0f} | RSI: {p.get('rsi', 0):.0f}\n"
+                f"   ATR: {p.get('atr_pct', 0):.1f}% | E[R]: {p.get('expected_return', 0):+.1f}%\n"
+                f"   목표: +{p.get('target_pct', 0):.0f}% | 손절: {p.get('stop_pct', 0):.0f}%\n"
+            )
+
+        system_prompt = (
+            f"너는 {manager['name']}의 투자 철학을 따르는 '{manager['title']}'이다.\n"
+            f"{manager['persona']}\n"
+            f"호칭: 주호님\n"
+            f"볼드(**) 사용 금지. 이모지로 구분.\n"
+            f"제공된 데이터만 사용. 학습 데이터의 과거 가격 사용 절대 금지.\n"
+            f"종목당 2~3줄. 핵심만. 이유+액션.\n"
+        )
+
+        user_prompt = ""
+        if market_context:
+            user_prompt += f"[시장 상황]\n{market_context}\n\n"
+        user_prompt += (
+            f"[{manager['emoji']} 후보 종목]\n{picks_text}\n"
+            f"위 종목 중 가장 추천하는 1~2개를 선정하고,\n"
+            f"{manager['name']}의 관점에서 간결하게 분석해주세요.\n"
+            f"형식: 종목명 — 한줄 핵심 이유 + 액션\n"
+        )
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 400,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_prompt}],
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                analysis = data["content"][0]["text"].strip().replace("**", "")
+                header = f"{manager['emoji']} {manager['name']} ({manager['title']})\n{'━' * 20}\n"
+                return header + analysis
+            else:
+                logger.warning("Manager picks API %s: %d", manager_key, resp.status_code)
+
+    except Exception as e:
+        logger.error("Manager picks error %s: %s", manager_key, e)
+
+    # 폴백
+    lines = [f"{manager['emoji']} {manager['name']} ({manager['title']})", f"{'━' * 20}"]
+    for i, p in enumerate(picks[:3], 1):
+        lines.append(
+            f"{i}. {p.get('name', '')} — {p.get('price', 0):,.0f}원 "
+            f"(점수 {p.get('score', 0):.0f})"
+        )
+    return "\n".join(lines)
+
+
+# 매니저별 horizon 매핑 (스캔 엔진 호라이즌 → 매니저)
+MANAGER_HORIZON_MAP = {
+    "scalp": "scalp",
+    "swing": "short",
+    "position": "mid",
+    "long_term": "long",
+}
+
+
+async def get_all_managers_picks(
+    picks_by_horizon: dict[str, list[dict]],
+    market_context: str = "",
+) -> dict[str, str]:
+    """4매니저 동시 분석 (asyncio.gather). 각 매니저가 자기 horizon 종목 분석.
+
+    Args:
+        picks_by_horizon: {"scalp": [picks], "short": [picks], "mid": [...], "long": [...]}
+        market_context: 시장 상황 텍스트
+
+    Returns:
+        {manager_key: analysis_text} — scalp/swing/position/long_term 키
+    """
+    import asyncio
+
+    tasks = {}
+    for mgr_key, horizon in MANAGER_HORIZON_MAP.items():
+        picks = picks_by_horizon.get(horizon, [])
+        tasks[mgr_key] = _analyze_picks_for_manager(mgr_key, picks, market_context)
+
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+
+    output = {}
+    for (mgr_key, _), result in zip(tasks.items(), results):
+        if isinstance(result, Exception):
+            manager = MANAGERS.get(mgr_key, {})
+            emoji = manager.get("emoji", "📌")
+            name = manager.get("name", mgr_key)
+            output[mgr_key] = f"{emoji} {name}: 분석 오류"
+            logger.error("Manager %s gather error: %s", mgr_key, result)
+        else:
+            output[mgr_key] = result
+
+    return output
+
+
 async def get_manager_greeting(holding_type: str, name: str, ticker: str) -> str:
     """종목 등록 시 매니저 인사 + 간단 첫 분석."""
     manager = MANAGERS.get(holding_type)

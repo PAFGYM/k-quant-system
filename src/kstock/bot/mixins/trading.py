@@ -977,13 +977,24 @@ class TradingMixin:
         for h in holdings[:5]:
             ticker = h.get("ticker", "")
             hname = h.get("name", ticker)
+            ht = h.get("holding_type", "swing")
             if ticker:
-                buttons.append([
+                # 매니저 아이콘 매핑
+                mgr_emoji = {
+                    "scalp": "⚡", "swing": "🔥",
+                    "position": "📊", "long_term": "💎",
+                }.get(ht, "📌")
+                row = [
                     InlineKeyboardButton(
-                        f"❌ {hname} 삭제",
+                        f"{mgr_emoji} {hname[:4]} 분석",
+                        callback_data=f"mgr:{ht}:{ticker}",
+                    ),
+                    InlineKeyboardButton(
+                        f"❌ 삭제",
                         callback_data=f"bal:remove:{ticker}",
                     ),
-                ])
+                ]
+                buttons.append(row)
         buttons.append(make_feedback_row("잔고"))
         return buttons
 

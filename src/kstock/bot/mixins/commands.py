@@ -727,6 +727,7 @@ class CommandsMixin:
         """AI 질문 모드 - 자주하는 질문 4개 버튼 + 직접 입력 안내."""
         from kstock.bot.bot_imports import make_feedback_row
         buttons = [
+            [InlineKeyboardButton("🎯 4매니저 동시추천", callback_data="quick_q:mgr4")],
             [InlineKeyboardButton("📊 오늘 시장 분석", callback_data="quick_q:market")],
             [InlineKeyboardButton("💼 내 포트폴리오 조언", callback_data="quick_q:portfolio")],
             [InlineKeyboardButton("🔥 지금 매수할 종목", callback_data="quick_q:buy_pick")],
@@ -921,6 +922,31 @@ class CommandsMixin:
     def _build_followup_buttons(self, question: str, stock: dict | None) -> list:
         """AI 응답 후 후속 질문 인라인 버튼 생성."""
         buttons = []
+        # v6.0: 4매니저 추천 후속 질문
+        if question == "4매니저추천":
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        "🛡️ 가장 안전한 종목은?",
+                        callback_data="followup_q:safe",
+                    ),
+                    InlineKeyboardButton(
+                        "🔥 수익률 1위 종목은?",
+                        callback_data="followup_q:top_pick",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "💼 내 보유종목과 분산?",
+                        callback_data="followup:portfolio:",
+                    ),
+                    InlineKeyboardButton(
+                        "🛒 매수 시작",
+                        callback_data="bp:start",
+                    ),
+                ],
+            ]
+            return buttons
         if stock:
             ticker = stock.get("code", "")
             name = stock.get("name", "")
@@ -1154,6 +1180,11 @@ class CommandsMixin:
             await self._handle_buy_pick_with_live_data(query, context)
             return
 
+        # v6.0: 4매니저 동시 추천
+        if question_type == "mgr4":
+            await self._handle_4manager_picks(query, context)
+            return
+
         if not self.anthropic_key:
             await query.edit_message_text(
                 "주호님, AI 기능을 사용하려면 ANTHROPIC_API_KEY 설정이 필요합니다."
@@ -1342,6 +1373,130 @@ class CommandsMixin:
 
         return "\n".join(result_lines)
 
+    async def _handle_4manager_picks(self, query, context) -> None:
+        """v6.0: 4매니저 동시추천 — 1탭으로 4명 매니저가 각자 투자 성향에 맞는 종목 추천.
+
+        리버모어(단타)/오닐(스윙)/린치(포지션)/버핏(장기) 병렬 분석.
+        ~3-5초 내 완료 (순차 20초 대비 75% 단축).
+        """
+        await query.edit_message_text(
+            "🎯 4매니저가 동시에 종목을 분석 중...\n"
+            "⚡리버모어 🔥오닐 📊린치 💎버핏\n"
+            "(약 5초 소요)"
+        )
+
+        try:
+            # 1. 4개 horizon 종목 병렬 수집
+            import asyncio
+            default_budget = 5_000_000  # 500만원 기준
+
+            horizon_tasks = {
+                hz: self._get_horizon_picks_data(hz, default_budget)
+                for hz in ("scalp", "short", "mid", "long")
+            }
+            horizon_results = await asyncio.gather(*horizon_tasks.values())
+
+            picks_by_horizon = {}
+            for hz, (picks, _err) in zip(horizon_tasks.keys(), horizon_results):
+                picks_by_horizon[hz] = picks
+
+            # 2. 매크로 컨텍스트 수집
+            market_context = ""
+            try:
+                snap = await self.macro_client.get_snapshot()
+                from kstock.signal.strategies import get_regime_mode
+                regime = get_regime_mode(snap)
+                market_context = (
+                    f"VIX: {snap.vix:.1f} | 나스닥: {snap.nasdaq_change_pct:+.2f}% | "
+                    f"원/달러: {snap.usdkrw:,.0f}원 | 레짐: {regime['label']}"
+                )
+            except Exception:
+                pass
+
+            # 3. 4매니저 동시 AI 분석 (asyncio.gather)
+            from kstock.bot.investment_managers import (
+                get_all_managers_picks, MANAGERS, MANAGER_HORIZON_MAP,
+            )
+            manager_analyses = await get_all_managers_picks(
+                picks_by_horizon, market_context,
+            )
+
+            # 4. 결과 포맷
+            lines = ["🎯 4매니저 동시추천", f"{'━' * 20}"]
+            if market_context:
+                lines.append(f"📈 {market_context}\n")
+
+            # 각 매니저 추천 1순위 종목 수집 (버튼용)
+            top_picks_for_buttons = {}
+
+            for mgr_key in ("scalp", "swing", "position", "long_term"):
+                analysis = manager_analyses.get(mgr_key, "")
+                if analysis:
+                    lines.append(f"\n{analysis}")
+
+                # 버튼용: 해당 horizon의 1순위 종목
+                hz = MANAGER_HORIZON_MAP.get(mgr_key, "")
+                hz_picks = picks_by_horizon.get(hz, [])
+                if hz_picks:
+                    top_picks_for_buttons[mgr_key] = hz_picks[0]
+
+            result_text = "\n".join(lines)
+
+            # 5. 액션 버튼 구성
+            from kstock.bot.bot_imports import make_feedback_row
+            buttons = []
+
+            # 각 매니저 1순위 종목 "담기" 버튼
+            add_row = []
+            for mgr_key, pick in top_picks_for_buttons.items():
+                mgr = MANAGERS.get(mgr_key, {})
+                emoji = mgr.get("emoji", "📌")
+                hz = MANAGER_HORIZON_MAP.get(mgr_key, "scalp")
+                ticker = pick.get("ticker", "")
+                name = pick.get("name", "")[:5]
+                cb = f"bp:add:{ticker}:{hz}"
+                if len(cb) <= 64:
+                    add_row.append(
+                        InlineKeyboardButton(
+                            f"{emoji}{name} 담기",
+                            callback_data=cb,
+                        )
+                    )
+                if len(add_row) == 2:
+                    buttons.append(add_row)
+                    add_row = []
+            if add_row:
+                buttons.append(add_row)
+
+            # 후속 질문 버튼
+            followup_buttons = self._build_followup_buttons("4매니저추천", None)
+            if followup_buttons:
+                buttons.extend(followup_buttons)
+
+            buttons.append(make_feedback_row("4매니저추천"))
+
+            markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+            # 6. 메시지 전송 (4096자 제한 처리)
+            if len(result_text) > 4000:
+                result_text = result_text[:3950] + "\n\n... (더보기는 개별 매니저 분석 참조)"
+
+            try:
+                await query.edit_message_text(result_text, reply_markup=markup)
+            except Exception:
+                await query.message.reply_text(
+                    result_text, reply_markup=markup or get_reply_markup(context),
+                )
+
+        except Exception as e:
+            logger.error("4manager picks error: %s", e, exc_info=True)
+            try:
+                await query.edit_message_text(
+                    "⚠️ 4매니저 분석 중 오류가 발생했습니다.\n잠시 후 다시 시도해주세요."
+                )
+            except Exception:
+                pass
+
     async def _handle_buy_pick_with_live_data(self, query, context) -> None:
         """매수 추천 — 실시간 스캔 데이터 기반 (AI 환각 주가 완전 차단).
 
@@ -1424,6 +1579,13 @@ class CommandsMixin:
             answer, followup_buttons = self._parse_followup_buttons(answer)
             if not followup_buttons:
                 followup_buttons = self._build_followup_buttons("매수 추천", None)
+            # v6.0: 매수 시작 버튼 추가
+            followup_buttons.append([
+                InlineKeyboardButton(
+                    "🛒 이 종목들로 매수 시작",
+                    callback_data="bp:start",
+                ),
+            ])
             markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None
 
             try:

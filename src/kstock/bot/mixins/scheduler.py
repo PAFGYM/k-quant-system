@@ -228,6 +228,19 @@ class SchedulerMixin:
             else:
                 holdings_text = "  보유종목 없음\n"
 
+            # v6.1: 글로벌 뉴스 컨텍스트 추가
+            news_ctx = ""
+            try:
+                news_items = self.db.get_recent_global_news(limit=5, hours=12)
+                if news_items:
+                    news_lines = []
+                    for n in news_items:
+                        urgency = "🚨" if n.get("is_urgent") else "📰"
+                        news_lines.append(f"  {urgency} {n.get('title', '')}")
+                    news_ctx = "\n[글로벌 뉴스 헤드라인]\n" + "\n".join(news_lines) + "\n"
+            except Exception:
+                pass
+
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
                 f"[시장 데이터]\n"
@@ -238,9 +251,10 @@ class SchedulerMixin:
                 f"BTC=${macro.btc_price:,.0f}({macro.btc_change_pct:+.1f}%), "
                 f"금=${macro.gold_price:,.0f}({macro.gold_change_pct:+.1f}%), "
                 f"레짐={macro.regime}, 모드={regime_mode.get('label', '')}\n\n"
+                f"{news_ctx}"
                 f"[보유종목]\n{holdings_text}\n"
                 f"아래 형식으로 작성해주세요:\n\n"
-                f"1) 시장 요약 (3줄 이내)\n"
+                f"1) 시장 요약 (3줄 이내) — 글로벌 뉴스 헤드라인이 있으면 핵심 이슈 반영\n"
                 f"2) 보유종목별 판단 — 각 종목마다:\n"
                 f"   - 종목명 + 수익률\n"
                 f"   - 투자시계(단기/스윙/중기/장기)에 맞는 판단\n"
@@ -490,6 +504,19 @@ class SchedulerMixin:
         if fg:
             fear_greed = f"\n공포탐욕지수: {fg}"
 
+        # v6.1: 글로벌 뉴스 컨텍스트
+        eod_news_ctx = ""
+        try:
+            eod_news = self.db.get_recent_global_news(limit=5, hours=12)
+            if eod_news:
+                eod_news_lines = []
+                for n in eod_news:
+                    urgency = "🚨" if n.get("is_urgent") else "📰"
+                    eod_news_lines.append(f"  {urgency} {n.get('title', '')}")
+                eod_news_ctx = "\n[글로벌 뉴스 헤드라인]\n" + "\n".join(eod_news_lines) + "\n"
+        except Exception:
+            pass
+
         prompt = (
             f"오늘 한국/미국 주식 시장 장 마감 종합 분석을 작성해줘.\n"
             f"4000자 내외의 전문적이고 상세한 분석을 부탁해.\n\n"
@@ -507,6 +534,7 @@ class SchedulerMixin:
             f"유가(WTI): ${getattr(macro, 'wti_price', 0):.1f}\n"
             f"시장 맥박: {pulse_state}\n"
             f"시장 체제: {macro.regime}{fear_greed}\n"
+            f"{eod_news_ctx}"
             f"{holdings_ctx}\n\n"
             f"아래 7개 섹션으로 상세히 분석:\n\n"
             f"1. 오늘의 시장 한줄 요약\n"
@@ -832,12 +860,20 @@ class SchedulerMixin:
             sell_plans = self.sell_planner.create_plans_for_all(
                 holdings, market_state,
             )
+            # v6.1: PDF에 글로벌 뉴스 포함
+            pdf_news = []
+            try:
+                pdf_news = self.db.get_recent_global_news(limit=8, hours=24)
+            except Exception:
+                pass
+
             filepath = await generate_daily_pdf(
                 macro_snapshot=macro,
                 holdings=holdings,
                 sell_plans=sell_plans,
                 pulse_history=self.market_pulse.get_recent_history(minutes=360),
                 yf_client=self.yf_client,
+                global_news=pdf_news,
             )
 
             # ── 4. 결론 위주 간결한 텍스트 메시지 1건 ──
@@ -1054,6 +1090,19 @@ class SchedulerMixin:
             market_open = is_kr_market_open(today)
             market_note = "개장일" if market_open else "휴장일"
 
+            # 5.5 v6.1: 글로벌 뉴스 컨텍스트
+            news_ctx = ""
+            try:
+                news_items = self.db.get_recent_global_news(limit=5, hours=12)
+                if news_items:
+                    news_lines = []
+                    for n in news_items:
+                        urgency = "🚨" if n.get("is_urgent") else "📰"
+                        news_lines.append(f"  {urgency} {n.get('title', '')}")
+                    news_ctx = "\n[글로벌 뉴스 헤드라인]\n" + "\n".join(news_lines) + "\n"
+            except Exception:
+                pass
+
             # 6. AI 프롬프트 구성
             prompt = (
                 f"K-Quant 에이전트 일일 운영 지침을 읽고 오늘의 운영 계획을 수립해주세요.\n\n"
@@ -1070,6 +1119,7 @@ class SchedulerMixin:
                 f"BTC: ${macro.btc_price:,.0f} ({macro.btc_change_pct:+.1f}%)\n"
                 f"레짐: {macro.regime}\n"
                 f"공포탐욕: {macro.fear_greed_score:.0f} ({macro.fear_greed_label})\n\n"
+                f"{news_ctx}"
                 f"[보유종목 현황]\n{holdings_text}\n"
                 f"[즐겨찾기]\n  {watch_names}\n\n"
             )
@@ -1180,6 +1230,19 @@ class SchedulerMixin:
                 f"{'━' * 22}"
             )
 
+            # v6.1: 글로벌 뉴스 컨텍스트
+            news_ctx = ""
+            try:
+                news_items = self.db.get_recent_global_news(limit=5, hours=12)
+                if news_items:
+                    news_lines = []
+                    for n in news_items:
+                        urgency = "🚨" if n.get("is_urgent") else "📰"
+                        news_lines.append(f"  {urgency} {n.get('title', '')}")
+                    news_ctx = "\n[글로벌 뉴스 헤드라인]\n" + "\n".join(news_lines) + "\n"
+            except Exception:
+                pass
+
             prompt = (
                 f"새벽 미국 시장 마감 결과를 분석하고, "
                 f"오늘 한국 시장에 미칠 영향을 알려줘.\n\n"
@@ -1198,10 +1261,12 @@ class SchedulerMixin:
                 f"시장체제: {macro.regime}\n"
                 f"한국시장 전망 신호등: {signal_emoji} {signal_label}\n"
                 f"한국시장 개장여부: {'개장' if market_open else '휴장'}\n"
+                f"{news_ctx}"
                 f"{holdings_ctx}\n\n"
                 f"아래 형식으로 분석:\n\n"
                 f"1. 미국 시장 마감 요약 (2-3줄)\n"
-                f"   - 3대 지수 동향 + 주요 원인\n\n"
+                f"   - 3대 지수 동향 + 주요 원인\n"
+                f"   - 글로벌 뉴스 헤드라인이 있으면 핵심 이슈 반영\n\n"
                 f"2. 주요 이슈 & 이벤트\n"
                 f"   - 실적 발표, FOMC, 경제지표 등\n"
                 f"   - 빅테크/반도체 등 핵심 종목 동향\n\n"
@@ -3216,3 +3281,125 @@ class SchedulerMixin:
                 logger.info("News alerts sent: %d", len(alerts))
         except Exception as e:
             logger.error("News monitor failed: %s", e)
+
+    # ── v6.1: 글로벌 뉴스 수집 + 위기 감지 (적응형 빈도) ──────────
+
+    async def job_global_news_collect(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """글로벌 뉴스 RSS 수집 + DB 저장 + 위기 감지 + 긴급 알림.
+
+        적응형 빈도: 정상 30분, 주의 15분, 경계 10분, 위기 5분.
+        매크로 선행지표(VIX/BTC/금/S&P500)로 위기 판단.
+        """
+        try:
+            from kstock.ingest.global_news import (
+                fetch_global_news,
+                filter_urgent_news,
+                format_urgent_alert,
+                detect_crisis_from_macro,
+                format_crisis_alert,
+            )
+
+            # 1. RSS 뉴스 수집
+            items = await fetch_global_news(max_per_feed=5)
+            if items:
+                # NewsItem → dict 변환 후 DB 저장
+                news_dicts = [
+                    {
+                        "title": item.title,
+                        "source": item.source,
+                        "url": item.url,
+                        "category": item.category,
+                        "lang": item.lang,
+                        "impact_score": item.impact_score,
+                        "is_urgent": item.is_urgent,
+                        "published": item.published,
+                    }
+                    for item in items
+                ]
+                saved = self.db.save_global_news(news_dicts)
+                logger.info("Global news: %d fetched, %d saved", len(items), saved)
+
+                # 2. 긴급 뉴스 감지 → 텔레그램 알림
+                urgent = filter_urgent_news(items)
+                if urgent and self.chat_id:
+                    # 쿨다운: 같은 뉴스 30분 내 중복 알림 방지
+                    last_urgent = getattr(self, "_last_urgent_news_time", 0.0)
+                    now_mono = _time.monotonic()
+                    if now_mono - last_urgent >= 1800:
+                        alert_msg = format_urgent_alert(urgent)
+                        if alert_msg:
+                            await context.bot.send_message(
+                                chat_id=self.chat_id, text=alert_msg,
+                            )
+                            self._last_urgent_news_time = now_mono
+                            logger.info("Urgent news alert sent: %d items", len(urgent))
+
+            # 3. 매크로 선행지표 기반 위기 감지 + 적응형 빈도 조정
+            try:
+                macro = await self.macro_client.get_snapshot()
+                crisis = detect_crisis_from_macro(macro)
+
+                prev_severity = getattr(self, "_news_crisis_severity", 0)
+                self._news_crisis_severity = crisis.severity
+
+                # 위기 수준 변경 시 → 수집 빈도 동적 조정 + 알림
+                if crisis.severity != prev_severity:
+                    await self._reschedule_news_collect(
+                        context, crisis.recommended_interval,
+                    )
+                    # 경계 이상이면 텔레그램 알림
+                    if crisis.severity >= 2 and self.chat_id:
+                        crisis_msg = format_crisis_alert(crisis)
+                        if crisis_msg:
+                            await context.bot.send_message(
+                                chat_id=self.chat_id, text=crisis_msg,
+                            )
+                    logger.info(
+                        "Crisis level changed: %d → %d (%s), interval=%ds",
+                        prev_severity, crisis.severity, crisis.label,
+                        crisis.recommended_interval,
+                    )
+            except Exception as e:
+                logger.debug("Crisis detection error: %s", e)
+
+            # 4. 주기적 클린업 (1일 1회)
+            now = datetime.now(KST)
+            last_cleanup = getattr(self, "_last_news_cleanup", None)
+            if last_cleanup is None or last_cleanup.date() != now.date():
+                cleaned = self.db.cleanup_old_news(days=7)
+                self._last_news_cleanup = now
+                if cleaned > 0:
+                    logger.info("Old news cleaned: %d rows", cleaned)
+
+        except Exception as e:
+            logger.error("Global news collect failed: %s", e, exc_info=True)
+
+    async def _reschedule_news_collect(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        new_interval: int,
+    ) -> None:
+        """글로벌 뉴스 수집 주기 동적 조정."""
+        jq = getattr(self, "_job_queue", None)
+        if jq is None:
+            jq = context.application.job_queue
+        if jq is None:
+            return
+
+        try:
+            current_jobs = jq.jobs()
+            for job in current_jobs:
+                if job.name == "global_news_collect":
+                    job.schedule_removal()
+
+            jq.run_repeating(
+                self.job_global_news_collect,
+                interval=new_interval,
+                first=10,
+                name="global_news_collect",
+            )
+            logger.info("News collect interval changed to %ds", new_interval)
+        except Exception as e:
+            logger.error("News reschedule failed: %s", e)
