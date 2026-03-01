@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from dataclasses import dataclass, field, asdict
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 
 STYLE_LABELS = {
     "scalper": "단타 (1~3일)",

@@ -280,7 +280,8 @@ class AIRouter:
                         system=system, max_tokens=max_tokens,
                         temperature=temperature, response_format=response_format,
                     )
-                except Exception:
+                except Exception as e:
+                    logger.warning("AI %s last-resort fallback failed for task: %s", name, e)
                     continue
 
         return "[AI 응답 불가] 모든 AI 프로바이더가 사용 불가합니다."

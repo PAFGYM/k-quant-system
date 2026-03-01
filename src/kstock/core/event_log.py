@@ -17,12 +17,12 @@ import json
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from enum import Enum
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 
 # 메모리 이벤트 최대 보관 수
 MAX_MEMORY_EVENTS = 5000
@@ -160,7 +160,7 @@ class EventLog:
             try:
                 listener(event)
             except Exception:
-                pass
+                logger.debug("EventLog.log: listener callback failed", exc_info=True)
 
     def log_quick(
         self,

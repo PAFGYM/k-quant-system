@@ -455,8 +455,8 @@ class AutoTrainer:
                         samples=len(X),
                         weights=json.dumps(list(optimal_weights)),
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("run_auto_train DB ml_performance save failed: %s", e)
 
             message = (
                 f"✅ ML 재학습 완료 ({trigger})\n"

@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+
+from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
-
-KST = timezone(timedelta(hours=9))
 USER_NAME = "주호님"
 
 # ---------------------------------------------------------------------------

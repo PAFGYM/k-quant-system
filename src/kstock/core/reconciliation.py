@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from enum import Enum, IntEnum
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 USER_NAME = "주호님"
 
 

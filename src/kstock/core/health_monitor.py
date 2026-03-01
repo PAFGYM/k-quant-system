@@ -141,6 +141,7 @@ def _get_memory_usage_darwin() -> float:
         used_pages = active_pages + wired_pages + compressed_pages
         return (used_pages / total_pages) * 100.0
     except Exception:
+        logger.debug("_get_memory_usage_darwin failed", exc_info=True)
         return -1.0
 
 
@@ -172,6 +173,7 @@ def _get_memory_usage_linux() -> float:
         used_kb = total_kb - available_kb
         return (used_kb / total_kb) * 100.0
     except Exception:
+        logger.debug("_get_memory_usage_linux failed", exc_info=True)
         return -1.0
 
 
@@ -300,7 +302,7 @@ def check_data_staleness(db_path: str | Path, max_hours: int = 2) -> HealthCheck
             check.message = "비장시간 — staleness 체크 스킵"
             return check
     except Exception:
-        pass
+        logger.debug("check_data_staleness: KST timezone import failed", exc_info=True)
 
     try:
         db_path = Path(db_path)
@@ -323,7 +325,7 @@ def check_data_staleness(db_path: str | Path, max_hours: int = 2) -> HealthCheck
                 if row and row[0]:
                     candidates.append(row[0])
             except Exception:
-                pass
+                logger.debug("check_data_staleness: job_runs query failed", exc_info=True)
 
             # 2. portfolio updated_at
             try:
@@ -332,7 +334,7 @@ def check_data_staleness(db_path: str | Path, max_hours: int = 2) -> HealthCheck
                 if row and row[0]:
                     candidates.append(row[0])
             except Exception:
-                pass
+                logger.debug("check_data_staleness: portfolio query failed", exc_info=True)
 
             # 3. chat_history (봇 활동 증거)
             try:
@@ -341,7 +343,7 @@ def check_data_staleness(db_path: str | Path, max_hours: int = 2) -> HealthCheck
                 if row and row[0]:
                     candidates.append(row[0])
             except Exception:
-                pass
+                logger.debug("check_data_staleness: chat_history query failed", exc_info=True)
 
             # 4. holdings updated_at
             try:
@@ -350,7 +352,7 @@ def check_data_staleness(db_path: str | Path, max_hours: int = 2) -> HealthCheck
                 if row and row[0]:
                     candidates.append(row[0])
             except Exception:
-                pass
+                logger.debug("check_data_staleness: holdings query failed", exc_info=True)
 
             if not candidates:
                 check.status = "warning"

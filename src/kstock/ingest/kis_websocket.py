@@ -18,14 +18,14 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Callable
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 
 # KIS WebSocket 엔드포인트
 WS_URL_VIRTUAL = "ws://ops.koreainvestment.com:31000"
@@ -231,8 +231,10 @@ class KISWebSocket:
             self._recv_task.cancel()
             try:
                 await self._recv_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.debug("disconnect: recv_task cleanup failed", exc_info=True)
         if self._ws:
             await self._ws.close()
         self._subscriptions.clear()
@@ -313,6 +315,7 @@ class KISWebSocket:
             await self._ws.send(msg)
             return True
         except Exception:
+            logger.debug("_send_unsubscribe: failed for tr_id=%s ticker=%s", tr_id, ticker, exc_info=True)
             return False
 
     async def _receive_loop(self) -> None:
@@ -416,7 +419,7 @@ class KISWebSocket:
                 try:
                     cb("price", ticker, self._prices[ticker])
                 except Exception:
-                    pass
+                    logger.debug("_parse_price: callback failed for %s", ticker, exc_info=True)
 
         except (ValueError, IndexError) as e:
             logger.debug("Price parse error: %s", e)
@@ -468,7 +471,7 @@ class KISWebSocket:
                 try:
                     cb("orderbook", ticker, self._orderbooks[ticker])
                 except Exception:
-                    pass
+                    logger.debug("_parse_orderbook: callback failed for %s", ticker, exc_info=True)
 
         except (ValueError, IndexError) as e:
             logger.debug("Orderbook parse error: %s", e)

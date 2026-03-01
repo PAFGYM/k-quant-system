@@ -112,7 +112,7 @@ class KISClient:
                         resp.status_code, err_code, err_desc,
                     )
                 except Exception:
-                    pass
+                    logger.debug("_fetch_token_sync: failed to parse error response", exc_info=True)
             resp.raise_for_status()
             return resp.json()
 

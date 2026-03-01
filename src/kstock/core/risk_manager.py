@@ -24,7 +24,7 @@ def _get_risk_limits() -> dict:
         from kstock.core.risk_policy import get_risk_policy
         return get_risk_policy().to_risk_limits_dict()
     except Exception:
-        pass
+        logger.debug("_get_risk_limits: RiskPolicy import failed, using fallback", exc_info=True)
     # 폴백: 하드코딩 (RiskPolicy 모듈 없을 때)
     return {
         "max_portfolio_mdd": -0.15,

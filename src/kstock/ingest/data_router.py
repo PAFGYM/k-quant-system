@@ -16,11 +16,11 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+
+from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
-
-KST = timezone(timedelta(hours=9))
 
 # v5.1: 실시간 소스 (매수 의사결정 허용)
 REALTIME_SOURCES = {"kis_realtime"}
@@ -79,6 +79,7 @@ class DataRouter:
             from kstock.ingest.point_in_time import get_registry
             return get_registry()
         except Exception:
+            logger.debug("_get_registry: PIT SourceRegistry import failed", exc_info=True)
             return None
 
     def _detect_source(self) -> DataSource:
@@ -211,6 +212,7 @@ class DataRouter:
                     return price
                 self._record_fetch("yfinance", ticker, False, elapsed)
             except Exception:
+                logger.debug("get_price: yfinance price fetch failed for %s", ticker, exc_info=True)
                 self._record_fetch("yfinance", ticker, False, 0)
 
         # 3. Naver Finance (새로운 폴백)
@@ -231,6 +233,7 @@ class DataRouter:
                     return price
                 self._record_fetch("naver", ticker, False, elapsed)
             except Exception:
+                logger.debug("get_price: Naver price fetch failed for %s", ticker, exc_info=True)
                 self._record_fetch("naver", ticker, False, 0)
 
         return 0.0
@@ -264,6 +267,7 @@ class DataRouter:
                     return df
                 self._record_fetch("yfinance", ticker, False, elapsed)
             except Exception:
+                logger.debug("get_ohlcv: yfinance OHLCV fetch failed for %s", ticker, exc_info=True)
                 self._record_fetch("yfinance", ticker, False, 0)
 
         # 2. Naver Finance
@@ -285,6 +289,7 @@ class DataRouter:
                     return df
                 self._record_fetch("naver", ticker, False, elapsed)
             except Exception:
+                logger.debug("get_ohlcv: Naver OHLCV fetch failed for %s", ticker, exc_info=True)
                 self._record_fetch("naver", ticker, False, 0)
 
         return pd.DataFrame()
@@ -295,6 +300,7 @@ class DataRouter:
             from kstock.ingest.point_in_time import AsOfJoinEngine
             return AsOfJoinEngine.tag_dataframe(df, source=source, ticker=ticker)
         except Exception:
+            logger.debug("_tag_ohlcv: PIT AsOfJoinEngine import/tag failed", exc_info=True)
             # PIT 모듈 없어도 동작
             return df
 
@@ -315,6 +321,7 @@ class DataRouter:
                     return info
                 self._record_fetch("yfinance", ticker, False, elapsed)
             except Exception:
+                logger.debug("get_stock_info: yfinance info fetch failed for %s", ticker, exc_info=True)
                 self._record_fetch("yfinance", ticker, False, 0)
 
         # 2. Naver Finance
@@ -332,6 +339,7 @@ class DataRouter:
                     return info
                 self._record_fetch("naver", ticker, False, elapsed)
             except Exception:
+                logger.debug("get_stock_info: Naver info fetch failed for %s", ticker, exc_info=True)
                 self._record_fetch("naver", ticker, False, 0)
 
         return {
@@ -347,7 +355,7 @@ class DataRouter:
                 stock = self.kis.kis.stock(ticker)
                 return stock.investor()
             except Exception:
-                pass
+                logger.warning("get_investor_data: KIS investor data fetch failed for %s", ticker, exc_info=True)
         return None
 
     def format_source_status(self) -> str:

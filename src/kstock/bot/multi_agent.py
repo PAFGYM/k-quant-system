@@ -19,11 +19,11 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+
+from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
-
-KST = timezone(timedelta(hours=9))
 USER_NAME = "주호님"
 
 
@@ -541,7 +541,7 @@ async def run_multi_agent_analysis(
                 agent_name=agent_config["name"],
                 score=50,
                 signal="중립",
-                summary=f"API 호출 실패: {str(e)[:100]}",
+                summary="분석 API 호출 실패 - 잠시 후 재시도",
             )
 
     # 3개 에이전트 병렬 호출 (기술적 + 펀더멘털 + 센티먼트)

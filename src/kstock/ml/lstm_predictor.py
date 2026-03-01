@@ -197,8 +197,8 @@ def train_lstm(
         with torch.no_grad():
             preds = model(X_val_t).numpy().flatten()
         val_auc = roc_auc_score(y_val, preds)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("train_lstm AUC calculation failed: %s", e)
 
     result = LSTMTrainResult(
         train_loss=round(train_loss, 4),
@@ -268,8 +268,8 @@ def _load_optimal_weights() -> tuple[float, float, float]:
             w = data.get("current_weights", [0.35, 0.30, 0.35])
             if len(w) == 3 and all(isinstance(x, (int, float)) for x in w):
                 return tuple(w)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("_load_optimal_weights failed: %s", e)
     return (0.35, 0.30, 0.35)
 
 

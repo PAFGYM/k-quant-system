@@ -238,7 +238,7 @@ class AdminExtrasMixin:
                     reply_markup=get_reply_markup(context),
                 )
             except Exception:
-                pass
+                logger.debug("_action_admin menu reply_markup restore failed", exc_info=True)
 
         elif subcmd == "security":
             # v3.6: 보안 감사
@@ -254,7 +254,7 @@ class AdminExtrasMixin:
             try:
                 chat_count = self.db.get_chat_usage(_today())
             except Exception:
-                pass
+                logger.debug("_action_admin chat_usage query failed", exc_info=True)
             uptime = datetime.now(KST) - self._start_time
             hours = uptime.seconds // 3600
             mins = (uptime.seconds % 3600) // 60
@@ -452,7 +452,7 @@ class AdminExtrasMixin:
                     if "ERROR" in line or "error" in line.lower():
                         recent_errors.append(line.strip()[-120:])
             except Exception:
-                pass
+                logger.debug("cmd_admin_report bot.log error scan failed", exc_info=True)
             if recent_errors:
                 report["recent_errors"] = recent_errors[-5:]
                 with open(admin_log_path, "a", encoding="utf-8") as f:
@@ -478,13 +478,13 @@ class AdminExtrasMixin:
                     if jr and jr.get("status") == "success":
                         jobs_today += 1
             except Exception:
-                pass
+                logger.debug("cmd_admin_report job_runs check failed", exc_info=True)
 
             chat_count = 0
             try:
                 chat_count = self.db.get_chat_usage(_today())
             except Exception:
-                pass
+                logger.debug("cmd_admin_report chat_usage query failed", exc_info=True)
 
             uptime = datetime.now(KST) - getattr(self, '_start_time', datetime.now(KST))
             lines = [
@@ -624,7 +624,7 @@ class AdminExtrasMixin:
                         reply_markup=InlineKeyboardMarkup(empty_buttons),
                     )
                 except Exception:
-                    pass
+                    logger.debug("cmd_balance empty holdings edit_text failed", exc_info=True)
                 return
 
             total_eval, total_invested = await self._update_holdings_prices(holdings)
@@ -636,6 +636,7 @@ class AdminExtrasMixin:
                     reply_markup=InlineKeyboardMarkup(bal_buttons),
                 )
             except Exception:
+                logger.debug("cmd_balance edit_text failed, falling back", exc_info=True)
                 await update.message.reply_text(
                     "\n".join(lines),
                     reply_markup=InlineKeyboardMarkup(bal_buttons),
@@ -809,6 +810,7 @@ class AdminExtrasMixin:
                                 "change_pct": change_pct, "volume_ratio": vol_ratio,
                             })
                     except Exception:
+                        logger.debug("_action_hub surge scan data build failed for %s", code, exc_info=True)
                         continue
 
                 if not stocks_data:
@@ -941,6 +943,7 @@ class AdminExtrasMixin:
                     else:
                         text = f"\u26a0\ufe0f {name} 호가 데이터를 조회할 수 없습니다."
                 except Exception:
+                    logger.debug("_action_orderbook price fetch failed for %s", ticker, exc_info=True)
                     text = f"\u26a0\ufe0f {name} 호가 조회 실패"
                 await query.message.reply_text(text)
 
@@ -980,7 +983,7 @@ class AdminExtrasMixin:
                             manager=_horizon_to_manager(ht),
                         )
                     except Exception:
-                        pass
+                        logger.debug("_action_favorites add_watchlist failed for %s", ticker, exc_info=True)
             watchlist = self.db.get_watchlist()
 
         if not watchlist:
@@ -1000,7 +1003,7 @@ class AdminExtrasMixin:
                     try:
                         self.db.add_watchlist(ticker, name)
                     except Exception:
-                        pass
+                        logger.debug("_action_favorites name update failed for %s", ticker, exc_info=True)
 
             cur = 0
             dc_pct = 0.0
@@ -1009,7 +1012,7 @@ class AdminExtrasMixin:
                 cur = detail["price"]
                 dc_pct = detail["day_change_pct"]
             except Exception:
-                pass
+                logger.debug("_action_favorites get_price_detail failed for %s", ticker, exc_info=True)
 
             rec_pnl = 0.0
             if rec_price > 0 and cur > 0:
@@ -1019,7 +1022,7 @@ class AdminExtrasMixin:
                 try:
                     self.db.add_watchlist(ticker, name, rec_price=cur)
                 except Exception:
-                    pass
+                    logger.debug("_action_favorites rec_price update failed for %s", ticker, exc_info=True)
 
             items.append({
                 "ticker": ticker, "name": name, "price": cur,
@@ -1184,6 +1187,7 @@ class AdminExtrasMixin:
                     # AI 추천 실패 → 수동 분류로 전환
                     await self._action_favorites(query, context, f"classify:{ticker}")
             except Exception:
+                logger.debug("_action_favorites auto_classify failed for %s, falling back to manual", ticker, exc_info=True)
                 await self._action_favorites(query, context, f"classify:{ticker}")
             return
 
@@ -1213,6 +1217,7 @@ class AdminExtrasMixin:
                         ]),
                     )
             except Exception:
+                logger.debug("_action_favorites news fetch failed for %s", ticker, exc_info=True)
                 await query.edit_message_text(
                     f"📰 {name}: 뉴스 조회 실패 (기능 준비 중)",
                     reply_markup=InlineKeyboardMarkup([
@@ -1244,7 +1249,7 @@ class AdminExtrasMixin:
                     mgr = MANAGERS.get(rec_hz, {})
                     ai_line = f"\n🤖 AI 추천: {mgr.get('emoji', '')} {mgr.get('title', rec_hz)} ({mgr.get('name', '')})\n"
             except Exception:
-                pass
+                logger.debug("_action_favorites recommend_investment_type failed for %s", ticker, exc_info=True)
 
             buttons = [
                 [

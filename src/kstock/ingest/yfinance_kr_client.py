@@ -25,6 +25,7 @@ try:
     from kstock.core.circuit_breaker import get_breaker
     _yf_breaker = get_breaker("yfinance", failure_threshold=5, recovery_timeout=120)
 except Exception:
+    logger.debug("yfinance circuit breaker import failed", exc_info=True)
     _yf_breaker = None
 
 # Cache for yfinance data to avoid repeated API calls
@@ -184,6 +185,7 @@ class YFinanceKRClient:
                     _yf_breaker.record_success()
                 return float(hist["Close"].iloc[-1])
         except Exception:
+            logger.debug("get_current_price: yfinance fetch failed for %s", symbol, exc_info=True)
             if _yf_breaker:
                 _yf_breaker.record_failure()
 
@@ -202,6 +204,7 @@ class YFinanceKRClient:
             naver = NaverFinanceClient()
             return await naver.get_current_price(code)
         except Exception:
+            logger.debug("_naver_fallback_price: Naver price fallback failed", exc_info=True)
             return 0.0
 
     async def _naver_fallback_ohlcv(self, code: str) -> pd.DataFrame:
@@ -213,7 +216,7 @@ class YFinanceKRClient:
             if not df.empty:
                 return df
         except Exception:
-            pass
+            logger.debug("_naver_fallback_ohlcv: Naver OHLCV fallback failed for %s", code, exc_info=True)
         return _generate_fallback_ohlcv(code)
 
     async def batch_download(
@@ -256,7 +259,7 @@ class YFinanceKRClient:
                     result[code] = df
                     _price_cache[symbol] = (now, df)
                 except Exception:
-                    pass
+                    logger.debug("batch_download: parse failed for symbol %s", symbol, exc_info=True)
         except Exception as e:
             logger.warning("Batch download failed: %s", e)
 

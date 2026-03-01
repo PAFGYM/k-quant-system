@@ -11,12 +11,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from dataclasses import dataclass, field
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 
 # ── RSS 피드 소스 정의 ──────────────────────────────────────
 

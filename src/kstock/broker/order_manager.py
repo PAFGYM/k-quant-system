@@ -21,13 +21,13 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 USER_NAME = "주호님"
 
 # 멱등성 윈도우 (같은 종목+방향 주문을 이 시간 내 중복 차단)

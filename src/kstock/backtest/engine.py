@@ -214,7 +214,8 @@ def run_backtest(
                     entry_idx = i + 1
                     in_trade = True
                     trades[-1:] and None  # no-op
-        except Exception:
+        except Exception as e:
+            logger.debug("run_backtest scoring at bar %d for %s: %s", i, code, e)
             continue
 
     # Close any remaining trade

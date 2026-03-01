@@ -14,11 +14,11 @@ import asyncio
 import logging
 import os
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+
+from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
-
-KST = timezone(timedelta(hours=9))
 USER_NAME = "주호님"
 
 # haiku 사용 여부 (ANTHROPIC_API_KEY 있으면 AI 요약 추가)
@@ -124,8 +124,8 @@ async def _get_ai_summary_cached(db, macro_client, now: datetime) -> str:
             )
             if cached:
                 return cached
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("_get_ai_summary_cached cache read failed: %s", e)
 
     # 2. 새로 생성 (타임아웃 적용)
     if not _HAS_ANTHROPIC:
@@ -142,8 +142,8 @@ async def _get_ai_summary_cached(db, macro_client, now: datetime) -> str:
         if db and summary:
             try:
                 await asyncio.to_thread(db.save_ai_summary_cache, summary)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("_get_ai_summary_cached save failed: %s", e)
         return summary
     except asyncio.TimeoutError:
         logger.warning("AI summary timed out")

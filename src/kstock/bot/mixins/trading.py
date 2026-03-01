@@ -60,7 +60,7 @@ class TradingMixin:
         except Exception as e:
             logger.error("Optimize error: %s", e, exc_info=True)
             await message.reply_text(
-                f"\u26a0\ufe0f 최적화 오류: {str(e)[:100]}",
+                "\u26a0\ufe0f 최적화 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.",
                 reply_markup=get_reply_markup(context),
             )
 
@@ -134,6 +134,7 @@ class TradingMixin:
                     f"환율: {snap.usdkrw:,.0f}원"
                 )
             except Exception:
+                logger.debug("_analyze_new_holding macro snapshot failed", exc_info=True)
                 market_ctx = "시장 데이터 없음"
 
             # AI 분석 요청
@@ -207,7 +208,7 @@ class TradingMixin:
                             ticker, name, price, holding_id,
                         )
                     except Exception:
-                        pass
+                        logger.debug("_action_add_screenshot analyze_new_holding failed for %s", ticker, exc_info=True)
             if added:
                 msg = (
                     f"✅ {len(added)}종목 포트폴리오 추가 완료!\n\n"
@@ -222,7 +223,7 @@ class TradingMixin:
                 try:
                     await self._ask_holding_type_bulk(query, added_ids)
                 except Exception:
-                    pass
+                    logger.debug("_action_add_screenshot ask_holding_type_bulk failed", exc_info=True)
             context.user_data.pop("screenshot_new_holdings", None)
             return
 
@@ -246,13 +247,13 @@ class TradingMixin:
                     try:
                         await self._ask_holding_type(query, holding_id, name)
                     except Exception:
-                        pass
+                        logger.debug("_action_add_screenshot ask_holding_type failed for %s", name, exc_info=True)
                     try:
                         await self._analyze_new_holding(
                             ticker, name, price, holding_id,
                         )
                     except Exception:
-                        pass
+                        logger.debug("_action_add_screenshot analyze_new_holding failed for %s", ticker, exc_info=True)
                 else:
                     await query.edit_message_text(
                         f"⚠️ {name} 가격 정보가 없어 추가할 수 없습니다."
@@ -292,13 +293,13 @@ class TradingMixin:
                 try:
                     await self._ask_holding_type(query, holding_id, name)
                 except Exception:
-                    pass
+                    logger.debug("_action_text_add ask_holding_type failed for %s", name, exc_info=True)
                 try:
                     await self._analyze_new_holding(
                         ticker, name, price, holding_id,
                     )
                 except Exception:
-                    pass
+                    logger.debug("_action_text_add analyze_new_holding failed for %s", ticker, exc_info=True)
             else:
                 await query.edit_message_text("⚠️ 가격 정보가 부족합니다.")
         else:
@@ -347,6 +348,7 @@ class TradingMixin:
                             f"60일 {tech.ma60:,.0f}원, 120일 {tech.ma120:,.0f}원"
                         )
                 except Exception:
+                    logger.debug("_action_stock_action tech data fetch failed for %s", code, exc_info=True)
                     tech_data = "기술적 데이터 조회 실패"
                 try:
                     fin = self.db.get_financials(code)
@@ -357,6 +359,7 @@ class TradingMixin:
                             f"ROE: {fin.get('roe', 0):.1f}%"
                         )
                 except Exception:
+                    logger.debug("_action_stock_action financials fetch failed for %s", code, exc_info=True)
                     fund_data = ""
 
                 # 매매 레벨 계산 (현재가 기반)
@@ -395,6 +398,7 @@ class TradingMixin:
                 try:
                     await query.message.reply_text(answer, reply_markup=get_reply_markup(context))
                 except Exception:
+                    logger.debug("_action_stock_action reply_text with markup failed", exc_info=True)
                     await query.message.reply_text(answer)
             except Exception as e:
                 logger.error("Stock action analyze error: %s", e, exc_info=True)
@@ -409,7 +413,7 @@ class TradingMixin:
                 try:
                     price = await self._get_price(code)
                 except Exception:
-                    pass
+                    logger.debug("_action_stock_action get_price failed for %s", code, exc_info=True)
             if price > 0:
                 holding_id = self.db.add_holding(code, name, price)
                 self.db.upsert_portfolio_horizon(
@@ -423,7 +427,7 @@ class TradingMixin:
                 try:
                     await self._analyze_new_holding(code, name, price, holding_id)
                 except Exception:
-                    pass
+                    logger.debug("_action_stock_action analyze_new_holding failed for %s", code, exc_info=True)
             else:
                 await query.edit_message_text(
                     f"⚠️ {name} 가격 조회 실패.\n다시 시도해주세요."
@@ -533,7 +537,7 @@ class TradingMixin:
                 try:
                     self.db.update_holding_type(hid, hold_type)
                 except Exception:
-                    pass
+                    logger.debug("_action_holding_type update_holding_type failed for id=%s", hid, exc_info=True)
             label = get_manager_label(hold_type)
             await query.edit_message_text(
                 f"✅ {len(ids)}종목 → {label} 배정 완료\n\n"
@@ -590,6 +594,7 @@ class TradingMixin:
                 f"환율={macro.usdkrw:,.0f}원"
             )
         except Exception:
+            logger.debug("_action_manager_analysis macro snapshot failed", exc_info=True)
             market_text = ""
 
         report = await get_manager_analysis(payload, type_holdings, market_text)
@@ -768,7 +773,7 @@ class TradingMixin:
                     ).fetchone()
                     has_sold = (row["cnt"] if row else 0) > 0
             except Exception:
-                pass
+                logger.debug("_get_kis_holdings sold check DB query failed", exc_info=True)
             if has_sold:
                 return []
             try:
@@ -820,7 +825,7 @@ class TradingMixin:
                     )
                     synced = True
                 except Exception:
-                    pass
+                    logger.debug("_get_kis_holdings DB sync failed for %s", h.get("ticker"), exc_info=True)
         if synced:
             logger.debug("Holdings synced to DB: %d items", len(holdings))
 
@@ -853,6 +858,7 @@ class TradingMixin:
                     h["day_change"] = detail["day_change"]
                 except Exception:
                     # 시세 조회 실패해도 기존 데이터로 진행
+                    logger.debug("_update_holdings_prices get_price_detail failed for %s", ticker, exc_info=True)
                     if cur <= 0:
                         cur = bp
 
@@ -1095,6 +1101,7 @@ class TradingMixin:
         try:
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
         except Exception:
+            logger.debug("_action_watch_detail edit_text failed, falling back", exc_info=True)
             await query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
 
     async def _action_nowatch(self, query, context, ticker: str) -> None:
@@ -2250,7 +2257,7 @@ class TradingMixin:
 
         except Exception as e:
             logger.error("Position sizing error: %s", e, exc_info=True)
-            return f"⚠️ 포지션 사이징 계산 중 오류: {str(e)[:100]}"
+            return "⚠️ 포지션 사이징 계산 중 오류가 발생했어요. 잠시 후 다시 시도해주세요."
 
     # == Phase 2+3 Callback Handlers (v4.3) ===================================
 

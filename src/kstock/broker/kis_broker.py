@@ -9,14 +9,14 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import yaml
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 
 try:
     from pykis import Api as PykisApi, DomainInfo as PykisDomain

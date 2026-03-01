@@ -865,6 +865,22 @@ CREATE TABLE IF NOT EXISTS global_news (
 );
 CREATE INDEX IF NOT EXISTS idx_global_news_created ON global_news(created_at);
 CREATE INDEX IF NOT EXISTS idx_global_news_urgent ON global_news(is_urgent, created_at);
+
+-- 성능 인덱스: 자주 조회되는 테이블
+CREATE INDEX IF NOT EXISTS idx_holdings_status ON holdings(status);
+CREATE INDEX IF NOT EXISTS idx_holdings_ticker ON holdings(ticker);
+CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at);
+CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
+CREATE INDEX IF NOT EXISTS idx_recommendations_status ON recommendations(status);
+CREATE INDEX IF NOT EXISTS idx_recommendations_created ON recommendations(created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_orders_ticker ON orders(ticker);
+CREATE INDEX IF NOT EXISTS idx_watchlist_ticker ON watchlist(ticker);
+CREATE INDEX IF NOT EXISTS idx_event_log_type ON event_log(event_type);
+CREATE INDEX IF NOT EXISTS idx_event_log_created ON event_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_ticker ON alerts(ticker);
+CREATE INDEX IF NOT EXISTS idx_reports_ticker ON reports(ticker);
+CREATE INDEX IF NOT EXISTS idx_reports_date ON reports(date);
 """
 
 

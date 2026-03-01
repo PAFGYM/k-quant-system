@@ -40,13 +40,14 @@ BLOCKED_PATTERNS = [
 # Prefix trigger
 CLAUDE_PREFIX = "클코"
 
-# Claude 대화 모드 키보드 — 메인 메뉴 기능 유지 + 종료 버튼
+# Claude 대화 모드 키보드 — MAIN_MENU와 동일 구조 + is_persistent
 CLAUDE_MODE_MENU = ReplyKeyboardMarkup(
     [
         ["📊 분석", "📈 시황"],
         ["💰 잔고", "⭐ 즐겨찾기"],
+        ["💻 클로드", "🤖 에이전트"],
         ["💬 AI질문", "📋 리포트"],
-        ["💻 클로드", "⚙️ 더보기"],
+        ["⚙️ 더보기"],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -156,7 +157,8 @@ class RemoteClaudeMixin:
             return "Claude CLI를 찾을 수 없습니다. 경로를 확인해주세요.", -1, elapsed
         except Exception as e:
             elapsed = time.monotonic() - start_time
-            return f"실행 오류: {str(e)[:200]}", -1, elapsed
+            logger.error("Claude CLI exec error: %s", e, exc_info=True)
+            return "실행 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.", -1, elapsed
 
     async def cmd_claude(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -178,92 +180,15 @@ class RemoteClaudeMixin:
     async def _menu_claude_code(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """💻 클로드 메뉴 버튼 핸들러 — AI 에이전트 종합 허브.
+        """💻 클로드 버튼 — 자유 대화 모드 진입.
 
-        v5.6: 세션비용, WebSocket 상태, 필수 버튼 모두 표시.
+        v6.1: 시스템 정보 폼 제거, 바로 대화 시작.
         """
         context.user_data["claude_mode"] = True
         context.user_data["claude_turn"] = 0
 
-        # AI 상태 확인
-        ai_available = []
-        try:
-            for name, provider in self.ai.providers.items():
-                if provider.available:
-                    ai_available.append(name)
-        except Exception:
-            pass
-        ai_text = ", ".join(ai_available) if ai_available else "Claude"
-
-        # 보유종목 수
-        try:
-            holdings_count = len(self.db.get_active_holdings())
-        except Exception:
-            holdings_count = 0
-
-        # 스케줄 잡 수 (실제 집계)
-        job_count = 27
-        try:
-            if hasattr(self, '_job_queue') and self._job_queue:
-                jobs = self._job_queue.jobs()
-                job_count = len(jobs)
-        except Exception:
-            pass
-
-        # WebSocket 상태 (실제 확인)
-        ws_status = self.ws.get_status()
-
-        # 세션 비용 추정 (오늘 사용한 AI 호출 기반)
-        session_cost = 0.0
-        try:
-            today_stats = self.db.get_today_feedback()
-            # 대략적 비용: 피드백 수 기반은 아니고, 실제 AI 호출 횟수 추정
-            job_runs = self.db.get_job_runs_today() if hasattr(self.db, 'get_job_runs_today') else []
-            ai_calls = 0
-            for jr in job_runs:
-                if jr.get("job_name") in ("morning_briefing", "us_premarket_briefing",
-                                           "daily_self_report", "sentiment_analysis"):
-                    ai_calls += 1
-            # 채팅 기반 AI 호출 추정
-            chat_count = len(self.db.get_recent_chats(limit=50)) if hasattr(self.db, 'get_recent_chats') else 0
-            session_cost = ai_calls * 0.01 + chat_count * 0.005
-        except Exception:
-            pass
-        cost_str = f"${session_cost:.4f}" if session_cost > 0 else "집계 중"
-
-        # 업타임 계산
-        uptime_str = ""
-        try:
-            uptime = datetime.now(KST) - self._start_time
-            hours = int(uptime.total_seconds() // 3600)
-            minutes = int((uptime.total_seconds() % 3600) // 60)
-            uptime_str = f"{hours}시간 {minutes}분"
-        except Exception:
-            uptime_str = "알 수 없음"
-
         await update.message.reply_text(
-            f"🤖 주호님의 AI 에이전트\n\n"
-            f"━━ 시스템 상태 ━━\n"
-            f"🧠 AI 엔진: {ai_text}\n"
-            f"💼 보유종목: {holdings_count}개 모니터링\n"
-            f"⏰ 자동 작업: {job_count}개 가동 중\n"
-            f"📡 실시간: {ws_status}\n"
-            f"💰 세션비용: {cost_str}\n"
-            f"🕐 업타임: {uptime_str}\n\n"
-            f"━━ AI 스케줄 ━━\n"
-            f"☀️ 07:00 미국장 분석\n"
-            f"📊 07:30 모닝 브리핑\n"
-            f"🛒 07:50 매수 플래너\n"
-            f"📡 08:50~15:35 WebSocket 실시간 감시\n"
-            f"🔍 장중 1분마다 시장 모니터링\n"
-            f"📋 16:00 장마감 PDF 리포트\n"
-            f"🧠 21:00 자가진단\n"
-            f"🤖 일요일 LSTM 재학습\n\n"
-            f"━━ 뭐든 물어보세요 ━━\n"
-            f"종목 분석, 시장 전망, 포트폴리오 조언\n"
-            f"봇 관리, 코드 수정, 시스템 확인\n"
-            f"뭐든 자유롭게 대화하세요!\n\n"
-            f"🔙 대화 종료 버튼으로 나갑니다.",
+            "🤖 무엇이든 물어보세요!",
             reply_markup=CLAUDE_MODE_MENU,
         )
 
@@ -320,9 +245,9 @@ class RemoteClaudeMixin:
                                 f"[절대 규칙] 위 실시간 데이터의 가격만 사용하라."
                             )
                     except Exception:
-                        pass
+                        logger.debug("_claude_free_chat get_price failed for %s", code, exc_info=True)
             except Exception:
-                pass
+                logger.debug("_claude_free_chat stock detection/enrichment failed", exc_info=True)
 
             chat_mem = ChatMemory(self.db)
             ctx = await build_full_context_with_macro(
@@ -342,6 +267,7 @@ class RemoteClaudeMixin:
             try:
                 await placeholder.edit_text(answer, reply_markup=markup)
             except Exception:
+                logger.debug("_claude_free_chat edit_text failed, falling back", exc_info=True)
                 await update.message.reply_text(
                     answer, reply_markup=CLAUDE_MODE_MENU,
                 )
@@ -352,7 +278,7 @@ class RemoteClaudeMixin:
                     "⚠️ 응답 중 오류가 발생했습니다. 다시 시도해주세요."
                 )
             except Exception:
-                pass
+                logger.debug("_claude_free_chat error recovery edit_text also failed", exc_info=True)
 
     async def _execute_claude_prompt(
         self, update: Update, prompt: str, *, context=None
@@ -418,7 +344,7 @@ class RemoteClaudeMixin:
         try:
             await placeholder.delete()
         except Exception:
-            pass
+            logger.debug("_execute_claude_prompt placeholder delete failed", exc_info=True)
 
         for i, chunk in enumerate(chunks):
             # 마지막 청크에 키보드 표시
@@ -515,7 +441,7 @@ class RemoteClaudeMixin:
         except Exception as e:
             logger.error("Claude mode image error: %s", e)
             await update.message.reply_text(
-                f"⚠️ 이미지 분석 실패: {str(e)[:200]}",
+                "⚠️ 이미지 분석에 실패했어요. 다른 이미지로 시도해주세요.",
                 reply_markup=CLAUDE_MODE_MENU,
             )
 
@@ -655,4 +581,4 @@ class RemoteClaudeMixin:
                         ),
                     )
                 except Exception:
-                    pass
+                    logger.debug("_auto_fix_error notification send failed", exc_info=True)

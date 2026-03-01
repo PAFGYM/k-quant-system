@@ -32,6 +32,7 @@ class CommandsMixin:
                 else:
                     pre_results.append((stock, 0.0))
             except Exception:
+                logger.debug("_run_scan pre-scan failed for %s", stock.get("code"), exc_info=True)
                 pre_results.append((stock, 0.0))
 
         # Second pass: full analysis with RS rank
@@ -79,7 +80,7 @@ class CommandsMixin:
                 if realtime > 0:
                     live_price = realtime
             except Exception:
-                pass
+                logger.debug("_run_scan_for_stock get_price failed for %s", ticker, exc_info=True)
 
             info = StockInfo(
                 ticker=ticker, name=name, market=market,
@@ -142,7 +143,7 @@ class CommandsMixin:
                     ml_pred = predict(features, self._ml_model)
                     ml_bonus_val = get_ml_bonus(ml_pred.probability)
                 except Exception:
-                    pass
+                    logger.debug("_run_scan_for_stock ML prediction failed for %s", ticker, exc_info=True)
 
             # v3.0: sentiment bonus
             sentiment_bonus = 0
@@ -150,7 +151,7 @@ class CommandsMixin:
                 try:
                     sentiment_bonus = get_sentiment_bonus(self._sentiment_cache[ticker])
                 except Exception:
-                    pass
+                    logger.debug("_run_scan_for_stock sentiment bonus failed for %s", ticker, exc_info=True)
 
             # v3.0: leading sector bonus
             from kstock.signal.policy_engine import _load_config as _load_policy_config
@@ -161,6 +162,7 @@ class CommandsMixin:
                 tier2 = leading.get("tier2", [])
                 leading_sector_bonus = 5 if sector in tier1 else 2 if sector in tier2 else 0
             except Exception:
+                logger.debug("_run_scan_for_stock leading sector bonus failed for %s", ticker, exc_info=True)
                 leading_sector_bonus = 0
 
             score = compute_composite_score(
@@ -226,7 +228,7 @@ class CommandsMixin:
                 logger.debug("Price %s: KIS=%s", ticker, price)
                 return price
         except Exception:
-            pass
+            logger.debug("_get_price KIS failed for %s", ticker, exc_info=True)
         # 2순위: Naver Finance (장중 ~수분 지연)
         try:
             from kstock.ingest.naver_finance import NaverFinanceClient
@@ -236,7 +238,7 @@ class CommandsMixin:
                 logger.debug("Price %s: Naver=%s", ticker, price)
                 return price
         except Exception:
-            pass
+            logger.debug("_get_price Naver failed for %s", ticker, exc_info=True)
         # 3순위: yfinance (전일 종가 기반, 지연 큼)
         market = "KOSPI"
         for s in self.all_tickers:
@@ -249,7 +251,7 @@ class CommandsMixin:
                 logger.debug("Price %s: yfinance=%s", ticker, price)
                 return price
         except Exception:
-            pass
+            logger.debug("_get_price yfinance failed for %s", ticker, exc_info=True)
         # 4순위: base_price fallback
         if base_price > 0:
             logger.debug("Price %s: fallback=%s", ticker, base_price)
@@ -267,7 +269,7 @@ class CommandsMixin:
             if detail["price"] > 0 and detail["prev_close"] > 0:
                 return detail
         except Exception:
-            pass
+            logger.debug("_get_price_detail KIS failed for %s", ticker, exc_info=True)
         # 2순위: yfinance로 현재가만, 전일 대비는 0
         price = await self._get_price(ticker, base_price)
         return {
@@ -598,6 +600,7 @@ class CommandsMixin:
             try:
                 holdings = _json.loads(last_ss.get("holdings_json", "[]") or "[]")
             except (_json.JSONDecodeError, TypeError):
+                logger.debug("cmd_history holdings JSON parse failed", exc_info=True)
                 holdings = []
 
             if not holdings:
@@ -664,6 +667,7 @@ class CommandsMixin:
             try:
                 holdings_list = json.loads(snapshots[0].get("holdings_json", "[]") or "[]")
             except (json.JSONDecodeError, TypeError):
+                logger.debug("cmd_goal snapshot holdings JSON parse failed", exc_info=True)
                 holdings_list = []
         else:
             last_ss = self.db.get_last_screenshot()
@@ -673,6 +677,7 @@ class CommandsMixin:
                     h_json = last_ss.get("holdings_json", "[]")
                     holdings_list = json.loads(h_json) if h_json else []
                 except (json.JSONDecodeError, TypeError):
+                    logger.debug("cmd_goal screenshot holdings JSON parse failed", exc_info=True)
                     holdings_list = []
 
         progress = compute_goal_progress(current_asset)
@@ -785,7 +790,7 @@ class CommandsMixin:
                             if live > 0:
                                 cur = live
                         except Exception:
-                            pass
+                            logger.debug("_handle_ai_question get_price failed for %s", code, exc_info=True)
                         if cur > 0:
                             enriched = (
                                 f"{question}\n\n"
@@ -818,6 +823,7 @@ class CommandsMixin:
             try:
                 await placeholder.edit_text(answer, reply_markup=markup)
             except Exception:
+                logger.debug("_handle_ai_question edit_text failed, falling back to reply_text", exc_info=True)
                 await update.message.reply_text(
                     answer,
                     reply_markup=markup or get_reply_markup(context),
@@ -829,6 +835,7 @@ class CommandsMixin:
                     "주호님, AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
                 )
             except Exception:
+                logger.debug("_handle_ai_question error edit_text also failed", exc_info=True)
                 await update.message.reply_text(
                     "주호님, AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
                     reply_markup=get_reply_markup(context),
@@ -1061,7 +1068,7 @@ class CommandsMixin:
                                 if live > 0:
                                     cur = live
                             except Exception:
-                                pass
+                                logger.debug("_handle_followup get_price failed for %s", code, exc_info=True)
                             if cur > 0:
                                 v_names = {name}
                                 enriched = (
@@ -1073,7 +1080,7 @@ class CommandsMixin:
                                     f"너의 학습 데이터에 있는 과거 주가를 절대 사용 금지."
                                 )
                 except Exception:
-                    pass
+                    logger.debug("_handle_followup stock data enrichment failed", exc_info=True)
 
             chat_mem = ChatMemory(self.db)
             ctx = await build_full_context_with_macro(
@@ -1133,7 +1140,7 @@ class CommandsMixin:
                                 tech = compute_indicators(ohlcv)
                                 rsi_str = f"\nRSI: {tech.rsi:.1f}"
                         except Exception:
-                            pass
+                            logger.debug("_handle_dynamic_followup RSI fetch failed for %s", code, exc_info=True)
                         enriched = (
                             f"{question}\n\n"
                             f"[{sname}({code}) 실시간 데이터]\n"
@@ -1142,7 +1149,7 @@ class CommandsMixin:
                             f"너의 학습 데이터에 있는 과거 주가를 절대 사용 금지."
                         )
             except Exception:
-                pass
+                logger.debug("_handle_dynamic_followup stock enrichment failed", exc_info=True)
 
             chat_mem = ChatMemory(self.db)
             ctx = await build_full_context_with_macro(
@@ -1199,9 +1206,8 @@ class CommandsMixin:
             from kstock.bot.chat_handler import handle_ai_question
             from kstock.bot.context_builder import build_full_context_with_macro
             from kstock.bot.chat_memory import ChatMemory
-            from datetime import datetime, timezone, timedelta
-            KST_TZ = timezone(timedelta(hours=9))
-            now = datetime.now(KST_TZ)
+            from datetime import datetime
+            now = datetime.now(KST)
 
             # 1. 실시간 매크로 데이터 수집
             macro_block = ""
@@ -1223,6 +1229,7 @@ class CommandsMixin:
                 if parts:
                     macro_block = " | ".join(parts)
             except Exception:
+                logger.debug("_action_quick_question macro snapshot failed", exc_info=True)
                 macro_block = "매크로 데이터 조회 실패"
 
             # 2. KOSPI/KOSDAQ 실시간 지수
@@ -1233,7 +1240,7 @@ class CommandsMixin:
                     if p > 0:
                         index_block += f"{idx_name}: {p:,.2f} | "
             except Exception:
-                pass
+                logger.debug("_action_quick_question index price fetch failed", exc_info=True)
 
             # 3. 보유종목 실시간 가격
             holdings = self.db.get_active_holdings()
@@ -1261,6 +1268,7 @@ class CommandsMixin:
                         else:
                             pf_lines.append(f"- {hname}({ticker}): 매수가 {buy_price:,.0f}원 | 수량 {qty}주")
                     except Exception:
+                        logger.debug("_action_quick_question holding price fetch failed for %s", ticker, exc_info=True)
                         pf_lines.append(f"- {hname}({ticker}): 매수가 {buy_price:,.0f}원 | 수량 {qty}주")
                 if pf_lines:
                     portfolio_block = "\n".join(pf_lines)
@@ -1300,6 +1308,7 @@ class CommandsMixin:
             try:
                 await query.edit_message_text(answer, reply_markup=markup)
             except Exception:
+                logger.debug("_action_quick_question edit_text failed, falling back", exc_info=True)
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
                     text=answer,
@@ -1312,7 +1321,7 @@ class CommandsMixin:
                     "주호님, AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
                 )
             except Exception:
-                pass
+                logger.debug("_action_quick_question error recovery edit_text also failed", exc_info=True)
 
     @staticmethod
     def _fix_hallucinated_prices(text: str, price_map: dict[str, float]) -> str:
@@ -1411,7 +1420,7 @@ class CommandsMixin:
                     f"원/달러: {snap.usdkrw:,.0f}원 | 레짐: {regime['label']}"
                 )
             except Exception:
-                pass
+                logger.debug("_action_4manager_picks macro context fetch failed", exc_info=True)
 
             # 3. 4매니저 동시 AI 분석 (asyncio.gather)
             from kstock.bot.investment_managers import (
@@ -1484,6 +1493,7 @@ class CommandsMixin:
             try:
                 await query.edit_message_text(result_text, reply_markup=markup)
             except Exception:
+                logger.debug("_action_4manager_picks edit_text failed, falling back", exc_info=True)
                 await query.message.reply_text(
                     result_text, reply_markup=markup or get_reply_markup(context),
                 )
@@ -1495,7 +1505,7 @@ class CommandsMixin:
                     "⚠️ 4매니저 분석 중 오류가 발생했습니다.\n잠시 후 다시 시도해주세요."
                 )
             except Exception:
-                pass
+                logger.debug("_action_4manager_picks error recovery edit_text also failed", exc_info=True)
 
     async def _handle_buy_pick_with_live_data(self, query, context) -> None:
         """매수 추천 — 실시간 스캔 데이터 기반 (AI 환각 주가 완전 차단).
@@ -1509,8 +1519,7 @@ class CommandsMixin:
 
         try:
             # 1. 실시간 스캔 (캐시 또는 새로 실행)
-            from datetime import datetime, timezone, timedelta
-            KST = timezone(timedelta(hours=9))
+            from datetime import datetime
             now = datetime.now(KST)
             cache_age = (now - self._scan_cache_time).total_seconds() if hasattr(self, '_scan_cache_time') and self._scan_cache_time else 9999
             if cache_age < 600 and hasattr(self, '_last_scan_results') and self._last_scan_results:
@@ -1537,7 +1546,7 @@ class CommandsMixin:
                     if p > 0:
                         live_price = p
                 except Exception:
-                    pass
+                    logger.debug("_handle_buy_pick get_price failed for %s", r.ticker, exc_info=True)
                 live_prices[r.name] = live_price
 
                 medals = {1: "1위", 2: "2위", 3: "3위"}
@@ -1591,6 +1600,7 @@ class CommandsMixin:
             try:
                 await query.edit_message_text(answer, reply_markup=markup)
             except Exception:
+                logger.debug("_handle_buy_pick edit_text failed, falling back", exc_info=True)
                 await query.message.reply_text(answer, reply_markup=markup or get_reply_markup(context))
         except Exception as e:
             logger.error("Buy pick with live data error: %s", e, exc_info=True)
@@ -1599,7 +1609,7 @@ class CommandsMixin:
                     "⚠️ 추천 종목 분석 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
                 )
             except Exception:
-                pass
+                logger.debug("_handle_buy_pick error recovery edit_text also failed", exc_info=True)
 
     async def _menu_reports(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1806,7 +1816,7 @@ class CommandsMixin:
                             )
                         short_data = self.db.get_short_selling(ticker, days=60)
                 except Exception:
-                    pass
+                    logger.debug("_action_short_selling data fetch failed for %s", ticker, exc_info=True)
 
             if not short_data:
                 await query.message.reply_text(
@@ -2099,7 +2109,7 @@ class CommandsMixin:
             try:
                 live_price = await self._get_price(ticker, base_price=0)
             except Exception:
-                pass
+                logger.debug("_action_multi_run get_price failed for %s", ticker, exc_info=True)
 
             stock_data = {"name": name, "ticker": ticker, "price": live_price}
             try:
@@ -2185,10 +2195,10 @@ class CommandsMixin:
             logger.error("Multi-run callback error: %s", e, exc_info=True)
             try:
                 await query.edit_message_text(
-                    f"\u26a0\ufe0f 멀티 분석 오류: {str(e)[:100]}"
+                    "\u26a0\ufe0f 분석 중 일시적 오류가 발생했어요. 잠시 후 다시 시도해주세요."
                 )
             except Exception:
-                pass
+                logger.debug("_action_multi_run error recovery edit_text also failed", exc_info=True)
 
     async def _action_sell_plans(self, query, context, payload: str) -> None:
         """Phase 8: 매도 계획 표시."""
@@ -2206,7 +2216,7 @@ class CommandsMixin:
                         h["current_price"] = cur
                         h["pnl_pct"] = round((cur - bp) / bp * 100, 2)
                 except Exception:
-                    pass
+                    logger.debug("_action_sell_plans get_price failed for %s", h.get("ticker"), exc_info=True)
 
             market_state = self.market_pulse.get_current_state()
             plans = self.sell_planner.create_plans_for_all(holdings, market_state)
@@ -2222,7 +2232,7 @@ class CommandsMixin:
             try:
                 await query.edit_message_text("\u26a0\ufe0f 매도 계획 생성 오류.")
             except Exception:
-                pass
+                logger.debug("_action_sell_plans error recovery edit_text also failed", exc_info=True)
 
     async def _action_scenario_run(self, query, context, payload: str) -> None:
         """Handle scenario selection callback."""
@@ -2242,7 +2252,7 @@ class CommandsMixin:
             try:
                 await query.edit_message_text("\u26a0\ufe0f 시나리오 분석 오류.")
             except Exception:
-                pass
+                logger.debug("_action_scenario_run error recovery edit_text also failed", exc_info=True)
 
     async def cmd_ml(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2329,7 +2339,7 @@ class CommandsMixin:
                         "prices_5d": [float(x) for x in close.tail(5).tolist()],
                     })
             except Exception:
-                pass
+                logger.debug("cmd_multi_agent OHLCV/tech fetch failed for %s", ticker, exc_info=True)
 
             fin = self.db.get_financials(ticker)
             if fin:
@@ -2363,6 +2373,7 @@ class CommandsMixin:
             try:
                 await placeholder.edit_text(msg)
             except Exception:
+                logger.debug("cmd_multi_agent edit_text failed, falling back", exc_info=True)
                 await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Multi-agent command error: %s", e, exc_info=True)
@@ -2424,6 +2435,7 @@ class CommandsMixin:
                             "past_suspicious_count": 0,
                         })
                 except Exception:
+                    logger.debug("cmd_surge stock data build failed", exc_info=True)
                     continue
 
             if not stocks_data:
@@ -2432,7 +2444,7 @@ class CommandsMixin:
                         "\U0001f525 현재 급등 조건을 충족하는 종목이 없습니다."
                     )
                 except Exception:
-                    pass
+                    logger.debug("cmd_surge edit_text failed for empty result", exc_info=True)
                 return
 
             # 등락률 기준 정렬, 상위 10개
@@ -2461,6 +2473,7 @@ class CommandsMixin:
             try:
                 await placeholder.edit_text("\n".join(lines))
             except Exception:
+                logger.debug("cmd_surge edit_text failed, falling back", exc_info=True)
                 await update.message.reply_text("\n".join(lines), reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Surge command error: %s", e, exc_info=True)
@@ -2568,6 +2581,7 @@ class CommandsMixin:
                         "disclosure_text": "",
                     })
                 except Exception:
+                    logger.debug("cmd_accumulation stock data build failed", exc_info=True)
                     continue
 
             if not stocks_data:
@@ -2576,7 +2590,7 @@ class CommandsMixin:
                         "\U0001f575\ufe0f 분석 가능한 종목 데이터가 없습니다."
                     )
                 except Exception:
-                    pass
+                    logger.debug("cmd_accumulation edit_text failed for empty result", exc_info=True)
                 return
 
             # 매집 패턴 탐지
@@ -2589,7 +2603,7 @@ class CommandsMixin:
                         f"({len(stocks_data)}종목 스캔 완료)"
                     )
                 except Exception:
-                    pass
+                    logger.debug("cmd_accumulation edit_text failed for no detection", exc_info=True)
                 return
 
             lines = [f"\U0001f575\ufe0f 스텔스 매집 감지 ({len(detections)}종목)\n"]
@@ -2622,6 +2636,7 @@ class CommandsMixin:
             try:
                 await placeholder.edit_text("\n".join(lines))
             except Exception:
+                logger.debug("cmd_accumulation edit_text failed, falling back", exc_info=True)
                 await update.message.reply_text("\n".join(lines), reply_markup=get_reply_markup(context))
         except Exception as e:
             logger.error("Accumulation command error: %s", e, exc_info=True)

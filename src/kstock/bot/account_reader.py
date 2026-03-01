@@ -18,14 +18,14 @@ import base64
 import json
 import logging
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 USER_NAME = "주호님"
 
 _VISION_PROMPT = (

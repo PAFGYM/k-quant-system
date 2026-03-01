@@ -217,6 +217,7 @@ class SchedulerMixin:
                     try:
                         current_price = await self._get_price(ticker, base_price=buy_price)
                     except Exception:
+                        logger.debug("job_morning_briefing get_price failed for %s", ticker, exc_info=True)
                         current_price = h.get("current_price", 0)
                     pnl_pct = ((current_price - buy_price) / buy_price * 100) if buy_price > 0 and current_price > 0 else 0
                     holdings_text += (
@@ -239,7 +240,7 @@ class SchedulerMixin:
                         news_lines.append(f"  {urgency} {n.get('title', '')}")
                     news_ctx = "\n[글로벌 뉴스 헤드라인]\n" + "\n".join(news_lines) + "\n"
             except Exception:
-                pass
+                logger.debug("job_morning_briefing global news fetch failed", exc_info=True)
 
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
@@ -475,6 +476,7 @@ class SchedulerMixin:
         try:
             macro = await self.macro_client.get_snapshot()
         except Exception:
+            logger.warning("_eod_market_analysis macro snapshot failed", exc_info=True)
             return None
 
         # 보유종목 현황 (상세)
@@ -515,7 +517,7 @@ class SchedulerMixin:
                     eod_news_lines.append(f"  {urgency} {n.get('title', '')}")
                 eod_news_ctx = "\n[글로벌 뉴스 헤드라인]\n" + "\n".join(eod_news_lines) + "\n"
         except Exception:
-            pass
+            logger.debug("_eod_market_analysis global news fetch failed", exc_info=True)
 
         prompt = (
             f"오늘 한국/미국 주식 시장 장 마감 종합 분석을 작성해줘.\n"
@@ -621,6 +623,7 @@ class SchedulerMixin:
                 day_chg = detail["day_change"]
                 day_chg_pct = detail["day_change_pct"]
             except Exception:
+                logger.debug("job_market_pulse get_price_detail failed for %s", ticker, exc_info=True)
                 cur = bp
                 day_chg = 0.0
                 day_chg_pct = 0.0
@@ -853,7 +856,7 @@ class SchedulerMixin:
                         h["day_change_pct"] = detail["day_change_pct"]
                         total_day_pnl += detail["day_change"] * h.get("quantity", 0)
                 except Exception:
-                    pass
+                    logger.debug("job_pdf_report get_price_detail failed for %s", h.get("ticker"), exc_info=True)
 
             # ── 3. PDF 생성 ──
             market_state = self.market_pulse.get_current_state()
@@ -865,7 +868,7 @@ class SchedulerMixin:
             try:
                 pdf_news = self.db.get_recent_global_news(limit=8, hours=24)
             except Exception:
-                pass
+                logger.debug("job_pdf_report global news fetch failed", exc_info=True)
 
             filepath = await generate_daily_pdf(
                 macro_snapshot=macro,
@@ -1071,7 +1074,7 @@ class SchedulerMixin:
                         if buy > 0 and current > 0:
                             pnl = (current - buy) / buy * 100
                     except Exception:
-                        pass
+                        logger.debug("job_daily_directive get_price failed for %s", h.get("ticker", ""), exc_info=True)
                     holdings_text += f"  {name}: {pnl:+.1f}% (매수 {buy:,.0f} → 현재 {current:,.0f}, {horizon})\n"
                     # 알림 대상 감지
                     if pnl <= -7 and horizon not in ("long", "long_term"):
@@ -1101,7 +1104,7 @@ class SchedulerMixin:
                         news_lines.append(f"  {urgency} {n.get('title', '')}")
                     news_ctx = "\n[글로벌 뉴스 헤드라인]\n" + "\n".join(news_lines) + "\n"
             except Exception:
-                pass
+                logger.debug("job_daily_directive global news fetch failed", exc_info=True)
 
             # 6. AI 프롬프트 구성
             prompt = (
@@ -1241,7 +1244,7 @@ class SchedulerMixin:
                         news_lines.append(f"  {urgency} {n.get('title', '')}")
                     news_ctx = "\n[글로벌 뉴스 헤드라인]\n" + "\n".join(news_lines) + "\n"
             except Exception:
-                pass
+                logger.debug("job_us_premarket global news fetch failed", exc_info=True)
 
             prompt = (
                 f"새벽 미국 시장 마감 결과를 분석하고, "
@@ -1463,7 +1466,7 @@ class SchedulerMixin:
                     f"({len(no_fin)}종목)"
                 )
         except Exception:
-            pass
+            logger.debug("_get_self_improvement_suggestions financials check failed", exc_info=True)
 
         # 2. 가격 갱신이 필요한 종목
         try:
@@ -1478,7 +1481,7 @@ class SchedulerMixin:
                     f"💰 현재가 갱신 필요: {stale_count}종목"
                 )
         except Exception:
-            pass
+            logger.debug("_get_self_improvement_suggestions price check failed", exc_info=True)
 
         # 3. 오류 잡 재실행 제안
         try:
@@ -1493,7 +1496,7 @@ class SchedulerMixin:
                         f"🔄 실패 작업 재실행: {', '.join(names[:3])}"
                     )
         except Exception:
-            pass
+            logger.debug("_get_self_improvement_suggestions job_runs check failed", exc_info=True)
 
         # 4. 투자기간 미설정 종목
         try:
@@ -1507,7 +1510,7 @@ class SchedulerMixin:
                     f"⏰ 투자기간 미설정: {', '.join(no_horizon[:3])}"
                 )
         except Exception:
-            pass
+            logger.debug("_get_self_improvement_suggestions horizon check failed", exc_info=True)
 
         # 5. v3.8 건강 체크: WebSocket, LSTM, 브리핑, 단타 모니터링
         try:
@@ -1532,7 +1535,7 @@ class SchedulerMixin:
                     "🏥 시스템 상태: " + ", ".join(health_items)
                 )
         except Exception:
-            pass
+            logger.debug("_get_self_improvement_suggestions health check failed", exc_info=True)
 
         if not suggestions:
             return None
@@ -1601,10 +1604,10 @@ class SchedulerMixin:
                                 )
                                 collected += 1
                         except Exception:
-                            pass
+                            logger.debug("_action_self_update fetch_financials failed for %s", h.get("ticker"), exc_info=True)
                     results.append(f"📊 재무 데이터: {collected}종목 수집 완료")
             except Exception:
-                pass
+                logger.debug("_action_self_update financials collection failed", exc_info=True)
 
             # 2. 현재가 갱신
             try:
@@ -1622,11 +1625,11 @@ class SchedulerMixin:
                                 )
                                 updated += 1
                         except Exception:
-                            pass
+                            logger.debug("_action_self_update get_price failed for %s", ticker, exc_info=True)
                 if updated > 0:
                     results.append(f"💰 현재가 갱신: {updated}종목 완료")
             except Exception:
-                pass
+                logger.debug("_action_self_update price update failed", exc_info=True)
 
             # 3. 투자기간 미설정 → 기본값 설정
             try:
@@ -1645,7 +1648,7 @@ class SchedulerMixin:
                         f"⏰ 투자기간: {set_count}종목 기본값(단기) 설정"
                     )
             except Exception:
-                pass
+                logger.debug("_action_self_update horizon set failed", exc_info=True)
 
             if results:
                 result_msg = (
@@ -2098,7 +2101,7 @@ class SchedulerMixin:
                             self._send_surge_alert(ticker, data),
                         )
                     except RuntimeError:
-                        pass
+                        logger.debug("on_ws_price_update no running event loop for surge alert")
 
         # 2. 보유종목 목표가/손절가 체크
         self._check_sell_targets(ticker, data, now, loop)
@@ -2223,7 +2226,7 @@ class SchedulerMixin:
                 try:
                     asyncio.ensure_future(coro)
                 except RuntimeError:
-                    pass
+                    logger.debug("_check_sell_targets no running event loop for sell guide")
 
     async def _send_sell_guide(
         self, name: str, ticker: str, current_price: float,
@@ -2349,6 +2352,7 @@ class SchedulerMixin:
             try:
                 buy_date = datetime.fromisoformat(buy_date_str[:10])
             except (ValueError, TypeError):
+                logger.debug("_check_swing_holding_period invalid buy_date for %s", h.get("ticker"), exc_info=True)
                 continue
 
             days_held = (now.date() - buy_date.date()).days
@@ -2420,7 +2424,7 @@ class SchedulerMixin:
             try:
                 self.db.upsert_job_run("lstm_retrain", _today(), status="error")
             except Exception:
-                pass
+                logger.debug("job_ml_auto_train upsert_job_run also failed", exc_info=True)
 
     async def job_risk_monitor(
         self, context: ContextTypes.DEFAULT_TYPE,
@@ -2646,7 +2650,7 @@ class SchedulerMixin:
                                 "  🚨 긴급: MDD 20% 초과 — 전량 매도 검토"
                             )
             except Exception:
-                pass
+                logger.debug("job_risk_monitor MDD calculation failed", exc_info=True)
 
             for h in holdings:
                 pnl = h.get("pnl_pct", 0) or 0
@@ -2785,7 +2789,7 @@ class SchedulerMixin:
                                 fc.status = "ok"
                                 fc.message += " (자동 복구 완료)"
                         except Exception:
-                            pass
+                            logger.debug("job_health_check recovery attempt failed for %s", fc.name, exc_info=True)
 
                 # 에러 항목만 알림 (warning은 로그만)
                 # v5.4: 동일 알림 반복 방지 — 4시간 쿨다운
@@ -2793,8 +2797,8 @@ class SchedulerMixin:
                 if errors:
                     if not hasattr(self, '_health_alert_cache'):
                         self._health_alert_cache = {}
-                    from datetime import datetime, timezone, timedelta
-                    now = datetime.now(timezone(timedelta(hours=9)))
+                    from datetime import datetime
+                    now = datetime.now(KST)
                     new_errors = []
                     for c in errors:
                         last_sent = self._health_alert_cache.get(c.name)
@@ -2821,7 +2825,7 @@ class SchedulerMixin:
                             stat.name, stat.state, stat.consecutive_failures,
                         )
             except Exception:
-                pass
+                logger.debug("job_health_check circuit_breaker stats failed", exc_info=True)
 
         except Exception as e:
             logger.debug("Health check job error: %s", e)
@@ -2930,7 +2934,7 @@ class SchedulerMixin:
                     if df is not None and not df.empty:
                         ohlcv_map[etf_code] = df
                 except Exception:
-                    pass
+                    logger.debug("job_sector_rotation ETF OHLCV fetch failed for %s", etf_code, exc_info=True)
 
             if not ohlcv_map:
                 logger.debug("Sector rotation: no ETF data available")
@@ -3010,7 +3014,7 @@ class SchedulerMixin:
             try:
                 snap = await self.macro_client.get_snapshot()
             except Exception:
-                pass
+                logger.debug("job_contrarian_scan macro snapshot failed", exc_info=True)
 
             vix = getattr(snap, 'vix', 20.0) if snap else 20.0
             fear_greed = getattr(snap, 'regime', '중립') if snap else '중립'
@@ -3057,7 +3061,7 @@ class SchedulerMixin:
                                     data_json=json.dumps(sig.data, ensure_ascii=False),
                                 )
                             except Exception:
-                                pass
+                                logger.debug("job_contrarian_scan DB save signal failed for %s", sig.ticker, exc_info=True)
                 except Exception as e:
                     logger.debug("Contrarian scan error for %s: %s", ticker, e)
 
@@ -3094,7 +3098,7 @@ class SchedulerMixin:
                 if df is not None and not df.empty:
                     ohlcv_map[code] = df
             except Exception:
-                pass
+                logger.debug("_refresh_sector_strengths ETF OHLCV failed for %s", code, exc_info=True)
         self._sector_strengths = compute_sector_returns(ohlcv_map)
 
     # == v5.5: 매일 저녁 7시 일일 평가 알림 ====================================

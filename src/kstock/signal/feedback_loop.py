@@ -497,7 +497,7 @@ def generate_weekly_feedback(
             strat_recs = db.get_recommendations_by_strategy(strat)
             all_for_breakdown.extend(strat_recs)
         except Exception:
-            pass
+            logger.debug("generate_weekly_feedback: strategy %s fetch failed", strat, exc_info=True)
     # Include completed recs too (they might not appear in by_strategy query)
     seen_ids = {r.get("id") for r in all_for_breakdown if r.get("id")}
     for r in completed_recs:

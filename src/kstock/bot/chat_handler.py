@@ -20,11 +20,11 @@ from __future__ import annotations
 import logging
 import os
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+
+from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
-
-KST = timezone(timedelta(hours=9))
 USER_NAME = "주호님"
 
 # Daily limit for AI chat questions

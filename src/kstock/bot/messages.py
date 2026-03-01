@@ -10,7 +10,7 @@ Rules:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from kstock.signal.scoring import FlowData, ScoreBreakdown
     from kstock.signal.strategies import StrategySignal
 
-KST = timezone(timedelta(hours=9))
+from kstock.core.tz import KST
 
 USER_NAME = "주호님"
 

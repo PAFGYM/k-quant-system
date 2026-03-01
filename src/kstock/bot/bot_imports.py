@@ -241,8 +241,7 @@ logger = logging.getLogger(__name__)
 from kstock.bot.ai_router import AIRouter
 from kstock.ingest.kis_websocket import KISWebSocket
 from kstock.core.security import startup_security_check, security_audit, mask_key
-
-KST = timezone(timedelta(hours=9))
+from kstock.core.tz import KST
 
 # Claude Code remote execution prefix
 CLAUDE_PREFIX = "클코"

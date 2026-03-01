@@ -18,7 +18,7 @@ class CoreHandlersMixin:
             if _saved_id.lstrip("-").isdigit():
                 self.chat_id = _saved_id
         except Exception:
-            pass
+            logger.debug("__init__ failed to load persisted chat_id", exc_info=True)
         self.anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
         self.kis = KISClient()
         self.yf_client = YFinanceKRClient()
@@ -408,7 +408,7 @@ class CoreHandlersMixin:
                     chat_id_path.parent.mkdir(parents=True, exist_ok=True)
                     chat_id_path.write_text(numeric_id)
                 except Exception:
-                    pass
+                    logger.debug("_persist_chat_id file write failed", exc_info=True)
 
     async def cmd_start(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -471,7 +471,7 @@ class CoreHandlersMixin:
         except Exception as e:
             logger.error("Backtest error: %s", e, exc_info=True)
             await update.message.reply_text(
-                f"\u26a0\ufe0f 백테스트 오류: {str(e)[:100]}",
+                "\u26a0\ufe0f 백테스트 중 오류가 발생했어요. 종목코드를 확인하고 다시 시도해주세요.",
                 reply_markup=get_reply_markup(context),
             )
 
@@ -516,7 +516,7 @@ class CoreHandlersMixin:
         except Exception as e:
             logger.error("Optimize error: %s", e, exc_info=True)
             await update.message.reply_text(
-                f"\u26a0\ufe0f 최적화 오류: {str(e)[:100]}",
+                "\u26a0\ufe0f 최적화 중 오류가 발생했어요. 잠시 후 다시 시도해주세요.",
                 reply_markup=get_reply_markup(context),
             )
 
@@ -828,9 +828,9 @@ class CoreHandlersMixin:
             context.user_data.pop("awaiting_optimize_ticker", None)
             # Claude 대화 모드: CLAUDE_MODE_MENU에 포함된 버튼은 모드 유지
             _claude_safe_buttons = {
-                "💻 클로드", "🔙 대화 종료",
+                "💻 클로드", "🔙 대화 종료", "🤖 에이전트",
                 "📊 분석", "📈 시황", "💰 잔고", "⭐ 즐겨찾기",
-                "💬 AI질문", "📋 리포트",
+                "💬 AI질문", "📋 리포트", "⚙️ 더보기",
             }
             if text not in _claude_safe_buttons:
                 context.user_data.pop("claude_mode", None)
@@ -933,7 +933,7 @@ class CoreHandlersMixin:
                         ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
                         f.write(f"[{ts}] [{agent_type}] {text}\n")
                 except Exception:
-                    pass
+                    logger.debug("handle_message agent feedback log write failed", exc_info=True)
                 context.user_data.pop("agent_mode", None)
                 context.user_data.pop("agent_type", None)
                 await update.message.reply_text(
@@ -1157,7 +1157,7 @@ class CoreHandlersMixin:
                     holding = h
                     break
         except Exception:
-            pass
+            logger.debug("_handle_sell_trade holding lookup failed for %s", ticker, exc_info=True)
 
         buy_price = holding.get("avg_price", 0) if holding else 0
         pnl_pct = ((sell_price - buy_price) / buy_price * 100) if buy_price > 0 and sell_price > 0 else 0
@@ -1253,6 +1253,7 @@ class CoreHandlersMixin:
             if price > 0:
                 price_str = f"현재가: {price:,.0f}원"
         except Exception:
+            logger.debug("_detect_stock_query get_price failed for %s", code, exc_info=True)
             price_str = "현재가: 조회 실패"
 
         # user_data에 저장 (콜백에서 사용)
@@ -1334,6 +1335,7 @@ class CoreHandlersMixin:
                         f"60일 {tech.ma60:,.0f}원, 120일 {tech.ma120:,.0f}원"
                     )
             except Exception:
+                logger.debug("_handle_stock_analysis tech data fetch failed for %s", code, exc_info=True)
                 tech_data = "기술적 데이터 조회 실패"
 
             try:
@@ -1347,6 +1349,7 @@ class CoreHandlersMixin:
                         f"부채비율: {fin.get('debt_ratio', 0):.0f}%"
                     )
             except Exception:
+                logger.debug("_handle_stock_analysis financials fetch failed for %s", code, exc_info=True)
                 fund_data = "재무 데이터 없음"
 
             # 매매 레벨 계산 (현재가 기반)
@@ -1396,6 +1399,7 @@ class CoreHandlersMixin:
             try:
                 await placeholder.edit_text(answer, reply_markup=markup)
             except Exception:
+                logger.debug("_handle_stock_analysis edit_text failed, falling back", exc_info=True)
                 await update.message.reply_text(
                     answer, reply_markup=markup or get_reply_markup(context),
                 )
@@ -1406,6 +1410,7 @@ class CoreHandlersMixin:
                     f"\u26a0\ufe0f {name} 분석 중 오류가 발생했습니다."
                 )
             except Exception:
+                logger.debug("_handle_stock_analysis error recovery edit_text also failed", exc_info=True)
                 await update.message.reply_text(
                     f"\u26a0\ufe0f {name} 분석 중 오류가 발생했습니다.",
                     reply_markup=get_reply_markup(context),
@@ -1509,7 +1514,7 @@ class CoreHandlersMixin:
             try:
                 await query.edit_message_text("\u26a0\ufe0f 오류가 발생했습니다.")
             except Exception:
-                pass
+                logger.debug("handle_callback error recovery edit_text also failed", exc_info=True)
 
     # == 더보기 인라인 메뉴 디스패치 (v5.9) ====================================
 
@@ -1543,7 +1548,7 @@ class CoreHandlersMixin:
         try:
             await query.edit_message_text("⚙️ 메뉴 이동 중...")
         except Exception:
-            pass
+            logger.debug("_action_menu_dispatch edit_text transition failed", exc_info=True)
         # 메뉴 함수는 update.message를 기대 → SimpleNamespace로 래핑
         import types
         fake_update = types.SimpleNamespace(
@@ -1558,7 +1563,7 @@ class CoreHandlersMixin:
             try:
                 await query.message.reply_text(f"⚠️ 메뉴 오류: {e}")
             except Exception:
-                pass
+                logger.debug("_action_menu_dispatch error recovery reply_text also failed", exc_info=True)
 
     # == Dismiss (generic close button) =======================================
 
@@ -1576,7 +1581,7 @@ class CoreHandlersMixin:
                 reply_markup=get_reply_markup(context),
             )
         except Exception:
-            pass
+            logger.debug("_action_dismiss edit/send failed", exc_info=True)
 
     # == Feedback system (v5.5) ================================================
 
@@ -1596,7 +1601,7 @@ class CoreHandlersMixin:
                     reply_markup=get_reply_markup(context),
                 )
             except Exception:
-                pass
+                logger.debug("_action_feedback like reply failed", exc_info=True)
         elif fb_type == "dislike":
             # 싫어요 → 자동 오류 진단 + 로그 기록
             try:
@@ -1659,7 +1664,7 @@ class CoreHandlersMixin:
                         reply_markup=get_reply_markup(context),
                     )
                 except Exception:
-                    pass
+                    logger.debug("_action_feedback dislike error recovery reply also failed", exc_info=True)
 
     async def _action_daily_rate(self, query, context, payload: str) -> None:
         """일일 평가 — rate:상 / rate:중 / rate:하."""
@@ -1681,7 +1686,7 @@ class CoreHandlersMixin:
                 reply_markup=get_reply_markup(context),
             )
         except Exception:
-            pass
+            logger.debug("_action_daily_rate reply failed", exc_info=True)
 
     # == Horizon selection ====================================================
 
@@ -1911,7 +1916,7 @@ class CoreHandlersMixin:
             try:
                 await query.edit_message_text("\u26a0\ufe0f 솔루션 조회 중 오류가 발생했습니다.")
             except Exception:
-                pass
+                logger.debug("_action_solution_detail error recovery edit_text also failed", exc_info=True)
 
     # == v4.1: Profit-Taking callbacks ==========================================
 
@@ -1971,7 +1976,7 @@ class CoreHandlersMixin:
             try:
                 await query.edit_message_text("⚠️ 처리 중 오류가 발생했습니다.")
             except Exception:
-                pass
+                logger.debug("_action_profit_taking error recovery edit_text also failed", exc_info=True)
 
     # == Usage guide ===========================================================
 

@@ -9,12 +9,12 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 USER_NAME = "주호님"
 
 # Google API scopes
@@ -234,7 +234,8 @@ def collect_weekly_data(db: Any) -> dict[str, Any]:
             "target_asset": progress.target_asset,
             "progress_pct": progress.progress_pct,
         }
-    except Exception:
+    except Exception as e:
+        logger.debug("collect_weekly_data goal_progress failed: %s", e)
         data["goal_progress"] = {
             "current_asset": data.get("total_eval", 0),
             "target_asset": 3_000_000_000,
@@ -253,11 +254,13 @@ def collect_weekly_data(db: Any) -> dict[str, Any]:
             continue
         try:
             short_data_map[ticker] = db.get_short_selling(ticker, days=7)
-        except Exception:
+        except Exception as e:
+            logger.debug("collect_weekly_data short_selling for %s: %s", ticker, e)
             short_data_map[ticker] = []
         try:
             margin_data_map[ticker] = db.get_margin_balance(ticker, days=7)
-        except Exception:
+        except Exception as e:
+            logger.debug("collect_weekly_data margin_balance for %s: %s", ticker, e)
             margin_data_map[ticker] = []
     data["short_data"] = short_data_map
     data["margin_data"] = margin_data_map
@@ -265,19 +268,22 @@ def collect_weekly_data(db: Any) -> dict[str, Any]:
     # Overheated shorts
     try:
         data["overheated_shorts"] = db.get_overheated_shorts(min_ratio=20.0, days=7)
-    except Exception:
+    except Exception as e:
+        logger.debug("collect_weekly_data overheated_shorts: %s", e)
         data["overheated_shorts"] = []
 
     # Rebalance history
     try:
         data["rebalance_history"] = db.get_rebalance_history(limit=5)
-    except Exception:
+    except Exception as e:
+        logger.debug("collect_weekly_data rebalance_history: %s", e)
         data["rebalance_history"] = []
 
     # Future tech watchlist
     try:
         data["future_watchlist"] = db.get_future_watchlist()
-    except Exception:
+    except Exception as e:
+        logger.debug("collect_weekly_data future_watchlist: %s", e)
         data["future_watchlist"] = []
 
     # Future triggers
@@ -285,14 +291,16 @@ def collect_weekly_data(db: Any) -> dict[str, Any]:
     for sk in ["autonomous_driving", "space_aerospace", "quantum_computing"]:
         try:
             future_triggers[sk] = db.get_future_triggers(sector=sk, days=7, limit=3)
-        except Exception:
+        except Exception as e:
+            logger.debug("collect_weekly_data future_triggers %s: %s", sk, e)
             future_triggers[sk] = []
     data["future_triggers"] = future_triggers
 
     # Seed positions
     try:
         data["seed_positions"] = db.get_seed_positions()
-    except Exception:
+    except Exception as e:
+        logger.debug("collect_weekly_data seed_positions: %s", e)
         data["seed_positions"] = []
 
     return data

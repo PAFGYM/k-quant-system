@@ -529,6 +529,7 @@ class MenusKisMixin:
         try:
             await placeholder.edit_text(msg)
         except Exception:
+            logger.debug("_menu_portfolio edit_text failed, falling back", exc_info=True)
             await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
         # Phase 8: 실시간 보고서도 별도 전송 (AI 요약 포함)
@@ -556,7 +557,7 @@ class MenusKisMixin:
                 )
                 h["current_price"] = cur
             except Exception:
-                pass
+                logger.debug("_menu_portfolio_detail price update failed for %s", h.get("ticker"), exc_info=True)
         msg = format_portfolio(holdings)
 
         # Correlation warnings
@@ -598,7 +599,7 @@ class MenusKisMixin:
                 r["current_price"] = cur
                 r["pnl_pct"] = pnl
             except Exception:
-                pass
+                logger.debug("_menu_reco_performance price update failed for %s", r.get("ticker"), exc_info=True)
         msg = format_reco_performance(active, completed, watch, stats)
         await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
@@ -676,7 +677,8 @@ class MenusKisMixin:
             try:
                 kis_live = await self.kis._ensure_token()
             except Exception as e:
-                kis_error = str(e)[:80]
+                logger.debug("KIS token ensure failed: %s", e)
+                kis_error = "연결 오류 - 잠시 후 다시 시도해주세요"
 
         if kis_live or self.kis_broker.connected:
             # 투자 허브 대시보드
@@ -895,14 +897,13 @@ class MenusKisMixin:
                     )
             except Exception as e:
                 logger.error("KIS test error: %s", e)
-                err = str(e)[:100]
                 buttons = [
                     [InlineKeyboardButton(
                         "🔑 키 재설정", callback_data="kis:setup",
                     )],
                 ]
                 await query.message.reply_text(
-                    f"❌ 연결 테스트 실패\n\n오류: {err}\n\n"
+                    "❌ 연결 테스트 실패\n\n"
                     "키를 재설정하거나 네트워크를 확인해주세요.",
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
@@ -988,6 +989,7 @@ class MenusKisMixin:
                                 else:
                                     day_info = ""
                             except Exception:
+                                logger.debug("_action_kis_balance day_info fetch failed", exc_info=True)
                                 day_info = ""
                             lines.append(
                                 f"{emoji} {nm}: {cur:,.0f}원\n"
@@ -1009,6 +1011,7 @@ class MenusKisMixin:
                                 cur = detail["price"]
                                 dc_pct = detail["day_change_pct"]
                             except Exception:
+                                logger.debug("_action_kis_balance DB fallback price_detail failed for %s", ticker, exc_info=True)
                                 cur = h.get("current_price", bp)
                                 dc_pct = 0
                             pnl = round((cur - bp) / bp * 100, 2) if bp > 0 else 0
@@ -1038,7 +1041,7 @@ class MenusKisMixin:
             except Exception as e:
                 logger.error("KIS balance error: %s", e)
                 await query.message.reply_text(
-                    f"❌ 잔고 조회 실패: {str(e)[:60]}\n"
+                    "❌ 잔고 조회에 실패했어요.\n"
                     "DB 기반 잔고는 '💰 잔고' 메뉴에서 확인하세요.",
                 )
             return
@@ -1075,6 +1078,7 @@ class MenusKisMixin:
                         f"  {i_emoji} 기관 3일: {i_net:+,}주"
                     )
                 except Exception:
+                    logger.debug("_action_supply_demand data fetch failed for %s", name, exc_info=True)
                     lines.append(f"\n[{name}] 수급 데이터 조회 실패")
 
             lines.append(
@@ -1198,7 +1202,7 @@ class MenusKisMixin:
                 try:
                     cur = await self._get_price(ticker, 0)
                 except Exception:
-                    pass
+                    logger.debug("_action_alert_setup get_price failed for %s", ticker, exc_info=True)
 
             lines = [
                 f"🔔 {name} 가격 알림 설정\n",
@@ -1263,7 +1267,7 @@ class MenusKisMixin:
                 try:
                     cur = await self._get_price(ticker, 0)
                 except Exception:
-                    pass
+                    logger.debug("_action_alert_set get_price failed for %s", ticker, exc_info=True)
 
             if direction == "up":
                 target = int(cur * (1 + pct / 100))
@@ -1292,7 +1296,7 @@ class MenusKisMixin:
             except Exception as e:
                 logger.error("Alert setup error: %s", e)
                 await query.edit_message_text(
-                    f"❌ 알림 설정 실패: {str(e)[:50]}"
+                    "❌ 알림 설정에 실패했어요. 잠시 후 다시 시도해주세요."
                 )
             return
 
@@ -1444,7 +1448,7 @@ class MenusKisMixin:
             try:
                 price = await self.kis.get_current_price("005930")
             except Exception:
-                pass
+                logger.debug("_action_kis_setup token test price fetch failed", exc_info=True)
 
             result_lines = [
                 f"✅ KIS API 설정 완료!\n",

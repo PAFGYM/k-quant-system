@@ -14,15 +14,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
 
-logger = logging.getLogger(__name__)
+from kstock.core.tz import KST
 
-KST = timezone(timedelta(hours=9))
+logger = logging.getLogger(__name__)
 
 # ── URL ──────────────────────────────────────────────────────────────────────
 

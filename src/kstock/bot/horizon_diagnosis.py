@@ -400,8 +400,8 @@ def _gather_junggi_data(
                 if consensus:
                     data["avg_target_price"] = consensus.avg_target_price
                     data["upside_pct"] = consensus.upside_pct
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("_gather_junggi_data consensus for %s: %s", ticker, e)
 
         # Policy
         try:
@@ -409,8 +409,8 @@ def _gather_junggi_data(
             summary = get_policy_summary()
             if summary:
                 data["policy_summary"] = summary[:200]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("_gather_junggi_data policy_summary: %s", e)
 
     return data
 
@@ -434,8 +434,8 @@ def _gather_janggi_data(
                 for key in ("op_margin", "roe", "debt_ratio"):
                     if key in latest and latest[key] is not None:
                         data[key] = latest[key]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("_gather_janggi_data financials for %s: %s", ticker, e)
 
     return data
 

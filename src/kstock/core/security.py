@@ -128,6 +128,7 @@ def check_env_file_safety() -> list[str]:
             else:
                 warnings.append("✅ .env 파일 git 미추적 (안전)")
         except Exception:
+            logger.debug("check_env_file_safety: git ls-files failed", exc_info=True)
             warnings.append("⚠️ git 상태 확인 불가")
     else:
         warnings.append("ℹ️ .env 파일 없음 (환경변수로 직접 설정)")
@@ -169,7 +170,7 @@ def security_audit() -> str:
                     if secret and len(secret) > 10:
                         lines.append(f"⚠️ kis_config.yaml {mode} 모드에 app_secret 포함")
             except Exception:
-                pass
+                logger.debug("security_audit: kis_config.yaml parse failed", exc_info=True)
     lines.append("")
 
     # 종합 점수

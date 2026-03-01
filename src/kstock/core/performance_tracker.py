@@ -9,15 +9,15 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
+
+from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
 
 USER_NAME = "주호님"
 
 TRACK_DAYS = [1, 3, 5, 10, 20]
-
-KST = timezone(timedelta(hours=9))
 
 STRATEGY_LABELS = {
     "A": "단기반등",
