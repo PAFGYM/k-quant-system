@@ -562,20 +562,37 @@ class TradingMixin:
     async def _action_manager_view(
         self, query, context, payload: str,
     ) -> None:
-        """mgr:{type} 콜백 — 매니저에게 담당 종목 분석 요청."""
+        """mgr:{type} 또는 mgr:{type}:{ticker} 콜백 — 매니저 분석 요청.
+
+        잔고 화면에서는 mgr:swing:005930 형태로 특정 종목 분석,
+        그 외에는 mgr:swing 형태로 해당 유형 전체 분석.
+        """
         from kstock.bot.investment_managers import get_manager_analysis, MANAGERS
 
-        manager = MANAGERS.get(payload)
+        # payload에서 매니저 유형과 선택적 ticker 분리
+        parts = payload.split(":", 1)
+        mgr_type = parts[0]
+        target_ticker = parts[1] if len(parts) > 1 else ""
+
+        manager = MANAGERS.get(mgr_type)
         if not manager:
             await query.edit_message_text("⚠️ 알 수 없는 매니저 유형")
             return
 
         holdings = self.db.get_active_holdings()
-        type_holdings = [
-            h for h in holdings
-            if h.get("holding_type", "auto") == payload
-            or (payload == "swing" and h.get("holding_type", "auto") == "auto")
-        ]
+
+        if target_ticker:
+            # 특정 종목만 분석 (잔고에서 종목 버튼 클릭)
+            type_holdings = [
+                h for h in holdings if h.get("ticker") == target_ticker
+            ]
+        else:
+            # 해당 유형 전체 분석
+            type_holdings = [
+                h for h in holdings
+                if h.get("holding_type", "auto") == mgr_type
+                or (mgr_type == "swing" and h.get("holding_type", "auto") == "auto")
+            ]
 
         if not type_holdings:
             await query.edit_message_text(
@@ -583,9 +600,13 @@ class TradingMixin:
             )
             return
 
-        await query.edit_message_text(
-            f"{manager['emoji']} {manager['name']} 분석 중..."
+        target_name = type_holdings[0].get("name", target_ticker) if target_ticker else ""
+        loading_text = (
+            f"{manager['emoji']} {manager['name']} — {target_name} 분석 중..."
+            if target_name
+            else f"{manager['emoji']} {manager['name']} 분석 중..."
         )
+        await query.edit_message_text(loading_text)
 
         try:
             macro = await self.macro_client.get_snapshot()
@@ -597,7 +618,7 @@ class TradingMixin:
             logger.debug("_action_manager_analysis macro snapshot failed", exc_info=True)
             market_text = ""
 
-        report = await get_manager_analysis(payload, type_holdings, market_text)
+        report = await get_manager_analysis(mgr_type, type_holdings, market_text)
         await query.message.reply_text(report[:4000])
 
     async def _action_bubble_check(
