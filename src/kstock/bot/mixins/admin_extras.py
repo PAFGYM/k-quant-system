@@ -46,6 +46,13 @@ def _admin_buttons() -> list:
             InlineKeyboardButton("\U0001f916 AI 상태", callback_data="ai:status"),
         ],
         [
+            InlineKeyboardButton("🏆 시스템 점수", callback_data="adm:score"),
+            InlineKeyboardButton("💰 API 비용", callback_data="adm:cost"),
+        ],
+        [
+            InlineKeyboardButton("🚨 경계 모드", callback_data="adm:alert"),
+        ],
+        [
             InlineKeyboardButton("\U0001f512 메뉴 닫기", callback_data="adm:close"),
         ],
     ]
@@ -68,6 +75,29 @@ def _bug_faq_buttons() -> list:
 
 
 class AdminExtrasMixin:
+    def _alert_mode_buttons(self) -> list:
+        """경계 모드 변경 버튼 생성 (현재 모드 제외)."""
+        current = getattr(self, "_alert_mode", "normal")
+        buttons = []
+        mode_info = [
+            ("normal", "🟢 일상"),
+            ("elevated", "🟡 긴장"),
+            ("wartime", "🔴 전시"),
+        ]
+        row = []
+        for mode_key, label in mode_info:
+            if mode_key == current:
+                row.append(InlineKeyboardButton(
+                    f"✅ {label} (현재)", callback_data=f"adm:alert:{mode_key}",
+                ))
+            else:
+                row.append(InlineKeyboardButton(
+                    label, callback_data=f"adm:alert:{mode_key}",
+                ))
+        buttons.append(row)
+        buttons.append([InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu")])
+        return buttons
+
     async def _menu_admin(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -239,6 +269,113 @@ class AdminExtrasMixin:
                 )
             except Exception:
                 logger.debug("_action_admin menu reply_markup restore failed", exc_info=True)
+
+        elif subcmd == "score":
+            # v6.2.1: 시스템 자가 점수
+            try:
+                from kstock.core.system_score import compute_system_score, format_score_report
+                score = compute_system_score(self.db)
+                text = format_score_report(score)
+                score_buttons = [
+                    [InlineKeyboardButton("📊 점수 추이", callback_data="adm:score_trend")],
+                    [InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu")],
+                ]
+                await query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup(score_buttons),
+                )
+            except Exception as e:
+                logger.error("System score error: %s", e, exc_info=True)
+                await query.edit_message_text(
+                    f"⚠️ 점수 계산 실패: {e}",
+                    reply_markup=InlineKeyboardMarkup(back_btn),
+                )
+
+        elif subcmd == "score_trend":
+            # v6.2.1: 점수 추이
+            try:
+                from kstock.core.system_score import format_score_trend
+                text = format_score_trend(self.db, days=14)
+                await query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup(back_btn),
+                )
+            except Exception as e:
+                await query.edit_message_text(
+                    f"⚠️ 추이 조회 실패: {e}",
+                    reply_markup=InlineKeyboardMarkup(back_btn),
+                )
+
+        elif subcmd == "cost":
+            # v6.2.1: API 비용 현황
+            try:
+                from kstock.core.token_tracker import format_monthly_cost_report
+                text = format_monthly_cost_report(self.db)
+                cost_buttons = [
+                    [InlineKeyboardButton("📅 오늘 사용량", callback_data="adm:cost_today")],
+                    [InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu")],
+                ]
+                await query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup(cost_buttons),
+                )
+            except Exception as e:
+                logger.error("Cost report error: %s", e, exc_info=True)
+                await query.edit_message_text(
+                    f"⚠️ 비용 조회 실패: {e}",
+                    reply_markup=InlineKeyboardMarkup(back_btn),
+                )
+
+        elif subcmd == "cost_today":
+            # v6.2.1: 오늘 API 사용량
+            try:
+                from datetime import datetime as _dt
+                today = _dt.utcnow().strftime("%Y-%m-%d")
+                daily = self.db.get_daily_api_usage(today)
+                total_cost = daily.get("total_cost", 0)
+                krw = total_cost * 1400
+                text = (
+                    f"📅 오늘 API 사용량 ({today})\n"
+                    f"{'━' * 24}\n\n"
+                    f"📊 호출: {daily.get('total_calls', 0):,}회\n"
+                    f"💵 비용: ${total_cost:.4f} (≈{krw:,.0f}원)\n"
+                    f"📝 입력: {daily.get('total_input', 0):,} tok\n"
+                    f"📝 출력: {daily.get('total_output', 0):,} tok\n"
+                    f"⚡ 캐시절약: {daily.get('total_cache_read', 0):,} tok\n"
+                    f"⏱ 평균응답: {daily.get('avg_latency', 0):.0f}ms"
+                )
+                await query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup(back_btn),
+                )
+            except Exception as e:
+                await query.edit_message_text(
+                    f"⚠️ 조회 실패: {e}",
+                    reply_markup=InlineKeyboardMarkup(back_btn),
+                )
+
+        elif subcmd == "alert":
+            # v6.2.2: 경계 모드 관리
+            sub2 = payload.split(":", 1)[1] if ":" in payload else ""
+
+            if sub2 in ("normal", "elevated", "wartime"):
+                # 모드 변경
+                await self.set_alert_mode(sub2, context=context, reason="수동 변경")
+                # 다시 경계 모드 메뉴 표시
+                status_text = self.get_alert_mode_status()
+                alert_buttons = self._alert_mode_buttons()
+                await query.edit_message_text(
+                    f"🚨 경계 모드 설정\n{'━' * 20}\n\n{status_text}",
+                    reply_markup=InlineKeyboardMarkup(alert_buttons),
+                )
+            else:
+                # 현재 상태 + 변경 버튼
+                status_text = self.get_alert_mode_status()
+                alert_buttons = self._alert_mode_buttons()
+                await query.edit_message_text(
+                    f"🚨 경계 모드 설정\n{'━' * 20}\n\n{status_text}",
+                    reply_markup=InlineKeyboardMarkup(alert_buttons),
+                )
 
         elif subcmd == "security":
             # v3.6: 보안 감사
@@ -610,11 +747,12 @@ class AdminExtrasMixin:
             holdings = await self._load_holdings_with_fallback()
 
             if not holdings:
-                empty_buttons = [[
-                    InlineKeyboardButton(
+                empty_buttons = [
+                    [InlineKeyboardButton(
                         "➕ 종목 추가", callback_data="bal:add",
-                    ),
-                ]]
+                    )],
+                    [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+                ]
                 try:
                     await placeholder.edit_text(
                         "💰 주호님, 등록된 보유종목이 없습니다.\n\n"
@@ -759,26 +897,27 @@ class AdminExtrasMixin:
         """분석 허브 — 종목명 입력 또는 빠른 분석 선택."""
         buttons = [
             [
-                InlineKeyboardButton("📊 멀티분석", callback_data="hub:multi"),
-                InlineKeyboardButton("🔥 급등주", callback_data="hub:surge"),
+                InlineKeyboardButton("🎯 4매니저 동시추천", callback_data="quick_q:mgr4"),
+                InlineKeyboardButton("🔥 매수추천", callback_data="quick_q:buy_pick"),
+            ],
+            [
+                InlineKeyboardButton("💼 포트폴리오 조언", callback_data="quick_q:portfolio"),
+                InlineKeyboardButton("📊 시장 분석", callback_data="quick_q:market"),
             ],
             [
                 InlineKeyboardButton("⚡ 스윙기회", callback_data="hub:swing"),
-                InlineKeyboardButton("🎯 매수추천", callback_data="quick_q:buy_pick"),
+                InlineKeyboardButton("🔥 급등주", callback_data="hub:surge"),
             ],
             [
-                InlineKeyboardButton("🎯 4매니저 추천", callback_data="quick_q:mgr4"),
-            ],
-            [
-                InlineKeyboardButton("📊 호가조회", callback_data="orderbook:select"),
-                InlineKeyboardButton("🤖 AI상태", callback_data="ai:status"),
+                InlineKeyboardButton("📊 멀티분석", callback_data="hub:multi"),
+                InlineKeyboardButton("⚠️ 리스크 점검", callback_data="quick_q:risk"),
             ],
             make_feedback_row("분석허브"),
         ]
         await update.message.reply_text(
             "📊 분석 허브\n\n"
-            "종목명을 직접 입력하거나\n"
-            "아래 버튼으로 빠른 분석을 시작하세요:",
+            "💬 종목명을 직접 입력하면 즉시 분석\n"
+            "⬇️ 또는 원클릭 분석:",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -1181,6 +1320,7 @@ class AdminExtrasMixin:
                         f"변경하려면 즐겨찾기에서 '변경' 버튼을 누르세요.",
                         reply_markup=InlineKeyboardMarkup([
                             [InlineKeyboardButton("⭐ 즐겨찾기 보기", callback_data="fav:refresh")],
+                            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
                         ]),
                     )
                 else:
@@ -1203,27 +1343,21 @@ class AdminExtrasMixin:
                     for i, n in enumerate(news[:5], 1):
                         lines.append(f"{i}. {n['title']}")
                         lines.append(f"   {n.get('date', '')} | {n.get('source', '')}")
-                    await query.edit_message_text(
-                        "\n".join(lines),
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
-                        ]),
-                    )
+                    fav_kb = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
+                    ])
+                    await safe_edit_or_reply(query, "\n".join(lines), reply_markup=fav_kb)
                 else:
-                    await query.edit_message_text(
-                        f"📰 {name}: 최근 뉴스가 없습니다.",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
-                        ]),
-                    )
+                    fav_kb = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
+                    ])
+                    await safe_edit_or_reply(query, f"📰 {name}: 최근 뉴스가 없습니다.", reply_markup=fav_kb)
             except Exception:
                 logger.debug("_action_favorites news fetch failed for %s", ticker, exc_info=True)
-                await query.edit_message_text(
-                    f"📰 {name}: 뉴스 조회 실패 (기능 준비 중)",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
-                    ]),
-                )
+                fav_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
+                ])
+                await safe_edit_or_reply(query, f"📰 {name}: 뉴스 조회 실패 (잠시 후 다시 시도해주세요)", reply_markup=fav_kb)
             return
 
         if action == "rm":

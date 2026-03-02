@@ -772,7 +772,7 @@ def format_trade_record(name: str, action: str, price: float, pnl_pct: float = 0
     elif action == "skip":
         return "패스 기록했습니다. 이후 가격 변동은 추적해드릴게요"
     elif action == "hold":
-        return "계속 보유합니다. 트레일링 스탑 작동 중이에요"
+        return "계속 보유합니다. 트레일링 스탑 작동 중입니다"
     elif action == "stop_loss":
         return f"{name} {_won(price)} 손절 기록 ({pnl_pct:+.1f}%) 다음 기회를 잡겠습니다"
     elif action == "hold_through_stop":

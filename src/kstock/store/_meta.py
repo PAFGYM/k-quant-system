@@ -8,6 +8,37 @@ from datetime import datetime, timedelta
 class MetaMixin:
     """채팅 + 사용자 + 알림 + 피드백 + 미래전망 + 기타 Mixin."""
 
+    # -- key-value meta store (v6.2.1) ----------------------------------------
+
+    def get_meta(self, key: str, default: str | None = None) -> str | None:
+        """범용 key-value 메타데이터 조회."""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS kv_meta ("
+                    "key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"
+                )
+                row = conn.execute(
+                    "SELECT value FROM kv_meta WHERE key=?", (key,)
+                ).fetchone()
+                return row[0] if row else default
+        except Exception:
+            return default
+
+    def set_meta(self, key: str, value: str) -> None:
+        """범용 key-value 메타데이터 저장."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS kv_meta ("
+                "key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO kv_meta (key, value, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (key, value, now),
+            )
+
     # -- alerts -----------------------------------------------------------------
 
     def insert_alert(self, ticker: str, alert_type: str, message: str) -> None:
@@ -66,6 +97,284 @@ class MetaMixin:
     def clear_chat_history(self) -> None:
         with self._connect() as conn:
             conn.execute("DELETE FROM chat_history")
+
+    # -- chat_memory_enhanced (v6.2) --------------------------------------------
+
+    def add_enhanced_chat_message(
+        self, role: str, content: str,
+        topic: str = "", tickers: str = "",
+        intent: str = "", keywords: str = "",
+        sentiment: str = "neutral",
+    ) -> int:
+        """강화된 대화 메시지 저장 (토픽/티커/의도 태깅)."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO chat_memory_enhanced "
+                "(role, content, topic, tickers, intent, keywords, sentiment, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (role, content, topic, tickers, intent, keywords, sentiment, now),
+            )
+            return cur.lastrowid or 0
+
+    def search_chat_by_topic(self, topic: str, limit: int = 10) -> list[dict]:
+        """토픽으로 과거 대화 검색."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM chat_memory_enhanced "
+                "WHERE topic LIKE ? ORDER BY created_at DESC LIMIT ?",
+                (f"%{topic}%", limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def search_chat_by_ticker(self, ticker: str, limit: int = 10) -> list[dict]:
+        """티커로 과거 대화 검색."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM chat_memory_enhanced "
+                "WHERE tickers LIKE ? ORDER BY created_at DESC LIMIT ?",
+                (f"%{ticker}%", limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def search_chat_by_keywords(self, keywords: str, limit: int = 10) -> list[dict]:
+        """키워드로 과거 대화 검색 (content에서 LIKE 검색)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM chat_memory_enhanced "
+                "WHERE content LIKE ? OR keywords LIKE ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (f"%{keywords}%", f"%{keywords}%", limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_recent_enhanced_messages(self, limit: int = 20) -> list[dict]:
+        """최근 강화 대화 메시지 (최신 순)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM chat_memory_enhanced "
+                "ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        result = [dict(r) for r in rows]
+        result.reverse()
+        return result
+
+    def cleanup_enhanced_chat(self, days: int = 90) -> int:
+        """오래된 강화 대화 정리 (90일 기본)."""
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM chat_memory_enhanced WHERE created_at < ?",
+                (cutoff,),
+            )
+            return cursor.rowcount
+
+    # -- user_preferences (v6.2) -----------------------------------------------
+
+    def upsert_user_preference(
+        self, key: str, value: str, confidence: float = 0.5,
+        source: str = "inferred",
+    ) -> None:
+        """사용자 선호도 저장/업데이트."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO user_preferences "
+                "(preference_key, preference_value, confidence, source, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(preference_key) DO UPDATE SET "
+                "preference_value=excluded.preference_value, "
+                "confidence=excluded.confidence, "
+                "source=excluded.source, "
+                "updated_at=excluded.updated_at",
+                (key, value, confidence, source, now),
+            )
+
+    def get_user_preferences(self) -> dict[str, dict]:
+        """모든 사용자 선호도 반환."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM user_preferences ORDER BY confidence DESC"
+            ).fetchall()
+        return {
+            r["preference_key"]: {
+                "value": r["preference_value"],
+                "confidence": r["confidence"],
+                "source": r["source"],
+            }
+            for r in rows
+        }
+
+    def get_user_preference(self, key: str) -> str | None:
+        """특정 선호도 값 반환."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT preference_value FROM user_preferences "
+                "WHERE preference_key=?",
+                (key,),
+            ).fetchone()
+        return row["preference_value"] if row else None
+
+    # -- api_usage_log (v6.2.1) ------------------------------------------------
+
+    def log_api_usage(
+        self,
+        provider: str,
+        model: str,
+        function_name: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        total_cost_usd: float = 0,
+        latency_ms: float = 0,
+        status: str = "success",
+        error_message: str = "",
+    ) -> None:
+        """API 사용 로그 저장."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO api_usage_log "
+                "(timestamp, provider, model, function_name, input_tokens, output_tokens, "
+                "cache_read_tokens, cache_write_tokens, total_cost_usd, latency_ms, "
+                "status, error_message) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (now, provider, model, function_name, input_tokens, output_tokens,
+                 cache_read_tokens, cache_write_tokens, total_cost_usd, latency_ms,
+                 status, error_message),
+            )
+
+    def get_monthly_api_usage(self, year_month: str = "") -> dict:
+        """월간 API 사용량 집계. year_month: 'YYYY-MM' (빈 문자열이면 이번 달)."""
+        if not year_month:
+            year_month = datetime.utcnow().strftime("%Y-%m")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT "
+                "  COUNT(*) as total_calls, "
+                "  COALESCE(SUM(input_tokens), 0) as total_input, "
+                "  COALESCE(SUM(output_tokens), 0) as total_output, "
+                "  COALESCE(SUM(cache_read_tokens), 0) as total_cache_read, "
+                "  COALESCE(SUM(cache_write_tokens), 0) as total_cache_write, "
+                "  COALESCE(SUM(total_cost_usd), 0) as total_cost, "
+                "  COALESCE(AVG(latency_ms), 0) as avg_latency, "
+                "  SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) as error_count "
+                "FROM api_usage_log WHERE timestamp LIKE ?",
+                (f"{year_month}%",),
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def get_daily_api_usage(self, date: str = "") -> dict:
+        """일간 API 사용량 집계."""
+        if not date:
+            date = datetime.utcnow().strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT "
+                "  COUNT(*) as total_calls, "
+                "  COALESCE(SUM(input_tokens), 0) as total_input, "
+                "  COALESCE(SUM(output_tokens), 0) as total_output, "
+                "  COALESCE(SUM(cache_read_tokens), 0) as total_cache_read, "
+                "  COALESCE(SUM(cache_write_tokens), 0) as total_cache_write, "
+                "  COALESCE(SUM(total_cost_usd), 0) as total_cost, "
+                "  COALESCE(AVG(latency_ms), 0) as avg_latency "
+                "FROM api_usage_log WHERE timestamp LIKE ?",
+                (f"{date}%",),
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def get_api_usage_by_model(self, year_month: str = "") -> list[dict]:
+        """모델별 API 사용량 집계."""
+        if not year_month:
+            year_month = datetime.utcnow().strftime("%Y-%m")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT model, "
+                "  COUNT(*) as calls, "
+                "  COALESCE(SUM(input_tokens), 0) as input_tok, "
+                "  COALESCE(SUM(output_tokens), 0) as output_tok, "
+                "  COALESCE(SUM(cache_read_tokens), 0) as cache_read, "
+                "  COALESCE(SUM(total_cost_usd), 0) as cost "
+                "FROM api_usage_log WHERE timestamp LIKE ? "
+                "GROUP BY model ORDER BY cost DESC",
+                (f"{year_month}%",),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_api_usage_by_function(self, year_month: str = "") -> list[dict]:
+        """기능별 API 사용량 집계."""
+        if not year_month:
+            year_month = datetime.utcnow().strftime("%Y-%m")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT function_name, "
+                "  COUNT(*) as calls, "
+                "  COALESCE(SUM(total_cost_usd), 0) as cost "
+                "FROM api_usage_log WHERE timestamp LIKE ? "
+                "GROUP BY function_name ORDER BY cost DESC",
+                (f"{year_month}%",),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def cleanup_old_api_usage(self, days: int = 90) -> int:
+        """오래된 API 사용 로그 정리."""
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM api_usage_log WHERE timestamp < ?", (cutoff,),
+            )
+            return cursor.rowcount
+
+    # -- system_scores (v6.2.1) ------------------------------------------------
+
+    def save_system_score(
+        self,
+        score_date: str,
+        total_score: float,
+        signal_score: float = 0,
+        trade_score: float = 0,
+        alert_score: float = 0,
+        learning_score: float = 0,
+        cost_score: float = 0,
+        uptime_score: float = 0,
+        details_json: str = "{}",
+    ) -> None:
+        """시스템 자가 점수 저장."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO system_scores "
+                "(score_date, total_score, signal_score, trade_score, alert_score, "
+                "learning_score, cost_score, uptime_score, details_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(score_date) DO UPDATE SET "
+                "total_score=excluded.total_score, signal_score=excluded.signal_score, "
+                "trade_score=excluded.trade_score, alert_score=excluded.alert_score, "
+                "learning_score=excluded.learning_score, cost_score=excluded.cost_score, "
+                "uptime_score=excluded.uptime_score, details_json=excluded.details_json, "
+                "created_at=excluded.created_at",
+                (score_date, total_score, signal_score, trade_score, alert_score,
+                 learning_score, cost_score, uptime_score, details_json, now),
+            )
+
+    def get_system_scores(self, limit: int = 30) -> list[dict]:
+        """최근 시스템 점수 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM system_scores ORDER BY score_date DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_latest_system_score(self) -> dict | None:
+        """최신 시스템 점수."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM system_scores ORDER BY score_date DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
 
     # -- chat_usage (v3.5) -----------------------------------------------------
 
@@ -486,7 +795,6 @@ class MetaMixin:
             for k, v in kwargs.items():
                 sets.append(f"{k}=?")
                 vals.append(v)
-            vals.append(1)
             with self._connect() as conn:
                 conn.execute(
                     f"UPDATE investor_profile SET {', '.join(sets)} WHERE id=1",

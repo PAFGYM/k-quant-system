@@ -754,6 +754,18 @@ async def _generate_ai_analysis(
             messages=[{"role": "user", "content": prompt}],
         )
 
+        # [v6.2.1] 토큰 추적
+        try:
+            from kstock.core.token_tracker import track_usage_global
+            track_usage_global(
+                provider="anthropic",
+                model="claude-sonnet-4-5-20250929",
+                function_name="pdf_report",
+                response=response,
+            )
+        except Exception:
+            pass
+
         text = response.content[0].text.strip()
         text = text.replace("**", "")
         parts = text.split("---")

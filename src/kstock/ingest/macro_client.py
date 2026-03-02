@@ -43,6 +43,11 @@ class MacroSnapshot:
     foreign_total: float = 0.0
     gold_price: float = 0.0
     gold_change_pct: float = 0.0
+    # v6.1.3: 한국 시장 지수
+    kospi: float = 0.0
+    kospi_change_pct: float = 0.0
+    kosdaq: float = 0.0
+    kosdaq_change_pct: float = 0.0
     # v3.5: time metadata
     fetched_at: datetime | None = None
     is_cached: bool = False
@@ -78,6 +83,9 @@ def _json_to_snapshot(json_str: str) -> MacroSnapshot:
                 d[k] = datetime.fromisoformat(d[k])
             except (ValueError, TypeError):
                 d[k] = None
+    # 알 수 없는 키 제거 (구버전 호환)
+    valid_keys = {f.name for f in fields(MacroSnapshot)}
+    d = {k: v for k, v in d.items() if k in valid_keys}
     return MacroSnapshot(**d)
 
 
@@ -234,7 +242,10 @@ class MacroClient:
     def _fetch_live_snapshot(self) -> MacroSnapshot:
         """Fetch live macro data from yfinance (runs in thread pool)."""
         # Batch download all tickers at once - much faster than individual calls
-        symbols = ["^VIX", "^GSPC", "^IXIC", "KRW=X", "^TNX", "DX-Y.NYB", "BTC-USD", "GC=F"]
+        symbols = [
+            "^VIX", "^GSPC", "^IXIC", "KRW=X", "^TNX", "DX-Y.NYB",
+            "BTC-USD", "GC=F", "^KS11", "^KQ11",
+        ]
         data = yf.download(symbols, period="5d", group_by="ticker", progress=False)
 
         vix_hist = data["^VIX"]["Close"].dropna()
@@ -245,6 +256,10 @@ class MacroClient:
         dxy_hist = data["DX-Y.NYB"]["Close"].dropna()
         btc_hist = data["BTC-USD"]["Close"].dropna()
         gold_hist = data["GC=F"]["Close"].dropna()
+
+        # 한국 시장 지수
+        kospi_hist = data["^KS11"]["Close"].dropna() if "^KS11" in data.columns.get_level_values(0) else None
+        kosdaq_hist = data["^KQ11"]["Close"].dropna() if "^KQ11" in data.columns.get_level_values(0) else None
 
         vix = float(vix_hist.iloc[-1])
         vix_prev = float(vix_hist.iloc[-2])
@@ -278,6 +293,20 @@ class MacroClient:
         gold_prev = float(gold_hist.iloc[-2]) if len(gold_hist) >= 2 else gold
         gold_change = (gold - gold_prev) / gold_prev * 100 if gold_prev > 0 else 0
 
+        # KOSPI
+        kospi_val = kospi_change = 0.0
+        if kospi_hist is not None and len(kospi_hist) >= 2:
+            kospi_val = float(kospi_hist.iloc[-1])
+            kospi_prev = float(kospi_hist.iloc[-2])
+            kospi_change = (kospi_val - kospi_prev) / kospi_prev * 100 if kospi_prev > 0 else 0
+
+        # KOSDAQ
+        kosdaq_val = kosdaq_change = 0.0
+        if kosdaq_hist is not None and len(kosdaq_hist) >= 2:
+            kosdaq_val = float(kosdaq_hist.iloc[-1])
+            kosdaq_prev = float(kosdaq_hist.iloc[-2])
+            kosdaq_change = (kosdaq_val - kosdaq_prev) / kosdaq_prev * 100 if kosdaq_prev > 0 else 0
+
         regime = self._classify_regime(spx_change, vix, usdkrw_change)
 
         # Fear & Greed composite score (0=극도공포, 100=극도탐욕)
@@ -306,6 +335,11 @@ class MacroClient:
             foreign_total=foreign_total,
             gold_price=round(gold, 0),
             gold_change_pct=round(gold_change, 2),
+            # v6.1.3: 한국 시장 지수
+            kospi=round(kospi_val, 2),
+            kospi_change_pct=round(kospi_change, 2),
+            kosdaq=round(kosdaq_val, 2),
+            kosdaq_change_pct=round(kosdaq_change, 2),
             # v3.5 additions
             spx_prev_close=round(spx_prev, 2),
             vix_prev=round(vix_prev, 2),
@@ -359,6 +393,11 @@ class MacroClient:
             foreign_total=foreign_total,
             gold_price=round(gold, 0),
             gold_change_pct=round(gold_change, 2),
+            # v6.1.3: 한국 시장 지수 (mock)
+            kospi=round(float(rng.uniform(2400, 2800)), 2),
+            kospi_change_pct=round(float(rng.normal(0, 1)), 2),
+            kosdaq=round(float(rng.uniform(700, 900)), 2),
+            kosdaq_change_pct=round(float(rng.normal(0, 1.2)), 2),
             # v3.5
             spx_prev_close=0.0,
             vix_prev=round(vix * 0.98, 2),

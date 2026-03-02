@@ -224,6 +224,17 @@ async def _generate_ai_summary(macro, now: datetime) -> str:
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
+        # [v6.2.1] 토큰 추적
+        try:
+            from kstock.core.token_tracker import track_usage_global
+            track_usage_global(
+                provider="anthropic",
+                model="claude-haiku-4-5-20251001",
+                function_name="live_market",
+                response=response,
+            )
+        except Exception:
+            pass
         return response.content[0].text.strip()
     except Exception as e:
         logger.warning("Haiku summary generation failed: %s", e)

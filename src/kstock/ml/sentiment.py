@@ -229,6 +229,17 @@ def analyze_sentiment_batch(
             system=_SENTIMENT_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
+        # [v6.2.1] 토큰 추적
+        try:
+            from kstock.core.token_tracker import track_usage_global
+            track_usage_global(
+                provider="anthropic",
+                model="claude-haiku-4-5-20251001",
+                function_name="sentiment",
+                response=message,
+            )
+        except Exception:
+            pass
     except Exception:
         logger.error("Claude API call failed for sentiment analysis", exc_info=True)
         return fallback

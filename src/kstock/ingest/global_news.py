@@ -5,11 +5,14 @@ AI 컨텍스트와 브리핑에 반영한다.
 
 v6.0: 초기 버전 — RSS 피드 기반
 v6.1: 위기 감지 + 매크로 선행지표 연동 + 적응형 빈도
+v6.2.2: 영문 뉴스 제목 한글 번역 자동화
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -292,6 +295,97 @@ def format_urgent_alert(items: list[NewsItem]) -> str:
 
     lines.append("\n⚠️ 포트폴리오 리스크 점검을 권장합니다")
     return "\n".join(lines)
+
+
+# ── 영문 → 한글 번역 ──────────────────────────────────────
+
+_EN_CHAR_RE = re.compile(r"[a-zA-Z]")
+
+
+def _is_english(text: str) -> bool:
+    """문자열이 영어 위주인지 판단 (알파벳 비율 > 40%)."""
+    if not text:
+        return False
+    alpha = sum(1 for c in text if _EN_CHAR_RE.match(c))
+    return alpha / len(text) > 0.4
+
+
+async def translate_titles_to_korean(items: list[NewsItem]) -> list[NewsItem]:
+    """영문 뉴스 제목을 한글로 번역 (Claude Haiku 배치 호출).
+
+    비용: ~$0.001/호출 (Haiku, 50 토큰 × 5개 제목)
+    원본 title → title_ko 필드에 저장, title은 원본 유지 안 함 (덮어쓰기).
+    번역 실패 시 원본 그대로 반환.
+    """
+    en_items = [item for item in items if _is_english(item.title)]
+    if not en_items:
+        return items  # 번역할 영문 제목 없음
+
+    # 번역할 제목 모음
+    titles = [item.title for item in en_items]
+    numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+
+    prompt = (
+        "다음 영문 금융/경제 뉴스 헤드라인을 한국어로 번역해줘.\n"
+        "규칙:\n"
+        "- 번호 형식 유지 (1. 2. 3. ...)\n"
+        "- 금융 전문 용어는 한국 증시에서 쓰는 표현으로\n"
+        "- 간결하게 1줄로, 부연설명 없이 번역만\n\n"
+        f"{numbered}"
+    )
+
+    try:
+        import httpx
+
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            logger.debug("ANTHROPIC_API_KEY not set, skipping translation")
+            return items
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 300,
+                    "temperature": 0.1,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if resp.status_code != 200:
+                logger.debug("Translation API error %d", resp.status_code)
+                return items
+
+            result = resp.json()["content"][0]["text"]
+
+        # 번역 결과 파싱: "1. 번역문" 형식
+        translated: dict[int, str] = {}
+        for line in result.strip().split("\n"):
+            line = line.strip()
+            m = re.match(r"(\d+)\.\s*(.+)", line)
+            if m:
+                idx = int(m.group(1)) - 1
+                translated[idx] = m.group(2).strip()
+
+        # 번역 적용
+        for i, item in enumerate(en_items):
+            if i in translated and translated[i]:
+                item.title = translated[i]
+
+        logger.info(
+            "Translated %d/%d English titles to Korean",
+            len(translated), len(en_items),
+        )
+
+    except Exception as e:
+        logger.debug("Title translation failed: %s", e)
+
+    return items
 
 
 # ── 위기 감지 엔진 (매크로 선행지표 기반) ──────────────────

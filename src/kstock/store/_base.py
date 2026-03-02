@@ -866,6 +866,156 @@ CREATE TABLE IF NOT EXISTS global_news (
 CREATE INDEX IF NOT EXISTS idx_global_news_created ON global_news(created_at);
 CREATE INDEX IF NOT EXISTS idx_global_news_urgent ON global_news(is_urgent, created_at);
 
+-- v6.2: 대화 메모리 강화 (RAG)
+CREATE TABLE IF NOT EXISTS chat_memory_enhanced (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    role            TEXT    NOT NULL,
+    content         TEXT    NOT NULL,
+    topic           TEXT    DEFAULT '',
+    tickers         TEXT    DEFAULT '',
+    intent          TEXT    DEFAULT '',
+    keywords        TEXT    DEFAULT '',
+    sentiment       TEXT    DEFAULT 'neutral',
+    created_at      TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_enhanced_topic ON chat_memory_enhanced(topic);
+CREATE INDEX IF NOT EXISTS idx_chat_enhanced_tickers ON chat_memory_enhanced(tickers);
+CREATE INDEX IF NOT EXISTS idx_chat_enhanced_created ON chat_memory_enhanced(created_at);
+
+-- v6.2: 사용자 선호도 패턴
+CREATE TABLE IF NOT EXISTS user_preferences (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    preference_key  TEXT    NOT NULL UNIQUE,
+    preference_value TEXT   NOT NULL DEFAULT '',
+    confidence      REAL    DEFAULT 0.5,
+    source          TEXT    DEFAULT 'inferred',
+    updated_at      TEXT    NOT NULL
+);
+
+-- v6.2: 신호별 적중률 추적 (자가 학습 루프)
+CREATE TABLE IF NOT EXISTS signal_performance (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_source   TEXT    NOT NULL,
+    signal_type     TEXT    NOT NULL DEFAULT 'buy',
+    ticker          TEXT    NOT NULL,
+    name            TEXT    DEFAULT '',
+    signal_date     TEXT    NOT NULL,
+    signal_score    REAL    DEFAULT 0,
+    signal_price    REAL    DEFAULT 0,
+    horizon         TEXT    DEFAULT 'swing',
+    manager         TEXT    DEFAULT '',
+    price_d1        REAL,
+    price_d3        REAL,
+    price_d5        REAL,
+    price_d10       REAL,
+    price_d20       REAL,
+    return_d1       REAL,
+    return_d3       REAL,
+    return_d5       REAL,
+    return_d10      REAL,
+    return_d20      REAL,
+    max_return      REAL,
+    max_drawdown    REAL,
+    hit             INTEGER DEFAULT 0,
+    evaluated_at    TEXT,
+    created_at      TEXT    NOT NULL,
+    UNIQUE(signal_source, ticker, signal_date)
+);
+CREATE INDEX IF NOT EXISTS idx_signal_perf_source ON signal_performance(signal_source);
+CREATE INDEX IF NOT EXISTS idx_signal_perf_date ON signal_performance(signal_date);
+CREATE INDEX IF NOT EXISTS idx_signal_perf_ticker ON signal_performance(ticker);
+
+-- v6.2: 매매 자동 복기 (trade_debrief)
+CREATE TABLE IF NOT EXISTS trade_debrief (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id        INTEGER,
+    ticker          TEXT    NOT NULL,
+    name            TEXT    DEFAULT '',
+    action          TEXT    NOT NULL,
+    entry_price     REAL    DEFAULT 0,
+    exit_price      REAL    DEFAULT 0,
+    pnl_pct         REAL    DEFAULT 0,
+    hold_days       INTEGER DEFAULT 0,
+    horizon         TEXT    DEFAULT 'swing',
+    manager         TEXT    DEFAULT '',
+    signal_source   TEXT    DEFAULT '',
+    signal_score    REAL    DEFAULT 0,
+    market_regime   TEXT    DEFAULT '',
+    entry_reason    TEXT    DEFAULT '',
+    exit_reason     TEXT    DEFAULT '',
+    ai_review       TEXT    DEFAULT '',
+    lessons_json    TEXT    DEFAULT '[]',
+    mistakes_json   TEXT    DEFAULT '[]',
+    improvements    TEXT    DEFAULT '',
+    grade           TEXT    DEFAULT 'C',
+    created_at      TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_debrief_ticker ON trade_debrief(ticker);
+CREATE INDEX IF NOT EXISTS idx_debrief_created ON trade_debrief(created_at);
+CREATE INDEX IF NOT EXISTS idx_debrief_grade ON trade_debrief(grade);
+
+-- v6.2: 신호 소스별 성과 요약 (주기적 집계)
+CREATE TABLE IF NOT EXISTS signal_source_stats (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_source   TEXT    NOT NULL,
+    period          TEXT    NOT NULL DEFAULT 'weekly',
+    total_signals   INTEGER DEFAULT 0,
+    evaluated       INTEGER DEFAULT 0,
+    hits            INTEGER DEFAULT 0,
+    hit_rate        REAL    DEFAULT 0,
+    avg_return_d5   REAL    DEFAULT 0,
+    avg_return_d10  REAL    DEFAULT 0,
+    avg_return_d20  REAL    DEFAULT 0,
+    avg_max_return  REAL    DEFAULT 0,
+    avg_max_dd      REAL    DEFAULT 0,
+    weight_adj      REAL    DEFAULT 1.0,
+    calculated_at   TEXT    NOT NULL,
+    UNIQUE(signal_source, period, calculated_at)
+);
+
+-- v6.2.1: API 토큰 사용량 로그
+CREATE TABLE IF NOT EXISTS api_usage_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       TEXT    NOT NULL,
+    provider        TEXT    NOT NULL DEFAULT 'anthropic',
+    model           TEXT    NOT NULL DEFAULT '',
+    function_name   TEXT    NOT NULL DEFAULT '',
+    input_tokens    INTEGER DEFAULT 0,
+    output_tokens   INTEGER DEFAULT 0,
+    cache_read_tokens   INTEGER DEFAULT 0,
+    cache_write_tokens  INTEGER DEFAULT 0,
+    total_cost_usd  REAL    DEFAULT 0,
+    latency_ms      REAL    DEFAULT 0,
+    status          TEXT    DEFAULT 'success',
+    error_message   TEXT    DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_api_usage_ts ON api_usage_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_api_usage_provider ON api_usage_log(provider);
+CREATE INDEX IF NOT EXISTS idx_api_usage_model ON api_usage_log(model);
+
+-- v6.2.1: 시스템 자가 점수 기록
+CREATE TABLE IF NOT EXISTS system_scores (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    score_date      TEXT    NOT NULL,
+    total_score     REAL    DEFAULT 0,
+    signal_score    REAL    DEFAULT 0,
+    trade_score     REAL    DEFAULT 0,
+    alert_score     REAL    DEFAULT 0,
+    learning_score  REAL    DEFAULT 0,
+    cost_score      REAL    DEFAULT 0,
+    uptime_score    REAL    DEFAULT 0,
+    details_json    TEXT    DEFAULT '{}',
+    created_at      TEXT    NOT NULL,
+    UNIQUE(score_date)
+);
+
+-- v6.2.1: 뉴스 중복 전송 방지 (재시작 후에도 유지)
+CREATE TABLE IF NOT EXISTS sent_news_urls (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    url        TEXT    UNIQUE NOT NULL,
+    created_at TEXT    DEFAULT (datetime('now'))
+);
+
 -- 성능 인덱스: 자주 조회되는 테이블
 CREATE INDEX IF NOT EXISTS idx_holdings_status ON holdings(status);
 CREATE INDEX IF NOT EXISTS idx_holdings_ticker ON holdings(ticker);

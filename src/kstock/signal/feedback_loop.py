@@ -7,6 +7,7 @@ continuous improvement.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -719,6 +720,164 @@ def get_feedback_for_ticker(
     except Exception as e:
         logger.error("피드백 텍스트 생성 실패: %s", e, exc_info=True)
         return "피드백 데이터 조회 실패"
+
+
+# ---------------------------------------------------------------------------
+# Signal-aware feedback (v6.2)
+# ---------------------------------------------------------------------------
+
+def generate_learning_feedback(db: Any) -> str:
+    """자가 학습 루프: 신호 적중률 + 매매 복기 통합 피드백.
+
+    매일/주간 스케줄러에서 호출하여 학습 결과를 텔레그램으로 전송.
+    """
+    lines: list[str] = []
+    lines.append("═" * 22)
+    lines.append("🧠 자가 학습 리포트")
+    lines.append("═" * 22)
+    lines.append("")
+
+    # 1. 신호 소스별 적중률
+    try:
+        stats = db.get_signal_source_stats(days=30)
+        if stats:
+            lines.append("📊 신호 적중률 (최근 30일)")
+            for s in stats:
+                source = s.get("signal_source", "")
+                from kstock.signal.auto_debrief import SIGNAL_SOURCES
+                source_kr = SIGNAL_SOURCES.get(source, source)
+                evaluated = s.get("evaluated") or 0
+                hits = s.get("hits") or 0
+                if evaluated == 0:
+                    continue
+                hit_rate = round(hits / evaluated * 100, 1)
+                emoji = "🟢" if hit_rate >= 60 else "🟡" if hit_rate >= 45 else "🔴"
+                avg_d5 = s.get("avg_d5") or 0
+                lines.append(
+                    f"  {emoji} {source_kr}: {hit_rate:.0f}% "
+                    f"({hits}/{evaluated}건, D5 {avg_d5:+.1f}%)"
+                )
+            lines.append("")
+    except Exception as e:
+        logger.warning("신호 통계 조회 실패: %s", e)
+
+    # 2. 매매 복기 요약
+    try:
+        debrief_stats = db.get_debrief_stats(days=30)
+        if debrief_stats and debrief_stats.get("total", 0) > 0:
+            total = debrief_stats["total"]
+            wins = debrief_stats.get("wins") or 0
+            avg_pnl = debrief_stats.get("avg_pnl") or 0
+            best = debrief_stats.get("best_pnl") or 0
+            worst = debrief_stats.get("worst_pnl") or 0
+            avg_hold = debrief_stats.get("avg_hold_days") or 0
+            win_rate = round(wins / total * 100, 1) if total > 0 else 0
+
+            lines.append("🎯 매매 복기 (최근 30일)")
+            lines.append(f"  총 {total}건, 승률 {win_rate:.0f}%")
+            lines.append(f"  평균 수익: {avg_pnl:+.1f}%, 평균 보유: {avg_hold:.0f}일")
+            lines.append(f"  최고: {best:+.1f}% | 최저: {worst:+.1f}%")
+
+            # 등급 분포
+            grade_a = debrief_stats.get("grade_a") or 0
+            grade_b = debrief_stats.get("grade_b") or 0
+            grade_c = debrief_stats.get("grade_c") or 0
+            grade_d = debrief_stats.get("grade_d") or 0
+            grade_f = debrief_stats.get("grade_f") or 0
+            lines.append(
+                f"  등급: A({grade_a}) B({grade_b}) C({grade_c}) "
+                f"D({grade_d}) F({grade_f})"
+            )
+            lines.append("")
+    except Exception as e:
+        logger.warning("복기 통계 조회 실패: %s", e)
+
+    # 3. 가중치 조정 추천
+    try:
+        weights = db.get_signal_weight_adjustments()
+        if weights:
+            boosted = [k for k, v in weights.items() if v >= 1.5]
+            reduced = [k for k, v in weights.items() if v <= 0.7]
+
+            if boosted or reduced:
+                lines.append("🔧 가중치 자동 조정")
+                from kstock.signal.auto_debrief import SIGNAL_SOURCES
+                for src in boosted:
+                    kr = SIGNAL_SOURCES.get(src, src)
+                    lines.append(f"  ⬆️ {kr} 가중치 상향 (적중률 우수)")
+                for src in reduced:
+                    kr = SIGNAL_SOURCES.get(src, src)
+                    lines.append(f"  ⬇️ {kr} 가중치 하향 (적중률 부진)")
+                lines.append("")
+    except Exception as e:
+        logger.warning("가중치 조회 실패: %s", e)
+
+    # 4. 전략별 성과
+    try:
+        strategy_stats = db.get_strategy_stats_all() if hasattr(db, "get_strategy_stats_all") else []
+        # 기존 recommendations 기반 전략 성과도 포함
+        recs = db.get_completed_recommendations(limit=200) if hasattr(db, "get_completed_recommendations") else []
+        if recs:
+            breakdown = compute_strategy_hit_rates(recs)
+            has_data = any(
+                v.get("hits", 0) + v.get("misses", 0) > 0
+                for v in breakdown.values()
+            )
+            if has_data:
+                lines.append("🏆 전략별 승률")
+                for strat in ("A", "B", "C", "D", "E", "F", "G"):
+                    data = breakdown.get(strat)
+                    if not data or (data.get("hits", 0) + data.get("misses", 0)) == 0:
+                        continue
+                    label = STRATEGY_LABELS.get(strat, strat)
+                    hr = data.get("hit_rate", 0)
+                    avg = data.get("avg_return", 0)
+                    emoji = "🟢" if hr >= 70 else "🟡" if hr >= 50 else "🔴"
+                    lines.append(f"  {emoji} {label}: {hr:.0f}% ({avg:+.1f}%)")
+                lines.append("")
+    except Exception as e:
+        logger.warning("전략 통계 조회 실패: %s", e)
+
+    # 5. 학습 포인트 요약
+    try:
+        recent_debriefs = db.get_trade_debriefs(limit=10) if hasattr(db, "get_trade_debriefs") else []
+        if recent_debriefs:
+            all_lessons = []
+            all_mistakes = []
+            for d in recent_debriefs:
+                try:
+                    all_lessons.extend(json.loads(d.get("lessons_json", "[]")))
+                except Exception:
+                    pass
+                try:
+                    all_mistakes.extend(json.loads(d.get("mistakes_json", "[]")))
+                except Exception:
+                    pass
+
+            # 빈도 기반 Top 3 교훈
+            if all_lessons:
+                from collections import Counter
+                top_lessons = Counter(all_lessons).most_common(3)
+                lines.append("💡 반복 교훈 (Top 3)")
+                for i, (lesson, cnt) in enumerate(top_lessons, 1):
+                    lines.append(f"  {i}. {lesson} ({cnt}회)")
+                lines.append("")
+
+            # 반복 실수
+            if all_mistakes:
+                from collections import Counter
+                top_mistakes = Counter(all_mistakes).most_common(2)
+                lines.append("⚠️ 반복 실수")
+                for mistake, cnt in top_mistakes:
+                    lines.append(f"  • {mistake} ({cnt}회)")
+                lines.append("")
+    except Exception as e:
+        logger.warning("교훈 분석 실패: %s", e)
+
+    lines.append("─" * 22)
+    lines.append("🤖 K-Quant 자가 학습 시스템 v6.2")
+
+    return "\n".join(lines)
 
 
 def format_feedback_stats(stats: dict) -> str:

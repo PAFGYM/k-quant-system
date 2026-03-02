@@ -285,6 +285,66 @@ def make_feedback_row(menu_name: str) -> list:
     ]
 
 
+async def send_long_message(
+    target, text: str, reply_markup=None, page_size: int = 3800,
+) -> None:
+    """긴 메시지를 페이지 단위로 분할 전송 (v6.2.1).
+
+    텔레그램 4096자 제한을 초과하는 메시지를 자동으로 나눠서 보냄.
+    마지막 페이지에만 reply_markup 첨부.
+
+    Args:
+        target: update.message 또는 query.message (send_text 메서드 보유 객체)
+        text: 전송할 전체 텍스트
+        reply_markup: 마지막 메시지에 첨부할 키보드 (InlineKeyboardMarkup 등)
+        page_size: 한 페이지 최대 글자 수 (기본 3800, 여유분 포함)
+    """
+    if len(text) <= page_size:
+        await target.reply_text(text, reply_markup=reply_markup)
+        return
+
+    # 줄 단위로 분할하여 page_size 이내에서 자르기
+    lines = text.split("\n")
+    pages = []
+    current_page = []
+    current_len = 0
+
+    for line in lines:
+        line_len = len(line) + 1  # +1 for newline
+        if current_len + line_len > page_size and current_page:
+            pages.append("\n".join(current_page))
+            current_page = [line]
+            current_len = line_len
+        else:
+            current_page.append(line)
+            current_len += line_len
+
+    if current_page:
+        pages.append("\n".join(current_page))
+
+    total = len(pages)
+    for i, page in enumerate(pages):
+        is_last = (i == total - 1)
+        header = f"📄 ({i + 1}/{total})\n" if total > 1 else ""
+        markup = reply_markup if is_last else None
+        await target.reply_text(header + page, reply_markup=markup)
+
+
+async def safe_edit_or_reply(query, text: str, reply_markup=None) -> None:
+    """edit_message_text를 시도하고, stale/수정 불가시 reply_text 폴백 (v6.2.2).
+
+    텔레그램은 메시지가 수정 불가 상태(48시간 초과, 이미 삭제됨 등)일 때
+    BadRequest를 던짐. 이 경우 새 메시지로 전송하여 UX 단절 방지.
+    """
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    except Exception:
+        try:
+            await query.message.reply_text(text, reply_markup=reply_markup)
+        except Exception:
+            logger.debug("safe_edit_or_reply: both edit and reply failed", exc_info=True)
+
+
 def get_reply_markup(context) -> ReplyKeyboardMarkup:
     """항상 CLAUDE_MODE_MENU 반환.
 

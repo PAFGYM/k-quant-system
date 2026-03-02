@@ -247,6 +247,7 @@ def compute_composite_score(
     ml_bonus: int = 0,
     sentiment_bonus: int = 0,
     leading_sector_bonus: int = 0,
+    multi_agent_bonus: int = 0,
 ) -> ScoreBreakdown:
     """Compute the 100-point composite score.
 
@@ -291,6 +292,9 @@ def compute_composite_score(
     composite += ml_bonus           # +15/+10/+5/-10
     composite += sentiment_bonus    # +10/+5/-10
     composite += leading_sector_bonus  # +5 tier1, +2 tier2
+
+    # v6.2: 멀티에이전트 분석 연동 보너스 (+15/+10/+5/-5/-10)
+    composite += multi_agent_bonus
 
     # v3.0: max ~160 points possible
     composite = round(max(0.0, min(160.0, composite)), 2)

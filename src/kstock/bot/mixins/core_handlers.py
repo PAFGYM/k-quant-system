@@ -23,6 +23,12 @@ class CoreHandlersMixin:
         self.kis = KISClient()
         self.yf_client = YFinanceKRClient()
         self.db = SQLiteStore()
+        # v6.2.1: 글로벌 DB 참조 설정 (토큰 추적용)
+        try:
+            from kstock.core.token_tracker import set_db
+            set_db(self.db)
+        except Exception:
+            pass
         self.macro_client = MacroClient(db=self.db)
         self.scoring_config = load_scoring_config()
         self.universe_config = _load_universe()
@@ -137,6 +143,9 @@ class CoreHandlersMixin:
 
         self._job_queue = jq
         self._application = app  # WebSocket 콜백에서 bot 접근용
+
+        # v6.2.2: 경계 모드 초기화 (DB에서 복원)
+        self.__init_scheduler_state__()
 
         # v5.9: 매일 06:00 일일 운영 지침 → AI 자율 판단
         jq.run_daily(
@@ -281,10 +290,19 @@ class CoreHandlersMixin:
             days=(6,),
             name="lstm_retrain",
         )
-        # v4.2: 리스크 모니터링 (5분마다, 트레일링 스탑 추적 + 긴급 알림만)
+        # v6.2.2: 경계 모드에 따른 초기 인터벌 설정
+        _acfg = self._get_alert_config() if hasattr(self, '_get_alert_config') else {}
+        _risk_iv = _acfg.get("risk_interval", 120)
+        _news_iv = _acfg.get("news_interval", 900)
+        _global_iv = _acfg.get("global_news_interval", 1800)
+        _us_iv = _acfg.get("us_futures_interval", 3600)
+        if hasattr(self, '_SURGE_THRESHOLD_PCT') and _acfg:
+            self._SURGE_THRESHOLD_PCT = _acfg.get("surge_threshold", 3.0)
+        # v4.2: 리스크 모니터링 (트레일링 스탑 추적 + 긴급 알림)
+        # v6.2.2: 경계 모드별 동적 인터벌
         jq.run_repeating(
             self.job_risk_monitor,
-            interval=300,
+            interval=_risk_iv,
             first=30,
             name="risk_monitor",
         )
@@ -337,26 +355,46 @@ class CoreHandlersMixin:
             days=(0, 1, 2, 3, 4),
             name="short_selling_collect",
         )
-        # v5.8: 뉴스 모니터링 (30분마다, 09:00~15:30 장중)
+        # v5.8: 뉴스 모니터링 — 경계 모드별 동적 인터벌
         jq.run_repeating(
             self.job_news_monitor,
-            interval=1800,
+            interval=_news_iv,
             first=120,
             name="news_monitor",
         )
-        # v5.9: 미국 선물 신호등 모니터링 (장중 1시간마다)
+        # v5.9: 미국 선물 신호등 모니터링 — 경계 모드별 동적 인터벌
         jq.run_repeating(
             self.job_us_futures_signal,
-            interval=3600,
+            interval=_us_iv,
             first=300,
             name="us_futures_signal",
         )
-        # v6.1: 글로벌 뉴스 수집 (30분 기본, 위기 시 5분까지 적응형)
+        # v6.1: 글로벌 뉴스 수집 — 경계 모드별 동적 인터벌
         jq.run_repeating(
             self.job_global_news_collect,
-            interval=1800,
+            interval=_global_iv,
             first=60,
             name="global_news_collect",
+        )
+        # v6.2: 자가 학습 — 신호 적중률 평가 (매일 16:20, 장 마감 후)
+        jq.run_daily(
+            self.job_signal_evaluation,
+            time=dt_time(hour=16, minute=20, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="signal_evaluation",
+        )
+        # v6.2: 자가 학습 리포트 (매주 토요일 11:00)
+        jq.run_daily(
+            self.job_learning_report,
+            time=dt_time(hour=11, minute=0, tzinfo=KST),
+            days=(5,),
+            name="learning_report",
+        )
+        # v6.2.1: 일일 시스템 자가 점수 (매일 23:55)
+        jq.run_daily(
+            self.job_daily_system_score,
+            time=dt_time(hour=23, minute=55, tzinfo=KST),
+            name="daily_system_score",
         )
         logger.info(
             "Scheduled: buy_planner(weekday 07:50), us_premarket(07:00), "
@@ -368,13 +406,16 @@ class CoreHandlersMixin:
             "report_crawl(weekday 08:20), "
             "ws_connect(weekday 08:50), ws_disconnect(weekday 15:35), "
             "scalp_close(weekday 14:30), short_review(weekday 08:00), "
-            "lstm_retrain(Sun 03:00), risk_monitor(5min, trailing only), "
-            "eod_risk_report(weekday 15:40), "
-            "health_check(30min), "
-            "journal_review(Sun 10:00), sector_rotation(weekday 09:05), "
-            "contrarian_scan(weekday 14:00), daily_rating(19:00), "
-            "short_selling(weekday 16:15), news_monitor(30min), "
-            "global_news(30min adaptive) KST"
+            "lstm_retrain(Sun 03:00), "
+            "risk_monitor(%ds), news_monitor(%ds), "
+            "global_news(%ds), us_futures(%ds), "
+            "surge_threshold(%.1f%%), "
+            "alert_mode(%s), "
+            "signal_eval(weekday 16:20), learning_report(Sat 11:00), "
+            "daily_system_score(23:55) KST",
+            _risk_iv, _news_iv, _global_iv, _us_iv,
+            self._SURGE_THRESHOLD_PCT,
+            self._alert_mode,
         )
 
     # == 봇 시작 시 클로드 메뉴 자동 발송 ====================================
@@ -1285,6 +1326,9 @@ class CoreHandlersMixin:
                 InlineKeyboardButton(
                     "👀 관심종목", callback_data=f"stock_act:watch:{code}",
                 ),
+                InlineKeyboardButton(
+                    "❌ 닫기", callback_data="dismiss:0",
+                ),
             ],
         ]
 
@@ -1420,7 +1464,10 @@ class CoreHandlersMixin:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         query = update.callback_query
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception:
+            logger.debug("handle_callback query.answer failed (query too old or invalid)", exc_info=True)
         data = query.data or ""
         try:
             action, _, payload = data.partition(":")
@@ -1512,9 +1559,19 @@ class CoreHandlersMixin:
         except Exception as e:
             logger.error("Callback error: %s", e, exc_info=True)
             try:
-                await query.edit_message_text("\u26a0\ufe0f 오류가 발생했습니다.")
+                # v6.2.1: 에러 복구 버튼 (단순 텍스트 대신 액션 제공)
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                err_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 다시 시도",
+                                          callback_data=f"{action}:{payload}" if payload else action)],
+                    [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+                ])
+                await query.message.reply_text(
+                    f"⚠️ 오류가 발생했습니다.\n원인: {str(e)[:80]}\n\n다시 시도하거나 닫아주세요.",
+                    reply_markup=err_kb,
+                )
             except Exception:
-                logger.debug("handle_callback error recovery edit_text also failed", exc_info=True)
+                logger.debug("handle_callback error recovery also failed", exc_info=True)
 
     # == 더보기 인라인 메뉴 디스패치 (v5.9) ====================================
 
@@ -1522,6 +1579,7 @@ class CoreHandlersMixin:
         """더보기 InlineKeyboard → 해당 메뉴 함수 호출.
 
         v5.9: 더보기를 InlineKeyboard로 전환하여 Reply Keyboard(클로드 메뉴) 유지.
+        v6.2.1: UX 개선 — 기능별 로딩 메시지 + 에러 복구 버튼.
         """
         menu_map = {
             "account_analysis": self._menu_account_analysis,
@@ -1540,13 +1598,32 @@ class CoreHandlersMixin:
             "optimize": self._menu_optimize,
             "admin": self._menu_admin,
         }
+        # v6.2.1: 기능별 로딩 메시지
+        _loading_msg = {
+            "account_analysis": "💻 계좌 분석 준비 중...",
+            "strategy_view": "🎯 전략별 보기 로딩 중...",
+            "surge": "🔥 급등주 스캔 중... (약 5초)",
+            "swing": "⚡ 스윙 기회 조회 중...",
+            "multi_agent": "📊 멀티 에이전트 준비 중...",
+            "accumulation": "🕵️ 매집 탐지 분석 중... (약 10초)",
+            "weekly_report": "📅 주간 보고서 로딩 중...",
+            "short": "📊 공매도 데이터 조회 중...",
+            "future_tech": "🚀 미래기술 종목 로딩 중...",
+            "goal": "🎯 30억 목표 대시보드 로딩 중...",
+            "financial": "📊 재무 진단 데이터 로딩 중...",
+            "kis_setup": "📡 KIS 연결 상태 확인 중...",
+            "notification": "🔔 알림 설정 로딩 중...",
+            "optimize": "⚙️ 최적화 설정 로딩 중...",
+            "admin": "🛠 관리자 메뉴 로딩 중...",
+        }
         handler = menu_map.get(payload)
         if not handler:
             await query.edit_message_text(f"⚠️ 알 수 없는 메뉴: {payload}")
             return
-        # 더보기 인라인 메시지를 닫음
+        # 로딩 메시지 표시
+        loading = _loading_msg.get(payload, "⏳ 로딩 중...")
         try:
-            await query.edit_message_text("⚙️ 메뉴 이동 중...")
+            await query.edit_message_text(loading)
         except Exception:
             logger.debug("_action_menu_dispatch edit_text transition failed", exc_info=True)
         # 메뉴 함수는 update.message를 기대 → SimpleNamespace로 래핑
@@ -1560,10 +1637,30 @@ class CoreHandlersMixin:
             await handler(fake_update, context)
         except Exception as e:
             logger.error("Menu dispatch error [%s]: %s", payload, e, exc_info=True)
+            # v6.2.1: 에러 복구 버튼
+            _menu_labels = {
+                "account_analysis": "계좌분석", "surge": "급등주",
+                "multi_agent": "멀티분석", "accumulation": "매집탐지",
+                "weekly_report": "주간보고서", "kis_setup": "KIS설정",
+            }
+            label = _menu_labels.get(payload, payload)
             try:
-                await query.message.reply_text(f"⚠️ 메뉴 오류: {e}")
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                err_buttons = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 다시 시도", callback_data=f"menu:{payload}")],
+                    [
+                        InlineKeyboardButton("🛠 오류 신고", callback_data="adm:bug"),
+                        InlineKeyboardButton("🔙 더보기", callback_data="goto:more"),
+                    ],
+                ])
+                await query.message.reply_text(
+                    f"⚠️ {label} 오류\n\n"
+                    f"원인: {str(e)[:80]}\n\n"
+                    f"아래 버튼으로 다시 시도하거나 오류를 신고해주세요.",
+                    reply_markup=err_buttons,
+                )
             except Exception:
-                logger.debug("_action_menu_dispatch error recovery reply_text also failed", exc_info=True)
+                logger.debug("_action_menu_dispatch error recovery also failed", exc_info=True)
 
     # == Dismiss (generic close button) =======================================
 

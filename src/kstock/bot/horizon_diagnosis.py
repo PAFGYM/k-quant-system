@@ -487,7 +487,7 @@ def fallback_diagnosis(
 
         msg = (
             f"\U0001f389 {USER_NAME}, {name} 잘 잡으셨습니다!\n"
-            f"{label} 기준 | 현재 {profit_pct:+.1f}% 수익 중이에요.\n"
+            f"{label} 기준 | 현재 {profit_pct:+.1f}% 수익 중입니다.\n"
             f"\U0001f4c8 트레일링 스탑 -{trailing_pct:.0f}% 설정하세요.\n"
             f"\U0001f3af 목표가: {target:,.0f}원 (+{target_pct}%)\n"
             f"\U0001f4aa 계속 들고 가세요!"
@@ -556,7 +556,7 @@ def fallback_diagnosis(
         if rsi < 30:
             action = "hold"
             msg = (
-                f"\U0001f534 {USER_NAME}, {name} 힘든 구간이에요.\n"
+                f"\U0001f534 {USER_NAME}, {name} 힘든 구간입니다.\n"
                 f"{label} 기준 | 현재 {profit_pct:+.1f}% 손실이지만 RSI {rsi:.1f}로 과매도입니다.\n"
                 f"\U0001f4aa 반등 가능성이 있으니 버티세요.\n"
                 f"\U0001f6d1 {stop:,.0f}원 아래로 가면 재검토.\n"

@@ -37,6 +37,55 @@ class SchedulerMixin:
     _SURGE_THRESHOLD_PCT = 3.0
     _surge_callback_registered: bool = False
 
+    # ── 경계 모드 (Alert Mode) ─────────────────────────────
+    # v6.2.2: 전시/긴장/일상 3단계 — 자동 에스컬레이션 + 디에스컬레이션
+    _ALERT_MODES = {
+        "normal": {
+            "label": "🟢 일상",
+            "risk_interval": 120,       # 리스크 모니터 (초)
+            "news_interval": 900,       # 뉴스 모니터 (초)
+            "global_news_interval": 1800,  # 글로벌 뉴스 수집 (초)
+            "surge_threshold": 3.0,     # 급등 감지 %
+            "us_futures_interval": 3600,  # 미국 선물 (초)
+        },
+        "elevated": {
+            "label": "🟡 긴장",
+            "risk_interval": 60,
+            "news_interval": 600,
+            "global_news_interval": 900,
+            "surge_threshold": 2.0,
+            "us_futures_interval": 1800,
+        },
+        "wartime": {
+            "label": "🔴 전시",
+            "risk_interval": 30,
+            "news_interval": 300,
+            "global_news_interval": 300,
+            "surge_threshold": 1.5,
+            "us_futures_interval": 900,
+        },
+    }
+    # 자동 강등 시간 (설정 후 N시간 무사 경과 시 한 단계 완화)
+    _AUTO_DEESCALATE_HOURS = {
+        "wartime": 6,    # 전시 → 6시간 무사 → 긴장
+        "elevated": 12,  # 긴장 → 12시간 무사 → 일상
+    }
+    # 뉴스 긴장 키워드 — 일치 시 자동 에스컬레이션
+    _ESCALATION_KEYWORDS_WARTIME = [
+        "전쟁", "공습", "미사일", "핵", "계엄", "쿠데타",
+        "war", "strike", "missile", "nuclear", "martial law",
+        "crash", "폭락", "서킷브레이커", "circuit breaker",
+        "blockade", "봉쇄", "대공황", "depression",
+    ]
+    _ESCALATION_KEYWORDS_ELEVATED = [
+        "긴급", "위기", "제재", "관세", "무역전쟁",
+        "급락", "경기침체", "recession", "crisis",
+        "sanction", "tariff", "plunge",
+        "금리 인상", "금리 인하", "rate hike", "rate cut",
+        "유가 급등", "oil surge", "호르무즈", "hormuz",
+        "디폴트", "default", "파산", "bankrupt",
+    ]
+
     def __init_scheduler_state__(self):
         """인스턴스별 mutable 상태 초기화 (class 속성 공유 문제 방지)."""
         if not hasattr(self, '_surge_cooldown'):
@@ -47,6 +96,222 @@ class SchedulerMixin:
             self._holdings_cache = []
         if not hasattr(self, '_holdings_index'):
             self._holdings_index = {}  # ticker → holding dict (O(1) 조회)
+        # 경계 모드 초기화 — DB에서 복원
+        if not hasattr(self, '_alert_mode'):
+            self._alert_mode = "normal"
+            self._alert_mode_since = _time.monotonic()
+            self._alert_last_escalation = 0.0
+            # DB에서 이전 모드 복원
+            try:
+                saved = self.db.get_meta("alert_mode")
+                if saved and saved in self._ALERT_MODES:
+                    self._alert_mode = saved
+                    logger.info("Alert mode restored from DB: %s", saved)
+            except Exception:
+                pass
+
+    # ── 경계 모드 관리 메서드 ──────────────────────────────
+    def _get_alert_config(self) -> dict:
+        """현재 경계 모드의 설정값 반환."""
+        return self._ALERT_MODES.get(self._alert_mode, self._ALERT_MODES["normal"])
+
+    async def set_alert_mode(
+        self,
+        mode: str,
+        context=None,
+        reason: str = "",
+        notify: bool = True,
+    ) -> str:
+        """경계 모드 변경 + 스케줄 동적 조정.
+
+        Returns:
+            변경 결과 메시지.
+        """
+        if mode not in self._ALERT_MODES:
+            return f"⚠️ 알 수 없는 모드: {mode} (normal/elevated/wartime)"
+
+        prev = self._alert_mode
+        if prev == mode:
+            cfg = self._ALERT_MODES[mode]
+            return f"{cfg['label']} 이미 {cfg['label']} 모드입니다"
+
+        self._alert_mode = mode
+        self._alert_mode_since = _time.monotonic()
+        cfg = self._ALERT_MODES[mode]
+
+        # 급등 감지 임계값 동적 변경
+        self._SURGE_THRESHOLD_PCT = cfg["surge_threshold"]
+
+        # DB 저장 (재시작 후 복원)
+        try:
+            self.db.set_meta("alert_mode", mode)
+        except Exception:
+            pass
+
+        # 스케줄 동적 재조정
+        if context:
+            await self._reschedule_for_alert_mode(context, cfg)
+
+        prev_cfg = self._ALERT_MODES[prev]
+        reason_str = f"\n이유: {reason}" if reason else ""
+        msg = (
+            f"🚨 경계 모드 변경\n"
+            f"{'━' * 20}\n"
+            f"{prev_cfg['label']} → {cfg['label']}\n"
+            f"{reason_str}\n\n"
+            f"📊 리스크 모니터: {cfg['risk_interval']}초\n"
+            f"📰 뉴스 모니터: {cfg['news_interval'] // 60}분\n"
+            f"🌍 글로벌 뉴스: {cfg['global_news_interval'] // 60}분\n"
+            f"⚡ 급등 감지: {cfg['surge_threshold']}%\n"
+            f"🇺🇸 미국 선물: {cfg['us_futures_interval'] // 60}분"
+        )
+
+        # 텔레그램 알림
+        if notify and self.chat_id and context:
+            try:
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                buttons = []
+                if mode != "normal":
+                    buttons.append([InlineKeyboardButton(
+                        "🟢 일상으로 복귀", callback_data="adm:alert:normal",
+                    )])
+                if mode == "normal":
+                    buttons.append([InlineKeyboardButton(
+                        "🟡 긴장 모드", callback_data="adm:alert:elevated",
+                    )])
+                buttons.append([InlineKeyboardButton(
+                    "❌ 닫기", callback_data="dismiss:0",
+                )])
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=msg,
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            except Exception as e:
+                logger.debug("Alert mode notification failed: %s", e)
+
+        logger.info(
+            "Alert mode changed: %s → %s (reason: %s)",
+            prev, mode, reason or "manual",
+        )
+        return msg
+
+    async def _reschedule_for_alert_mode(self, context, cfg: dict) -> None:
+        """경계 모드에 따라 반복 스케줄 동적 재조정."""
+        jq = getattr(self, "_job_queue", None)
+        if jq is None:
+            jq = context.application.job_queue
+        if jq is None:
+            return
+
+        # 재조정할 잡 목록: (잡 이름, 새 간격, 핸들러)
+        reschedule_map = {
+            "risk_monitor": (cfg["risk_interval"], self.job_risk_monitor),
+            "news_monitor": (cfg["news_interval"], self.job_news_monitor),
+            "global_news_collect": (cfg["global_news_interval"], self.job_global_news_collect),
+            "us_futures_signal": (cfg["us_futures_interval"], self.job_us_futures_signal),
+        }
+
+        current_jobs = jq.jobs()
+        for job_name, (new_interval, handler) in reschedule_map.items():
+            # 기존 잡 제거
+            for job in current_jobs:
+                if job.name == job_name:
+                    job.schedule_removal()
+            # 새 간격으로 재등록
+            jq.run_repeating(
+                handler,
+                interval=new_interval,
+                first=10,
+                name=job_name,
+            )
+        logger.info(
+            "Rescheduled jobs for %s mode: risk=%ds, news=%ds, global=%ds, us=%ds",
+            self._alert_mode,
+            cfg["risk_interval"], cfg["news_interval"],
+            cfg["global_news_interval"], cfg["us_futures_interval"],
+        )
+
+    async def _check_news_escalation(self, items) -> None:
+        """뉴스 헤드라인으로 경계 모드 자동 에스컬레이션 판단."""
+        if not items:
+            return
+
+        now = _time.monotonic()
+        # 쿨다운: 마지막 에스컬레이션 후 30분 내 재에스컬레이션 방지
+        if now - self._alert_last_escalation < 1800:
+            return
+
+        titles = " ".join(item.title.lower() for item in items)
+
+        # 전시 키워드 체크
+        wartime_hits = sum(
+            1 for kw in self._ESCALATION_KEYWORDS_WARTIME
+            if kw.lower() in titles
+        )
+        # 긴장 키워드 체크
+        elevated_hits = sum(
+            1 for kw in self._ESCALATION_KEYWORDS_ELEVATED
+            if kw.lower() in titles
+        )
+
+        new_mode = None
+        reason = ""
+
+        if wartime_hits >= 2 and self._alert_mode != "wartime":
+            new_mode = "wartime"
+            reason = f"전시 키워드 {wartime_hits}개 감지"
+        elif (wartime_hits >= 1 or elevated_hits >= 2) and self._alert_mode == "normal":
+            new_mode = "elevated"
+            reason = f"긴장 키워드 감지 (전시:{wartime_hits}, 긴장:{elevated_hits})"
+
+        if new_mode:
+            self._alert_last_escalation = now
+            # context가 없으므로 저장만 하고 알림은 글로벌 뉴스 잡에서 처리
+            self._pending_escalation = (new_mode, reason)
+
+    async def _check_auto_deescalation(self, context) -> None:
+        """시간 경과에 따른 자동 경계 완화."""
+        if self._alert_mode == "normal":
+            return
+
+        hours_limit = self._AUTO_DEESCALATE_HOURS.get(self._alert_mode)
+        if not hours_limit:
+            return
+
+        elapsed_hours = (_time.monotonic() - self._alert_mode_since) / 3600
+        if elapsed_hours < hours_limit:
+            return
+
+        # 한 단계 완화
+        if self._alert_mode == "wartime":
+            new_mode = "elevated"
+            reason = f"전시 모드 {hours_limit}시간 경과, 자동 완화"
+        else:
+            new_mode = "normal"
+            reason = f"긴장 모드 {hours_limit}시간 경과, 자동 완화"
+
+        await self.set_alert_mode(new_mode, context=context, reason=reason)
+
+    def get_alert_mode_status(self) -> str:
+        """현재 경계 모드 상태 텍스트."""
+        cfg = self._get_alert_config()
+        elapsed = (_time.monotonic() - self._alert_mode_since) / 3600
+        deesc = self._AUTO_DEESCALATE_HOURS.get(self._alert_mode)
+        deesc_str = ""
+        if deesc:
+            remaining = max(0, deesc - elapsed)
+            deesc_str = f"\n⏱ 자동 완화까지: {remaining:.1f}시간"
+
+        return (
+            f"경계 모드: {cfg['label']}\n"
+            f"유지 시간: {elapsed:.1f}시간{deesc_str}\n\n"
+            f"📊 리스크 모니터: {cfg['risk_interval']}초\n"
+            f"📰 뉴스 모니터: {cfg['news_interval'] // 60}분\n"
+            f"🌍 글로벌 뉴스: {cfg['global_news_interval'] // 60}분\n"
+            f"⚡ 급등 감지: {cfg['surge_threshold']}%\n"
+            f"🇺🇸 미국 선물: {cfg['us_futures_interval'] // 60}분"
+        )
 
     async def job_premarket_buy_planner(
         self, context: ContextTypes.DEFAULT_TYPE,
@@ -71,7 +336,7 @@ class SchedulerMixin:
         await context.bot.send_message(
             chat_id=self.chat_id,
             text=(
-                "☀️ 주호님, 좋은 아침이에요\n\n"
+                "☀️ 주호님, 좋은 아침입니다\n\n"
                 "오늘 추가 매수 계획이 있으신가요?\n\n"
                 "매수 계획 있음을 누르면\n"
                 "금액 → 투자 타입 선택 후\n"
@@ -242,6 +507,46 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("job_morning_briefing global news fetch failed", exc_info=True)
 
+            # v6.2.1: 운영자 특별 지시사항 (DB에서 로드, 없으면 빈 문자열)
+            special_ctx = ""
+            try:
+                directive = self.db.get_meta("market_special_context")
+                if directive:
+                    special_ctx = f"\n[📌 운영자 특별 관심사항]\n{directive}\n"
+            except Exception:
+                pass
+
+            # v6.2.2: 보유종목 외인/기관 수급 데이터
+            flow_ctx = ""
+            try:
+                if holdings:
+                    flow_lines = []
+                    for h in holdings[:8]:
+                        ticker = h.get("ticker", "")
+                        name = h.get("name", ticker)
+                        try:
+                            frgn = await self.kis.get_foreign_flow(ticker, days=3)
+                            inst = await self.kis.get_institution_flow(ticker, days=3)
+                            f_net = int(frgn["net_buy_volume"].sum()) if len(frgn) > 0 else 0
+                            i_net = int(inst["net_buy_volume"].sum()) if len(inst) > 0 else 0
+                            f_e = "🔵" if f_net > 0 else "🔴"
+                            i_e = "🟢" if i_net > 0 else "🔴"
+                            flow_lines.append(
+                                f"  {name}: 외인{f_e}{f_net:+,}주 기관{i_e}{i_net:+,}주 (3일)"
+                            )
+                        except Exception:
+                            pass
+                    if flow_lines:
+                        flow_ctx = "\n[외인/기관 수급 (3일)]\n" + "\n".join(flow_lines) + "\n"
+            except Exception:
+                logger.debug("Morning briefing flow data failed", exc_info=True)
+
+            # v6.2.2: 경계 모드 컨텍스트
+            alert_ctx = ""
+            if hasattr(self, '_alert_mode') and self._alert_mode != "normal":
+                acfg = self._get_alert_config()
+                alert_ctx = f"\n[⚠️ 현재 경계 모드: {acfg['label']}]\n"
+
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
                 f"[시장 데이터]\n"
@@ -253,22 +558,27 @@ class SchedulerMixin:
                 f"금=${macro.gold_price:,.0f}({macro.gold_change_pct:+.1f}%), "
                 f"레짐={macro.regime}, 모드={regime_mode.get('label', '')}\n\n"
                 f"{news_ctx}"
+                f"{special_ctx}"
+                f"{alert_ctx}"
                 f"[보유종목]\n{holdings_text}\n"
+                f"{flow_ctx}"
                 f"아래 형식으로 작성해주세요:\n\n"
-                f"1) 시장 요약 (3줄 이내) — 글로벌 뉴스 헤드라인이 있으면 핵심 이슈 반영\n"
+                f"1) 시장 요약 (3줄 이내) — 글로벌 뉴스 + 수급 핵심\n"
                 f"2) 보유종목별 판단 — 각 종목마다:\n"
-                f"   - 종목명 + 수익률\n"
+                f"   - 종목명 + 수익률 + 외인/기관 수급 동향\n"
                 f"   - 투자시계(단기/스윙/중기/장기)에 맞는 판단\n"
                 f"   - 판단: 보유유지/추가매수/일부익절/전량매도/손절 중 택1\n"
-                f"   - 구체적 이유 1줄\n"
+                f"   - 구체적 이유 1줄 (수급 근거 포함)\n"
                 f"   - 목표가, 손절가 제시\n"
-                f"3) 오늘 주목할 이벤트/섹터 (2줄)\n\n"
+                f"3) 외인/기관 수급 종합 (수급 데이터가 있으면 반드시 분석)\n"
+                f"4) 오늘 주목할 이벤트/섹터 (2줄)\n\n"
                 f"투자시계별 기준:\n"
                 f"- 단기(scalp): 1~3일, 수익 3~5% 목표\n"
                 f"- 스윙(swing): 1~2주, 수익 8~15% 목표\n"
                 f"- 중기(mid): 1~3개월, 수익 15~30% 목표\n"
                 f"- 장기(long): 3개월+, 수익 30~100% 목표\n\n"
-                f"볼드(**) 사용 금지. 이모지로 가독성 확보. 한 문장 최대 25자."
+                f"볼드(**) 사용 금지. 이모지로 가독성 확보.\n"
+                f"존댓말 사용 (주호님). 한 문장 최대 25자."
             )
             result = await self.ai.analyze(
                 "morning_briefing", prompt, max_tokens=1200,
@@ -315,17 +625,21 @@ class SchedulerMixin:
     async def _check_surge_and_longterm(
         self, bot, results: list, macro: MacroSnapshot
     ) -> None:
-        """장중 급등 종목 감지 + 장기 보유 적합 종목 추천."""
+        """장중 급등/반등/장기 종목 감지.
+
+        v6.2.2: 반등 감지 추가 — 최근 급락 후 V턴 시그널.
+        """
         surge_stocks = []
         longterm_picks = []
+        bounce_stocks = []
 
         for r in results:
             info = r.info
             change_pct = getattr(info, "change_pct", 0)
             score = r.score
 
-            # 급등 감지: 당일 +5% 이상 상승
-            if change_pct >= 5.0:
+            # 급등 감지: 경계 모드별 임계값 적용
+            if change_pct >= self._SURGE_THRESHOLD_PCT:
                 if not self.db.has_recent_alert(r.ticker, "surge", hours=8):
                     surge_stocks.append(r)
 
@@ -336,7 +650,17 @@ class SchedulerMixin:
                 if not self.db.has_recent_alert(r.ticker, "longterm_pick", hours=72):
                     longterm_picks.append(r)
 
-        # 급등 알림 (상위 3개)
+            # v6.2.2: 반등(V턴) 감지
+            # 조건: RSI 과매도(< 35) → 당일 +1.5%+ 반등 + 거래량 증가
+            rsi = getattr(r.tech, "rsi", 50)
+            vol_ratio = getattr(info, "volume_ratio", 1.0)
+            if (rsi < 35
+                    and change_pct >= 1.5
+                    and vol_ratio >= 1.5):
+                if not self.db.has_recent_alert(r.ticker, "bounce", hours=24):
+                    bounce_stocks.append(r)
+
+        # 급등 알림 (상위 3개) — v6.2: 이유+액션 포함
         if surge_stocks:
             surge_stocks.sort(
                 key=lambda x: getattr(x.info, "change_pct", 0), reverse=True,
@@ -345,10 +669,24 @@ class SchedulerMixin:
             for s in surge_stocks[:3]:
                 chg = getattr(s.info, "change_pct", 0)
                 price = getattr(s.info, "current_price", 0)
+                vol_ratio = getattr(s.info, "volume_ratio", 0)
+                # v6.2: 급등 이유 추론
+                reasons = []
+                if vol_ratio > 3:
+                    reasons.append(f"거래량 {vol_ratio:.0f}배 급증")
+                if chg >= 10:
+                    reasons.append("상한가 접근 — 뉴스/공시 확인 필요")
+                elif chg >= 5:
+                    reasons.append("강한 매수세 유입")
+                if s.score.composite >= 110:
+                    reasons.append(f"스캔 점수 {s.score.composite:.0f}점 — 펀더멘탈 양호")
+                reason_text = " | ".join(reasons[:2]) if reasons else "장중 모멘텀"
+
                 lines.append(
                     f"\U0001f4c8 {s.name} ({s.ticker})\n"
                     f"  {price:,.0f}원 | +{chg:.1f}%\n"
-                    f"  점수 {s.score.composite:.0f}점 | {s.score.signal}"
+                    f"  점수 {s.score.composite:.0f}점 | {s.score.signal}\n"
+                    f"  💡 {reason_text}"
                 )
                 self.db.insert_alert(s.ticker, "surge", f"급등 +{chg:.1f}%")
             buttons = []
@@ -400,6 +738,46 @@ class SchedulerMixin:
                 chat_id=self.chat_id,
                 text="\n".join(lines),
                 reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+            )
+
+        # v6.2.2: 반등(V턴) 감지 알림
+        if bounce_stocks:
+            bounce_stocks.sort(
+                key=lambda x: getattr(x.info, "change_pct", 0), reverse=True,
+            )
+            lines = ["📈 반등(V턴) 감지\n"]
+            for b in bounce_stocks[:3]:
+                chg = getattr(b.info, "change_pct", 0)
+                price = getattr(b.info, "current_price", 0)
+                rsi = getattr(b.tech, "rsi", 50)
+                vol = getattr(b.info, "volume_ratio", 1)
+                # 보유종목 여부 확인
+                is_held = b.ticker in self._holdings_index
+                held_tag = " 📌보유중" if is_held else ""
+                lines.append(
+                    f"🔄 {b.name} ({b.ticker}){held_tag}\n"
+                    f"  {price:,.0f}원 | +{chg:.1f}% 반등\n"
+                    f"  RSI {rsi:.0f}(과매도) | 거래량 {vol:.1f}배\n"
+                    f"  💡 급락 후 매수세 유입 — 추가매수 검토"
+                )
+                self.db.insert_alert(b.ticker, "bounce", f"V턴 +{chg:.1f}%")
+            buttons = []
+            for b in bounce_stocks[:3]:
+                row = [
+                    InlineKeyboardButton(
+                        f"🔍 상세", callback_data=f"detail:{b.ticker}",
+                    ),
+                ]
+                if b.ticker not in self._holdings_index:
+                    row.append(InlineKeyboardButton(
+                        f"⭐ 즐겨찾기", callback_data=f"fav:add:{b.ticker}:{b.name}",
+                    ))
+                buttons.append(row)
+            buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+            await bot.send_message(
+                chat_id=self.chat_id,
+                text="\n".join(lines),
+                reply_markup=InlineKeyboardMarkup(buttons),
             )
 
     async def job_eod_report(self, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2506,6 +2884,48 @@ class SchedulerMixin:
                             ticker, f"profit_{alert.alert_type}",
                             alert.message[:200],
                         )
+
+                        # v6.2: 스마트 알림 (이유+액션 포함)
+                        pnl_pct = (current_price - buy_price) / buy_price * 100 if buy_price > 0 else 0
+                        smart_msg = None
+                        try:
+                            from kstock.bot.smart_alerts import build_holding_alert
+                            # 시장 레짐 확인
+                            _regime = ""
+                            try:
+                                _macro = await self.macro_client.get_snapshot()
+                                if _macro and hasattr(_macro, "vix"):
+                                    if _macro.vix >= 30: _regime = "panic"
+                                    elif _macro.vix >= 25: _regime = "fear"
+                                    elif _macro.vix >= 18: _regime = "normal"
+                                    else: _regime = "calm"
+                            except Exception:
+                                pass
+
+                            # 보유일수 계산
+                            _hold_days = 0
+                            try:
+                                bd = h.get("buy_date") or h.get("created_at", "")
+                                if bd:
+                                    _bd_dt = datetime.strptime(bd[:10], "%Y-%m-%d")
+                                    _hold_days = max(0, (datetime.utcnow() - _bd_dt).days)
+                            except Exception:
+                                pass
+
+                            smart_msg = build_holding_alert(
+                                name=name, ticker=ticker,
+                                pnl_pct=pnl_pct,
+                                buy_price=buy_price,
+                                current_price=current_price,
+                                holding_type=holding_type,
+                                hold_days=_hold_days,
+                                market_regime=_regime,
+                            )
+                        except Exception:
+                            pass
+
+                        alert_text = smart_msg if smart_msg else sizer.format_profit_alert(alert)
+
                         buttons = [
                             [
                                 InlineKeyboardButton(
@@ -2520,7 +2940,7 @@ class SchedulerMixin:
                         ]
                         await context.bot.send_message(
                             chat_id=self.chat_id,
-                            text=sizer.format_profit_alert(alert),
+                            text=alert_text,
                             reply_markup=InlineKeyboardMarkup(buttons),
                         )
                         logger.info(
@@ -3230,12 +3650,40 @@ class SchedulerMixin:
                 if t:
                     ticker_names[t] = w.get("name", t)
 
-            # 이미 전송한 뉴스 URL 추적
+            # 이미 전송한 뉴스 URL 추적 (DB 영속 + 메모리 캐시 병행)
+            # v6.2.1: 재시작 후에도 중복 뉴스 방지
             sent_news = context.bot_data.setdefault("sent_news", set())
+            if not sent_news:
+                # 봇 시작 후 첫 실행: DB에서 최근 전송 URL 로드
+                try:
+                    rows = self.db.conn.execute(
+                        "SELECT url FROM sent_news_urls ORDER BY id DESC LIMIT 500"
+                    ).fetchall()
+                    sent_news.update(r[0] for r in rows)
+                except Exception:
+                    # 테이블 없으면 생성
+                    try:
+                        self.db.conn.execute(
+                            "CREATE TABLE IF NOT EXISTS sent_news_urls ("
+                            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                            "url TEXT UNIQUE NOT NULL, "
+                            "created_at TEXT DEFAULT (datetime('now')))"
+                        )
+                        self.db.conn.commit()
+                    except Exception:
+                        pass
             # 오래된 항목 정리 (1000개 초과 시)
             if len(sent_news) > 1000:
                 context.bot_data["sent_news"] = set()
                 sent_news = context.bot_data["sent_news"]
+                try:
+                    self.db.conn.execute(
+                        "DELETE FROM sent_news_urls WHERE id NOT IN "
+                        "(SELECT id FROM sent_news_urls ORDER BY id DESC LIMIT 500)"
+                    )
+                    self.db.conn.commit()
+                except Exception:
+                    pass
 
             # 중요 키워드
             important_kw = [
@@ -3243,11 +3691,16 @@ class SchedulerMixin:
                 "인수", "합병", "M&A", "공시", "배당", "증자", "감자",
                 "상장폐지", "거래정지", "신고가", "신저가", "목표가",
                 "투자의견", "매수", "매도", "상향", "하향",
+                # v6.2.1: 정부 정책/부양책/시장 안정화 관련 키워드
+                "정부", "부양", "국채", "안정화", "긴급", "대책",
+                "규제", "완화", "지원", "보조금", "정책", "100조",
+                "공매도", "금지", "재개", "밸류업", "기업가치",
             ]
             # 시장 전체 뉴스 제외 키워드 (종목과 무관한 뉴스)
+            # v6.2.1: 국채/금리 제거 (정부 정책 모니터링 강화)
             market_noise = [
                 "코스피", "코스닥", "증시", "지수", "외국인",
-                "기관", "개인", "순매수", "순매도", "국채", "금리",
+                "기관", "개인", "순매수", "순매도",
             ]
 
             alerts = []
@@ -3270,6 +3723,15 @@ class SchedulerMixin:
                         if is_important:
                             alerts.append(f"📰 {name}: {title}\n🔗 {url}")
                             sent_news.add(url)
+                            # v6.2.1: DB에도 저장 (재시작 후 중복 방지)
+                            try:
+                                self.db.conn.execute(
+                                    "INSERT OR IGNORE INTO sent_news_urls (url) VALUES (?)",
+                                    (url,),
+                                )
+                                self.db.conn.commit()
+                            except Exception:
+                                pass
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.debug("News monitor for %s: %s", ticker, e)
@@ -3303,11 +3765,15 @@ class SchedulerMixin:
                 format_urgent_alert,
                 detect_crisis_from_macro,
                 format_crisis_alert,
+                translate_titles_to_korean,
             )
 
             # 1. RSS 뉴스 수집
             items = await fetch_global_news(max_per_feed=5)
             if items:
+                # 1-1. 영문 제목 → 한글 번역
+                items = await translate_titles_to_korean(items)
+
                 # NewsItem → dict 변환 후 DB 저장
                 news_dicts = [
                     {
@@ -3340,6 +3806,19 @@ class SchedulerMixin:
                             self._last_urgent_news_time = now_mono
                             logger.info("Urgent news alert sent: %d items", len(urgent))
 
+                # 2-1. 뉴스 키워드 기반 경계 모드 자동 에스컬레이션
+                await self._check_news_escalation(items)
+                pending = getattr(self, "_pending_escalation", None)
+                if pending:
+                    new_mode, reason = pending
+                    del self._pending_escalation
+                    await self.set_alert_mode(
+                        new_mode, context=context, reason=reason,
+                    )
+
+            # 2-2. 자동 경계 완화 체크
+            await self._check_auto_deescalation(context)
+
             # 3. 매크로 선행지표 기반 위기 감지 + 적응형 빈도 조정
             try:
                 macro = await self.macro_client.get_snapshot()
@@ -3360,6 +3839,17 @@ class SchedulerMixin:
                             await context.bot.send_message(
                                 chat_id=self.chat_id, text=crisis_msg,
                             )
+                    # 매크로 위기 → 경계 모드 자동 에스컬레이션
+                    if crisis.severity >= 3 and self._alert_mode != "wartime":
+                        await self.set_alert_mode(
+                            "wartime", context=context,
+                            reason=f"매크로 위기 감지: {', '.join(crisis.triggers[:3])}",
+                        )
+                    elif crisis.severity >= 2 and self._alert_mode == "normal":
+                        await self.set_alert_mode(
+                            "elevated", context=context,
+                            reason=f"매크로 경계: {', '.join(crisis.triggers[:3])}",
+                        )
                     logger.info(
                         "Crisis level changed: %d → %d (%s), interval=%ds",
                         prev_severity, crisis.severity, crisis.label,
@@ -3407,3 +3897,121 @@ class SchedulerMixin:
             logger.info("News collect interval changed to %ds", new_interval)
         except Exception as e:
             logger.error("News reschedule failed: %s", e)
+
+    # ── v6.2: 자가 학습 루프 ─────────────────────────────────────────────
+
+    async def job_signal_evaluation(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매일 16:20 — 신호 적중률 평가 + 가중치 재계산.
+
+        장 마감 후 미평가 신호들의 D+N 수익률을 계산하고
+        신호 소스별 가중치를 자동 조정합니다.
+        """
+        if not self.chat_id:
+            return
+        if not is_kr_market_open():
+            return
+        try:
+            from kstock.signal.auto_debrief import (
+                evaluate_pending_signals,
+                compute_signal_weights,
+            )
+
+            # 1. 미평가 신호 가격 추적
+            evaluated = await evaluate_pending_signals(self.db)
+
+            # 2. 가중치 재계산
+            weights = compute_signal_weights(self.db, period_days=90)
+
+            self.db.upsert_job_run(
+                "signal_evaluation", _today(), status="success",
+                message=f"evaluated={evaluated}, sources={len(weights)}",
+            )
+            logger.info(
+                "Signal evaluation: %d signals evaluated, %d sources weighted",
+                evaluated, len(weights),
+            )
+        except Exception as e:
+            logger.error("Signal evaluation failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "signal_evaluation", _today(),
+                status="error", message=str(e)[:200],
+            )
+
+    async def job_learning_report(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매주 토요일 11:00 — 자가 학습 리포트 텔레그램 전송.
+
+        신호 적중률, 매매 복기 요약, 가중치 조정, 반복 패턴을 종합.
+        """
+        if not self.chat_id:
+            return
+        try:
+            from kstock.signal.feedback_loop import generate_learning_feedback
+
+            report_text = generate_learning_feedback(self.db)
+
+            if report_text and len(report_text) > 50:
+                # v6.2.1: 페이지네이션 (4096자 제한 대응)
+                if len(report_text) > 3800:
+                    pages = []
+                    lines = report_text.split("\n")
+                    cur, cur_len = [], 0
+                    for line in lines:
+                        ll = len(line) + 1
+                        if cur_len + ll > 3800 and cur:
+                            pages.append("\n".join(cur))
+                            cur, cur_len = [line], ll
+                        else:
+                            cur.append(line)
+                            cur_len += ll
+                    if cur:
+                        pages.append("\n".join(cur))
+                    for i, pg in enumerate(pages):
+                        hdr = f"📄 ({i+1}/{len(pages)})\n" if len(pages) > 1 else ""
+                        await context.bot.send_message(
+                            chat_id=self.chat_id, text=hdr + pg,
+                        )
+                else:
+                    await context.bot.send_message(
+                        chat_id=self.chat_id,
+                        text=report_text,
+                    )
+
+            self.db.upsert_job_run(
+                "learning_report", _today(), status="success",
+            )
+            logger.info("Weekly learning report sent")
+        except Exception as e:
+            logger.error("Learning report failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "learning_report", _today(),
+                status="error", message=str(e)[:200],
+            )
+
+    async def job_daily_system_score(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매일 23:55 — 시스템 자가 점수 계산 및 저장.
+
+        100점 만점으로 신호적중/매매성과/알림/학습/비용/안정성 종합 평가.
+        """
+        try:
+            from kstock.core.system_score import compute_system_score
+            score = compute_system_score(self.db)
+            logger.info(
+                "System score: %s/100 (grade=%s)",
+                score.get("total", 0), score.get("grade", "?"),
+            )
+            self.db.upsert_job_run(
+                "daily_system_score", _today(), status="success",
+                message=f"score={score.get('total', 0)}, grade={score.get('grade', '?')}",
+            )
+        except Exception as e:
+            logger.error("Daily system score failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "daily_system_score", _today(),
+                status="error", message=str(e)[:200],
+            )

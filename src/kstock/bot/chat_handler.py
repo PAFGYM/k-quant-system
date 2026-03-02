@@ -140,6 +140,23 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
     from kstock.bot.context_builder import build_system_prompt
     system_prompt = build_system_prompt(context)
 
+    # v6.2: 과거 관련 대화 검색 + 사용자 선호도 컨텍스트
+    rag_context = ""
+    pref_context = ""
+    try:
+        rag_context = chat_memory.get_relevant_context(question, max_items=5)
+        pref_context = chat_memory.get_user_preferences_context()
+    except Exception as e:
+        logger.debug("RAG/preference context extraction failed: %s", e)
+
+    if rag_context or pref_context:
+        extra_context = ""
+        if pref_context:
+            extra_context += f"\n\n{pref_context}"
+        if rag_context:
+            extra_context += f"\n\n{rag_context}"
+        system_prompt = system_prompt + extra_context
+
     # Assemble conversation messages from history + new question
     history = chat_memory.get_recent(limit=20)
     messages: list[dict[str, str]] = []
@@ -182,6 +199,18 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
                 "📝 Cache MISS: write=%d, input=%d, output=%d",
                 cache_write, input_tokens, output_tokens,
             )
+
+        # [v6.2.1] 토큰 사용량 DB 기록
+        try:
+            from kstock.core.token_tracker import track_usage
+            track_usage(
+                db=db, provider="anthropic",
+                model="claude-sonnet-4-5-20250929",
+                function_name="chat",
+                response=response,
+            )
+        except Exception:
+            pass
     except Exception as e:
         logger.error("Claude API call error: %s", e)
         return (
@@ -197,6 +226,7 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
         from kstock.bot.hallucination_guard import (
             validate_prices_against_context,
             strip_unverified_prices,
+            validate_market_indices,
         )
         # 1) 질문에 현재가가 있으면 그 기준으로 범위 밖 가격 교체
         answer = validate_prices_against_context(answer, question)
@@ -206,6 +236,18 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
             holdings = db.get_active_holdings()
             known_names = {h.get("name", "") for h in holdings if h.get("name")}
             answer = strip_unverified_prices(answer, known_names)
+        # 3) [v6.1.3] 시장 지수 환각 검증 — 코스피/코스닥 값 교체
+        market_str = context.get("market", "")
+        actual_indices = {}
+        import re as _re
+        kospi_m = _re.search(r"코스피:\s*([\d,]+\.\d+)", market_str)
+        kosdaq_m = _re.search(r"코스닥:\s*([\d,]+\.\d+)", market_str)
+        if kospi_m:
+            actual_indices["kospi"] = float(kospi_m.group(1).replace(",", ""))
+        if kosdaq_m:
+            actual_indices["kosdaq"] = float(kosdaq_m.group(1).replace(",", ""))
+        if actual_indices:
+            answer = validate_market_indices(answer, actual_indices)
     except Exception as e:
         logger.error("환각 가드 적용 실패: %s", e)
 

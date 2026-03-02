@@ -76,7 +76,7 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 
 [응답 형식 - 핵심만 빠르게]
 - 볼드(별표 두개) 절대 사용 금지
-- 한국어, 정중하고 짧은 존댓말. 신뢰감 있게.
+- 한국어, 정중하고 짧은 존댓말(합니다/입니다/하세요). "이에요/예요" 같은 반말 톤 금지.
 - 핵심 결론을 첫 2줄에 넣어라 ("그래서 사? 말아?")
 - 전체 200~400자. 400자 넘기지 마라. 짧을수록 좋다.
 - 뻔한 서론/인사/공감 표현 금지 ("좋은 질문입니다", "완전 공감합니다" 등)
@@ -314,7 +314,18 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
     us2y = macro_snapshot.get("us2y")
     dxy = macro_snapshot.get("dxy")
     fg = macro_snapshot.get("fear_greed")
+    kospi = macro_snapshot.get("kospi")
+    kospi_chg = macro_snapshot.get("kospi_change_pct")
+    kosdaq = macro_snapshot.get("kosdaq")
+    kosdaq_chg = macro_snapshot.get("kosdaq_change_pct")
 
+    # 한국 시장 지수 (최상단 배치)
+    if kospi is not None and kospi > 0:
+        chg_str = f" ({kospi_chg:+.2f}%)" if kospi_chg is not None else ""
+        lines.append(f"코스피: {kospi:,.2f}{chg_str}")
+    if kosdaq is not None and kosdaq > 0:
+        chg_str = f" ({kosdaq_chg:+.2f}%)" if kosdaq_chg is not None else ""
+        lines.append(f"코스닥: {kosdaq:,.2f}{chg_str}")
     if sp500 is not None:
         lines.append(f"S&P500: {sp500:+.2f}%")
     if nasdaq is not None:
@@ -535,6 +546,11 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                 "us2y": getattr(snap, "us2y", 0),  # [v3.6.6] 유동성 감지
                 "dxy": getattr(snap, "dxy", 0),
                 "fear_greed": getattr(snap, "fear_greed_score", 50),
+                # v6.1.3: 한국 시장 지수
+                "kospi": getattr(snap, "kospi", 0),
+                "kospi_change_pct": getattr(snap, "kospi_change_pct", 0),
+                "kosdaq": getattr(snap, "kosdaq", 0),
+                "kosdaq_change_pct": getattr(snap, "kosdaq_change_pct", 0),
             }
         except Exception as e:
             logger.warning("Failed to get macro for AI context: %s", e)

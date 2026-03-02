@@ -351,6 +351,75 @@ def strip_unverified_prices(
         return response
 
 
+def validate_market_indices(
+    response: str,
+    actual_indices: dict[str, float] | None = None,
+) -> str:
+    """AI 응답에서 시장 지수(코스피/코스닥) 환각을 검증합니다.
+
+    실제 지수 데이터가 제공된 경우, AI가 언급한 지수 값이
+    실제 값과 ±10% 이상 차이나면 실제 값으로 교체합니다.
+
+    Args:
+        response: AI 응답 텍스트
+        actual_indices: {"kospi": 2650.5, "kosdaq": 820.3} 등
+
+    Returns:
+        수정된 응답 텍스트
+    """
+    if not actual_indices:
+        return response
+
+    try:
+        modified = response
+
+        # 코스피 지수 검증
+        kospi_actual = actual_indices.get("kospi", 0)
+        if kospi_actual > 0:
+            for pattern in [
+                r"코스피\s*(?:지수)?\s*(\d{3,4}(?:\.\d+)?)\s*(?:포인트|pt)?",
+                r"KOSPI\s*(\d{3,4}(?:\.\d+)?)",
+            ]:
+                for match in re.finditer(pattern, modified, re.IGNORECASE):
+                    claimed = float(match.group(1))
+                    diff_pct = abs(claimed - kospi_actual) / kospi_actual
+                    if diff_pct > 0.10:
+                        logger.warning(
+                            "코스피 지수 환각: AI=%s, 실제=%.2f (차이 %.1f%%)",
+                            match.group(1), kospi_actual, diff_pct * 100,
+                        )
+                        modified = modified.replace(
+                            match.group(0),
+                            f"코스피 {kospi_actual:,.2f}",
+                        )
+
+        # 코스닥 지수 검증
+        kosdaq_actual = actual_indices.get("kosdaq", 0)
+        if kosdaq_actual > 0:
+            for pattern in [
+                r"코스닥\s*(?:지수)?\s*(\d{3,4}(?:\.\d+)?)\s*(?:포인트|pt)?",
+                r"KOSDAQ\s*(\d{3,4}(?:\.\d+)?)",
+            ]:
+                for match in re.finditer(pattern, modified, re.IGNORECASE):
+                    claimed = float(match.group(1))
+                    diff_pct = abs(claimed - kosdaq_actual) / kosdaq_actual
+                    if diff_pct > 0.10:
+                        logger.warning(
+                            "코스닥 지수 환각: AI=%s, 실제=%.2f (차이 %.1f%%)",
+                            match.group(1), kosdaq_actual, diff_pct * 100,
+                        )
+                        modified = modified.replace(
+                            match.group(0),
+                            f"코스닥 {kosdaq_actual:,.2f}",
+                        )
+
+        return modified
+
+    except Exception as e:
+        logger.warning("지수 환각 검증 실패: %s", e)
+        return response
+
+
 def guard_response(
     response: str,
     known_prices: dict[str, float] | None = None,

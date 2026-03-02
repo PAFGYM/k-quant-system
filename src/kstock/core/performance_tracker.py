@@ -7,6 +7,7 @@ Computes strategy-level and overall hit rates and alpha.
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -62,6 +63,20 @@ class StrategyPerformance:
 
 
 @dataclass
+class RollingMetrics:
+    """Rolling risk-adjusted performance metrics (v6.3)."""
+
+    date: str
+    rolling_sharpe: float
+    rolling_sortino: float
+    rolling_information_ratio: float
+    rolling_beta: float
+    rolling_alpha: float
+    rolling_volatility_pct: float
+    rolling_max_drawdown_pct: float
+
+
+@dataclass
 class PerformanceSummary:
     """Overall performance summary across all strategies."""
 
@@ -73,6 +88,10 @@ class PerformanceSummary:
     alpha_vs_kospi: float = 0.0
     alpha_vs_kosdaq: float = 0.0
     strategy_breakdown: list[StrategyPerformance] = field(default_factory=list)
+    sharpe_ratio: float = 0.0
+    sortino_ratio: float = 0.0
+    information_ratio: float = 0.0
+    beta: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -741,3 +760,286 @@ def format_live_scorecard(tracks: list[RecommendationTrack]) -> str:
     except Exception as exc:
         logger.error("format_live_scorecard 실패: %s", exc)
         return f"{USER_NAME}, 스코어카드 생성 중 오류가 발생했습니다."
+
+
+# ---------------------------------------------------------------------------
+# 9. Rolling risk-adjusted metrics (v6.3)
+# ---------------------------------------------------------------------------
+
+def compute_rolling_sharpe(
+    daily_returns: list[float],
+    window: int = 60,
+    risk_free_rate: float = 0.035,
+) -> list[float]:
+    """Compute rolling annualized Sharpe ratio.
+
+    Args:
+        daily_returns: List of daily returns (decimal, e.g. 0.01 = 1%).
+        window: Rolling window size in days.
+        risk_free_rate: Annual risk-free rate (e.g. 0.035 = 3.5%).
+
+    Returns:
+        List of rolling Sharpe values. First (window-1) values are 0.0.
+        Empty list if input is empty.
+    """
+    n = len(daily_returns)
+    if n == 0:
+        return []
+    if n < window:
+        return [0.0] * n
+
+    rf_daily = risk_free_rate / 252.0
+    sqrt_252 = math.sqrt(252)
+    result = [0.0] * (window - 1)
+
+    for i in range(window - 1, n):
+        w = daily_returns[i - window + 1 : i + 1]
+        mean_r = sum(w) / window
+        variance = sum((r - mean_r) ** 2 for r in w) / window
+        std_r = math.sqrt(variance) if variance > 0 else 0.0
+        if std_r < 1e-12:
+            result.append(0.0)
+        else:
+            sharpe = (mean_r - rf_daily) / std_r * sqrt_252
+            result.append(round(sharpe, 6))
+
+    return result
+
+
+def compute_rolling_sortino(
+    daily_returns: list[float],
+    window: int = 60,
+    risk_free_rate: float = 0.035,
+) -> list[float]:
+    """Compute rolling annualized Sortino ratio (downside deviation only).
+
+    Args:
+        daily_returns: List of daily returns (decimal).
+        window: Rolling window size in days.
+        risk_free_rate: Annual risk-free rate.
+
+    Returns:
+        List of rolling Sortino values. First (window-1) values are 0.0.
+    """
+    n = len(daily_returns)
+    if n == 0:
+        return []
+    if n < window:
+        return [0.0] * n
+
+    rf_daily = risk_free_rate / 252.0
+    sqrt_252 = math.sqrt(252)
+    result = [0.0] * (window - 1)
+
+    for i in range(window - 1, n):
+        w = daily_returns[i - window + 1 : i + 1]
+        mean_r = sum(w) / window
+        downside = [r for r in w if r < 0]
+        if downside:
+            dd = math.sqrt(sum(r ** 2 for r in downside) / len(downside))
+        else:
+            dd = 0.0001
+        sortino = (mean_r - rf_daily) / dd * sqrt_252
+        result.append(round(sortino, 6))
+
+    return result
+
+
+def compute_information_ratio(
+    portfolio_returns: list[float],
+    benchmark_returns: list[float],
+    window: int = 60,
+) -> list[float]:
+    """Compute rolling annualized Information Ratio.
+
+    Args:
+        portfolio_returns: List of daily portfolio returns (decimal).
+        benchmark_returns: List of daily benchmark returns (decimal).
+        window: Rolling window size in days.
+
+    Returns:
+        List of rolling IR values. First (window-1) values are 0.0.
+    """
+    length = min(len(portfolio_returns), len(benchmark_returns))
+    if length == 0:
+        return []
+
+    active = [
+        portfolio_returns[i] - benchmark_returns[i] for i in range(length)
+    ]
+
+    if length < window:
+        return [0.0] * length
+
+    sqrt_252 = math.sqrt(252)
+    result = [0.0] * (window - 1)
+
+    for i in range(window - 1, length):
+        w = active[i - window + 1 : i + 1]
+        mean_a = sum(w) / window
+        variance = sum((a - mean_a) ** 2 for a in w) / window
+        std_a = math.sqrt(variance) if variance > 0 else 0.0
+        if std_a < 1e-12:
+            result.append(0.0)
+        else:
+            ir = mean_a / std_a * sqrt_252
+            result.append(round(ir, 6))
+
+    return result
+
+
+def compute_rolling_beta(
+    portfolio_returns: list[float],
+    benchmark_returns: list[float],
+    window: int = 60,
+) -> list[float]:
+    """Compute rolling beta of portfolio vs benchmark.
+
+    Args:
+        portfolio_returns: List of daily portfolio returns (decimal).
+        benchmark_returns: List of daily benchmark returns (decimal).
+        window: Rolling window size in days.
+
+    Returns:
+        List of rolling beta values. First (window-1) values are 0.0.
+    """
+    length = min(len(portfolio_returns), len(benchmark_returns))
+    if length == 0:
+        return []
+    if length < window:
+        return [0.0] * length
+
+    result = [0.0] * (window - 1)
+
+    for i in range(window - 1, length):
+        rp = portfolio_returns[i - window + 1 : i + 1]
+        rb = benchmark_returns[i - window + 1 : i + 1]
+        mean_p = sum(rp) / window
+        mean_b = sum(rb) / window
+        cov = sum((rp[j] - mean_p) * (rb[j] - mean_b) for j in range(window)) / window
+        var_b = sum((rb[j] - mean_b) ** 2 for j in range(window)) / window
+        if var_b < 1e-18:
+            result.append(1.0)
+        else:
+            result.append(round(cov / var_b, 6))
+
+    return result
+
+
+def compute_rolling_metrics(
+    daily_values: list[float],
+    daily_dates: list[str],
+    benchmark_values: list[float] | None = None,
+    window: int = 60,
+    risk_free_rate: float = 0.035,
+) -> list[RollingMetrics]:
+    """Compute comprehensive rolling risk metrics from portfolio values.
+
+    Args:
+        daily_values: Daily portfolio NAV values.
+        daily_dates: Corresponding date strings (YYYY-MM-DD).
+        benchmark_values: Optional benchmark NAV values (same length).
+        window: Rolling window size in days.
+        risk_free_rate: Annual risk-free rate.
+
+    Returns:
+        List of RollingMetrics for each day (from index 1 onward, since
+        returns start at index 1).
+    """
+    if len(daily_values) < 2:
+        return []
+
+    # Convert values to returns
+    returns: list[float] = []
+    for i in range(1, len(daily_values)):
+        prev = daily_values[i - 1]
+        if prev != 0:
+            returns.append((daily_values[i] - prev) / prev)
+        else:
+            returns.append(0.0)
+
+    dates = daily_dates[1:]  # align with returns
+
+    bench_returns: list[float] | None = None
+    if benchmark_values and len(benchmark_values) >= 2:
+        bench_returns = []
+        for i in range(1, len(benchmark_values)):
+            prev = benchmark_values[i - 1]
+            if prev != 0:
+                bench_returns.append((benchmark_values[i] - prev) / prev)
+            else:
+                bench_returns.append(0.0)
+
+    sharpe = compute_rolling_sharpe(returns, window, risk_free_rate)
+    sortino = compute_rolling_sortino(returns, window, risk_free_rate)
+
+    if bench_returns:
+        ir = compute_information_ratio(returns, bench_returns, window)
+        beta = compute_rolling_beta(returns, bench_returns, window)
+    else:
+        ir = [0.0] * len(returns)
+        beta = [0.0] * len(returns)
+
+    # Rolling volatility and max drawdown
+    sqrt_252 = math.sqrt(252)
+    vol_list: list[float] = []
+    mdd_list: list[float] = []
+
+    for i in range(len(returns)):
+        if i < window - 1:
+            vol_list.append(0.0)
+            mdd_list.append(0.0)
+        else:
+            w = returns[i - window + 1 : i + 1]
+            mean_w = sum(w) / window
+            variance = sum((r - mean_w) ** 2 for r in w) / window
+            vol = math.sqrt(variance) * sqrt_252 * 100  # annualized pct
+            vol_list.append(round(vol, 4))
+
+            # Max drawdown within window (using values)
+            val_start = i - window + 1 + 1  # +1 because values are offset by 1
+            val_end = i + 1 + 1
+            window_values = daily_values[val_start:val_end]
+            peak = window_values[0] if window_values else 1.0
+            max_dd = 0.0
+            for v in window_values:
+                if v > peak:
+                    peak = v
+                dd = (v - peak) / peak * 100 if peak > 0 else 0.0
+                if dd < max_dd:
+                    max_dd = dd
+            mdd_list.append(round(max_dd, 4))
+
+    # Rolling alpha = portfolio_return - beta * benchmark_return (annualized)
+    alpha_list: list[float] = []
+    rf_daily = risk_free_rate / 252.0
+    for i in range(len(returns)):
+        if i < window - 1:
+            alpha_list.append(0.0)
+        else:
+            w_p = returns[i - window + 1 : i + 1]
+            mean_p = sum(w_p) / window * 252
+            b = beta[i] if i < len(beta) else 0.0
+            if bench_returns and i < len(bench_returns):
+                w_b = bench_returns[max(0, i - window + 1) : i + 1]
+                mean_b = sum(w_b) / len(w_b) * 252 if w_b else 0.0
+            else:
+                mean_b = 0.0
+            a = mean_p - risk_free_rate - b * (mean_b - risk_free_rate)
+            alpha_list.append(round(a, 6))
+
+    # Build RollingMetrics list
+    metrics: list[RollingMetrics] = []
+    for i in range(len(returns)):
+        metrics.append(RollingMetrics(
+            date=dates[i] if i < len(dates) else "",
+            rolling_sharpe=sharpe[i] if i < len(sharpe) else 0.0,
+            rolling_sortino=sortino[i] if i < len(sortino) else 0.0,
+            rolling_information_ratio=ir[i] if i < len(ir) else 0.0,
+            rolling_beta=beta[i] if i < len(beta) else 0.0,
+            rolling_alpha=alpha_list[i] if i < len(alpha_list) else 0.0,
+            rolling_volatility_pct=vol_list[i] if i < len(vol_list) else 0.0,
+            rolling_max_drawdown_pct=mdd_list[i] if i < len(mdd_list) else 0.0,
+        ))
+
+    return metrics

@@ -307,6 +307,7 @@ class MenusKisMixin:
                 [InlineKeyboardButton(name, callback_data=f"sector_rpt:{name}")]
                 for name in self.SECTOR_KEYWORDS
             ]
+            buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
             await query.edit_message_text(
                 "\U0001f4cb 섹터를 선택하세요:",
                 reply_markup=InlineKeyboardMarkup(buttons),

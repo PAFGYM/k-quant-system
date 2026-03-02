@@ -242,7 +242,7 @@ def _fallback_diagnosis(
             action="hold",
             message=(
                 f"\U0001f389 {USER_NAME}, {name} 잘 잡으셨습니다!\n"
-                f"현재 {profit_pct:+.1f}% 수익 중이에요.\n"
+                f"현재 {profit_pct:+.1f}% 수익 중입니다.\n"
                 f"\U0001f4c8 트레일링 스탑 {trailing_pct:.0f}% 설정 권장합니다.\n"
                 f"추가 매수는 {add_price:,.0f}원 부근 눌림에서 고려하세요.\n"
                 f"\U0001f4aa 계속 들고 가세요!"
@@ -317,7 +317,7 @@ def _fallback_diagnosis(
             # Oversold, potential rebound
             action = "hold"
             msg = (
-                f"\U0001f534 {USER_NAME}, {name} 힘든 구간이에요.\n"
+                f"\U0001f534 {USER_NAME}, {name} 힘든 구간입니다.\n"
                 f"현재 {profit_pct:+.1f}% 손실이지만 RSI {rsi:.1f}로 과매도입니다.\n"
                 f"\U0001f4aa 반등 가능성이 있으니 버티세요.\n"
                 f"\U0001f6d1 다만 {stop:,.0f}원 아래로 가면 재검토 필요합니다.\n"

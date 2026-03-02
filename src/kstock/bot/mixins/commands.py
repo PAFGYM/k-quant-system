@@ -165,6 +165,14 @@ class CommandsMixin:
                 logger.debug("_run_scan_for_stock leading sector bonus failed for %s", ticker, exc_info=True)
                 leading_sector_bonus = 0
 
+            # v6.2: 멀티에이전트 보너스 연동
+            multi_agent_bonus = 0
+            try:
+                from kstock.signal.agent_bridge import get_multi_agent_bonus
+                multi_agent_bonus = get_multi_agent_bonus(self.db, ticker)
+            except Exception:
+                pass
+
             score = compute_composite_score(
                 macro, flow, info, tech, self.scoring_config,
                 mtf_bonus=mtf_bonus, sector_adj=sector_adj,
@@ -172,6 +180,7 @@ class CommandsMixin:
                 ml_bonus=ml_bonus_val,
                 sentiment_bonus=sentiment_bonus,
                 leading_sector_bonus=leading_sector_bonus,
+                multi_agent_bonus=multi_agent_bonus,
             )
 
             # Multi-strategy evaluation
@@ -927,7 +936,10 @@ class CommandsMixin:
         return clean_answer, buttons
 
     def _build_followup_buttons(self, question: str, stock: dict | None) -> list:
-        """AI 응답 후 후속 질문 인라인 버튼 생성."""
+        """AI 응답 후 후속 질문 인라인 버튼 생성.
+
+        v6.2.1: 모든 후속 버튼 세트에 닫기 버튼 추가.
+        """
         buttons = []
         # v6.0: 4매니저 추천 후속 질문
         if question == "4매니저추천":
@@ -952,6 +964,7 @@ class CommandsMixin:
                         callback_data="bp:start",
                     ),
                 ],
+                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
             ]
             return buttons
         if stock:
@@ -979,6 +992,7 @@ class CommandsMixin:
                         callback_data=f"followup:compare:{ticker}",
                     ),
                 ],
+                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
             ]
         else:
             # 일반 질문 후속
@@ -1003,6 +1017,7 @@ class CommandsMixin:
                         callback_data="followup:risk:",
                     ),
                 ],
+                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
             ]
         return buttons
 
@@ -1038,8 +1053,8 @@ class CommandsMixin:
 
         question = question_map.get(qtype, f"{name} 더 자세히 분석해줘")
 
-        await query.edit_message_text(
-            query.message.text + f"\n\n\U0001f4ad {question}..."
+        await safe_edit_or_reply(
+            query, query.message.text + f"\n\n\U0001f4ad {question}..."
         )
 
         try:
@@ -1104,15 +1119,15 @@ class CommandsMixin:
             logger.error("Followup AI error: %s", e, exc_info=True)
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text="\u26a0\ufe0f AI 응답 중 오류가 발생했습니다.",
+                text="⚠️ AI 응답 중 오류가 발생했습니다.\n💡 잠시 후 같은 질문을 다시 시도하시거나, '💬 AI질문' 메뉴를 이용해주세요.",
             )
 
     async def _action_followup_dynamic(self, query, context, payload: str) -> None:
         """AI가 생성한 동적 후속 질문 버튼 콜백."""
         question = payload  # payload가 곧 질문 텍스트
 
-        await query.edit_message_text(
-            query.message.text + f"\n\n\U0001f4ad {question}..."
+        await safe_edit_or_reply(
+            query, query.message.text + f"\n\n\U0001f4ad {question}..."
         )
 
         try:
@@ -1172,7 +1187,7 @@ class CommandsMixin:
             logger.error("Dynamic followup AI error: %s", e, exc_info=True)
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text="\u26a0\ufe0f AI 응답 중 오류가 발생했습니다.",
+                text="⚠️ AI 응답 중 오류가 발생했습니다.\n💡 잠시 후 같은 질문을 다시 시도하시거나, '💬 AI질문' 메뉴를 이용해주세요.",
             )
 
     async def _handle_quick_question(
@@ -1246,7 +1261,7 @@ class CommandsMixin:
             holdings = self.db.get_active_holdings()
             portfolio_block = ""
             v_names = set()
-            if holdings and question_type in ("portfolio", "risk"):
+            if holdings and question_type in ("portfolio", "risk", "flow"):
                 pf_lines = []
                 for h in holdings[:10]:
                     ticker = h.get("ticker", "")
@@ -1273,13 +1288,33 @@ class CommandsMixin:
                 if pf_lines:
                     portfolio_block = "\n".join(pf_lines)
 
+            # v6.2.2: 외인/기관 수급 quick question
+            if question_type == "flow" and holdings:
+                flow_lines = []
+                for h in holdings[:8]:
+                    ticker = h.get("ticker", "")
+                    hname = h.get("name", ticker)
+                    try:
+                        frgn = await self.kis.get_foreign_flow(ticker, days=5)
+                        inst = await self.kis.get_institution_flow(ticker, days=5)
+                        f_net = int(frgn["net_buy_volume"].sum()) if len(frgn) > 0 else 0
+                        i_net = int(inst["net_buy_volume"].sum()) if len(inst) > 0 else 0
+                        flow_lines.append(
+                            f"- {hname}: 외인 {f_net:+,}주 / 기관 {i_net:+,}주 (5일 누적)"
+                        )
+                    except Exception:
+                        pass
+                if flow_lines:
+                    portfolio_block += "\n\n[외인/기관 수급 5일]\n" + "\n".join(flow_lines)
+
             # 4. 질문 + 실시간 데이터 조합
             base_questions = {
-                "market": "오늘 시장 전체 흐름을 분석하고, 지금 어떤 전략이 유효한지 판단해줘",
-                "portfolio": "내 보유종목 전체를 점검하고, 각 종목별로 지금 해야 할 행동(홀딩/추매/익절/손절)을 구체적으로 알려줘",
-                "risk": "내 포트폴리오의 리스크를 점검해줘. 집중도, 섹터 편중, 손실 종목, 전체 시장 리스크를 분석하고 대응 방안을 알려줘",
+                "market": "오늘 시장 전체 흐름을 분석하고, 지금 어떤 전략이 유효한지 판단해주세요",
+                "portfolio": "주호님의 보유종목 전체를 점검하고, 각 종목별로 지금 해야 할 행동(홀딩/추매/익절/손절)을 구체적으로 알려주세요",
+                "risk": "주호님의 포트폴리오 리스크를 점검해주세요. 집중도, 섹터 편중, 손실 종목, 전체 시장 리스크를 분석하고 대응 방안을 알려주세요",
+                "flow": "주호님의 보유종목 외인/기관 수급 현황을 분석하고, 수급 흐름에 따른 매수/매도 판단을 알려주세요. 외인과 기관이 동시에 사는 종목은 특히 주목해주세요",
             }
-            base_q = base_questions.get(question_type, "오늘 시장 어때?")
+            base_q = base_questions.get(question_type, "오늘 시장 어떤가요?")
 
             data_sections = [f"[실시간 데이터 — {now.strftime('%Y-%m-%d %H:%M')} KST]"]
             if macro_block:
@@ -1486,26 +1521,32 @@ class CommandsMixin:
 
             markup = InlineKeyboardMarkup(buttons) if buttons else None
 
-            # 6. 메시지 전송 (4096자 제한 처리)
-            if len(result_text) > 4000:
-                result_text = result_text[:3950] + "\n\n... (더보기는 개별 매니저 분석 참조)"
-
-            try:
-                await query.edit_message_text(result_text, reply_markup=markup)
-            except Exception:
-                logger.debug("_action_4manager_picks edit_text failed, falling back", exc_info=True)
-                await query.message.reply_text(
-                    result_text, reply_markup=markup or get_reply_markup(context),
-                )
+            # 6. 메시지 전송 (4096자 제한 → 페이지네이션)
+            if len(result_text) > 3800:
+                # 긴 메시지는 페이지 분할 전송
+                await send_long_message(query.message, result_text, reply_markup=markup)
+            else:
+                try:
+                    await query.edit_message_text(result_text, reply_markup=markup)
+                except Exception:
+                    logger.debug("_action_4manager_picks edit_text failed, falling back", exc_info=True)
+                    await query.message.reply_text(
+                        result_text, reply_markup=markup or get_reply_markup(context),
+                    )
 
         except Exception as e:
             logger.error("4manager picks error: %s", e, exc_info=True)
-            try:
-                await query.edit_message_text(
-                    "⚠️ 4매니저 분석 중 오류가 발생했습니다.\n잠시 후 다시 시도해주세요."
-                )
-            except Exception:
-                logger.debug("_action_4manager_picks error recovery edit_text also failed", exc_info=True)
+            retry_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 다시 시도", callback_data="quick_q:mgr4")],
+                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+            ])
+            await safe_edit_or_reply(
+                query,
+                "⚠️ 4매니저 분석 중 오류가 발생했습니다.\n"
+                "네트워크 또는 AI 서비스 일시 장애일 수 있습니다.\n\n"
+                "아래 버튼으로 다시 시도해주세요.",
+                reply_markup=retry_kb,
+            )
 
     async def _handle_buy_pick_with_live_data(self, query, context) -> None:
         """매수 추천 — 실시간 스캔 데이터 기반 (AI 환각 주가 완전 차단).
@@ -1604,12 +1645,17 @@ class CommandsMixin:
                 await query.message.reply_text(answer, reply_markup=markup or get_reply_markup(context))
         except Exception as e:
             logger.error("Buy pick with live data error: %s", e, exc_info=True)
-            try:
-                await query.edit_message_text(
-                    "⚠️ 추천 종목 분석 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
-                )
-            except Exception:
-                logger.debug("_handle_buy_pick error recovery edit_text also failed", exc_info=True)
+            retry_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 다시 시도", callback_data="quick_q:buy_pick")],
+                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+            ])
+            await safe_edit_or_reply(
+                query,
+                "⚠️ 추천 종목 분석 중 오류가 발생했습니다.\n"
+                "스캔 또는 AI 서비스 일시 장애일 수 있습니다.\n\n"
+                "아래 버튼으로 다시 시도해주세요.",
+                reply_markup=retry_kb,
+            )
 
     async def _menu_reports(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1780,7 +1826,17 @@ class CommandsMixin:
                     f"    공매도 비율: {latest_ratio:.1f}% | "
                     f"점수: {signal.score_adj:+d}"
                 )
-            await query.edit_message_text("\n".join(lines))
+            dismiss_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+            ])
+            text = "\n".join(lines)
+            if len(text) > 4000:
+                await send_long_message(query.message, text, reply_markup=dismiss_kb)
+            else:
+                try:
+                    await query.edit_message_text(text, reply_markup=dismiss_kb)
+                except Exception:
+                    await query.message.reply_text(text, reply_markup=dismiss_kb)
         else:
             # 개별 종목 분석
             ticker = payload
@@ -1852,7 +1908,10 @@ class CommandsMixin:
                 )
                 lines.append(f"📊 공매도+레버리지 종합: {combined:+d}점")
 
-            await query.message.reply_text("\n".join(lines))
+            dismiss_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+            ])
+            await send_long_message(query.message, "\n".join(lines), reply_markup=dismiss_kb)
 
     async def _menu_future_tech(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -2076,6 +2135,7 @@ class CommandsMixin:
                     InlineKeyboardButton("MSCI 편입", callback_data="scn:msci_inclusion:0"),
                     InlineKeyboardButton("폭락 재현", callback_data="scn:crash:0"),
                 ],
+                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
             ]
             await update.message.reply_text(
                 "\U0001f4ca 시나리오 분석을 선택하세요:",
@@ -2165,6 +2225,20 @@ class CommandsMixin:
                 verdict=report.verdict, confidence=report.confidence,
             )
 
+            # v6.2: 신호 성과 추적 기록
+            try:
+                self.db.save_signal_performance(
+                    signal_source="multi_agent",
+                    signal_type="analysis",
+                    ticker=ticker,
+                    name=name,
+                    signal_date=datetime.now(KST).strftime("%Y-%m-%d"),
+                    signal_score=report.combined_score,
+                    signal_price=price,
+                )
+            except Exception:
+                pass
+
             # 후속 버튼: 다른 종목 분석, 피드백, 닫기
             buttons = []
             # 보유종목 중 다른 종목 분석 버튼
@@ -2193,12 +2267,10 @@ class CommandsMixin:
             )
         except Exception as e:
             logger.error("Multi-run callback error: %s", e, exc_info=True)
-            try:
-                await query.edit_message_text(
-                    "\u26a0\ufe0f 분석 중 일시적 오류가 발생했어요. 잠시 후 다시 시도해주세요."
-                )
-            except Exception:
-                logger.debug("_action_multi_run error recovery edit_text also failed", exc_info=True)
+            await safe_edit_or_reply(
+                query,
+                "⚠️ 분석 중 일시적 오류가 발생했습니다.\n💡 잠시 후 다시 시도해주세요.",
+            )
 
     async def _action_sell_plans(self, query, context, payload: str) -> None:
         """Phase 8: 매도 계획 표시."""
@@ -2222,17 +2294,17 @@ class CommandsMixin:
             plans = self.sell_planner.create_plans_for_all(holdings, market_state)
             msg = format_sell_plans(plans)
 
-            # 텔레그램 메시지 길이 제한 (4096자)
-            if len(msg) > 4000:
-                msg = msg[:3990] + "\n\n... (일부 생략)"
-
-            await query.edit_message_text(msg)
+            # 텔레그램 메시지 길이 제한 → 페이지네이션
+            if len(msg) > 3800:
+                await send_long_message(query.message, msg)
+            else:
+                await query.edit_message_text(msg)
         except Exception as e:
             logger.error("Sell plans error: %s", e, exc_info=True)
-            try:
-                await query.edit_message_text("\u26a0\ufe0f 매도 계획 생성 오류.")
-            except Exception:
-                logger.debug("_action_sell_plans error recovery edit_text also failed", exc_info=True)
+            await safe_edit_or_reply(
+                query,
+                "⚠️ 매도 계획 생성 중 오류가 발생했습니다.\n💡 잠시 후 '📊 분석' 메뉴에서 다시 시도해주세요.",
+            )
 
     async def _action_scenario_run(self, query, context, payload: str) -> None:
         """Handle scenario selection callback."""
@@ -2249,10 +2321,10 @@ class CommandsMixin:
             await query.edit_message_text(msg)
         except Exception as e:
             logger.error("Scenario run error: %s", e, exc_info=True)
-            try:
-                await query.edit_message_text("\u26a0\ufe0f 시나리오 분석 오류.")
-            except Exception:
-                logger.debug("_action_scenario_run error recovery edit_text also failed", exc_info=True)
+            await safe_edit_or_reply(
+                query,
+                "⚠️ 시나리오 분석 중 오류가 발생했습니다.\n💡 '📊 분석' 메뉴에서 다시 시도해주세요.",
+            )
 
     async def cmd_ml(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

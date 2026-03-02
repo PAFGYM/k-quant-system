@@ -91,6 +91,21 @@ class TradingMixin:
         msg = format_trade_record(result.name, "buy", price)
         await query.edit_message_text(msg)
 
+        # v6.2: 신호 성과 추적 기록
+        try:
+            self.db.save_signal_performance(
+                signal_source="scan_engine",
+                signal_type="buy",
+                ticker=ticker,
+                name=result.name,
+                signal_date=datetime.now(KST).strftime("%Y-%m-%d"),
+                signal_score=result.score.composite if result.score else 0,
+                signal_price=price,
+                horizon="swing",
+            )
+        except Exception as e:
+            logger.debug("Signal performance save failed: %s", e)
+
         # 투자전략 선택 InlineKeyboard
         await self._ask_horizon(query, ticker, result.name)
 
@@ -156,6 +171,17 @@ class TradingMixin:
                 ),
                 messages=[{"role": "user", "content": prompt}],
             )
+            # [v6.2.1] 토큰 추적
+            try:
+                from kstock.core.token_tracker import track_usage
+                track_usage(
+                    db=self.db, provider="anthropic",
+                    model="claude-haiku-4-5-20251001",
+                    function_name="investment_manager",
+                    response=response,
+                )
+            except Exception:
+                pass
             analysis = response.content[0].text.strip().replace("**", "")
 
             # DB에 분석 저장
@@ -453,6 +479,7 @@ class TradingMixin:
                 InlineKeyboardButton("중기 (1~6개월)", callback_data=f"hz:junggi:{ticker}"),
                 InlineKeyboardButton("장기 (6개월+)", callback_data=f"hz:janggi:{ticker}"),
             ],
+            [InlineKeyboardButton("❌ 취소", callback_data="dismiss:0")],
         ])
         await query.message.reply_text(
             f"📊 {name} 투자 전략을 선택하세요:",
@@ -480,6 +507,7 @@ class TradingMixin:
                     "💎 장기 (2개월+)", callback_data=f"ht:long_term:{holding_id}",
                 ),
             ],
+            [InlineKeyboardButton("❌ 취소", callback_data="dismiss:0")],
         ])
         await query.message.reply_text(
             f"📊 {name} 투자 전략을 선택하세요:",
@@ -610,16 +638,33 @@ class TradingMixin:
 
         try:
             macro = await self.macro_client.get_snapshot()
-            market_text = (
-                f"VIX={macro.vix:.1f}, S&P={macro.spx_change_pct:+.2f}%, "
-                f"환율={macro.usdkrw:,.0f}원"
-            )
+            parts = [f"VIX={macro.vix:.1f}", f"S&P={macro.spx_change_pct:+.2f}%"]
+            if hasattr(macro, "kospi") and macro.kospi > 0:
+                parts.insert(0, f"코스피={macro.kospi:,.0f}")
+            if hasattr(macro, "kosdaq") and macro.kosdaq > 0:
+                parts.insert(1, f"코스닥={macro.kosdaq:,.0f}")
+            parts.append(f"환율={macro.usdkrw:,.0f}원")
+            market_text = ", ".join(parts)
         except Exception:
             logger.debug("_action_manager_analysis macro snapshot failed", exc_info=True)
             market_text = ""
 
         report = await get_manager_analysis(mgr_type, type_holdings, market_text)
-        await query.message.reply_text(report[:4000])
+
+        # 후속 액션 버튼
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        followup_buttons = []
+        if target_ticker:
+            followup_buttons.append([
+                InlineKeyboardButton("📊 멀티분석", callback_data=f"multi_run:{target_ticker}"),
+                InlineKeyboardButton("📈 호가", callback_data=f"orderbook:{target_ticker}"),
+            ])
+        followup_buttons.append([
+            InlineKeyboardButton("🎯 4매니저 추천", callback_data="quick_q:mgr4"),
+            InlineKeyboardButton("❌ 닫기", callback_data="dismiss:mgr"),
+        ])
+        markup = InlineKeyboardMarkup(followup_buttons)
+        await query.message.reply_text(report[:4000], reply_markup=markup)
 
     async def _action_bubble_check(
         self, query, context, payload: str,
@@ -743,6 +788,14 @@ class TradingMixin:
             if holding:
                 self.db.update_holding(holding["id"], status="sold")
                 hname = holding.get("name", ticker)
+                # v6.2: 삭제 시에도 복기 (수동 청산으로 기록)
+                pnl = holding.get("pnl_pct", 0) or 0
+                exit_price = holding.get("current_price") or holding.get("buy_price", 0)
+                await self._trigger_auto_debrief(
+                    ticker=ticker, name=hname, action="manual_close",
+                    entry_price=holding.get("buy_price", 0), exit_price=exit_price,
+                    pnl_pct=pnl, holding=holding,
+                )
                 # 삭제 후 잔고 메뉴 재표시 (메뉴 닫기 전까지 유지)
                 holdings = await self._load_holdings_with_fallback()
                 if holdings:
@@ -1040,13 +1093,19 @@ class TradingMixin:
             price = holding.get("current_price") or holding["buy_price"]
             pnl = holding.get("pnl_pct", 0)
             self.db.update_holding(holding["id"], sold_pct=50)
-            self.db.add_trade(
+            trade_id = self.db.add_trade(
                 ticker=ticker, name=holding["name"], action="sell",
                 action_price=price, pnl_pct=pnl,
                 recommended_price=holding["buy_price"], quantity_pct=50,
             )
             msg = format_trade_record(holding["name"], "sell", price, pnl)
             await query.edit_message_text(msg)
+            # v6.2: 자동 복기 트리거
+            await self._trigger_auto_debrief(
+                ticker=ticker, name=holding["name"], action="sell",
+                entry_price=holding["buy_price"], exit_price=price,
+                pnl_pct=pnl, holding=holding, trade_id=trade_id,
+            )
         else:
             await query.edit_message_text("\u26a0\ufe0f 보유 종목을 찾을 수 없습니다.")
 
@@ -1067,13 +1126,19 @@ class TradingMixin:
             price = holding.get("current_price") or holding["buy_price"]
             pnl = holding.get("pnl_pct", 0)
             self.db.update_holding(holding["id"], status="closed")
-            self.db.add_trade(
+            trade_id = self.db.add_trade(
                 ticker=ticker, name=holding["name"], action="stop_loss",
                 action_price=price, pnl_pct=pnl,
                 recommended_price=holding["buy_price"], quantity_pct=100,
             )
             msg = format_trade_record(holding["name"], "stop_loss", price, pnl)
             await query.edit_message_text(msg)
+            # v6.2: 자동 복기 트리거
+            await self._trigger_auto_debrief(
+                ticker=ticker, name=holding["name"], action="stop_loss",
+                entry_price=holding["buy_price"], exit_price=price,
+                pnl_pct=pnl, holding=holding, trade_id=trade_id,
+            )
         else:
             await query.edit_message_text("\u26a0\ufe0f 보유 종목을 찾을 수 없습니다.")
 
@@ -1886,6 +1951,17 @@ class TradingMixin:
                     ),
                     messages=[{"role": "user", "content": prompt}],
                 )
+                # [v6.2.1] 토큰 추적
+                try:
+                    from kstock.core.token_tracker import track_usage
+                    track_usage(
+                        db=self.db, provider="anthropic",
+                        model="claude-sonnet-4-5-20250929",
+                        function_name="strategist",
+                        response=response,
+                    )
+                except Exception:
+                    pass
                 from kstock.bot.chat_handler import _sanitize_response
                 analysis_text = _sanitize_response(response.content[0].text)
             except Exception as e:
@@ -2055,6 +2131,26 @@ class TradingMixin:
                     holding_type, item["name"], item["ticker"],
                     item["quantity"], item["price"],
                 )
+                # v6.2: 신호 성과 추적 기록
+                manager_map = {
+                    "scalp": "manager_scalp", "short": "manager_swing",
+                    "mid": "manager_position", "long": "manager_long_term",
+                }
+                signal_source = manager_map.get(item.get("horizon", ""), "scan_engine")
+                try:
+                    self.db.save_signal_performance(
+                        signal_source=signal_source,
+                        signal_type="buy",
+                        ticker=item["ticker"],
+                        name=item["name"],
+                        signal_date=datetime.now(KST).strftime("%Y-%m-%d"),
+                        signal_score=item.get("score", 0),
+                        signal_price=item["price"],
+                        horizon=holding_type,
+                        manager=item.get("manager", ""),
+                    )
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error(
                     "Failed to register holding %s: %s",
@@ -2449,6 +2545,112 @@ class TradingMixin:
         except Exception as e:
             logger.error("Advanced backtest error: %s", e, exc_info=True)
             await query.edit_message_text("⚠️ 고급 백테스트 실행 중 오류 발생")
+
+    # == v6.2: 자동 매매 복기 ================================================
+
+    async def _trigger_auto_debrief(
+        self,
+        ticker: str,
+        name: str,
+        action: str,
+        entry_price: float,
+        exit_price: float,
+        pnl_pct: float,
+        holding: dict | None = None,
+        trade_id: int | None = None,
+    ) -> None:
+        """매매 완료 시 백그라운드로 자동 복기 실행."""
+        try:
+            from kstock.signal.auto_debrief import auto_debrief_trade, format_debrief_message
+
+            # holding에서 추가 정보 추출
+            horizon = "swing"
+            manager = ""
+            if holding:
+                ht = holding.get("holding_type", "auto")
+                horizon = {
+                    "scalp": "scalp", "swing": "swing",
+                    "position": "position", "long_term": "long_term",
+                }.get(ht, "swing")
+
+            # 보유일수 계산
+            hold_days = 0
+            if holding and holding.get("buy_date"):
+                try:
+                    from datetime import datetime
+                    buy_dt = datetime.strptime(holding["buy_date"][:10], "%Y-%m-%d")
+                    hold_days = max(0, (datetime.utcnow() - buy_dt).days)
+                except Exception:
+                    pass
+
+            # 시장 레짐
+            market_regime = ""
+            try:
+                macro = await self.macro_client.get_snapshot()
+                if macro and hasattr(macro, "vix"):
+                    if macro.vix >= 30:
+                        market_regime = "panic"
+                    elif macro.vix >= 25:
+                        market_regime = "fear"
+                    elif macro.vix >= 18:
+                        market_regime = "normal"
+                    else:
+                        market_regime = "calm"
+            except Exception:
+                pass
+
+            result = await auto_debrief_trade(
+                db=self.db,
+                ticker=ticker,
+                name=name,
+                action=action,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                pnl_pct=pnl_pct,
+                hold_days=hold_days,
+                horizon=horizon,
+                manager=manager,
+                market_regime=market_regime,
+                trade_id=trade_id,
+            )
+
+            # 텔레그램으로 복기 결과 전송 (등급 C 이하 또는 수익 3%+ 매매만)
+            if result.grade in ("A", "B") or result.grade in ("D", "F") or abs(pnl_pct) >= 3:
+                debrief_msg = format_debrief_message(result)
+                if self.chat_id:
+                    try:
+                        from telegram import Bot
+                        bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN", ""))
+                        # v6.2.1: 페이지네이션 (4096자 제한)
+                        if len(debrief_msg) > 3800:
+                            pages = []
+                            lines = debrief_msg.split("\n")
+                            cur, cur_len = [], 0
+                            for line in lines:
+                                ll = len(line) + 1
+                                if cur_len + ll > 3800 and cur:
+                                    pages.append("\n".join(cur))
+                                    cur, cur_len = [line], ll
+                                else:
+                                    cur.append(line)
+                                    cur_len += ll
+                            if cur:
+                                pages.append("\n".join(cur))
+                            for i, pg in enumerate(pages):
+                                hdr = f"📄 ({i+1}/{len(pages)})\n" if len(pages) > 1 else ""
+                                await bot.send_message(
+                                    chat_id=self.chat_id, text=hdr + pg,
+                                )
+                        else:
+                            await bot.send_message(
+                                chat_id=self.chat_id,
+                                text=debrief_msg,
+                            )
+                    except Exception as e:
+                        logger.warning("복기 메시지 전송 실패: %s", e)
+
+        except Exception as e:
+            logger.error("Auto debrief trigger failed: %s", e, exc_info=True)
 
     # == Scheduled Jobs ======================================================
 

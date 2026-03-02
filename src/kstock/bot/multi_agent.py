@@ -517,6 +517,16 @@ async def run_multi_agent_analysis(
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = response.content[0].text
+            # [v6.2.1] 토큰 추적
+            try:
+                from kstock.core.token_tracker import track_usage_global
+                track_usage_global(
+                    provider="anthropic", model=model,
+                    function_name="multi_agent",
+                    response=response,
+                )
+            except Exception:
+                pass
             score = parse_agent_score(raw)
             signal = parse_agent_signal(raw)
             logger.info(

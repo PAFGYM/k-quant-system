@@ -722,3 +722,239 @@ class TradingMixin:
                 (period, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- signal_performance (v6.2) -----------------------------------------------
+
+    def save_signal_performance(
+        self,
+        signal_source: str,
+        signal_type: str,
+        ticker: str,
+        name: str,
+        signal_date: str,
+        signal_score: float = 0,
+        signal_price: float = 0,
+        horizon: str = "swing",
+        manager: str = "",
+    ) -> int:
+        """신호 발생 기록 (추후 가격 추적을 위한 베이스라인)."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO signal_performance "
+                "(signal_source, signal_type, ticker, name, signal_date, "
+                " signal_score, signal_price, horizon, manager, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (signal_source, signal_type, ticker, name, signal_date,
+                 signal_score, signal_price, horizon, manager, now),
+            )
+            return cur.lastrowid or 0
+
+    def get_pending_signal_evaluations(self, days_ago: int = 1) -> list[dict]:
+        """평가 대기 중인 신호 목록 (signal_date 기준 N일 이상 경과, 미평가)."""
+        cutoff = (datetime.utcnow() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM signal_performance "
+                "WHERE signal_date <= ? AND evaluated_at IS NULL "
+                "ORDER BY signal_date ASC LIMIT 200",
+                (cutoff,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_signal_evaluation(
+        self,
+        signal_id: int,
+        price_d1: float | None = None,
+        price_d3: float | None = None,
+        price_d5: float | None = None,
+        price_d10: float | None = None,
+        price_d20: float | None = None,
+        return_d1: float | None = None,
+        return_d3: float | None = None,
+        return_d5: float | None = None,
+        return_d10: float | None = None,
+        return_d20: float | None = None,
+        max_return: float | None = None,
+        max_drawdown: float | None = None,
+        hit: int = 0,
+    ) -> None:
+        """신호 평가 결과 업데이트."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE signal_performance SET "
+                "price_d1=?, price_d3=?, price_d5=?, price_d10=?, price_d20=?, "
+                "return_d1=?, return_d3=?, return_d5=?, return_d10=?, return_d20=?, "
+                "max_return=?, max_drawdown=?, hit=?, evaluated_at=? "
+                "WHERE id=?",
+                (price_d1, price_d3, price_d5, price_d10, price_d20,
+                 return_d1, return_d3, return_d5, return_d10, return_d20,
+                 max_return, max_drawdown, hit, now, signal_id),
+            )
+
+    def get_signal_source_stats(
+        self, signal_source: str | None = None, days: int = 90,
+    ) -> list[dict]:
+        """신호 소스별 적중률 통계."""
+        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            if signal_source:
+                rows = conn.execute(
+                    "SELECT signal_source, "
+                    "  COUNT(*) as total, "
+                    "  SUM(CASE WHEN evaluated_at IS NOT NULL THEN 1 ELSE 0 END) as evaluated, "
+                    "  SUM(hit) as hits, "
+                    "  ROUND(AVG(CASE WHEN evaluated_at IS NOT NULL THEN return_d5 END), 2) as avg_d5, "
+                    "  ROUND(AVG(CASE WHEN evaluated_at IS NOT NULL THEN return_d10 END), 2) as avg_d10, "
+                    "  ROUND(AVG(CASE WHEN evaluated_at IS NOT NULL THEN return_d20 END), 2) as avg_d20, "
+                    "  ROUND(AVG(max_return), 2) as avg_max_ret, "
+                    "  ROUND(AVG(max_drawdown), 2) as avg_max_dd "
+                    "FROM signal_performance "
+                    "WHERE signal_source=? AND signal_date >= ? "
+                    "GROUP BY signal_source",
+                    (signal_source, cutoff),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT signal_source, "
+                    "  COUNT(*) as total, "
+                    "  SUM(CASE WHEN evaluated_at IS NOT NULL THEN 1 ELSE 0 END) as evaluated, "
+                    "  SUM(hit) as hits, "
+                    "  ROUND(AVG(CASE WHEN evaluated_at IS NOT NULL THEN return_d5 END), 2) as avg_d5, "
+                    "  ROUND(AVG(CASE WHEN evaluated_at IS NOT NULL THEN return_d10 END), 2) as avg_d10, "
+                    "  ROUND(AVG(CASE WHEN evaluated_at IS NOT NULL THEN return_d20 END), 2) as avg_d20, "
+                    "  ROUND(AVG(max_return), 2) as avg_max_ret, "
+                    "  ROUND(AVG(max_drawdown), 2) as avg_max_dd "
+                    "FROM signal_performance "
+                    "WHERE signal_date >= ? "
+                    "GROUP BY signal_source "
+                    "ORDER BY hits DESC",
+                    (cutoff,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- trade_debrief (v6.2) ---------------------------------------------------
+
+    def save_trade_debrief(
+        self,
+        ticker: str,
+        name: str,
+        action: str,
+        entry_price: float = 0,
+        exit_price: float = 0,
+        pnl_pct: float = 0,
+        hold_days: int = 0,
+        horizon: str = "swing",
+        manager: str = "",
+        signal_source: str = "",
+        signal_score: float = 0,
+        market_regime: str = "",
+        entry_reason: str = "",
+        exit_reason: str = "",
+        ai_review: str = "",
+        lessons_json: str = "[]",
+        mistakes_json: str = "[]",
+        improvements: str = "",
+        grade: str = "C",
+        trade_id: int | None = None,
+    ) -> int:
+        """매매 자동 복기 저장."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO trade_debrief "
+                "(trade_id, ticker, name, action, entry_price, exit_price, "
+                " pnl_pct, hold_days, horizon, manager, signal_source, signal_score, "
+                " market_regime, entry_reason, exit_reason, ai_review, "
+                " lessons_json, mistakes_json, improvements, grade, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (trade_id, ticker, name, action, entry_price, exit_price,
+                 pnl_pct, hold_days, horizon, manager, signal_source, signal_score,
+                 market_regime, entry_reason, exit_reason, ai_review,
+                 lessons_json, mistakes_json, improvements, grade, now),
+            )
+            return cur.lastrowid or 0
+
+    def get_trade_debriefs(
+        self, ticker: str | None = None, limit: int = 20,
+    ) -> list[dict]:
+        """매매 복기 이력 조회."""
+        with self._connect() as conn:
+            if ticker:
+                rows = conn.execute(
+                    "SELECT * FROM trade_debrief WHERE ticker=? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (ticker, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM trade_debrief "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_debrief_stats(self, days: int = 30) -> dict:
+        """복기 통계 요약 (최근 N일)."""
+        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT "
+                "  COUNT(*) as total, "
+                "  SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END) as wins, "
+                "  SUM(CASE WHEN pnl_pct <= 0 THEN 1 ELSE 0 END) as losses, "
+                "  ROUND(AVG(pnl_pct), 2) as avg_pnl, "
+                "  ROUND(MAX(pnl_pct), 2) as best_pnl, "
+                "  ROUND(MIN(pnl_pct), 2) as worst_pnl, "
+                "  ROUND(AVG(hold_days), 1) as avg_hold_days, "
+                "  SUM(CASE WHEN grade='A' THEN 1 ELSE 0 END) as grade_a, "
+                "  SUM(CASE WHEN grade='B' THEN 1 ELSE 0 END) as grade_b, "
+                "  SUM(CASE WHEN grade='C' THEN 1 ELSE 0 END) as grade_c, "
+                "  SUM(CASE WHEN grade='D' THEN 1 ELSE 0 END) as grade_d, "
+                "  SUM(CASE WHEN grade='F' THEN 1 ELSE 0 END) as grade_f "
+                "FROM trade_debrief WHERE created_at >= ?",
+                (cutoff,),
+            ).fetchone()
+        return dict(row) if row else {}
+
+    # -- signal_source_stats (v6.2) -----------------------------------------------
+
+    def save_signal_source_stats(
+        self,
+        signal_source: str,
+        period: str,
+        total_signals: int,
+        evaluated: int,
+        hits: int,
+        hit_rate: float,
+        avg_return_d5: float = 0,
+        avg_return_d10: float = 0,
+        avg_return_d20: float = 0,
+        avg_max_return: float = 0,
+        avg_max_dd: float = 0,
+        weight_adj: float = 1.0,
+    ) -> int:
+        """신호 소스별 성과 통계 저장."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT OR REPLACE INTO signal_source_stats "
+                "(signal_source, period, total_signals, evaluated, hits, hit_rate, "
+                " avg_return_d5, avg_return_d10, avg_return_d20, "
+                " avg_max_return, avg_max_dd, weight_adj, calculated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (signal_source, period, total_signals, evaluated, hits, hit_rate,
+                 avg_return_d5, avg_return_d10, avg_return_d20,
+                 avg_max_return, avg_max_dd, weight_adj, now),
+            )
+            return cur.lastrowid or 0
+
+    def get_signal_weight_adjustments(self) -> dict[str, float]:
+        """각 신호 소스의 최신 가중치 조정값 반환."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT signal_source, weight_adj FROM signal_source_stats "
+                "WHERE id IN (SELECT MAX(id) FROM signal_source_stats GROUP BY signal_source)"
+            ).fetchall()
+        return {r["signal_source"]: r["weight_adj"] for r in rows}
