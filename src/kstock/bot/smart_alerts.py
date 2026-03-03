@@ -1,4 +1,4 @@
-"""지능형 알림 시스템 (v6.2).
+"""지능형 알림 시스템 (v6.5).
 
 기존 단순 알림을 "이유 + 액션 + 컨텍스트" 포함하는 스마트 알림으로 강화.
 
@@ -7,6 +7,8 @@
 2. 매수 기회 알림 (왜 기회인지 + 과거 적중률)
 3. 리스크 알림 (구체적 위험 + 방어 전략)
 4. 학습 알림 (이번 주 학습 결과 요약)
+
+v6.5: signal_guard 통합 — 장기보유 매도 억제 + 신뢰도 등급
 
 핵심 원칙: 모든 알림에 "왜?" + "뭘 해야 하나?" 포함
 """
@@ -32,8 +34,13 @@ def build_holding_alert(
     target_price: float | None = None,
     market_regime: str = "",
     signal_weight: float = 1.0,
+    consensus: str = "",
+    confidence: float = 0.5,
+    agreement: float = 0.5,
 ) -> str | None:
     """보유종목 상태에 따라 이유+액션 포함 스마트 알림 생성.
+
+    v6.5: signal_guard 통합 — 장기보유 매도 신호 억제.
 
     Returns:
         알림 메시지 (None이면 알림 불필요).
@@ -45,6 +52,46 @@ def build_holding_alert(
         "scalp": "초단타", "swing": "스윙",
         "position": "포지션", "long_term": "장기",
     }.get(holding_type, holding_type)
+
+    # v6.5: 장기보유 보호 — 매도 신호 억제 체크
+    if holding_type in ("long_term", "position") and pnl_pct <= -7:
+        try:
+            from kstock.signal.signal_guard import (
+                apply_holding_guard,
+                format_guard_result,
+            )
+            guard = apply_holding_guard(
+                consensus=consensus or "SELL",
+                holding_type=holding_type,
+                hold_days=hold_days,
+                pnl_pct=pnl_pct,
+                confidence=confidence,
+                agreement=agreement,
+                market_regime=market_regime,
+            )
+            if guard.suppressed:
+                # 장기/포지션 보유 → 매도 억제됨 → 보호 알림만 전송
+                lines: list[str] = [
+                    f"🛡 장기보유 보호: {name}",
+                    f"{'━' * 20}",
+                    f"현재: {current_price:,.0f}원 ({pnl_pct:+.1f}%)",
+                    f"매수가: {buy_price:,.0f}원 | {horizon_kr} {hold_days}일차",
+                    "",
+                    "📌 매도 신호 감지되었으나 억제됨:",
+                    f"  • {guard.reason}",
+                    "",
+                    "🎯 추천 액션:",
+                    "  1. 현재 보유 유지",
+                    "  2. 펀더멘탈 재확인 (실적/뉴스)",
+                ]
+                if guard.override_conditions:
+                    lines.append("")
+                    lines.append("⚠️ 다음 조건 시 매도 허용:")
+                    for cond in guard.override_conditions:
+                        lines.append(f"  • {cond}")
+                return "\n".join(lines)
+        except Exception as e:
+            logger.warning("Signal guard check failed: %s", e)
 
     lines: list[str] = []
 
@@ -158,6 +205,8 @@ def build_opportunity_alert(
     signal_source: str = "scan_engine",
     hit_rate: float = 0,
     past_recommendations: int = 0,
+    reliability_grade: str = "",
+    reliability_emoji: str = "",
 ) -> str:
     """매수 기회 알림 (이유 + 과거 적중률 포함).
 
@@ -174,10 +223,15 @@ def build_opportunity_alert(
         "HOLD": "⚪", "SELL": "🔴",
     }.get(signal, "⚪")
 
+    # v6.5: 신뢰도 등급 표시
+    grade_text = ""
+    if reliability_grade:
+        grade_text = f" | {reliability_emoji} {reliability_grade}등급"
+
     lines = [
         f"💡 매수 기회: {name}({ticker})",
         f"{'━' * 20}",
-        f"{signal_emoji} 점수: {score:.0f}점 | {signal}",
+        f"{signal_emoji} 점수: {score:.0f}점 | {signal}{grade_text}",
         f"출처: {source_kr}",
         "",
     ]

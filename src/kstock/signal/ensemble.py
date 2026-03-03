@@ -5,15 +5,18 @@ Lynch, Buffett, etc.) into a single buy/sell/hold consensus using
 weighted voting, entropy-based agreement metrics, and adaptive
 performance weighting.
 
-v6.3 — full implementation replacing v5.0 stub.
+v6.5 — signal guard integration (holding protection + reliability grading).
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Union
+
+logger = logging.getLogger(__name__)
 
 
 # ───────────────────────── Dataclasses ─────────────────────────
@@ -56,6 +59,13 @@ class VoteResult:
     signal_agreement: float = 0.0  # 0‑1 (1 = unanimous)
     contributing_strategies: List[str] = field(default_factory=list)
     dissenting_strategies: List[str] = field(default_factory=list)
+    # v6.5: Signal guard fields
+    reliability_grade: str = ""       # A/B/C/D
+    reliability_score: float = 0.0    # 0~100
+    reliability_emoji: str = ""       # 🟢/🔵/🟡/🔴
+    reliability_warning: str = ""     # 경고 메시지
+    holding_suppressed: bool = False  # 장기보유 보호로 매도 억제됨
+    original_consensus: str = ""      # 억제 전 원래 합의
 
 
 @dataclass
@@ -434,6 +444,91 @@ def filter_top_consensus(
     return filtered[:top_n]
 
 
+def vote_with_guard(
+    signals: Sequence[Union[SignalVote, dict]],
+    config: Optional[EnsembleConfig] = None,
+    holding_type: str = "",
+    hold_days: int = 0,
+    pnl_pct: float = 0.0,
+    market_regime: str = "normal",
+    signal_source: str = "",
+    hit_rate_30d: float = 0.5,
+) -> VoteResult:
+    """vote() + 장기보유 보호 + 신뢰도 등급 통합.
+
+    기존 vote()의 모든 기능에 더해:
+    1. 장기보유 종목의 매도 신호 억제 (signal_guard.apply_holding_guard)
+    2. 신호 신뢰도 등급 A~D 부여 (signal_guard.compute_signal_reliability)
+
+    Args:
+        signals: 전략별 투표 리스트.
+        config: 앙상블 설정.
+        holding_type: 보유 유형 (scalp/swing/position/long_term).
+        hold_days: 보유 일수.
+        pnl_pct: 현재 수익률 (%).
+        market_regime: 시장 레짐.
+        signal_source: 신호 소스명.
+        hit_rate_30d: 과거 30일 적중률.
+
+    Returns:
+        VoteResult with reliability and guard fields populated.
+    """
+    from kstock.signal.signal_guard import (
+        apply_holding_guard,
+        compute_signal_reliability,
+    )
+
+    # 1. 기본 투표
+    result = vote(signals, config=config)
+
+    # 2. 신뢰도 등급 계산
+    try:
+        rel = compute_signal_reliability(
+            consensus=result.consensus,
+            confidence=result.confidence,
+            agreement=result.signal_agreement,
+            contributing_count=len(result.contributing_strategies),
+            total_votes=result.total_votes,
+            signal_source=signal_source,
+            hit_rate_30d=hit_rate_30d,
+            holding_type=holding_type,
+            market_regime=market_regime,
+        )
+        result.reliability_grade = rel.grade
+        result.reliability_score = rel.score
+        result.reliability_emoji = rel.emoji
+        result.reliability_warning = rel.warning
+    except Exception as e:
+        logger.warning("Signal reliability calculation failed: %s", e)
+
+    # 3. 장기보유 보호 (holding_type이 있을 때만)
+    if holding_type and result.consensus in ("SELL", "STRONG_SELL"):
+        try:
+            guard = apply_holding_guard(
+                consensus=result.consensus,
+                holding_type=holding_type,
+                hold_days=hold_days,
+                pnl_pct=pnl_pct,
+                confidence=result.confidence,
+                agreement=result.signal_agreement,
+                market_regime=market_regime,
+            )
+            if guard.suppressed:
+                result.original_consensus = result.consensus
+                result.consensus = guard.adjusted_consensus
+                result.holding_suppressed = True
+                logger.info(
+                    "Holding guard suppressed: %s → %s (%s)",
+                    guard.original_consensus,
+                    guard.adjusted_consensus,
+                    guard.reason,
+                )
+        except Exception as e:
+            logger.warning("Holding guard failed: %s", e)
+
+    return result
+
+
 def format_ensemble_result(result: VoteResult) -> str:
     """Format VoteResult for Telegram display (plain text + emoji).
 
@@ -477,5 +572,21 @@ def format_ensemble_result(result: VoteResult) -> str:
     if result.dissenting_strategies:
         dissents = ", ".join(result.dissenting_strategies[:5])
         lines.append(f"❌ 반대: {dissents}")
+
+    # v6.5: 신뢰도 등급
+    if result.reliability_grade:
+        lines.append(f"")
+        lines.append(
+            f"{result.reliability_emoji} 신뢰도 "
+            f"{result.reliability_grade}등급 ({result.reliability_score:.0f}점)"
+        )
+        if result.reliability_warning:
+            lines.append(f"⚠️ {result.reliability_warning}")
+
+    # v6.5: 장기보유 보호
+    if result.holding_suppressed:
+        lines.append(f"")
+        lines.append(f"🛡 장기보유 보호 적용")
+        lines.append(f"원래: {result.original_consensus} → {result.consensus}")
 
     return "\n".join(lines)

@@ -2926,18 +2926,29 @@ class SchedulerMixin:
 
                         alert_text = smart_msg if smart_msg else sizer.format_profit_alert(alert)
 
-                        buttons = [
-                            [
-                                InlineKeyboardButton(
-                                    "🔴 매도" if alert.alert_type == "stop_loss" else "⚠️ 매도",
-                                    callback_data=f"pt:sell:{alert.ticker}:{alert.sell_shares}",
-                                ),
-                                InlineKeyboardButton(
-                                    "💎 홀드",
-                                    callback_data=f"pt:ignore:{alert.ticker}",
-                                ),
-                            ],
-                        ]
+                        # v6.5: 장기보유 보호 시 "확인" 버튼만 표시
+                        if smart_msg and "장기보유 보호" in smart_msg:
+                            buttons = [
+                                [
+                                    InlineKeyboardButton(
+                                        "✅ 확인",
+                                        callback_data=f"pt:ignore:{alert.ticker}",
+                                    ),
+                                ],
+                            ]
+                        else:
+                            buttons = [
+                                [
+                                    InlineKeyboardButton(
+                                        "🔴 매도" if alert.alert_type == "stop_loss" else "⚠️ 매도",
+                                        callback_data=f"pt:sell:{alert.ticker}:{alert.sell_shares}",
+                                    ),
+                                    InlineKeyboardButton(
+                                        "💎 홀드",
+                                        callback_data=f"pt:ignore:{alert.ticker}",
+                                    ),
+                                ],
+                            ]
                         await context.bot.send_message(
                             chat_id=self.chat_id,
                             text=alert_text,

@@ -70,6 +70,15 @@ def _strategy_tag(strategy_type: str) -> str:
     return f"[{STRATEGY_LABELS.get(strategy_type, strategy_type)}]"
 
 
+def _reliability_badge(grade: str, emoji: str = "", score: float = 0) -> str:
+    """신뢰도 등급 배지 (한 줄)."""
+    if not grade:
+        return ""
+    if not emoji:
+        emoji = {"A": "🟢", "B": "🔵", "C": "🟡", "D": "🔴"}.get(grade, "⚪")
+    return f"{emoji} 신뢰도 {grade}등급 ({score:.0f}점)"
+
+
 def generate_buy_reasons(tech, info, flow, macro) -> list:
     reasons = []
     if tech.rsi <= 30:
@@ -257,9 +266,16 @@ def format_watch_alert(name: str, ticker: str, score, tech, info, strategy_type:
     )
 
 
-def format_sell_alert_profit(name: str, holding: dict, current_price: float) -> str:
+def format_sell_alert_profit(
+    name: str, holding: dict, current_price: float,
+    reliability_grade: str = "", reliability_emoji: str = "",
+    reliability_score: float = 0,
+) -> str:
     buy_price = holding["buy_price"]
     pnl_pct = (current_price - buy_price) / buy_price * 100
+
+    badge = _reliability_badge(reliability_grade, reliability_emoji, reliability_score)
+    badge_line = f"\n{badge}" if badge else ""
 
     return (
         f"\u2550" * 22 + "\n"
@@ -269,13 +285,36 @@ def format_sell_alert_profit(name: str, holding: dict, current_price: float) -> 
         f"{_won(buy_price)} -> {_won(current_price)}\n"
         f"1차 익절 구간 도달\n\n"
         f"절반(50%) 매도하세요\n"
-        f"나머지는 트레일링 스탑 작동 중"
+        f"나머지는 트레일링 스탑 작동 중{badge_line}"
     )
 
 
-def format_sell_alert_stop(name: str, holding: dict, current_price: float) -> str:
+def format_sell_alert_stop(
+    name: str, holding: dict, current_price: float,
+    reliability_grade: str = "", reliability_emoji: str = "",
+    reliability_score: float = 0, holding_suppressed: bool = False,
+) -> str:
     buy_price = holding["buy_price"]
     pnl_pct = (current_price - buy_price) / buy_price * 100
+
+    # v6.5: 장기보유 보호 — 매도 억제 시 보호 메시지
+    if holding_suppressed:
+        holding_type = holding.get("holding_type", "")
+        horizon_kr = {
+            "scalp": "초단타", "swing": "스윙",
+            "position": "포지션", "long_term": "장기",
+        }.get(holding_type, holding_type)
+        return (
+            f"\u2550" * 22 + "\n"
+            f"🛡 {USER_NAME}, {name} 보호 중\n"
+            f"\u2550" * 22 + "\n\n"
+            f"{pnl_pct:+.1f}% ({_won(buy_price)} -> {_won(current_price)})\n"
+            f"{horizon_kr} 보유 — 단기 매도 신호 억제됨\n"
+            f"펀더멘탈 기반으로 보유 유지하세요"
+        )
+
+    badge = _reliability_badge(reliability_grade, reliability_emoji, reliability_score)
+    badge_line = f"\n{badge}" if badge else ""
 
     return (
         f"\u2550" * 22 + "\n"
@@ -283,7 +322,7 @@ def format_sell_alert_stop(name: str, holding: dict, current_price: float) -> st
         f"\u2550" * 22 + "\n\n"
         f"{pnl_pct:+.1f}% 도달 ({_won(buy_price)} -> {_won(current_price)})\n"
         f"더 빠질 수 있습니다\n"
-        f"지금 전량 매도하세요"
+        f"지금 전량 매도하세요{badge_line}"
     )
 
 
@@ -297,19 +336,28 @@ def format_recommendations(results: list) -> str:
     medals = {1: "\U0001f947", 2: "\U0001f948", 3: "\U0001f949"}
 
     for item in results:
-        if len(item) >= 7:
-            rank, name, ticker, score_val, signal, strat, price = item
+        # v6.5: 8번째 항목으로 reliability_grade 지원
+        reliability_grade = ""
+        if len(item) >= 8:
+            rank, name, ticker, score_val, signal, strat, price, reliability_grade = item[:8]
+        elif len(item) >= 7:
+            rank, name, ticker, score_val, signal, strat, price = item[:7]
         elif len(item) >= 6:
-            rank, name, ticker, score_val, signal, strat = item
+            rank, name, ticker, score_val, signal, strat = item[:6]
             price = 0
         else:
-            rank, name, ticker, score_val, signal = item
+            rank, name, ticker, score_val, signal = item[:5]
             strat = "A"
             price = 0
         medal = medals.get(rank, f"{rank}.")
         tag = _strategy_tag(strat)
         price_str = f" {_won(price)}" if price and price > 0 else ""
-        line = f"{medal} {name}{price_str} {score_val:.1f}점 {tag}"
+        # v6.5: 신뢰도 등급 배지 (있으면 표시)
+        grade_badge = ""
+        if reliability_grade:
+            grade_emoji = {"A": "🟢", "B": "🔵", "C": "🟡", "D": "🔴"}.get(reliability_grade, "")
+            grade_badge = f" {grade_emoji}{reliability_grade}"
+        line = f"{medal} {name}{price_str} {score_val:.1f}점 {tag}{grade_badge}"
         if signal == "BUY":
             buy_items.append(line)
         elif signal == "WATCH":
