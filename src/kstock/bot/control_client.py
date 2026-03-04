@@ -9,7 +9,7 @@ import socket
 import sys
 
 SOCKET_PATH = "/tmp/kquant_control.sock"
-TIMEOUT = 30
+TIMEOUT = 660  # Claude Code 실행 최대 10분 + 여유
 
 
 def send_command(cmd: str, args: dict | None = None) -> dict:

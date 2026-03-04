@@ -396,6 +396,53 @@ cmd_costs() {
     _ctrl "get_cost"
 }
 
+# ── Claude Code ────────────────────────────
+
+cmd_claude() {
+    local prompt="${1:-}"
+    if [ -z "$prompt" ]; then
+        echo -e "${RED}사용법: ./kbot claude \"프롬프트\"${NC}"
+        echo ""
+        echo "예시:"
+        echo "  ./kbot claude \"봇 로그 확인해줘\""
+        echo "  ./kbot claude \"테스트 실행해줘\""
+        echo "  ./kbot claude \"삼성전자 분석해줘\""
+        return 1
+    fi
+
+    # 봇이 실행 중이면 소켓 경유 (결과를 텔레그램에도 전송)
+    if _is_running && [ -S "/tmp/kquant_control.sock" ]; then
+        echo -e "${CYAN}Claude Code 실행 (봇 경유)...${NC}"
+        # JSON escape the prompt
+        local escaped_prompt
+        escaped_prompt=$(python3 -c "import json; print(json.dumps('$prompt'))")
+        _ctrl "run_claude" "{\"prompt\": $escaped_prompt}"
+    else
+        # 봇 미실행 시 직접 Claude CLI 실행
+        echo -e "${CYAN}Claude Code 직접 실행...${NC}"
+        local claude_cli=""
+        for candidate in \
+            "/Users/botddol/.local/bin/claude" \
+            "/Users/botddol/.nvm/versions/node/v20.20.0/bin/claude" \
+            "/opt/homebrew/bin/claude" \
+            "/usr/local/bin/claude"; do
+            if [ -f "$candidate" ]; then
+                claude_cli="$candidate"
+                break
+            fi
+        done
+        if [ -z "$claude_cli" ]; then
+            echo -e "${RED}Claude CLI를 찾을 수 없습니다${NC}"
+            return 1
+        fi
+        PYTHONPATH=src "$claude_cli" -p "$prompt" \
+            --output-format text \
+            --dangerously-skip-permissions \
+            --model sonnet \
+            --max-turns 5
+    fi
+}
+
 # ── 도움말 ────────────────────────────────
 
 cmd_help() {
@@ -428,6 +475,9 @@ cmd_help() {
     echo "    ai \"질문\"          AI에게 질문"
     echo "    scan [매니저]       매수 스캔 (scalp/swing/position/long_term/all)"
     echo ""
+    echo -e "  ${BOLD}Claude Code${NC}"
+    echo "    claude \"프롬프트\"   Claude Code 실행 (봇 경유 or 직접)"
+    echo ""
     echo -e "  ${BOLD}소켓 컨트롤 (실행 중인 봇)${NC}"
     echo "    jobs               스케줄 작업 목록"
     echo "    trigger <작업명>   작업 즉시 실행"
@@ -459,6 +509,8 @@ case "${1:-help}" in
     send)     cmd_send "${2:-}" ;;
     ai)       cmd_ai "${2:-}" ;;
     scan)     cmd_scan "${2:-all}" ;;
+    # Claude Code
+    claude)   cmd_claude "${2:-}" ;;
     # 소켓 컨트롤
     jobs)     cmd_jobs ;;
     trigger)  cmd_trigger "${2:-}" ;;

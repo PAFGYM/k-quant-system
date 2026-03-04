@@ -36,6 +36,7 @@ class ControlServer:
             "get_cost": self._cmd_get_cost,
             "send_message": self._cmd_send_message,
             "get_logs": self._cmd_get_logs,
+            "run_claude": self._cmd_run_claude,
         }
 
     async def start(self) -> None:
@@ -58,7 +59,7 @@ class ControlServer:
     async def _handle_client(self, reader: asyncio.StreamReader,
                               writer: asyncio.StreamWriter) -> None:
         try:
-            line = await asyncio.wait_for(reader.readline(), timeout=30)
+            line = await asyncio.wait_for(reader.readline(), timeout=660)
             if not line:
                 return
             request = json.loads(line.decode("utf-8"))
@@ -217,6 +218,35 @@ class ControlServer:
             return "".join(tail)[-3000:]
         except Exception as e:
             return f"Error reading logs: {e}"
+
+    async def _cmd_run_claude(self, prompt: str = "", model: str = "sonnet",
+                              max_turns: int = 5, notify: bool = True, **_kw) -> str:
+        """Execute Claude Code CLI and optionally send result to Telegram."""
+        if not prompt:
+            return "Error: prompt required"
+        try:
+            output, returncode, elapsed = await self.bot._run_claude_cli(prompt)
+            result_text = output or "(empty output)"
+            if len(result_text) > 5000:
+                result_text = result_text[:2000] + "\n\n... (truncated) ...\n\n" + result_text[-2000:]
+            if notify and self.bot.chat_id:
+                icon = "✅" if returncode == 0 else "⚠️"
+                tg_text = (
+                    f"💻 {icon} Claude Code (CLI)\n"
+                    f"{'━' * 22}\n"
+                    f"📝 {prompt[:100]}\n"
+                    f"⏱ {elapsed:.1f}s\n\n"
+                    f"{result_text[:3500]}"
+                )
+                try:
+                    await self.bot._application.bot.send_message(
+                        chat_id=self.bot.chat_id, text=tg_text
+                    )
+                except Exception as e:
+                    logger.warning("Failed to notify telegram: %s", e)
+            return result_text
+        except Exception as e:
+            return f"Claude execution failed: {e}"
 
     # ── Helpers ───────────────────────────────────────
 
