@@ -1132,6 +1132,17 @@ class StoreBase:
                         conn.execute(sql)
                     except sqlite3.OperationalError:
                         pass
+            # Migrate: watchlist — sector 컬럼 (v8.4 종목 관리 대시보드)
+            for col, sql in [
+                ("sector", "ALTER TABLE watchlist ADD COLUMN sector TEXT DEFAULT ''"),
+            ]:
+                try:
+                    conn.execute(f"SELECT {col} FROM watchlist LIMIT 1")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass
             # Migrate: consensus.ticker UNIQUE 인덱스 추가 (ON CONFLICT 지원)
             try:
                 conn.execute(

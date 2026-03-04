@@ -240,6 +240,125 @@ class PortfolioMixin:
         with self._connect() as conn:
             conn.execute("UPDATE watchlist SET active=0 WHERE ticker=?", (ticker,))
 
+    def bulk_add_watchlist(self, items: list[dict]) -> int:
+        """유니버스 종목을 일괄 등록. 이미 있는 종목은 건너뜀."""
+        now = datetime.utcnow().isoformat()
+        count = 0
+        with self._connect() as conn:
+            for item in items:
+                existing = conn.execute(
+                    "SELECT ticker FROM watchlist WHERE ticker=?",
+                    (item["ticker"],),
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """INSERT INTO watchlist
+                           (ticker, name, target_price, target_rsi, active,
+                            created_at, rec_price, horizon, manager, sector)
+                           VALUES (?, ?, NULL, 30, 1, ?, 0, '', '', ?)""",
+                        (item["ticker"], item["name"], now,
+                         item.get("sector", "")),
+                    )
+                    count += 1
+                else:
+                    # sector만 업데이트 (기존 horizon/manager 보존)
+                    sector = item.get("sector", "")
+                    if sector:
+                        conn.execute(
+                            "UPDATE watchlist SET sector=? WHERE ticker=? AND (sector IS NULL OR sector='')",
+                            (sector, item["ticker"]),
+                        )
+        return count
+
+    def get_watchlist_by_category(
+        self, category: str, limit: int = 8, offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """카테고리별 워치리스트 조회 (페이지네이션). Returns (items, total_count)."""
+        with self._connect() as conn:
+            if category == "holding":
+                rows = conn.execute(
+                    """SELECT w.ticker, w.name, w.horizon, w.manager, w.sector,
+                              w.rec_price,
+                              h.buy_price, h.current_price, h.pnl_pct,
+                              h.quantity, h.eval_amount, h.holding_type
+                       FROM watchlist w
+                       INNER JOIN holdings h ON w.ticker = h.ticker
+                         AND h.status='active'
+                       WHERE w.active=1
+                       ORDER BY w.name
+                       LIMIT ? OFFSET ?""",
+                    (limit, offset),
+                ).fetchall()
+                total = conn.execute(
+                    """SELECT COUNT(*) FROM watchlist w
+                       INNER JOIN holdings h ON w.ticker = h.ticker
+                         AND h.status='active'
+                       WHERE w.active=1""",
+                ).fetchone()[0]
+            elif category == "unclassified":
+                rows = conn.execute(
+                    """SELECT w.ticker, w.name, w.horizon, w.manager, w.sector,
+                              w.rec_price,
+                              NULL as buy_price, NULL as current_price,
+                              NULL as pnl_pct, NULL as quantity,
+                              NULL as eval_amount, NULL as holding_type
+                       FROM watchlist w
+                       WHERE w.active=1
+                         AND (w.horizon IS NULL OR w.horizon='')
+                       ORDER BY w.name
+                       LIMIT ? OFFSET ?""",
+                    (limit, offset),
+                ).fetchall()
+                total = conn.execute(
+                    """SELECT COUNT(*) FROM watchlist
+                       WHERE active=1
+                         AND (horizon IS NULL OR horizon='')""",
+                ).fetchone()[0]
+            else:
+                # scalp, swing, position, long_term
+                rows = conn.execute(
+                    """SELECT w.ticker, w.name, w.horizon, w.manager, w.sector,
+                              w.rec_price,
+                              h.buy_price, h.current_price, h.pnl_pct,
+                              h.quantity, h.eval_amount, h.holding_type
+                       FROM watchlist w
+                       LEFT JOIN holdings h ON w.ticker = h.ticker
+                         AND h.status='active'
+                       WHERE w.active=1 AND w.horizon=?
+                       ORDER BY w.name
+                       LIMIT ? OFFSET ?""",
+                    (category, limit, offset),
+                ).fetchall()
+                total = conn.execute(
+                    "SELECT COUNT(*) FROM watchlist WHERE active=1 AND horizon=?",
+                    (category,),
+                ).fetchone()[0]
+            return [dict(r) for r in rows], total
+
+    def get_watchlist_category_counts(self) -> dict:
+        """카테고리별 종목 수 반환."""
+        with self._connect() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM watchlist WHERE active=1",
+            ).fetchone()[0]
+            counts = {"total": total}
+            for cat in ("scalp", "swing", "position", "long_term"):
+                counts[cat] = conn.execute(
+                    "SELECT COUNT(*) FROM watchlist WHERE active=1 AND horizon=?",
+                    (cat,),
+                ).fetchone()[0]
+            counts["unclassified"] = conn.execute(
+                """SELECT COUNT(*) FROM watchlist
+                   WHERE active=1 AND (horizon IS NULL OR horizon='')""",
+            ).fetchone()[0]
+            counts["holding"] = conn.execute(
+                """SELECT COUNT(*) FROM watchlist w
+                   INNER JOIN holdings h ON w.ticker = h.ticker
+                     AND h.status='active'
+                   WHERE w.active=1""",
+            ).fetchone()[0]
+            return counts
+
     # -- portfolio_horizon ------------------------------------------------------
 
     def upsert_portfolio_horizon(

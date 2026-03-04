@@ -1095,164 +1095,239 @@ class AdminExtrasMixin:
                 return item.get("name", fallback or ticker)
         return fallback if fallback and fallback != ticker else ticker
 
-    async def _build_favorites_view(self) -> tuple[str, InlineKeyboardMarkup] | None:
-        """즐겨찾기 UI 빌드 → (text, markup).
+    # ── 종목 관리 대시보드 (v8.4) ─────────────────────────────────
 
-        v5.8.1 UX 재설계:
-        - 텍스트: 종목명 + 현재가 + 오늘등락 + 추천수익률
-        - 버튼: [종목명] [분류(현재유형)] [❌]
-        - 분류 누르면 AI추천 + 4개 유형 한번에 표시
-        """
-        from kstock.bot.investment_managers import MANAGERS
+    _HZ_TAG = {
+        "scalp": "⚡단타", "swing": "🔥스윙",
+        "position": "📊포지션", "long_term": "💎장기",
+    }
+    _HZ_HDR = {
+        "scalp": "⚡ 단타 — 제시 리버모어",
+        "swing": "🔥 스윙 — 윌리엄 오닐",
+        "position": "📊 포지션 — 피터 린치",
+        "long_term": "💎 장기 — 워렌 버핏",
+    }
+    _TAB_EMOJI = {
+        "holding": "💰", "scalp": "⚡", "swing": "🔥",
+        "position": "📊", "long_term": "💎", "unclassified": "📦",
+    }
+    _TAB_LABEL = {
+        "holding": "보유", "scalp": "단타", "swing": "스윙",
+        "position": "포지션", "long_term": "장기", "unclassified": "미분류",
+    }
+    _ITEMS_PER_PAGE = 8
 
-        watchlist = self.db.get_watchlist()
+    async def _sync_universe_to_watchlist(self) -> int:
+        """유니버스 전체를 워치리스트에 동기화. 신규 종목만 추가."""
+        items = []
+        for stock in self.all_tickers:
+            items.append({
+                "ticker": stock["code"],
+                "name": stock["name"],
+                "sector": stock.get("sector", stock.get("category", "")),
+            })
+        count = self.db.bulk_add_watchlist(items)
 
-        if not watchlist:
-            holdings = await self._load_holdings_with_fallback()
+        # 기존 holdings의 holding_type → watchlist.horizon 반영
+        try:
+            holdings = self.db.get_active_holdings()
             for h in holdings:
                 ticker = h.get("ticker", "")
-                name = h.get("name", "")
-                bp = h.get("buy_price", 0)
                 ht = h.get("holding_type", "")
-                if ticker and name:
-                    try:
-                        self.db.add_watchlist(
-                            ticker, name, rec_price=bp,
-                            horizon=_holding_type_to_horizon(ht),
-                            manager=_horizon_to_manager(ht),
-                        )
-                    except Exception:
-                        logger.debug("_action_favorites add_watchlist failed for %s", ticker, exc_info=True)
-            watchlist = self.db.get_watchlist()
+                if ticker and ht and ht not in ("auto", ""):
+                    hz = _holding_type_to_horizon(ht)
+                    if hz:
+                        self.db.update_watchlist_horizon(ticker, hz, hz)
+        except Exception:
+            logger.debug("_sync_universe_to_watchlist holdings sync failed", exc_info=True)
 
-        if not watchlist:
-            return None
+        return count
 
-        # ── 종목 데이터 수집 ──
-        items = []
-        for w in watchlist[:12]:
-            ticker = w.get("ticker", "")
-            name = w.get("name", ticker)
-            rec_price = w.get("rec_price", 0) or 0
-            horizon = w.get("horizon", "") or ""
+    async def _build_dashboard_view(
+        self, category: str = "", page: int = 0,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        """종목 관리 대시보드 빌드. category=""이면 요약, 아니면 탭 상세."""
+        counts = self.db.get_watchlist_category_counts()
 
-            if name == ticker or not name:
-                name = self._resolve_name(ticker, name)
-                if name != ticker:
-                    try:
-                        self.db.add_watchlist(ticker, name)
-                    except Exception:
-                        logger.debug("_action_favorites name update failed for %s", ticker, exc_info=True)
+        if category == "":
+            return await self._build_dashboard_summary(counts)
+        return await self._build_dashboard_tab(category, page, counts)
 
-            cur = 0
+    async def _build_dashboard_summary(
+        self, counts: dict,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        """대시보드 요약 화면: 카테고리 수 + 보유종목 미리보기."""
+        total = counts.get("total", 0)
+        lines = [
+            f"⭐ 종목 관리 ({total}종목)",
+            "━" * 22,
+            "",
+            f"💰 보유: {counts.get('holding', 0)}종목",
+            f"⚡ 단타: {counts.get('scalp', 0)} | "
+            f"🔥 스윙: {counts.get('swing', 0)}",
+            f"📊 포지션: {counts.get('position', 0)} | "
+            f"💎 장기: {counts.get('long_term', 0)}",
+            f"📦 미분류: {counts.get('unclassified', 0)}",
+        ]
+
+        # 보유종목 미리보기 (최대 5개, 가격 조회)
+        if counts.get("holding", 0) > 0:
+            held, _ = self.db.get_watchlist_by_category("holding", limit=5)
+            lines.append("\n── 💰 보유종목 ──")
+            for h in held:
+                name = h.get("name", h.get("ticker", ""))[:8]
+                pnl = float(h.get("pnl_pct", 0) or 0)
+                bp = float(h.get("buy_price", 0) or 0)
+                cur = 0.0
+                dc_pct = 0.0
+                try:
+                    detail = await self._get_price_detail(h["ticker"], 0)
+                    cur = detail["price"]
+                    dc_pct = detail["day_change_pct"]
+                except Exception:
+                    cur = float(h.get("current_price", 0) or 0)
+
+                if cur > 0 and bp > 0:
+                    pnl = (cur - bp) / bp * 100
+
+                de = "📈" if dc_pct > 0 else ("📉" if dc_pct < 0 else "➖")
+                pe = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
+                ps = "+" if pnl > 0 else ""
+                ds = "+" if dc_pct > 0 else ""
+                if cur > 0:
+                    lines.append(
+                        f"{de} {name}: {cur:,.0f}원 ({ds}{dc_pct:.1f}%) "
+                        f"{pe}{ps}{pnl:.1f}%"
+                    )
+                else:
+                    lines.append(f"  {name}")
+
+        # 버튼: 6개 탭 + 자동분류 + 새로고침
+        buttons = []
+        row1 = []
+        row2 = []
+        for cat in ("holding", "scalp", "swing"):
+            e = self._TAB_EMOJI[cat]
+            n = counts.get(cat, 0)
+            lbl = self._TAB_LABEL[cat]
+            row1.append(InlineKeyboardButton(
+                f"{e}{lbl} {n}", callback_data=f"fav:tab:{cat}:0",
+            ))
+        for cat in ("position", "long_term", "unclassified"):
+            e = self._TAB_EMOJI[cat]
+            n = counts.get(cat, 0)
+            lbl = self._TAB_LABEL[cat]
+            row2.append(InlineKeyboardButton(
+                f"{e}{lbl} {n}", callback_data=f"fav:tab:{cat}:0",
+            ))
+        buttons.append(row1)
+        buttons.append(row2)
+
+        if counts.get("unclassified", 0) > 0:
+            buttons.append([
+                InlineKeyboardButton(
+                    "🤖 자동분류", callback_data="fav:auto_classify",
+                ),
+                InlineKeyboardButton(
+                    "🔄 새로고침", callback_data="fav:refresh",
+                ),
+            ])
+        else:
+            buttons.append([
+                InlineKeyboardButton(
+                    "🔄 새로고침", callback_data="fav:refresh",
+                ),
+            ])
+
+        buttons.append([
+            InlineKeyboardButton("❌ 닫기", callback_data="dismiss:fav"),
+        ])
+
+        text = "\n".join(lines)
+        return text, InlineKeyboardMarkup(buttons)
+
+    async def _build_dashboard_tab(
+        self, category: str, page: int, counts: dict,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        """카테고리 탭 상세 화면: 종목 리스트 + 페이지네이션."""
+        per_page = self._ITEMS_PER_PAGE
+        items, total = self.db.get_watchlist_by_category(
+            category, limit=per_page, offset=page * per_page,
+        )
+        total_pages = max(1, (total + per_page - 1) // per_page)
+
+        e = self._TAB_EMOJI.get(category, "📌")
+        lbl = self._TAB_LABEL.get(category, category)
+        hdr = self._HZ_HDR.get(category, f"{e} {lbl}")
+        lines = [
+            f"{hdr} ({total}종목)",
+            "━" * 22,
+        ]
+
+        # 종목 데이터 + 가격 조회
+        buttons = []
+        for item in items:
+            ticker = item.get("ticker", "")
+            name = (item.get("name", "") or ticker)[:8]
+            bp = float(item.get("buy_price", 0) or 0)
+            is_held = bp > 0
+
+            cur = 0.0
             dc_pct = 0.0
             try:
                 detail = await self._get_price_detail(ticker, 0)
                 cur = detail["price"]
                 dc_pct = detail["day_change_pct"]
             except Exception:
-                logger.debug("_action_favorites get_price_detail failed for %s", ticker, exc_info=True)
+                pass
 
-            rec_pnl = 0.0
-            if rec_price > 0 and cur > 0:
-                rec_pnl = (cur - rec_price) / rec_price * 100
-            if rec_price <= 0 and cur > 0:
-                rec_price = cur
-                try:
-                    self.db.add_watchlist(ticker, name, rec_price=cur)
-                except Exception:
-                    logger.debug("_action_favorites rec_price update failed for %s", ticker, exc_info=True)
+            de = "📈" if dc_pct > 0 else ("📉" if dc_pct < 0 else "➖")
+            ds = "+" if dc_pct > 0 else ""
+            hold_tag = ""
 
-            items.append({
-                "ticker": ticker, "name": name, "price": cur,
-                "dc_pct": dc_pct, "rec_price": rec_price,
-                "rec_pnl": rec_pnl, "horizon": horizon,
-            })
+            if is_held and cur > 0:
+                pnl = (cur - bp) / bp * 100
+                pe = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
+                ps = "+" if pnl > 0 else ""
+                hold_tag = f" 보유{pe}{ps}{pnl:.1f}%"
 
-        # ── 상수 ──
-        hz_tag = {"scalp": "⚡단타", "swing": "🔥스윙", "position": "📊포지션", "long_term": "💎장기"}
-        hz_hdr = {
-            "scalp": "⚡ 단타 — 제시 리버모어",
-            "swing": "🔥 스윙 — 윌리엄 오닐",
-            "position": "📊 포지션 — 피터 린치",
-            "long_term": "💎 장기 — 워렌 버핏",
-        }
-
-        # ── 그룹핑 ──
-        grouped = {}
-        ungrouped = []
-        for item in items:
-            hz = item["horizon"]
-            if hz and hz in hz_hdr:
-                grouped.setdefault(hz, []).append(item)
+            if cur > 0:
+                lines.append(
+                    f"{de} {name}: {cur:,.0f}원 ({ds}{dc_pct:.1f}%){hold_tag}"
+                )
             else:
-                ungrouped.append(item)
+                lines.append(f"  {name}")
 
-        lines = ["⭐ 내 즐겨찾기\n"]
-        buttons = []
-
-        def _price_line(item):
-            c, dp, rp = item["price"], item["dc_pct"], item["rec_pnl"]
-            if c <= 0:
-                return f"  ─ {item['name']}"
-            de = "📈" if dp > 0 else ("📉" if dp < 0 else "➖")
-            ds = "+" if dp > 0 else ""
-            pnl = ""
-            if item["rec_price"] > 0:
-                pe = "🟢" if rp > 0 else ("🔴" if rp < 0 else "⚪")
-                ps = "+" if rp > 0 else ""
-                pnl = f" | 추천{pe}{ps}{rp:.1f}%"
-            return f"  {de} {item['name']}: {c:,.0f}원 ({ds}{dp:.1f}%){pnl}"
-
-        def _item_buttons(item, has_type=True):
-            """종목 1개에 대한 버튼 행: [종목명] [📊차트] [분류] [❌]"""
-            tk = item["ticker"]
-            hz = item["horizon"]
-            # 분류 버튼 라벨
-            if has_type and hz in hz_tag:
-                cls_label = f"{hz_tag[hz]} 변경"
-            else:
-                cls_label = "🔄 분류하기"
-            return [
+            # 종목별 버튼: [종목명] → 상세
+            buttons.append([
                 InlineKeyboardButton(
-                    f"📋 {item['name'][:6]}",
-                    callback_data=f"fav:news:{tk}",
+                    f"📋 {name}", callback_data=f"fav:stock:{ticker}",
                 ),
                 InlineKeyboardButton(
-                    "📊",
-                    callback_data=f"fav:chart:{tk}",
+                    "📊", callback_data=f"fav:chart:{ticker}",
                 ),
                 InlineKeyboardButton(
-                    cls_label,
-                    callback_data=f"fav:classify:{tk}",
+                    "🔄", callback_data=f"fav:classify:{ticker}",
                 ),
-                InlineKeyboardButton("❌", callback_data=f"fav:rm:{tk}"),
-            ]
+            ])
 
-        # ── 분류된 종목 출력 ──
-        for hz_key in ["scalp", "swing", "position", "long_term"]:
-            if hz_key not in grouped:
-                continue
-            lines.append(f"\n{hz_hdr[hz_key]}")
-            for item in grouped[hz_key]:
-                lines.append(_price_line(item))
-                buttons.append(_item_buttons(item, has_type=True))
+        if total_pages > 1:
+            lines.append(f"\n[{page + 1}/{total_pages} 페이지]")
 
-        # ── 미분류 종목 ──
-        if ungrouped:
-            lines.append("\n📌 미분류")
-            for item in ungrouped:
-                lines.append(_price_line(item))
-                buttons.append(_item_buttons(item, has_type=False))
-
-        # ── 하단 ──
-        buttons.append([
-            InlineKeyboardButton("➕ 종목 추가", callback_data="fav:add_mode"),
-            InlineKeyboardButton("🔄 새로고침", callback_data="fav:refresh"),
-        ])
-        buttons.append([
-            InlineKeyboardButton("👨‍💼 매니저 현황", callback_data="fav:managers"),
-        ])
+        # 페이지네이션 버튼
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(
+                "← 이전", callback_data=f"fav:tab:{category}:{page - 1}",
+            ))
+        nav_row.append(InlineKeyboardButton(
+            "🔙 전체", callback_data="fav:tab::0",
+        ))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton(
+                "다음 →", callback_data=f"fav:tab:{category}:{page + 1}",
+            ))
+        buttons.append(nav_row)
         buttons.append([
             InlineKeyboardButton("❌ 닫기", callback_data="dismiss:fav"),
         ])
@@ -1263,20 +1338,182 @@ class AdminExtrasMixin:
 
         return text, InlineKeyboardMarkup(buttons)
 
+    async def _build_stock_detail(
+        self, ticker: str,
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        """개별 종목 상세 보기 (보유 현황 포함)."""
+        name = self._resolve_name(ticker, ticker)
+
+        # watchlist 정보
+        watchlist = self.db.get_watchlist()
+        w_item = None
+        for w in watchlist:
+            if w.get("ticker") == ticker:
+                w_item = w
+                break
+        horizon = (w_item.get("horizon", "") or "") if w_item else ""
+        sector = (w_item.get("sector", "") or "") if w_item else ""
+
+        # universe에서 sector 보완
+        if not sector:
+            for s in self.all_tickers:
+                if s["code"] == ticker:
+                    sector = s.get("sector", s.get("category", ""))
+                    break
+
+        # 현재가
+        cur = 0.0
+        dc_pct = 0.0
+        try:
+            detail = await self._get_price_detail(ticker, 0)
+            cur = detail["price"]
+            dc_pct = detail["day_change_pct"]
+        except Exception:
+            pass
+
+        # 보유 여부
+        holding = self.db.get_holding_by_ticker(ticker)
+
+        hz_label = self._HZ_TAG.get(horizon, "📦미분류")
+        de = "📈" if dc_pct > 0 else ("📉" if dc_pct < 0 else "➖")
+        ds = "+" if dc_pct > 0 else ""
+
+        lines = [
+            f"{de} {name} ({ticker}) — {hz_label}",
+            "━" * 22,
+        ]
+        if cur > 0:
+            lines.append(f"현재가: {cur:,.0f}원 ({ds}{dc_pct:.1f}%)")
+
+        if holding:
+            bp = float(holding.get("buy_price", 0) or 0)
+            qty = int(holding.get("quantity", 0) or 0)
+            pnl = 0.0
+            if bp > 0 and cur > 0:
+                pnl = (cur - bp) / bp * 100
+            pe = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
+            ps = "+" if pnl > 0 else ""
+            lines.append(f"\n{pe} 보유중 | 매수: {bp:,.0f}원 | 손익: {ps}{pnl:.1f}%")
+            if qty:
+                eval_amt = cur * qty if cur > 0 else 0
+                lines.append(f"수량: {qty}주 | 평가: {eval_amt:,.0f}원")
+
+        if sector:
+            lines.append(f"섹터: {sector}")
+
+        # 버튼
+        buttons = [
+            [
+                InlineKeyboardButton("📰 뉴스", callback_data=f"fav:news:{ticker}"),
+                InlineKeyboardButton("📊 차트", callback_data=f"fav:chart:{ticker}"),
+            ],
+            [
+                InlineKeyboardButton("🔄 분류변경", callback_data=f"fav:classify:{ticker}"),
+                InlineKeyboardButton(
+                    "🤖 매니저분석",
+                    callback_data=f"mgr:{horizon or 'swing'}:{ticker}",
+                ),
+            ],
+        ]
+
+        # 돌아가기 버튼: 소속 탭으로 복귀
+        back_cat = horizon if horizon else "unclassified"
+        buttons.append([
+            InlineKeyboardButton(
+                "🔙 돌아가기", callback_data=f"fav:tab:{back_cat}:0",
+            ),
+        ])
+
+        return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+    def _rule_based_classify(self, ticker: str) -> str:
+        """규칙 기반 빠른 분류. ETF/대형주 등 명확한 종목만."""
+        item = None
+        for s in self.all_tickers:
+            if s["code"] == ticker:
+                item = s
+                break
+        if not item:
+            return ""
+
+        category = item.get("category", "")
+        sector = item.get("sector", "")
+        market = item.get("market", "")
+
+        # ETF 분류
+        if category in ("index", "global", "dividend", "sector", "commodity"):
+            return "long_term"
+        if category in ("leverage", "inverse"):
+            return "scalp"
+
+        # 방어적 대형주 → 장기
+        if sector in ("금융", "통신", "보험", "담배", "지주"):
+            return "long_term"
+
+        # 고성장 KOSDAQ → 스윙
+        if market == "KOSDAQ":
+            return "swing"
+
+        # 경기순환 → 포지션
+        if sector in ("자동차", "조선", "건설", "에너지", "철강", "화학"):
+            return "position"
+
+        return ""
+
+    async def _auto_classify_unassigned(self, limit: int = 10) -> int:
+        """미분류 종목을 규칙+AI로 일괄 분류."""
+        watchlist = self.db.get_watchlist()
+        unclassified = [
+            w for w in watchlist
+            if not w.get("horizon") and w.get("active", 1)
+        ][:limit]
+
+        classified = 0
+        for w in unclassified:
+            ticker = w["ticker"]
+            name = w.get("name", ticker)
+            try:
+                hz = self._rule_based_classify(ticker)
+                if not hz:
+                    try:
+                        from kstock.bot.investment_managers import recommend_investment_type
+                        hz = await recommend_investment_type(ticker, name)
+                    except Exception:
+                        logger.debug("AI classify failed for %s", ticker, exc_info=True)
+                if hz:
+                    self.db.update_watchlist_horizon(ticker, hz, hz)
+                    classified += 1
+            except Exception:
+                logger.debug("auto_classify failed for %s", ticker, exc_info=True)
+        return classified
+
+    async def _build_favorites_view(self) -> tuple[str, InlineKeyboardMarkup] | None:
+        """(하위호환) 기존 즐겨찾기 뷰 → 대시보드로 리다이렉트."""
+        counts = self.db.get_watchlist_category_counts()
+        if counts.get("total", 0) == 0:
+            return None
+        return await self._build_dashboard_view()
+
     async def _menu_favorites(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """⭐ 즐겨찾기 — watchlist 종목 표시 + 빠른 액션."""
-        result = await self._build_favorites_view()
-        if result is None:
+        """⭐ 즐겨찾기 → 종목 관리 대시보드."""
+        # 유니버스 동기화 (첫 실행 또는 종목 부족 시)
+        counts = self.db.get_watchlist_category_counts()
+        if counts.get("total", 0) < len(self.all_tickers) // 2:
+            added = await self._sync_universe_to_watchlist()
+            if added > 0:
+                counts = self.db.get_watchlist_category_counts()
+
+        if counts.get("total", 0) == 0:
             await update.message.reply_text(
-                "⭐ 즐겨찾기가 비어있습니다.\n\n"
-                "종목명을 입력하면 자동으로 추가할 수 있습니다.\n"
-                "예: 삼성전자",
+                "⭐ 종목 관리 대시보드\n\n"
+                "등록된 종목이 없습니다. 유니버스 설정을 확인해주세요.",
                 reply_markup=get_reply_markup(context),
             )
             return
-        text, markup = result
+
+        text, markup = await self._build_dashboard_view()
         await update.message.reply_text(text, reply_markup=markup)
 
     async def _action_favorites(self, query, context, payload: str = "") -> None:
@@ -1522,13 +1759,34 @@ class AdminExtrasMixin:
             )
             return
 
+        if action == "tab":
+            # 탭 이동: fav:tab:{category}:{page}
+            cat = parts[1] if len(parts) > 1 else ""
+            pg = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+            text, markup = await self._build_dashboard_view(cat, pg)
+            await safe_edit_or_reply(query, text, reply_markup=markup)
+            return
+
+        if action == "stock":
+            # 개별 종목 상세: fav:stock:{ticker}
+            ticker = parts[1] if len(parts) > 1 else ""
+            if ticker:
+                text, markup = await self._build_stock_detail(ticker)
+                await safe_edit_or_reply(query, text, reply_markup=markup)
+            return
+
+        if action == "auto_classify":
+            # 미분류 종목 자동 분류
+            await safe_edit_or_reply(query, "🤖 미분류 종목 자동 분류 중...")
+            classified = await self._auto_classify_unassigned(limit=15)
+            text, markup = await self._build_dashboard_view()
+            header = f"🤖 {classified}종목 자동 분류 완료!\n\n"
+            await safe_edit_or_reply(query, header + text, reply_markup=markup)
+            return
+
         if action == "refresh":
-            result = await self._build_favorites_view()
-            if result:
-                text, markup = result
-                await query.edit_message_text(text, reply_markup=markup)
-            else:
-                await query.edit_message_text("⭐ 즐겨찾기가 비어있습니다.")
+            text, markup = await self._build_dashboard_view()
+            await safe_edit_or_reply(query, text, reply_markup=markup)
             return
 
     # ── 원격접속 메뉴 ─────────────────────────────────────────
