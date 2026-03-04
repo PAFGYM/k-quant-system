@@ -1396,21 +1396,20 @@ class AdminExtrasMixin:
         buttons.append(row1)
         buttons.append(row2)
 
+        # 매수 추천 + 자동분류 + 새로고침
+        action_row = [
+            InlineKeyboardButton(
+                "📈 매수추천", callback_data="fav:buy_scan",
+            ),
+        ]
         if counts.get("unclassified", 0) > 0:
-            buttons.append([
-                InlineKeyboardButton(
-                    "🤖 자동분류", callback_data="fav:auto_classify",
-                ),
-                InlineKeyboardButton(
-                    "🔄 새로고침", callback_data="fav:refresh",
-                ),
-            ])
-        else:
-            buttons.append([
-                InlineKeyboardButton(
-                    "🔄 새로고침", callback_data="fav:refresh",
-                ),
-            ])
+            action_row.append(InlineKeyboardButton(
+                "🤖 자동분류", callback_data="fav:auto_classify",
+            ))
+        action_row.append(InlineKeyboardButton(
+            "🔄 새로고침", callback_data="fav:refresh",
+        ))
+        buttons.append(action_row)
 
         buttons.append(make_feedback_row("즐겨찾기"))
 
@@ -1864,6 +1863,153 @@ class AdminExtrasMixin:
             await query.message.reply_text(
                 result_text[:4000], reply_markup=nav_kb,
             )
+            return
+
+        if action == "buy_scan":
+            # v8.7: 전체 관심종목 매수 추천 스캔
+            import asyncio as _aio
+            await safe_edit_or_reply(query, "📈 관심종목 매수 스캔 중... (30초 소요)")
+
+            try:
+                watchlist = self.db.get_watchlist()
+                holdings = self.db.get_active_holdings()
+                held_tickers = {h["ticker"] for h in holdings}
+                # 보유 종목 제외, 분류된 종목만 (미분류는 제외)
+                candidates = [
+                    w for w in watchlist
+                    if w["ticker"] not in held_tickers
+                    and w.get("horizon") in ("scalp", "swing", "position", "long_term")
+                ]
+
+                if not candidates:
+                    await query.message.reply_text(
+                        "📈 스캔 대상 종목이 없습니다.\n"
+                        "즐겨찾기에서 종목을 분류해주세요.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
+                        ]),
+                    )
+                    return
+
+                from kstock.features.technical import compute_indicators
+                from kstock.bot.investment_managers import compute_recovery_score
+
+                async def _scan_one(w):
+                    """한 종목 기술 스캔."""
+                    ticker = w["ticker"]
+                    result = {"ticker": ticker, "name": (w.get("name") or ticker)[:8],
+                              "horizon": w.get("horizon", ""), "score": 0, "ok": False}
+                    try:
+                        detail = await self._get_price_detail(ticker, 0)
+                        price = detail["price"]
+                        dc = detail["day_change_pct"]
+                        result["price"] = price
+                        result["dc"] = dc
+
+                        market = "KOSPI"
+                        for s in self.all_tickers:
+                            if s["code"] == ticker:
+                                market = s.get("market", "KOSPI")
+                                break
+                        ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
+                        if ohlcv is not None and not ohlcv.empty and len(ohlcv) >= 20:
+                            tech = compute_indicators(ohlcv)
+                            result["rsi"] = tech.rsi
+                            result["bb_pctb"] = tech.bb_pctb
+                            result["macd_cross"] = tech.macd_signal_cross
+                            result["vol_ratio"] = tech.volume_ratio
+                            result["score"] = compute_recovery_score(tech, dc)
+                            result["ok"] = True
+                    except Exception:
+                        pass
+                    return result
+
+                # 병렬 스캔 (최대 20개씩 배치)
+                batch_size = 20
+                all_results = []
+                for i in range(0, len(candidates), batch_size):
+                    batch = candidates[i:i + batch_size]
+                    batch_results = await _aio.gather(
+                        *[_scan_one(w) for w in batch],
+                        return_exceptions=True,
+                    )
+                    for r in batch_results:
+                        if isinstance(r, dict) and r.get("ok"):
+                            all_results.append(r)
+
+                # 점수순 정렬, 상위 10개
+                all_results.sort(key=lambda x: x["score"], reverse=True)
+                top = all_results[:10]
+
+                hz_emoji = {"scalp": "⚡", "swing": "🔥", "position": "📊", "long_term": "💎"}
+                lines = [
+                    f"📈 매수 추천 스캔 ({len(all_results)}종목 분석)",
+                    "━" * 22,
+                ]
+
+                if not top:
+                    lines.append("\n스캔 결과가 없습니다.")
+                else:
+                    for i, r in enumerate(top, 1):
+                        he = hz_emoji.get(r.get("horizon"), "📌")
+                        score = r["score"]
+                        # 점수에 따른 신호등
+                        if score >= 60:
+                            sig = "🟢 매수"
+                        elif score >= 40:
+                            sig = "🟡 관심"
+                        else:
+                            sig = "⚪ 보류"
+                        rsi = r.get("rsi", 50)
+                        mc = r.get("macd_cross", 0)
+                        mc_txt = "↑" if mc > 0 else ("↓" if mc < 0 else "-")
+                        vr = r.get("vol_ratio", 1)
+                        price = r.get("price", 0)
+                        dc = r.get("dc", 0)
+                        ds = "+" if dc > 0 else ""
+                        lines.append(
+                            f"{i}. {he}{r['name']} {sig} ({score}점)\n"
+                            f"   {price:,.0f}원({ds}{dc:.1f}%) "
+                            f"RSI:{rsi:.0f} MACD:{mc_txt} 거래량:{vr:.1f}배"
+                        )
+
+                    lines.append(f"\n{'━' * 22}")
+                    lines.append("🟢60+점=매수 🟡40+점=관심 ⚪보류")
+
+                # 상위 종목 버튼 (최대 6개, 2열)
+                buttons = []
+                btn_row = []
+                for r in top[:6]:
+                    cb = f"fav:diag:{r['ticker']}"
+                    if len(cb) <= 64:
+                        btn_row.append(InlineKeyboardButton(
+                            f"🔍 {r['name']}", callback_data=cb,
+                        ))
+                    if len(btn_row) == 3:
+                        buttons.append(btn_row)
+                        btn_row = []
+                if btn_row:
+                    buttons.append(btn_row)
+
+                buttons.append([
+                    InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
+                    InlineKeyboardButton("👍", callback_data="fb:like:매수추천"),
+                    InlineKeyboardButton("👎", callback_data="fb:dislike:매수추천"),
+                    InlineKeyboardButton("❌", callback_data="dismiss:0"),
+                ])
+
+                await query.message.reply_text(
+                    "\n".join(lines)[:4000],
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            except Exception as e:
+                logger.error("fav:buy_scan failed: %s", e, exc_info=True)
+                await query.message.reply_text(
+                    f"⚠️ 매수 스캔 실패: {e}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
+                    ]),
+                )
             return
 
         if action == "chart":
