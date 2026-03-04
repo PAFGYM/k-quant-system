@@ -129,11 +129,16 @@ class CoreHandlersMixin:
         ])
 
     async def _post_shutdown(self, app: Application) -> None:
-        """Graceful shutdown: WebSocket 정리."""
+        """Graceful shutdown: WebSocket + ControlServer 정리."""
         try:
             await self.ws.disconnect()
         except Exception as e:
             logger.warning("WebSocket shutdown error: %s", e)
+        try:
+            if hasattr(self, "_control_server") and self._control_server:
+                await self._control_server.stop()
+        except Exception as e:
+            logger.warning("ControlServer shutdown error: %s", e)
 
     def schedule_jobs(self, app: Application) -> None:
         jq = app.job_queue
@@ -403,6 +408,15 @@ class CoreHandlersMixin:
             time=dt_time(hour=23, minute=55, tzinfo=KST),
             name="daily_system_score",
         )
+        # v8.7: ControlServer 시작 (Unix socket CLI 제어)
+        try:
+            from kstock.bot.control_server import ControlServer
+            self._control_server = ControlServer(self)
+            jq.run_once(self._job_start_control_server, when=2, name="control_server_start")
+        except Exception as e:
+            logger.warning("ControlServer init failed: %s", e)
+            self._control_server = None
+
         logger.info(
             "Scheduled: buy_planner(weekday 07:50), us_premarket(07:00), "
             "morning(07:30), intraday(1min), "
@@ -419,11 +433,21 @@ class CoreHandlersMixin:
             "surge_threshold(%.1f%%), "
             "alert_mode(%s), "
             "signal_eval(weekday 16:20), learning_report(Sat 11:00), "
-            "daily_system_score(23:55) KST",
+            "daily_system_score(23:55), control_server(unix_socket) KST",
             _risk_iv, _news_iv, _global_iv, _us_iv,
             self._SURGE_THRESHOLD_PCT,
             self._alert_mode,
         )
+
+    # == ControlServer 시작 ====================================================
+
+    async def _job_start_control_server(self, context) -> None:
+        """v8.7: Unix socket ControlServer 시작."""
+        if hasattr(self, "_control_server") and self._control_server:
+            try:
+                await self._control_server.start()
+            except Exception as e:
+                logger.error("ControlServer start failed: %s", e)
 
     # == 봇 시작 시 클로드 메뉴 자동 발송 ====================================
 
@@ -1645,6 +1669,8 @@ class CoreHandlersMixin:
                 # v8.6: 매니저 도메인 관리
                 "mgr_tab": self._action_manager_tab,
                 "mgr_scan": self._action_manager_scan,
+                # v8.7: 시스템 컨트롤
+                "ctrl": self._handle_control_callback,
             }
             handler = dispatch.get(action)
             if handler:

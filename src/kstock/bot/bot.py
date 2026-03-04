@@ -18,6 +18,7 @@ from kstock.bot.mixins import (
     SchedulerMixin,
     CommandsMixin,
     AdminExtrasMixin,
+    ControlMixin,
     RemoteClaudeMixin,
 )
 
@@ -31,9 +32,10 @@ class KQuantBot(
     SchedulerMixin,
     CommandsMixin,
     AdminExtrasMixin,
+    ControlMixin,
     RemoteClaudeMixin,
 ):
-    """K-Quant v8.7 Telegram Bot — Multi-AI + Real-time + Modular."""
+    """K-Quant v8.7 Telegram Bot — Multi-AI + Real-time + Modular + Control."""
     pass
 
 

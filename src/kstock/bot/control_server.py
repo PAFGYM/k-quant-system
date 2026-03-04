@@ -151,11 +151,12 @@ class ControlServer:
 
     async def _cmd_get_score(self, **_kw) -> dict:
         try:
-            row = self.bot.db.execute(
-                "SELECT score_date, total_score, signal_score, trade_score, "
-                "alert_score, learning_score, cost_score, uptime_score, details_json "
-                "FROM system_scores ORDER BY score_date DESC LIMIT 1"
-            ).fetchone()
+            with self.bot.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT score_date, total_score, signal_score, trade_score, "
+                    "alert_score, learning_score, cost_score, uptime_score, details_json "
+                    "FROM system_scores ORDER BY score_date DESC LIMIT 1"
+                ).fetchone()
             if row:
                 return {
                     "date": row[0], "total": row[1],
@@ -170,15 +171,16 @@ class ControlServer:
 
     async def _cmd_get_cost(self, **_kw) -> dict:
         try:
-            row = self.bot.db.execute(
-                "SELECT SUM(total_cost_usd), COUNT(*), "
-                "SUM(input_tokens), SUM(output_tokens) "
-                "FROM api_usage_log"
-            ).fetchone()
-            today_row = self.bot.db.execute(
-                "SELECT SUM(total_cost_usd), COUNT(*) "
-                "FROM api_usage_log WHERE date(timestamp) = date('now')"
-            ).fetchone()
+            with self.bot.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT SUM(total_cost_usd), COUNT(*), "
+                    "SUM(input_tokens), SUM(output_tokens) "
+                    "FROM api_usage_log"
+                ).fetchone()
+                today_row = conn.execute(
+                    "SELECT SUM(total_cost_usd), COUNT(*) "
+                    "FROM api_usage_log WHERE date(timestamp) = date('now')"
+                ).fetchone()
             return {
                 "total_cost": round(row[0] or 0, 4),
                 "total_calls": row[1] or 0,

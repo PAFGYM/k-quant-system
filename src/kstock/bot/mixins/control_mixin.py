@@ -227,11 +227,12 @@ class ControlMixin:
     async def _ctrl_quick_stats(self, query, context, _arg: str) -> None:
         lines = ["📊 시스템 점수 + API 비용\n"]
         try:
-            row = self.db.execute(
-                "SELECT score_date, total_score, signal_score, trade_score, "
-                "alert_score, learning_score, cost_score, uptime_score "
-                "FROM system_scores ORDER BY score_date DESC LIMIT 1"
-            ).fetchone()
+            with self.db._connect() as conn:
+                row = conn.execute(
+                    "SELECT score_date, total_score, signal_score, trade_score, "
+                    "alert_score, learning_score, cost_score, uptime_score "
+                    "FROM system_scores ORDER BY score_date DESC LIMIT 1"
+                ).fetchone()
             if row:
                 lines.append(f"📅 {row[0]}")
                 lines.append(f"🏆 총점: {row[1]}/100")
@@ -245,13 +246,14 @@ class ControlMixin:
 
         lines.append("")
         try:
-            cost_row = self.db.execute(
-                "SELECT SUM(total_cost_usd), COUNT(*) FROM api_usage_log"
-            ).fetchone()
-            today_row = self.db.execute(
-                "SELECT SUM(total_cost_usd), COUNT(*) "
-                "FROM api_usage_log WHERE date(timestamp) = date('now')"
-            ).fetchone()
+            with self.db._connect() as conn:
+                cost_row = conn.execute(
+                    "SELECT SUM(total_cost_usd), COUNT(*) FROM api_usage_log"
+                ).fetchone()
+                today_row = conn.execute(
+                    "SELECT SUM(total_cost_usd), COUNT(*) "
+                    "FROM api_usage_log WHERE date(timestamp) = date('now')"
+                ).fetchone()
             total_cost = round(cost_row[0] or 0, 4) if cost_row else 0
             total_calls = cost_row[1] or 0 if cost_row else 0
             today_cost = round(today_row[0] or 0, 4) if today_row else 0

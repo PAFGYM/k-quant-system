@@ -1,4 +1,4 @@
-"""Bot mixin modules for K-Quant v3.6."""
+"""Bot mixin modules for K-Quant v8.7."""
 
 from kstock.bot.mixins.core_handlers import CoreHandlersMixin  # noqa: F401
 from kstock.bot.mixins.menus_kis import MenusKisMixin  # noqa: F401
@@ -6,6 +6,7 @@ from kstock.bot.mixins.trading import TradingMixin  # noqa: F401
 from kstock.bot.mixins.scheduler import SchedulerMixin  # noqa: F401
 from kstock.bot.mixins.commands import CommandsMixin  # noqa: F401
 from kstock.bot.mixins.admin_extras import AdminExtrasMixin  # noqa: F401
+from kstock.bot.mixins.control_mixin import ControlMixin  # noqa: F401
 from kstock.bot.mixins.remote_claude import RemoteClaudeMixin  # noqa: F401
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "SchedulerMixin",
     "CommandsMixin",
     "AdminExtrasMixin",
+    "ControlMixin",
     "RemoteClaudeMixin",
 ]
