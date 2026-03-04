@@ -610,10 +610,31 @@ class TradingMixin:
         holdings = self.db.get_active_holdings()
 
         if target_ticker:
-            # 특정 종목만 분석 (잔고에서 종목 버튼 클릭)
+            # 특정 종목만 분석 (잔고 또는 즐겨찾기에서 클릭)
             type_holdings = [
                 h for h in holdings if h.get("ticker") == target_ticker
             ]
+            if not type_holdings:
+                # 보유종목이 아닌 관심종목 → 가상 엔트리 생성
+                name = target_ticker
+                for s in self.all_tickers:
+                    if s["code"] == target_ticker:
+                        name = s.get("name", target_ticker)
+                        break
+                cur = 0.0
+                try:
+                    cur = await self._get_price(target_ticker, 0)
+                except Exception:
+                    pass
+                type_holdings = [{
+                    "ticker": target_ticker,
+                    "name": name,
+                    "buy_price": 0,
+                    "quantity": 0,
+                    "current_price": cur,
+                    "holding_type": mgr_type,
+                    "pnl_pct": 0,
+                }]
         else:
             # 해당 유형 전체 분석
             type_holdings = [
@@ -674,7 +695,7 @@ class TradingMixin:
         if target_ticker:
             followup_buttons.append([
                 InlineKeyboardButton("📊 멀티분석", callback_data=f"multi_run:{target_ticker}"),
-                InlineKeyboardButton("📈 호가", callback_data=f"orderbook:{target_ticker}"),
+                InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{target_ticker}"),
             ])
         followup_buttons.append([
             InlineKeyboardButton("🎯 4매니저 추천", callback_data="quick_q:mgr4"),

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# kbot — K-Quant 봇 통합 관리 CLI
+# kbot — K-Quant 봇 통합 관리 CLI v8.7
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
 # 프로세스:
@@ -27,6 +27,15 @@
 #   ./kbot send "메시지"        텔레그램 메시지 전송
 #   ./kbot ai "질문"            AI에게 질문
 #   ./kbot scan [매니저]        매니저 매수 스캔 (scalp/swing/position/long_term)
+#
+# 소켓 컨트롤 (실행 중인 봇에 명령):
+#   ./kbot jobs                 스케줄 작업 목록
+#   ./kbot trigger <작업명>     작업 즉시 실행
+#   ./kbot pause <작업명>       작업 일시중지
+#   ./kbot resume <작업명>      작업 재개
+#   ./kbot alert [모드]         경계모드 조회/변경
+#   ./kbot scores              시스템 점수
+#   ./kbot costs               API 비용
 
 set -euo pipefail
 
@@ -62,6 +71,36 @@ _print_header() {
 
 _tg_py() {
     PYTHONPATH=src python3 "$SCRIPT_DIR/scripts/tg.py" "$@"
+}
+
+_ctrl() {
+    # Send command to running bot via Unix socket
+    local cmd="$1"
+    shift
+    local args="${1:-{}}"
+    PYTHONPATH=src python3 -c "
+import json, sys
+from kstock.bot.control_client import send_command
+r = send_command('$cmd', json.loads('$args'))
+if not r.get('ok'):
+    print(f'Error: {r.get(\"error\", \"unknown\")}', file=sys.stderr)
+    sys.exit(1)
+result = r.get('result', '')
+if isinstance(result, str):
+    print(result)
+elif isinstance(result, list):
+    for item in result:
+        if isinstance(item, dict):
+            icon = '▶' if item.get('enabled', True) else '⏸'
+            print(f'  {icon} {item.get(\"name\", \"?\"):30s} next: {item.get(\"next_run\", \"-\")}')
+        else:
+            print(item)
+elif isinstance(result, dict):
+    for k, v in result.items():
+        print(f'  {k}: {v}')
+else:
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+"
 }
 
 # ── 프로세스 관리 ─────────────────────────
@@ -284,6 +323,79 @@ asyncio.run(run())
 "
 }
 
+# ── 소켓 컨트롤 (실행 중인 봇) ────────────
+
+cmd_jobs() {
+    _print_header
+    echo -e "${BOLD}스케줄 작업 목록${NC}"
+    echo ""
+    _ctrl "list_jobs"
+}
+
+cmd_trigger() {
+    local job_name="${1:-}"
+    if [ -z "$job_name" ]; then
+        echo -e "${RED}사용법: ./kbot trigger <작업명>${NC}"
+        echo ""
+        echo "주요 작업:"
+        echo "  morning_briefing      모닝 브리핑"
+        echo "  us_premarket_briefing 미국 프리마켓"
+        echo "  daily_pdf_report      장마감 리포트"
+        echo "  daily_self_report     자가진단"
+        echo "  daily_system_score    시스템 점수"
+        echo "  sentiment_analysis    뉴스 감성분석"
+        echo "  premarket_buy_planner 매수 플래너"
+        echo "  sector_rotation_check 섹터 로테이션"
+        echo "  contrarian_scan       역발상 스캔"
+        echo "  signal_evaluation     시그널 평가"
+        echo "  auto_classify         자동 분류"
+        return 1
+    fi
+    echo -e "${CYAN}작업 실행: $job_name${NC}"
+    _ctrl "trigger_job" "{\"name\": \"$job_name\"}"
+}
+
+cmd_pause() {
+    local job_name="${1:-}"
+    if [ -z "$job_name" ]; then
+        echo -e "${RED}사용법: ./kbot pause <작업명>${NC}"
+        return 1
+    fi
+    _ctrl "pause_job" "{\"name\": \"$job_name\"}"
+}
+
+cmd_resume() {
+    local job_name="${1:-}"
+    if [ -z "$job_name" ]; then
+        echo -e "${RED}사용법: ./kbot resume <작업명>${NC}"
+        return 1
+    fi
+    _ctrl "resume_job" "{\"name\": \"$job_name\"}"
+}
+
+cmd_alert() {
+    local mode="${1:-}"
+    if [ -z "$mode" ]; then
+        _ctrl "alert_mode"
+    else
+        _ctrl "alert_mode" "{\"mode\": \"$mode\"}"
+    fi
+}
+
+cmd_scores() {
+    _print_header
+    echo -e "${BOLD}시스템 점수${NC}"
+    echo ""
+    _ctrl "get_score"
+}
+
+cmd_costs() {
+    _print_header
+    echo -e "${BOLD}API 비용${NC}"
+    echo ""
+    _ctrl "get_cost"
+}
+
 # ── 도움말 ────────────────────────────────
 
 cmd_help() {
@@ -316,6 +428,15 @@ cmd_help() {
     echo "    ai \"질문\"          AI에게 질문"
     echo "    scan [매니저]       매수 스캔 (scalp/swing/position/long_term/all)"
     echo ""
+    echo -e "  ${BOLD}소켓 컨트롤 (실행 중인 봇)${NC}"
+    echo "    jobs               스케줄 작업 목록"
+    echo "    trigger <작업명>   작업 즉시 실행"
+    echo "    pause <작업명>     작업 일시중지"
+    echo "    resume <작업명>    작업 재개"
+    echo "    alert [모드]       경계모드 조회/변경 (normal/elevated/wartime)"
+    echo "    scores             시스템 점수"
+    echo "    costs              API 비용"
+    echo ""
 }
 
 # ── 메인 ─────────────────────────────────
@@ -338,6 +459,14 @@ case "${1:-help}" in
     send)     cmd_send "${2:-}" ;;
     ai)       cmd_ai "${2:-}" ;;
     scan)     cmd_scan "${2:-all}" ;;
+    # 소켓 컨트롤
+    jobs)     cmd_jobs ;;
+    trigger)  cmd_trigger "${2:-}" ;;
+    pause)    cmd_pause "${2:-}" ;;
+    resume)   cmd_resume "${2:-}" ;;
+    alert)    cmd_alert "${2:-}" ;;
+    scores)   cmd_scores ;;
+    costs)    cmd_costs ;;
     help|-h|--help) cmd_help ;;
     *)
         echo -e "${RED}알 수 없는 명령: $1${NC}"

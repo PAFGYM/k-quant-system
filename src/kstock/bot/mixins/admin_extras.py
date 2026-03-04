@@ -50,6 +50,7 @@ def _admin_buttons() -> list:
             InlineKeyboardButton("🚨 경계 모드", callback_data="adm:alert"),
         ],
         [
+            InlineKeyboardButton("🎮 시스템 컨트롤", callback_data="ctrl:menu"),
             InlineKeyboardButton("\U0001f512 메뉴 닫기", callback_data="adm:close"),
         ],
     ]
@@ -1572,15 +1573,15 @@ class AdminExtrasMixin:
         # 버튼
         buttons = [
             [
+                InlineKeyboardButton("🔍 AI진단", callback_data=f"fav:diag:{ticker}"),
+                InlineKeyboardButton("🤖 분석", callback_data=f"mgr:{horizon or 'swing'}:{ticker}"),
+            ],
+            [
                 InlineKeyboardButton("📰 뉴스", callback_data=f"fav:news:{ticker}"),
                 InlineKeyboardButton("📊 차트", callback_data=f"fav:chart:{ticker}"),
             ],
             [
                 InlineKeyboardButton("🔄 분류", callback_data=f"fav:classify:{ticker}"),
-                InlineKeyboardButton("🤖 분석", callback_data=f"mgr:{horizon or 'swing'}:{ticker}"),
-            ],
-            [
-                InlineKeyboardButton("🗑 삭제", callback_data=f"fav:rm:{ticker}"),
                 InlineKeyboardButton("💰 매수", callback_data=f"kis_buy:{ticker}"),
             ],
         ]
@@ -1746,6 +1747,123 @@ class AdminExtrasMixin:
             except Exception:
                 logger.debug("_action_favorites auto_classify failed for %s, falling back to manual", ticker, exc_info=True)
                 await self._action_favorites(query, context, f"classify:{ticker}")
+            return
+
+        if action == "diag":
+            # v8.7: AI 종목 진단 — 매수/매도/관망 + 근거 + 적정가
+            ticker = parts[1] if len(parts) > 1 else ""
+            name = self._resolve_name(ticker, ticker)
+            await safe_edit_or_reply(query, f"🔍 {name} AI 진단 중...")
+
+            try:
+                # 1) 현재가 + 등락
+                cur = 0.0
+                dc_pct = 0.0
+                try:
+                    detail = await self._get_price_detail(ticker, 0)
+                    cur = detail["price"]
+                    dc_pct = detail["day_change_pct"]
+                except Exception:
+                    pass
+
+                # 2) 기술적 지표
+                tech_text = ""
+                try:
+                    market = "KRX"
+                    for s in self.all_tickers:
+                        if s["code"] == ticker:
+                            market = s.get("market", "KRX")
+                            break
+                    ohlcv = self.yf_client.get_ohlcv(ticker, market, period="3mo")
+                    if ohlcv is not None and len(ohlcv) > 5:
+                        from kstock.features.technical import compute_indicators
+                        tech = compute_indicators(ohlcv)
+                        tech_text = (
+                            f"RSI: {tech.rsi:.1f}, BB%B: {tech.bb_pctb:.2f}, "
+                            f"MACD크로스: {'상향' if tech.macd_signal_cross > 0 else '하향' if tech.macd_signal_cross < 0 else '중립'}, "
+                            f"거래량비: {tech.volume_ratio:.1f}배"
+                        )
+                        if tech.high_52w and tech.high_52w > 0:
+                            drop = (cur - tech.high_52w) / tech.high_52w * 100 if cur > 0 else 0
+                            tech_text += f", 52주고점대비: {drop:+.1f}%"
+                except Exception:
+                    logger.debug("fav:diag tech failed for %s", ticker, exc_info=True)
+
+                # 3) 보유 정보
+                hold_text = "미보유"
+                holding = None
+                for h in self.db.get_active_holdings():
+                    if h.get("ticker") == ticker:
+                        holding = h
+                        break
+                if holding:
+                    bp = float(holding.get("buy_price", 0) or 0)
+                    pnl = ((cur - bp) / bp * 100) if bp > 0 and cur > 0 else 0
+                    hold_text = f"보유중 (매수가: {bp:,.0f}원, 손익: {pnl:+.1f}%)"
+
+                # 4) 매크로 환경
+                macro_text = ""
+                try:
+                    macro = await self.macro_client.get_snapshot()
+                    alert_mode = getattr(self, "_alert_mode", "normal")
+                    macro_text = (
+                        f"코스피: {macro.kospi:,.0f}, VIX: {macro.vix:.1f}, "
+                        f"환율: {macro.usdkrw:,.0f}원, 경계모드: {alert_mode}"
+                    )
+                except Exception:
+                    pass
+
+                # 5) AI 진단 요청
+                prompt = (
+                    f"종목: {name}({ticker})\n"
+                    f"현재가: {cur:,.0f}원 (등락: {dc_pct:+.1f}%)\n"
+                    f"보유: {hold_text}\n"
+                )
+                if tech_text:
+                    prompt += f"기술지표: {tech_text}\n"
+                if macro_text:
+                    prompt += f"시장환경: {macro_text}\n"
+                prompt += (
+                    "\n위 데이터 기반으로 이 종목에 대해 간결하게 진단해주세요:\n"
+                    "1. 판단: 매수/매도/관망 중 하나\n"
+                    "2. 적정 매수가격대 (현재가 대비)\n"
+                    "3. 근거 (기술적 + 펀더멘탈 2~3줄)\n"
+                    "4. 리스크 요인 1줄\n"
+                    "5. 보유자 조언 (보유중이면) 또는 진입 전략 (미보유면)\n"
+                    "반드시 한국어로, 총 15줄 이내로 답변하세요."
+                )
+
+                from kstock.bot.chat_handler import handle_ai_question
+                from kstock.bot.context_builder import build_full_context_with_macro
+                from kstock.bot.chat_memory import ChatMemory
+                context_text = await build_full_context_with_macro(
+                    self.db, macro_client=self.macro_client,
+                )
+                chat_mem = ChatMemory(self.db)
+                diag_result = await handle_ai_question(
+                    prompt, context_text, self.db, chat_mem,
+                )
+
+                header = f"🔍 {name} AI 진단\n{'━' * 22}\n\n"
+                result_text = header + diag_result
+
+            except Exception as e:
+                logger.error("fav:diag failed for %s: %s", ticker, e, exc_info=True)
+                result_text = f"⚠️ {name} 진단 실패: {e}"
+
+            nav_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
+                    InlineKeyboardButton("📊 차트", callback_data=f"fav:chart:{ticker}"),
+                ],
+                [
+                    InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
+                    InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+                ],
+            ])
+            await query.message.reply_text(
+                result_text[:4000], reply_markup=nav_kb,
+            )
             return
 
         if action == "chart":
