@@ -194,60 +194,26 @@ class RemoteClaudeMixin:
     async def _menu_claude_code(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """💻 클로드 버튼 — 순수 AI 에이전트 대화 모드.
+        """💻 클로드 버튼 — 순수 Claude Code 에이전트.
 
-        v8.2: 버튼 제거, 현재 시장 상황 자동 주입 + 자유 대화만.
+        v8.3: 모든 메시지를 Claude CLI로 라우팅.
+        투자 분석 + 맥미니 제어 + 코드 수정 + 범용 AI 모두 가능.
         """
         context.user_data["claude_mode"] = True
         context.user_data["claude_turn"] = 0
 
-        # 현재 시장 상황 자동 수집
-        market_ctx = ""
-        try:
-            macro = await self.macro_client.get_snapshot()
-            vix = getattr(macro, "vix", 0)
-            spx_chg = getattr(macro, "spx_change_pct", 0)
-            krw = getattr(macro, "usdkrw", 0)
-
-            alert_mode = getattr(self, '_alert_mode', 'normal')
-            alert_labels = {"normal": "🟢 일상", "elevated": "🟡 긴장", "wartime": "🔴 전시"}
-            alert_str = alert_labels.get(alert_mode, alert_mode)
-
-            market_ctx = (
-                f"\n📊 현재 시장\n"
-                f"  VIX: {vix:.1f} | S&P500: {spx_chg:+.1f}%\n"
-                f"  환율: {krw:,.0f}원 | 경계: {alert_str}\n"
-            )
-
-            # 보유종목 요약
-            holdings = await self._load_holdings_with_fallback()
-            if holdings:
-                total_pnl = 0
-                losing = 0
-                for h in holdings:
-                    pnl = h.get("pnl_pct", 0)
-                    total_pnl += pnl
-                    if pnl < -5:
-                        losing += 1
-                avg_pnl = total_pnl / len(holdings) if holdings else 0
-                market_ctx += (
-                    f"  보유: {len(holdings)}종목 | 평균수익: {avg_pnl:+.1f}%\n"
-                )
-                if losing > 0:
-                    market_ctx += f"  ⚠️ -5% 이하: {losing}종목\n"
-        except Exception:
-            pass
-
         await update.message.reply_text(
-            f"🤖 AI 에이전트{market_ctx}\n"
-            f"{'━' * 20}\n"
-            f"무엇이든 물어보세요. 현재 시장 상황을\n"
-            f"반영해서 답변합니다.\n\n"
+            f"💻 Claude Code 에이전트\n"
+            f"{'━' * 22}\n\n"
+            f"순수 Claude가 맥미니에서 직접 실행됩니다.\n"
+            f"투자 분석, 코드 수정, 시스템 제어 모두 가능.\n\n"
             f"예시:\n"
-            f"  '지금 내 종목 어떻게 해야해?'\n"
-            f"  '이 장에서 뭘 사야해?'\n"
-            f"  '손절 기준 다시 잡아줘'\n"
-            f"  '시장 전망 분석해줘'",
+            f"  '삼성전자 분석해줘'\n"
+            f"  '봇 로그 확인해줘'\n"
+            f"  '파이썬 패키지 설치해줘'\n"
+            f"  '디스크 용량 확인'\n"
+            f"  '코드 수정해줘'\n\n"
+            f"🔙 종료하려면 다른 메뉴 버튼을 누르세요.",
             reply_markup=get_reply_markup(context),
         )
 
@@ -290,13 +256,14 @@ class RemoteClaudeMixin:
     async def _handle_claude_free_chat(
         self, update: Update, context, text: str
     ) -> None:
-        """클로드 자유 대화 — Claude API로 실시간 추론.
+        """클로드 자유 대화 — 모든 메시지를 Claude CLI로 실행.
 
-        v5.3: CLI 실행이 아닌 Claude API 직접 대화.
-        v6.2.1: 작업 지시 감지 시 Claude Code CLI로 자동 라우팅.
-                 이미지 대기 중이면 이미지+텍스트 합쳐서 Vision 분석.
+        v8.3: 제한된 API 대화 제거. 모든 입력을 Claude Code CLI로 라우팅.
+        순수 Claude가 맥미니에서 직접 실행되어 투자 분석, 시스템 제어,
+        코드 수정, 범용 질문 모두 처리.
+        이미지 대기 중이면 이미지+텍스트 합쳐서 Vision 분석.
         """
-        # v6.2.1: 대기 중인 이미지가 있으면 이미지+텍스트 합쳐서 분석
+        # 대기 중인 이미지가 있으면 이미지+텍스트 합쳐서 분석
         pending_img = context.user_data.pop("pending_image", None)
         pending_ts = context.user_data.pop("pending_image_ts", 0)
         if pending_img and (time.time() - pending_ts) < self._IMG_WAIT_SECONDS:
@@ -305,76 +272,8 @@ class RemoteClaudeMixin:
             )
             return
 
-        # v6.2.1: 작업 지시 감지 → Claude Code CLI로 라우팅
-        if self._is_work_instruction(text):
-            await self._execute_claude_prompt(update, text, context=context)
-            return
-
-        turn = context.user_data.get("claude_turn", 0)
-        context.user_data["claude_turn"] = turn + 1
-
-        placeholder = await update.message.reply_text(
-            "🤖 Claude가 생각 중..."
-        )
-
-        try:
-            from kstock.bot.chat_handler import handle_ai_question
-            from kstock.bot.context_builder import build_full_context_with_macro
-            from kstock.bot.chat_memory import ChatMemory
-
-            # 종목 감지 시 실시간 가격 주입
-            enriched = text
-            v_names = None
-            try:
-                stock = self._detect_stock_query(text)
-                if stock:
-                    code = stock.get("code", "")
-                    name = stock.get("name", code)
-                    market = stock.get("market", "KOSPI")
-                    try:
-                        price = await self._get_price(code)
-                        if price > 0:
-                            v_names = {name}
-                            enriched = (
-                                f"{text}\n\n"
-                                f"[{name}({code}) 실시간 현재가: {price:,.0f}원]\n"
-                                f"[절대 규칙] 위 실시간 데이터의 가격만 사용하라."
-                            )
-                    except Exception:
-                        logger.debug("_claude_free_chat get_price failed for %s", code, exc_info=True)
-            except Exception:
-                logger.debug("_claude_free_chat stock detection/enrichment failed", exc_info=True)
-
-            chat_mem = ChatMemory(self.db)
-            ctx = await build_full_context_with_macro(
-                self.db, self.macro_client, self.yf_client,
-            )
-            answer = await handle_ai_question(
-                enriched, ctx, self.db, chat_mem, verified_names=v_names
-            )
-
-            # 후속 질문 파싱
-            answer, followup_buttons = self._parse_followup_buttons(answer)
-            markup = None
-            if followup_buttons:
-                from telegram import InlineKeyboardMarkup
-                markup = InlineKeyboardMarkup(followup_buttons)
-
-            try:
-                await placeholder.edit_text(answer, reply_markup=markup)
-            except Exception:
-                logger.debug("_claude_free_chat edit_text failed, falling back", exc_info=True)
-                await update.message.reply_text(
-                    answer, reply_markup=CLAUDE_MODE_MENU,
-                )
-        except Exception as e:
-            logger.error("Claude free chat error: %s", e, exc_info=True)
-            try:
-                await placeholder.edit_text(
-                    "⚠️ 응답 중 오류가 발생했습니다. 다시 시도해주세요."
-                )
-            except Exception:
-                logger.debug("_claude_free_chat error recovery edit_text also failed", exc_info=True)
+        # 모든 메시지를 Claude CLI로 실행
+        await self._execute_claude_prompt(update, text, context=context)
 
     async def _execute_claude_prompt(
         self, update: Update, prompt: str, *, context=None
