@@ -2499,9 +2499,15 @@ class AdminExtrasMixin:
             await safe_edit_or_reply(query, "📋 v8 기능 설명서 PDF 생성 중...")
             try:
                 import subprocess as _sp
+                # __file__ = src/kstock/bot/mixins/admin_extras.py → 4단계 상위 = 프로젝트 루트
+                _here = os.path.abspath(__file__)
                 proj = os.path.dirname(os.path.dirname(os.path.dirname(
-                    os.path.dirname(os.path.abspath(__file__)))))
+                    os.path.dirname(os.path.dirname(_here)))))
                 script = os.path.join(proj, "scripts", "gen_v8_doc.py")
+                # 폴백: 환경변수 또는 하드코딩
+                if not os.path.exists(script):
+                    proj = os.environ.get("PROJECT_DIR", "/Users/botddol/k-quant-system")
+                    script = os.path.join(proj, "scripts", "gen_v8_doc.py")
                 if not os.path.exists(script):
                     await query.message.reply_text("⚠️ gen_v8_doc.py 스크립트를 찾을 수 없습니다.")
                     return
