@@ -1706,55 +1706,76 @@ class AdminExtrasMixin:
             return
 
         if action == "managers":
-            # 4명의 매니저 현황 대시보드 — 시장 상황 반영
-            from kstock.bot.investment_managers import MANAGERS
+            # v8.6: 매니저 도메인 대시보드 — 보유+관심 통합
+            from collections import defaultdict
+            from kstock.bot.investment_managers import MANAGERS, MANAGER_THRESHOLDS
+
+            holdings = self.db.get_active_holdings()
             watchlist = self.db.get_watchlist()
             alert_mode = getattr(self, '_alert_mode', 'normal')
 
-            lines = ["👨‍💼 투자 매니저 현황\n"]
+            # 보유종목 매니저별 카운트
+            held_by_mgr = defaultdict(int)
+            for h in holdings:
+                ht = h.get("holding_type", "auto")
+                if ht == "auto":
+                    ht = "swing"
+                held_by_mgr[ht] += 1
 
-            # 전시/경계 상황 헤더
+            # 관심종목 매니저별 카운트 (horizon 기준)
+            wl_by_mgr = defaultdict(int)
+            unclassified = 0
+            for w in watchlist:
+                hz = w.get("horizon", "")
+                if hz and hz in MANAGERS:
+                    wl_by_mgr[hz] += 1
+                elif not hz:
+                    unclassified += 1
+
+            lines = ["👨‍💼 투자 매니저 대시보드\n" + "━" * 22]
+
             if alert_mode == "wartime":
-                lines.append(
-                    "🔴 전시 경계 모드\n"
-                    "━" * 22 + "\n"
-                    "단타: 신규 진입 자제, 기존 포지션 축소\n"
-                    "스윙: 손절 -5% 강화, 경기민감 축소\n"
-                    "포지션: 방어섹터 중심 유지\n"
-                    "장기: 변동 무시, 분할매수 기회 탐색\n"
-                )
+                lines.append("🔴 전시 경계 모드 활성")
             elif alert_mode == "elevated":
+                lines.append("🟠 경계 모드 활성")
+            lines.append("")
+
+            for mgr_key in ["scalp", "swing", "position", "long_term"]:
+                mgr = MANAGERS[mgr_key]
+                th = MANAGER_THRESHOLDS[mgr_key]
+                held = held_by_mgr.get(mgr_key, 0)
+                watch = wl_by_mgr.get(mgr_key, 0)
                 lines.append(
-                    "🟠 경계 모드 — 변동성 확대\n"
-                    "━" * 22 + "\n"
-                    "전체 매니저: 분할 매수, 손절 -6%\n"
+                    f"{mgr['emoji']} {mgr['name']}: "
+                    f"보유 {held} | 관심 {watch}"
+                )
+                lines.append(
+                    f"  손절 {th['stop_loss']:.0f}% | "
+                    f"익절 +{th['take_profit_1']:.0f}%/+{th['take_profit_2']:.0f}%"
                 )
 
-            for mgr_key in ["scalp", "swing", "position", "long_term"]:
-                mgr = MANAGERS[mgr_key]
-                stocks = [w for w in watchlist if w.get("manager") == mgr_key]
-                lines.append(f"{mgr['emoji']} {mgr['name']} ({mgr['title']})")
-                if stocks:
-                    for s in stocks[:5]:
-                        name = s.get("name", s.get("ticker", ""))
-                        pnl = float(s.get("pnl_pct", 0) or 0)
-                        pnl_str = f" ({pnl:+.1f}%)" if pnl != 0 else ""
-                        lines.append(f"  - {name}{pnl_str}")
-                    lines.append(f"  총 {len(stocks)}종목 관리 중")
-                else:
-                    lines.append("  배정된 종목 없음")
-                lines.append("")
+            if unclassified > 0:
+                lines.append(f"\n📦 미분류: {unclassified}종목")
 
-            buttons = []
-            for mgr_key in ["scalp", "swing", "position", "long_term"]:
-                mgr = MANAGERS[mgr_key]
-                buttons.append([
-                    InlineKeyboardButton(
-                        f"{mgr['emoji']} {mgr['name']} 분석 요청",
-                        callback_data=f"mgr:{mgr_key}",
-                    ),
-                ])
-            buttons.append(make_feedback_row("매니저"))
+            buttons = [
+                [InlineKeyboardButton(
+                    f"{MANAGERS[k]['emoji']} {MANAGERS[k]['name'][:4]} 관리",
+                    callback_data=f"mgr_tab:{k}",
+                ) for k in ["scalp", "swing"]],
+                [InlineKeyboardButton(
+                    f"{MANAGERS[k]['emoji']} {MANAGERS[k]['name'][:3]} 관리",
+                    callback_data=f"mgr_tab:{k}",
+                ) for k in ["position", "long_term"]],
+            ]
+            if unclassified > 0:
+                buttons.append([InlineKeyboardButton(
+                    "🤖 전체 자동분류", callback_data="mgr_tab:classify",
+                )])
+            buttons.append([
+                InlineKeyboardButton("🔙 즐겨찾기", callback_data="fav:refresh"),
+                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+            ])
+
             await query.edit_message_text(
                 "\n".join(lines),
                 reply_markup=InlineKeyboardMarkup(buttons),
@@ -1780,7 +1801,7 @@ class AdminExtrasMixin:
         if action == "auto_classify":
             # 미분류 종목 자동 분류
             await safe_edit_or_reply(query, "🤖 미분류 종목 자동 분류 중...")
-            classified = await self._auto_classify_unassigned(limit=15)
+            classified = await self._auto_classify_unassigned(limit=75)
             text, markup = await self._build_dashboard_view()
             header = f"🤖 {classified}종목 자동 분류 완료!\n\n"
             await safe_edit_or_reply(query, header + text, reply_markup=markup)
@@ -2219,5 +2240,180 @@ class AdminExtrasMixin:
                 "⚠️ 오늘의 할 일 생성 중 오류가 발생했습니다.",
                 reply_markup=get_reply_markup(context),
             )
+
+    # ── v8.6: 매니저 탭 + 매수 스캔 ─────────────────────────────
+
+    async def _action_manager_tab(self, query, context, payload: str) -> None:
+        """mgr_tab:{manager_key|classify} — 매니저별 관리화면 또는 자동분류."""
+        from kstock.bot.investment_managers import MANAGERS, MANAGER_THRESHOLDS
+
+        if payload == "classify":
+            await safe_edit_or_reply(query, "🤖 전체 자동분류 실행 중...")
+            classified = await self._auto_classify_unassigned(limit=75)
+            buttons = [[InlineKeyboardButton(
+                "👨‍💼 매니저 대시보드", callback_data="fav:managers",
+            )]]
+            await safe_edit_or_reply(
+                query,
+                f"🤖 자동분류 완료: {classified}종목 분류됨",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        mgr = MANAGERS.get(payload)
+        if not mgr:
+            await safe_edit_or_reply(query, "⚠️ 알 수 없는 매니저")
+            return
+
+        th = MANAGER_THRESHOLDS.get(payload, {})
+
+        # 보유종목 (이 매니저 담당)
+        holdings = self.db.get_active_holdings()
+        held = [
+            h for h in holdings
+            if (h.get("holding_type", "auto") == payload)
+            or (payload == "swing" and h.get("holding_type") == "auto")
+        ]
+
+        # 관심종목 (watchlist에서 horizon 매칭, 보유 제외)
+        watchlist = self.db.get_watchlist()
+        held_tickers = {h["ticker"] for h in held}
+        wl_only = [
+            w for w in watchlist
+            if w.get("horizon") == payload and w["ticker"] not in held_tickers
+        ]
+
+        lines = [
+            f"{mgr['emoji']} {mgr['name']} ({mgr['title']})",
+            "━" * 22,
+            f"손절 {th.get('stop_loss', -5):.0f}% | "
+            f"익절 +{th.get('take_profit_1', 5):.0f}%/+{th.get('take_profit_2', 10):.0f}%",
+            "",
+        ]
+
+        # 보유종목 섹션
+        if held:
+            lines.append(f"💰 보유 종목 ({len(held)})")
+            for h in held[:10]:
+                name = (h.get("name", "") or h.get("ticker", ""))[:10]
+                pnl = float(h.get("pnl_pct", 0) or 0)
+                bp = float(h.get("buy_price", 0) or 0)
+                cp = float(h.get("current_price", 0) or 0)
+                try:
+                    cp_live = await self._get_price(h["ticker"], base_price=bp)
+                    if cp_live and isinstance(cp_live, (int, float)):
+                        cp = cp_live
+                        pnl = (cp - bp) / bp * 100 if bp > 0 else 0
+                except Exception:
+                    pass
+                emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                lines.append(f"  {emoji} {name}: {pnl:+.1f}%")
+        else:
+            lines.append("💰 보유 종목 없음")
+
+        lines.append("")
+
+        # 관심종목 섹션
+        if wl_only:
+            lines.append(f"👀 관심 종목 ({len(wl_only)})")
+            for w in wl_only[:10]:
+                name = (w.get("name", "") or w.get("ticker", ""))[:12]
+                lines.append(f"  - {name}")
+            if len(wl_only) > 10:
+                lines.append(f"  ... 외 {len(wl_only) - 10}종목")
+        else:
+            lines.append("👀 관심 종목 없음")
+
+        buttons = [
+            [InlineKeyboardButton(
+                f"{mgr['emoji']} 보유종목 분석", callback_data=f"mgr:{payload}",
+            )],
+            [InlineKeyboardButton(
+                "🔍 매수 스캔", callback_data=f"mgr_scan:{payload}",
+            )],
+            [
+                InlineKeyboardButton("👨‍💼 대시보드", callback_data="fav:managers"),
+                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+            ],
+        ]
+
+        text = "\n".join(lines)
+        if len(text) > 3900:
+            text = text[:3900] + "\n..."
+        await safe_edit_or_reply(query, text, reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _action_manager_scan(self, query, context, payload: str) -> None:
+        """mgr_scan:{manager_key} — 매니저 관심종목 매수 스캔 (수동)."""
+        from kstock.bot.investment_managers import MANAGERS, scan_manager_domain
+
+        mgr = MANAGERS.get(payload)
+        if not mgr:
+            await safe_edit_or_reply(query, "⚠️ 알 수 없는 매니저")
+            return
+
+        await safe_edit_or_reply(
+            query, f"{mgr['emoji']} {mgr['name']} 관심종목 매수 스캔 중...",
+        )
+
+        # 관심종목 조회 (보유 제외)
+        watchlist = self.db.get_watchlist()
+        holdings = self.db.get_active_holdings()
+        held_tickers = {h["ticker"] for h in holdings}
+        stocks = [
+            w for w in watchlist
+            if w.get("horizon") == payload and w["ticker"] not in held_tickers
+        ]
+
+        if not stocks:
+            buttons = [[InlineKeyboardButton(
+                "👨‍💼 대시보드", callback_data="fav:managers",
+            )]]
+            await query.message.reply_text(
+                f"{mgr['emoji']} {mgr['name']}: 관심종목이 없습니다.\n"
+                f"즐겨찾기에서 종목을 분류해주세요.",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        # 가격 데이터 보강
+        for w in stocks:
+            try:
+                p = await self._get_price(w["ticker"], 0)
+                w["price"] = p if isinstance(p, (int, float)) else 0
+            except Exception:
+                w["price"] = 0
+
+        # 시장 상황
+        market_text = ""
+        try:
+            macro_client = MacroClient()
+            macro = await macro_client.snapshot()
+            market_text = (
+                f"VIX={macro.vix:.1f}, S&P={macro.spx_change_pct:+.2f}%, "
+                f"환율={macro.usdkrw:,.0f}원"
+            )
+        except Exception:
+            pass
+
+        current_alert = getattr(self, '_alert_mode', 'normal')
+        report = await scan_manager_domain(
+            payload, stocks, market_text, alert_mode=current_alert,
+        )
+
+        if not report:
+            report = f"{mgr['emoji']} {mgr['name']}: 분석 실패. 잠시 후 다시 시도해주세요."
+
+        buttons = [
+            [InlineKeyboardButton(
+                f"{mgr['emoji']} 관리화면", callback_data=f"mgr_tab:{payload}",
+            )],
+            [
+                InlineKeyboardButton("👨‍💼 대시보드", callback_data="fav:managers"),
+                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+            ],
+        ]
+        await query.message.reply_text(
+            report[:4000], reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
 

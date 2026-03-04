@@ -572,6 +572,9 @@ class SchedulerMixin:
             # v3.9: 매니저별 보유종목 분석 (holding_type별 그룹핑)
             await self._send_manager_briefings(context, macro)
 
+            # v8.6: 매니저 관심종목 매수 스캔
+            await self._send_manager_watchlist_scan(context, macro)
+
             # v8.5: 오늘의 할 일 (Daily Action Planner)
             await self._send_daily_actions(context, macro)
 
@@ -624,6 +627,81 @@ class SchedulerMixin:
         except Exception as e:
             logger.debug("Manager briefings error: %s", e)
 
+    # ── v8.6: 자동분류 + 매니저 매수 스캔 ────────────────────────
+
+    async def job_auto_classify(self, context) -> None:
+        """미분류 종목 자동 분류 (시작 시 + 매일 06:30)."""
+        try:
+            classified = await self._auto_classify_unassigned(limit=75)
+            if classified > 0:
+                logger.info("Auto-classify: %d stocks classified", classified)
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=f"🤖 자동분류 완료: {classified}종목 분류됨",
+                )
+            else:
+                logger.info("Auto-classify: no unclassified stocks")
+        except Exception as e:
+            logger.error("job_auto_classify failed: %s", e)
+
+    async def _send_manager_watchlist_scan(self, context, macro) -> None:
+        """매니저별 관심종목 매수 스캔 — 아침 브리핑 후 실행."""
+        try:
+            from collections import defaultdict
+            from kstock.bot.investment_managers import scan_manager_domain, MANAGERS
+
+            watchlist = self.db.get_watchlist()
+            if not watchlist:
+                return
+
+            # 보유종목 티커 set
+            holdings = self.db.get_active_holdings()
+            held_tickers = {h["ticker"] for h in holdings}
+
+            market_text = (
+                f"VIX={macro.vix:.1f}, S&P={macro.spx_change_pct:+.2f}%, "
+                f"나스닥={macro.nasdaq_change_pct:+.2f}%, "
+                f"환율={macro.usdkrw:,.0f}원, 레짐={macro.regime}"
+            )
+
+            # 관심종목을 매니저별 그룹핑 (보유 종목 제외)
+            by_manager = defaultdict(list)
+            for w in watchlist:
+                hz = w.get("horizon", "")
+                if not hz or w["ticker"] in held_tickers:
+                    continue
+                if hz not in MANAGERS:
+                    continue
+                # 가격 데이터 보강
+                try:
+                    price_data = await self._get_price(w["ticker"], 0)
+                    w["price"] = price_data if isinstance(price_data, (int, float)) else 0
+                except Exception:
+                    w["price"] = 0
+                by_manager[hz].append(w)
+
+            current_alert = getattr(self, '_alert_mode', 'normal')
+            scanned = 0
+            for mgr_key, stocks in by_manager.items():
+                if not stocks:
+                    continue
+                try:
+                    report = await scan_manager_domain(
+                        mgr_key, stocks, market_text,
+                        alert_mode=current_alert,
+                    )
+                    if report and "매수 타이밍 종목 없음" not in report:
+                        await context.bot.send_message(
+                            chat_id=self.chat_id, text=report[:4000],
+                        )
+                        scanned += 1
+                except Exception as e:
+                    logger.debug("Manager scan %s error: %s", mgr_key, e)
+
+            logger.info("Manager watchlist scan: %d managers had picks", scanned)
+        except Exception as e:
+            logger.debug("Manager watchlist scan error: %s", e)
+
     async def _generate_daily_actions(self, macro) -> list[dict]:
         """보유종목 + 시장 상황 기반 오늘의 할 일 생성."""
         actions = []
@@ -649,25 +727,29 @@ class SchedulerMixin:
             stop = float(h.get("stop_price", buy_price * 0.95) or buy_price * 0.95)
             target = float(h.get("target_1", buy_price * 1.03) or buy_price * 1.03)
             ht = h.get("holding_type", "swing")
+            if ht == "auto":
+                ht = "swing"
 
-            # 긴급: 손절가 도달
-            if cur <= stop or pnl <= -5:
+            # 매니저별 기준 적용
+            from kstock.bot.investment_managers import MANAGER_THRESHOLDS
+            mgr_th = MANAGER_THRESHOLDS.get(ht, MANAGER_THRESHOLDS["swing"])
+            mgr_stop = mgr_th["stop_loss"]
+            mgr_tp1 = mgr_th["take_profit_1"]
+
+            # 긴급: 매니저별 손절 기준 도달
+            wartime_stop = mgr_stop * 0.6 if alert_mode == "wartime" else mgr_stop
+            if cur <= stop or pnl <= wartime_stop:
+                reason = f"{pnl:+.1f}% (매니저 손절 {wartime_stop:.0f}%)"
+                if alert_mode == "wartime":
+                    reason += " 🔴전시"
                 actions.append({
                     "priority": "urgent", "ticker": ticker, "name": name,
                     "action": "손절 필요",
-                    "reason": f"{pnl:+.1f}% (손절가 도달)",
+                    "reason": reason,
                     "callback_data": f"detail:{ticker}",
                 })
-            # 긴급: 전시모드 -3%
-            elif alert_mode == "wartime" and pnl <= -3:
-                actions.append({
-                    "priority": "urgent", "ticker": ticker, "name": name,
-                    "action": "전시 손절 검토",
-                    "reason": f"{pnl:+.1f}% (전시 경계모드 -3%)",
-                    "callback_data": f"detail:{ticker}",
-                })
-            # 주의: 목표가 근접
-            elif pnl >= 3 and cur >= target * 0.98:
+            # 주의: 매니저별 1차 익절 기준 60% 도달
+            elif pnl >= mgr_tp1 * 0.6 and cur >= target * 0.98:
                 actions.append({
                     "priority": "caution", "ticker": ticker, "name": name,
                     "action": "1차 익절 검토",

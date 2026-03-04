@@ -147,6 +147,13 @@ class CoreHandlersMixin:
         # v6.2.2: 경계 모드 초기화 (DB에서 복원)
         self.__init_scheduler_state__()
 
+        # v8.6: 미분류 종목 자동 분류 (시작 10초 후 + 매일 06:30)
+        jq.run_once(self.job_auto_classify, when=10, name="startup_auto_classify")
+        jq.run_daily(
+            self.job_auto_classify,
+            time=dt_time(hour=6, minute=30, tzinfo=KST),
+            name="daily_auto_classify",
+        )
         # v5.9: 매일 06:00 일일 운영 지침 → AI 자율 판단
         jq.run_daily(
             self.job_daily_directive,
@@ -1635,6 +1642,9 @@ class CoreHandlersMixin:
                 "remote": self._action_remote,
                 # v8.5: 온보딩
                 "onboard": self._action_onboarding,
+                # v8.6: 매니저 도메인 관리
+                "mgr_tab": self._action_manager_tab,
+                "mgr_scan": self._action_manager_scan,
             }
             handler = dispatch.get(action)
             if handler:

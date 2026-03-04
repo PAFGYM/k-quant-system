@@ -12,6 +12,15 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# ── 매니저별 손절/익절 기준 ──────────────────────────────────
+
+MANAGER_THRESHOLDS: dict[str, dict] = {
+    "scalp":     {"stop_loss": -3.0, "take_profit_1": 5.0, "take_profit_2": 8.0},
+    "swing":     {"stop_loss": -7.0, "take_profit_1": 10.0, "take_profit_2": 20.0},
+    "position":  {"stop_loss": -12.0, "take_profit_1": 20.0, "take_profit_2": 40.0},
+    "long_term": {"stop_loss": -20.0, "take_profit_1": 30.0, "take_profit_2": 80.0},
+}
+
 # ── 매니저 정의 ─────────────────────────────────────────────
 
 MANAGERS: dict[str, dict] = {
@@ -625,3 +634,107 @@ async def get_manager_greeting(holding_type: str, name: str, ticker: str) -> str
         f"{greeting}\n\n"
         f"📌 이 종목은 {manager['name']}이 관리합니다."
     )
+
+
+# ── 매니저 관심종목 매수 스캔 ──────────────────────────────
+
+async def scan_manager_domain(
+    manager_key: str,
+    watchlist_stocks: list[dict],
+    market_context: str = "",
+    alert_mode: str = "normal",
+) -> str:
+    """매니저가 관심종목에서 매수 타이밍 종목을 스캔.
+
+    Args:
+        manager_key: scalp/swing/position/long_term
+        watchlist_stocks: 관심종목 리스트 (ticker, name, price, day_change 등)
+        market_context: 시장 상황 텍스트
+        alert_mode: normal/elevated/wartime
+
+    Returns:
+        매수 추천 텍스트 또는 빈 문자열
+    """
+    manager = MANAGERS.get(manager_key)
+    if not manager or not watchlist_stocks:
+        return ""
+
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ""
+
+    # 종목 데이터 정리 (보유 제외, 관심만)
+    stocks_text = ""
+    for w in watchlist_stocks[:15]:
+        price = w.get("price", 0)
+        change = w.get("day_change", 0)
+        rsi = w.get("rsi", 0)
+        vol_ratio = w.get("vol_ratio", 0)
+        line = f"- {w.get('name', '')} ({w.get('ticker', '')})"
+        if price > 0:
+            line += f": {price:,.0f}원"
+        if change != 0:
+            line += f", 등락 {change:+.1f}%"
+        if rsi > 0:
+            line += f", RSI {rsi:.0f}"
+        if vol_ratio > 0:
+            line += f", 거래량비 {vol_ratio:.0f}%"
+        stocks_text += line + "\n"
+
+    if not stocks_text.strip():
+        return ""
+
+    situation = ""
+    if alert_mode == "wartime":
+        situation = (
+            "\n[🔴 전시 모드] 매수 매우 신중. 확신 80%↑ 종목만 추천. "
+            "방어 섹터 우선. 추천 없으면 '관망'으로.\n"
+        )
+    elif alert_mode == "elevated":
+        situation = "\n[🟠 경계 모드] 분할 매수만 권장. 한번에 풀 매수 금지.\n"
+
+    system_prompt = (
+        f"너는 {manager['name']}의 투자 철학을 따르는 '{manager['title']}'이다.\n"
+        f"{manager['persona']}\n"
+        f"{situation}\n"
+        f"[필수 규칙]\n"
+        f"호칭: 주호님. 볼드(**) 사용 금지. 이모지로 구분.\n"
+        f"제공된 가격 데이터만 사용. 학습 데이터의 과거 가격 절대 금지.\n"
+        f"관심종목 중에서 지금 매수 타이밍인 종목을 골라 추천.\n"
+        f"추천 종목이 없으면 '현재 매수 타이밍 종목 없음'이라고 답해.\n"
+        f"추천 시: 종목명, 매수 이유(2줄), 목표가/손절가 제시.\n"
+    )
+
+    user_prompt = (
+        f"[시장 상황]\n{market_context}\n\n"
+        f"[{manager['emoji']} 관심 종목]\n{stocks_text}\n"
+        f"위 종목 중 매수 추천 종목이 있으면 1~3개 선정하고 이유를 설명해줘."
+    )
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 600,
+                    "system": system_prompt,
+                    "messages": [{"role": "user", "content": user_prompt}],
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                analysis = data["content"][0]["text"].strip().replace("**", "")
+                header = f"{manager['emoji']} {manager['name']} 매수 스캔\n{'━' * 20}\n\n"
+                return header + analysis
+            else:
+                logger.warning("scan_manager_domain %s: %d", manager_key, resp.status_code)
+    except Exception as e:
+        logger.error("scan_manager_domain error %s: %s", manager_key, e)
+    return ""
