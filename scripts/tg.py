@@ -149,6 +149,51 @@ def restart_bot() -> str:
         return f"재시작 실패: {e}"
 
 
+def get_balance() -> str:
+    """잔고 요약 조회."""
+    try:
+        from kstock.store.sqlite import SQLiteStore
+        db = SQLiteStore()
+        holdings = db.get_active_holdings()
+        if not holdings:
+            return "📦 보유종목 없음 (잔고 데이터 없음)"
+        total_buy = 0
+        total_eval = 0
+        lines = [f"💰 잔고 요약 ({len(holdings)}종목)"]
+        for h in holdings:
+            name = h.get("name", "")[:8]
+            bp = float(h.get("buy_price", 0) or 0)
+            qty = int(h.get("quantity", 0) or 0)
+            cur = float(h.get("current_price", 0) or 0)
+            buy_amt = bp * qty
+            eval_amt = cur * qty if cur > 0 else buy_amt
+            total_buy += buy_amt
+            total_eval += eval_amt
+            pnl = ((cur - bp) / bp * 100) if bp > 0 and cur > 0 else 0
+            emoji = "📈" if pnl > 0 else ("📉" if pnl < 0 else "➖")
+            lines.append(f"{emoji} {name}: {pnl:+.1f}% ({eval_amt:,.0f}원)")
+        total_pnl = ((total_eval - total_buy) / total_buy * 100) if total_buy > 0 else 0
+        lines.append(f"\n총 매입: {total_buy:,.0f}원")
+        lines.append(f"총 평가: {total_eval:,.0f}원")
+        lines.append(f"총 손익: {total_pnl:+.1f}%")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"잔고 조회 실패: {e}"
+
+
+def get_market() -> str:
+    """시장 현황 조회."""
+    try:
+        snapshot = get_macro_snapshot()
+        from kstock.store.sqlite import SQLiteStore
+        db = SQLiteStore()
+        alert_mode = db.get_meta("alert_mode") or "normal"
+        mode_label = {"normal": "🟢 일상", "elevated": "🟡 긴장", "wartime": "🔴 전시"}.get(alert_mode, alert_mode)
+        return f"📈 시장 현황\n경계: {mode_label}\n\n{snapshot}"
+    except Exception as e:
+        return f"시장 현황 조회 실패: {e}"
+
+
 def ask_ai(question: str) -> str:
     """AI에게 질문 (동기 호출)."""
     try:
@@ -194,6 +239,10 @@ def main():
 
     if args.status:
         result = bot_status()
+    elif args.balance:
+        result = get_balance()
+    elif args.market:
+        result = get_market()
     elif args.macro:
         result = get_macro_snapshot()
     elif args.holdings:

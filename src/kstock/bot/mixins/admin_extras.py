@@ -30,11 +30,11 @@ def _admin_buttons() -> list:
     """관리자 메뉴 인라인 버튼 생성."""
     return [
         [
-            InlineKeyboardButton("\U0001f41b 오류 신고", callback_data="adm:bug"),
+            InlineKeyboardButton("🔧 시스템 제어", callback_data="adm:sys"),
             InlineKeyboardButton("\U0001f4ca 봇 상태", callback_data="adm:status"),
         ],
         [
-            InlineKeyboardButton("\U0001f4cb 보유종목 DB", callback_data="adm:holdings"),
+            InlineKeyboardButton("\U0001f41b 오류 신고", callback_data="adm:bug"),
             InlineKeyboardButton("\U0001f6a8 에러 로그", callback_data="adm:logs"),
         ],
         [
@@ -42,14 +42,11 @@ def _admin_buttons() -> list:
             InlineKeyboardButton("📋 운영 지침", callback_data="adm:directive"),
         ],
         [
-            InlineKeyboardButton("\U0001f512 보안 감사", callback_data="adm:security"),
             InlineKeyboardButton("\U0001f916 AI 상태", callback_data="ai:status"),
-        ],
-        [
-            InlineKeyboardButton("🏆 시스템 점수", callback_data="adm:score"),
             InlineKeyboardButton("💰 API 비용", callback_data="adm:cost"),
         ],
         [
+            InlineKeyboardButton("🏆 시스템 점수", callback_data="adm:score"),
             InlineKeyboardButton("🚨 경계 모드", callback_data="adm:alert"),
         ],
         [
@@ -103,10 +100,8 @@ class AdminExtrasMixin:
     ) -> None:
         """🛠 관리자 메뉴 버튼 — 인라인 버튼으로 관리 기능 제공."""
         await update.message.reply_text(
-            "\U0001f6e0 관리자 모드 (v3.6)\n\n"
-            "아래 버튼을 눌러주세요.\n"
-            "오류 신고 시 메시지나 스크린샷을\n"
-            "바로 보내면 됩니다!",
+            "\U0001f6e0 관리자 모드 v8.7\n\n"
+            "아래 버튼을 눌러주세요.",
             reply_markup=InlineKeyboardMarkup(_admin_buttons()),
         )
 
@@ -202,7 +197,7 @@ class AdminExtrasMixin:
             context.user_data.pop("admin_mode", None)
             context.user_data.pop("admin_faq_type", None)
             await query.edit_message_text(
-                "\U0001f6e0 관리자 모드 (v5.2)\n\n"
+                "\U0001f6e0 관리자 모드 v8.7\n\n"
                 "아래 버튼을 눌러주세요.",
                 reply_markup=InlineKeyboardMarkup(_admin_buttons()),
             )
@@ -255,6 +250,181 @@ class AdminExtrasMixin:
                     f"📋 현재 운영 지침\n{'━' * 20}\n\n{content}",
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
+
+        elif subcmd == "sys":
+            # v8.7: 시스템 제어 패널
+            sub2 = payload.split(":", 1)[1] if ":" in payload else ""
+            sys_back = [[InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu")]]
+
+            if sub2 == "restart_confirm":
+                # 재시작 확인 완료 → 실행
+                await query.edit_message_text("🔄 봇 재시작 중... (5초 후 복귀)")
+                import subprocess as _sp
+                _sp.Popen(
+                    ["bash", "-c", f"sleep 2 && cd {os.getcwd()} && ./kbot restart"],
+                    start_new_session=True,
+                )
+                return
+
+            if sub2 == "restart":
+                # 재시작 확인 요청
+                await query.edit_message_text(
+                    "🔄 봇을 재시작하시겠습니까?\n\n"
+                    "⚠️ 재시작 동안 5~10초간 응답이 중단됩니다.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("✅ 재시작", callback_data="adm:sys:restart_confirm"),
+                            InlineKeyboardButton("❌ 취소", callback_data="adm:sys"),
+                        ],
+                    ]),
+                )
+                return
+
+            if sub2 == "resources":
+                # 시스템 리소스 상세
+                import subprocess as _sp
+                lines = ["🖥 시스템 리소스", "━" * 22]
+                try:
+                    pid = _sp.check_output(
+                        ["pgrep", "-f", "kstock.app"], text=True, timeout=3,
+                    ).strip().split("\n")[0]
+                    ps_out = _sp.check_output(
+                        ["ps", "-p", pid, "-o", "rss=,etime=,%cpu="],
+                        text=True, timeout=3,
+                    ).strip()
+                    parts = ps_out.split()
+                    mem_mb = int(parts[0]) // 1024 if parts else 0
+                    uptime = parts[1] if len(parts) > 1 else "?"
+                    cpu = parts[2] if len(parts) > 2 else "?"
+                    lines.append(f"PID: {pid}")
+                    lines.append(f"메모리: {mem_mb}MB")
+                    lines.append(f"CPU: {cpu}%")
+                    lines.append(f"가동: {uptime}")
+                except Exception:
+                    lines.append("봇 프로세스 없음")
+
+                # 디스크
+                try:
+                    df_out = _sp.check_output(
+                        ["df", "-h", "/"], text=True, timeout=3,
+                    ).strip().split("\n")[-1].split()
+                    lines.append(f"\n💾 디스크: {df_out[2]} 사용 / {df_out[1]} (잔여 {df_out[3]})")
+                except Exception:
+                    pass
+
+                # DB 크기
+                try:
+                    db_path = os.path.join(os.getcwd(), "data", "kquant.db")
+                    if os.path.exists(db_path):
+                        db_size = os.path.getsize(db_path) / (1024 * 1024)
+                        lines.append(f"📊 DB: {db_size:.1f}MB")
+                except Exception:
+                    pass
+
+                # 로그 크기
+                try:
+                    log_path = "/tmp/kstock_bot.log"
+                    if os.path.exists(log_path):
+                        log_size = os.path.getsize(log_path) / (1024 * 1024)
+                        lines.append(f"📝 로그: {log_size:.1f}MB")
+                except Exception:
+                    pass
+
+                await query.edit_message_text(
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 시스템 제어", callback_data="adm:sys")],
+                    ]),
+                )
+                return
+
+            if sub2 == "errors":
+                # 최근 에러 로그 (실제 로그 파일)
+                import subprocess as _sp
+                try:
+                    result = _sp.run(
+                        ["grep", "-E", "ERROR|CRITICAL|Exception", "/tmp/kstock_bot.log"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    error_lines = result.stdout.strip().split("\n")
+                    recent = [l.strip()[-100:] for l in error_lines if l.strip()][-8:]
+                    if recent:
+                        text = "🚨 최근 에러 (8건)\n" + "━" * 22 + "\n\n"
+                        text += "\n\n".join(recent)
+                    else:
+                        text = "✅ 에러 없음!"
+                except Exception as e:
+                    text = f"⚠️ 로그 확인 실패: {e}"
+                await query.edit_message_text(
+                    text[:4000],
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 시스템 제어", callback_data="adm:sys")],
+                    ]),
+                )
+                return
+
+            if sub2 == "jobs":
+                # 스케줄러 현황
+                lines = ["📋 스케줄러 현황", "━" * 22]
+                try:
+                    app = context.application
+                    if hasattr(app, "job_queue") and app.job_queue:
+                        jobs = app.job_queue.jobs()
+                        if jobs:
+                            for j in sorted(jobs, key=lambda x: str(x.next_t or ""))[:15]:
+                                next_t = j.next_t.strftime("%H:%M") if j.next_t else "?"
+                                name = (j.name or "unnamed")[:25]
+                                lines.append(f"  ⏰ {next_t} — {name}")
+                            lines.append(f"\n총 {len(jobs)}개 작업")
+                        else:
+                            lines.append("등록된 작업 없음")
+                    else:
+                        lines.append("job_queue 없음")
+                except Exception as e:
+                    lines.append(f"조회 실패: {e}")
+                await query.edit_message_text(
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 시스템 제어", callback_data="adm:sys")],
+                    ]),
+                )
+                return
+
+            # 기본: 시스템 제어 메뉴
+            sys_buttons = [
+                [
+                    InlineKeyboardButton("🔄 봇 재시작", callback_data="adm:sys:restart"),
+                    InlineKeyboardButton("🖥 리소스", callback_data="adm:sys:resources"),
+                ],
+                [
+                    InlineKeyboardButton("🚨 에러 로그", callback_data="adm:sys:errors"),
+                    InlineKeyboardButton("📋 스케줄러", callback_data="adm:sys:jobs"),
+                ],
+                [InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu")],
+            ]
+            # 간단한 상태 요약
+            status_line = "🔴 중지됨"
+            try:
+                import subprocess as _sp
+                pid_out = _sp.check_output(
+                    ["pgrep", "-f", "kstock.app"], text=True, timeout=3,
+                ).strip().split("\n")[0]
+                if pid_out:
+                    up = _sp.check_output(
+                        ["ps", "-p", pid_out, "-o", "etime="],
+                        text=True, timeout=3,
+                    ).strip()
+                    status_line = f"🟢 실행 중 (PID {pid_out}, 가동 {up})"
+            except Exception:
+                pass
+
+            await query.edit_message_text(
+                f"🔧 시스템 제어\n{'━' * 22}\n\n"
+                f"상태: {status_line}\n"
+                f"버전: v8.7",
+                reply_markup=InlineKeyboardMarkup(sys_buttons),
+            )
+            return
 
         elif subcmd == "close":
             # 관리자 메뉴 닫기 + 상태 초기화 + Reply Keyboard 복구
@@ -403,7 +573,7 @@ class AdminExtrasMixin:
             ws_subs = len(self.ws.get_subscriptions())
 
             await query.edit_message_text(
-                f"\U0001f4ca 봇 상태 (v3.6)\n\n"
+                f"\U0001f4ca 봇 상태 v8.7\n\n"
                 f"\u2705 가동: {hours}시간 {mins}분\n"
                 f"\U0001f4b0 보유종목: {len(holdings)}개\n"
                 f"\U0001f916 AI 채팅: {chat_count}회/50\n"

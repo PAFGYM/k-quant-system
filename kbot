@@ -3,19 +3,30 @@
 # kbot — K-Quant 봇 통합 관리 CLI
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
-# 사용법:
+# 프로세스:
 #   ./kbot start        봇 시작
 #   ./kbot stop         봇 종료
 #   ./kbot restart      봇 재시작
 #   ./kbot status       상태 확인 (PID, 가동시간, 메모리)
+#   ./kbot pid          PID만 출력
+#
+# 로그:
 #   ./kbot logs [N]     최근 로그 N줄 (기본 50)
 #   ./kbot errors [N]   ERROR/WARNING만 (기본 30)
 #   ./kbot tail         실시간 로그 모니터링
-#   ./kbot health       워치독 1회 실행
+#
+# 정보:
 #   ./kbot macro        매크로 스냅샷
 #   ./kbot holdings     보유종목 목록
+#   ./kbot balance      잔고 요약
+#   ./kbot market       시장 현황
+#   ./kbot health       워치독 1회 실행
 #   ./kbot version      봇 버전
-#   ./kbot pid          PID만 출력
+#
+# 컨트롤:
+#   ./kbot send "메시지"        텔레그램 메시지 전송
+#   ./kbot ai "질문"            AI에게 질문
+#   ./kbot scan [매니저]        매니저 매수 스캔 (scalp/swing/position/long_term)
 
 set -euo pipefail
 
@@ -49,7 +60,11 @@ _print_header() {
     echo "━━━━━━━━━━━━━━━━━━━━━━"
 }
 
-# ── 명령어 ───────────────────────────────
+_tg_py() {
+    PYTHONPATH=src python3 "$SCRIPT_DIR/scripts/tg.py" "$@"
+}
+
+# ── 프로세스 관리 ─────────────────────────
 
 cmd_start() {
     _print_header
@@ -81,7 +96,6 @@ cmd_stop() {
     fi
     echo -e "봇 종료 중 (PID: $pid)..."
     kill "$pid" 2>/dev/null || true
-    # 5초 대기 후 강제 종료
     for i in $(seq 1 5); do
         if ! _is_running; then
             break
@@ -110,14 +124,11 @@ cmd_status() {
         echo -e "${RED}상태: 중지됨${NC}"
         return 0
     fi
-    # 가동시간
     local uptime
     uptime=$(ps -p "$pid" -o etime= 2>/dev/null | tr -d ' ')
-    # 메모리 (RSS in MB)
     local mem_kb
     mem_kb=$(ps -p "$pid" -o rss= 2>/dev/null | tr -d ' ')
     local mem_mb=$((mem_kb / 1024))
-    # 프로세스 수
     local proc_count
     proc_count=$(pgrep -f "kstock.app" 2>/dev/null | wc -l | tr -d ' ')
 
@@ -129,7 +140,6 @@ cmd_status() {
     echo -e "  버전:     $VERSION"
     echo -e "  로그:     $LOG_FILE"
 
-    # 409 Conflict 체크
     if [ -f "$LOG_FILE" ]; then
         local conflicts
         conflicts=$(tail -100 "$LOG_FILE" 2>/dev/null | grep -c "409 Conflict" || true)
@@ -138,6 +148,8 @@ cmd_status() {
         fi
     fi
 }
+
+# ── 로그 ──────────────────────────────────
 
 cmd_logs() {
     local lines=${1:-50}
@@ -166,13 +178,14 @@ cmd_tail() {
     tail -f "$LOG_FILE"
 }
 
+# ── 정보 ──────────────────────────────────
+
 cmd_health() {
     _print_header
     echo "워치독 실행 중..."
     if [ -f "$SCRIPT_DIR/scripts/bot_watchdog.sh" ]; then
         bash "$SCRIPT_DIR/scripts/bot_watchdog.sh"
     else
-        # 인라인 체크
         if _is_running; then
             local pid=$(_get_pid)
             local proc_count
@@ -189,11 +202,19 @@ cmd_health() {
 }
 
 cmd_macro() {
-    PYTHONPATH=src python3 "$SCRIPT_DIR/scripts/tg.py" --macro --no-send
+    _tg_py --macro --no-send
 }
 
 cmd_holdings() {
-    PYTHONPATH=src python3 "$SCRIPT_DIR/scripts/tg.py" --holdings --no-send
+    _tg_py --holdings --no-send
+}
+
+cmd_balance() {
+    _tg_py --balance --no-send
+}
+
+cmd_market() {
+    _tg_py --market --no-send
 }
 
 cmd_version() {
@@ -210,28 +231,90 @@ cmd_pid() {
     fi
 }
 
+# ── 컨트롤 ────────────────────────────────
+
+cmd_send() {
+    local msg="${1:-}"
+    if [ -z "$msg" ]; then
+        echo -e "${RED}사용법: ./kbot send \"메시지 내용\"${NC}"
+        return 1
+    fi
+    _tg_py "$msg"
+}
+
+cmd_ai() {
+    local question="${1:-}"
+    if [ -z "$question" ]; then
+        echo -e "${RED}사용법: ./kbot ai \"질문 내용\"${NC}"
+        return 1
+    fi
+    _tg_py --ai "$question"
+}
+
+cmd_scan() {
+    local mgr="${1:-all}"
+    echo -e "${CYAN}매니저 스캔: $mgr${NC}"
+    PYTHONPATH=src python3 -c "
+import asyncio, sys
+sys.path.insert(0, 'src')
+from kstock.bot.investment_managers import MANAGERS, scan_manager_domain
+from kstock.store.sqlite import SQLiteStore
+
+async def run():
+    db = SQLiteStore()
+    mgr_key = '$mgr'
+    if mgr_key == 'all':
+        keys = list(MANAGERS.keys())
+    elif mgr_key in MANAGERS:
+        keys = [mgr_key]
+    else:
+        print(f'알 수 없는 매니저: {mgr_key}')
+        print(f'사용 가능: {list(MANAGERS.keys())}')
+        return
+    for k in keys:
+        mgr = MANAGERS[k]
+        print(f'\\n{mgr[\"emoji\"]} {mgr[\"name\"]} 스캔 중...')
+        result = await scan_manager_domain(k, db)
+        if result:
+            print(result[:2000])
+        else:
+            print('결과 없음')
+
+asyncio.run(run())
+"
+}
+
+# ── 도움말 ────────────────────────────────
+
 cmd_help() {
     _print_header
     echo ""
     echo "사용법: ./kbot <명령>"
     echo ""
     echo -e "  ${BOLD}프로세스 관리${NC}"
-    echo "    start        봇 시작"
-    echo "    stop         봇 종료"
-    echo "    restart      봇 재시작"
-    echo "    status       상태 확인"
-    echo "    pid          PID만 출력"
+    echo "    start              봇 시작"
+    echo "    stop               봇 종료"
+    echo "    restart            봇 재시작"
+    echo "    status             상태 확인"
+    echo "    pid                PID만 출력"
     echo ""
     echo -e "  ${BOLD}로그${NC}"
-    echo "    logs [N]     최근 로그 N줄 (기본 50)"
-    echo "    errors [N]   ERROR/WARNING만 (기본 30)"
-    echo "    tail         실시간 로그 모니터링"
+    echo "    logs [N]           최근 로그 N줄 (기본 50)"
+    echo "    errors [N]         ERROR/WARNING만 (기본 30)"
+    echo "    tail               실시간 로그 모니터링"
     echo ""
     echo -e "  ${BOLD}정보${NC}"
-    echo "    health       워치독 실행"
-    echo "    macro        매크로 스냅샷"
-    echo "    holdings     보유종목 목록"
-    echo "    version      봇 버전"
+    echo "    macro              매크로 스냅샷"
+    echo "    holdings           보유종목 목록"
+    echo "    balance            잔고 요약"
+    echo "    market             시장 현황"
+    echo "    health             워치독 실행"
+    echo "    version            봇 버전"
+    echo ""
+    echo -e "  ${BOLD}컨트롤${NC}"
+    echo "    send \"메시지\"       텔레그램 메시지 전송"
+    echo "    ai \"질문\"          AI에게 질문"
+    echo "    scan [매니저]       매수 스캔 (scalp/swing/position/long_term/all)"
     echo ""
 }
 
@@ -248,8 +331,13 @@ case "${1:-help}" in
     health)   cmd_health ;;
     macro)    cmd_macro ;;
     holdings) cmd_holdings ;;
+    balance)  cmd_balance ;;
+    market)   cmd_market ;;
     version)  cmd_version ;;
     pid)      cmd_pid ;;
+    send)     cmd_send "${2:-}" ;;
+    ai)       cmd_ai "${2:-}" ;;
+    scan)     cmd_scan "${2:-all}" ;;
     help|-h|--help) cmd_help ;;
     *)
         echo -e "${RED}알 수 없는 명령: $1${NC}"
