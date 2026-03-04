@@ -2085,7 +2085,7 @@ class AdminExtrasMixin:
     ) -> None:
         """인터랙티브 온보딩 — 7단계 가이드 투어."""
         import json
-        progress_raw = self.db.get_kv("onboarding_progress")
+        progress_raw = self.db.get_meta("onboarding_progress")
         progress = json.loads(progress_raw) if progress_raw else {"step": 1}
         step_num = progress.get("step", 1)
         if step_num > len(ONBOARDING_STEPS):
@@ -2123,7 +2123,7 @@ class AdminExtrasMixin:
         sub, _, val = payload.partition(":")
 
         if sub == "restart":
-            self.db.set_kv("onboarding_progress", json.dumps({"step": 1}))
+            self.db.set_meta("onboarding_progress", json.dumps({"step": 1}))
             step = ONBOARDING_STEPS[0]
             text = format_onboarding_step(step, 1, len(ONBOARDING_STEPS))
             buttons = [
@@ -2137,7 +2137,7 @@ class AdminExtrasMixin:
             return
 
         if sub == "skip":
-            self.db.set_kv("onboarding_progress", json.dumps({
+            self.db.set_meta("onboarding_progress", json.dumps({
                 "step": len(ONBOARDING_STEPS) + 1,
             }))
             await safe_edit_or_reply(query, format_onboarding_complete())
@@ -2145,7 +2145,7 @@ class AdminExtrasMixin:
 
         if sub == "next":
             step_num = int(val) if val else 2
-            self.db.set_kv("onboarding_progress", json.dumps({"step": step_num}))
+            self.db.set_meta("onboarding_progress", json.dumps({"step": step_num}))
             if step_num > len(ONBOARDING_STEPS):
                 await safe_edit_or_reply(query, format_onboarding_complete())
                 return
@@ -2170,11 +2170,11 @@ class AdminExtrasMixin:
 
         if sub == "try":
             # 체험 → 해당 메뉴로 연결
-            progress_raw = self.db.get_kv("onboarding_progress")
+            progress_raw = self.db.get_meta("onboarding_progress")
             progress = json.loads(progress_raw) if progress_raw else {"step": 1}
             current_step = progress.get("step", 1)
             # 자동으로 다음 스텝 전진
-            self.db.set_kv("onboarding_progress", json.dumps({
+            self.db.set_meta("onboarding_progress", json.dumps({
                 "step": current_step + 1,
             }))
 
