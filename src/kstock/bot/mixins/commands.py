@@ -650,6 +650,10 @@ class CommandsMixin:
 
             lines.append("")
             lines.append("상세 분석: /short [종목코드]")
+            lines.append("또는 종목명을 바로 입력하세요")
+
+            # 종목명 입력 대기 상태 설정
+            context.user_data["awaiting_short"] = True
 
             await update.message.reply_text(
                 "\n".join(lines), reply_markup=get_reply_markup(context),

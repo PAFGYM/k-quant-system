@@ -916,6 +916,7 @@ class CoreHandlersMixin:
             # 메뉴 이동 시 진행 중인 상태 클리어
             context.user_data.pop("kis_setup", None)
             context.user_data.pop("awaiting_optimize_ticker", None)
+            context.user_data.pop("awaiting_short", None)
             # Claude 대화 모드: CLAUDE_MODE_MENU에 포함된 버튼은 모드 유지
             _claude_safe_buttons = {
                 "💻 클로드", "🔙 대화 종료", "🤖 에이전트", "🖥 원격접속",
@@ -1071,6 +1072,16 @@ class CoreHandlersMixin:
             if text.strip() in ("온보딩", "가이드", "둘러보기"):
                 await self._menu_onboarding(update, context)
                 return
+
+            # 0-7. 명령 대기 상태 처리 (예: /short 후 종목명 입력)
+            if context.user_data.get("awaiting_short"):
+                detected = self._detect_stock_query(text)
+                if detected:
+                    context.user_data.pop("awaiting_short", None)
+                    ticker = detected["code"]
+                    context.args = [ticker]
+                    await self.cmd_short(update, context)
+                    return
 
             # 1. 자연어 보유종목 등록/매도 감지
             trade = self._detect_trade_input(text)
