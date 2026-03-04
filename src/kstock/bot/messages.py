@@ -1,4 +1,4 @@
-"""Telegram message formatting - K-Quant v3.5 with ML, sentiment, KIS, screenshot.
+"""Telegram message formatting - K-Quant v8.7 with ML, sentiment, KIS, screenshot.
 
 Rules:
 - No ** bold, no Markdown parse_mode
@@ -129,7 +129,7 @@ def generate_one_liner(tech, flow, macro) -> str:
 
 def format_welcome() -> str:
     return (
-        f"🚀 {USER_NAME}, K-Quant v8.6\n\n"
+        f"🚀 {USER_NAME}, K-Quant v8.7\n\n"
         "AI 투자 매니저 시스템\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "👨‍💼 4명의 전담 매니저가 종목을 관리합니다\n"
@@ -753,13 +753,13 @@ def format_system_status(last_runs: list, job_infos: list = None) -> str:
             lines.append(f"  {icon} {run.get('job_name', 'N/A')} @ {ended}")
     else:
         lines.append("아직 실행된 작업이 없습니다.")
-    lines.extend(["", "\u2500" * 25, f"\U0001f551 {_now_kst()}", "K-Quant v8.6"])
+    lines.extend(["", "\u2500" * 25, f"\U0001f551 {_now_kst()}", "K-Quant v8.7"])
     return "\n".join(lines)
 
 
 def format_help() -> str:
     return (
-        f"❓ {USER_NAME}, K-Quant v8.6 도움말\n"
+        f"❓ {USER_NAME}, K-Quant v8.7 도움말\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 분석 — 종목명 입력 → AI 즉시 분석\n"
         "📈 시황 — 🟢🟡🔴 신호등 시장 판단\n"
@@ -789,7 +789,7 @@ def format_help() -> str:
         "  💎 버핏 — 장기 (손절-20%, 익절+30%)\n\n"
         "💡 '온보딩' 입력 → 기능 체험 투어\n"
         "⚙️ 더보기 → 고급 기능 (급등주/스윙/매집탐지)\n\n"
-        "K-Quant System v8.6"
+        "K-Quant System v8.7"
     )
 
 

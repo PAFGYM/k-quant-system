@@ -1,4 +1,4 @@
-# K-Quant System v2.0
+# K-Quant System v8.7
 
 한국 주식 & ETF 자동 분석 시스템 + 다중 전략 매매 타이밍 알림
 

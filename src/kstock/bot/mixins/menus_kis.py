@@ -7,7 +7,7 @@ from kstock.bot.bot_imports import *  # noqa: F403
 class MenusKisMixin:
     async def _menu_usage_guide(self, update: Update, context) -> None:
         msg = (
-            "📖 주호님, K-Quant v3.9 사용법\n\n"
+            "📖 주호님, K-Quant v8.7 사용법\n\n"
 
             "━━ 메인 메뉴 ━━\n\n"
 

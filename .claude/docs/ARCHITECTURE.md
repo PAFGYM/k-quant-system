@@ -1,4 +1,4 @@
-# K-Quant v3.8 아키텍처
+# K-Quant v8.7 아키텍처
 
 ## Mixin 구조
 KQuantBot = CoreHandlers + MenusKis + Trading + Scheduler + Commands + AdminExtras + RemoteClaude

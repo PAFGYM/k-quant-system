@@ -181,7 +181,7 @@ async def generate_daily_self_report(db, macro_client=None, ws=None) -> str:
     lines.extend([
         "",
         "\u2500" * 25,
-        f"\U0001f916 K-Quant v3.10 | {now.strftime('%H:%M')} 자가진단 완료",
+        f"\U0001f916 K-Quant v8.7 | {now.strftime('%H:%M')} 자가진단 완료",
     ])
 
     return "\n".join(lines)
