@@ -12,11 +12,11 @@
     python3 scripts/tg.py --macro                # 매크로 스냅샷
     python3 scripts/tg.py --holdings             # 보유종목 목록
     python3 scripts/tg.py --ai "질문"            # AI에게 질문
-    python3 scripts/tg.py --scan                 # 스캔 엔진 실행
-    python3 scripts/tg.py --4mgr                 # 4매니저 추천
 
 Claude Code에서:
     python3 scripts/tg.py "SK하이닉스 지금 어때?"
+
+봇 관리는 ./kbot 스크립트를 사용하세요.
 """
 from __future__ import annotations
 
@@ -136,10 +136,10 @@ def restart_bot() -> str:
         time.sleep(5)
         # 새 프로세스 시작
         subprocess.Popen(
-            [sys.executable, "-m", "kstock.app"],
+            [sys.executable, "-c", "from kstock.app import main; main()"],
             cwd=PROJECT_DIR,
             env={**os.environ, "PYTHONPATH": "src"},
-            stdout=open(os.path.join(PROJECT_DIR, "bot.log"), "w"),
+            stdout=open("/tmp/kstock_bot.log", "w"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )

@@ -1,0 +1,259 @@
+#!/bin/bash
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# kbot — K-Quant 봇 통합 관리 CLI
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# 사용법:
+#   ./kbot start        봇 시작
+#   ./kbot stop         봇 종료
+#   ./kbot restart      봇 재시작
+#   ./kbot status       상태 확인 (PID, 가동시간, 메모리)
+#   ./kbot logs [N]     최근 로그 N줄 (기본 50)
+#   ./kbot errors [N]   ERROR/WARNING만 (기본 30)
+#   ./kbot tail         실시간 로그 모니터링
+#   ./kbot health       워치독 1회 실행
+#   ./kbot macro        매크로 스냅샷
+#   ./kbot holdings     보유종목 목록
+#   ./kbot version      봇 버전
+#   ./kbot pid          PID만 출력
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+PID_FILE="$SCRIPT_DIR/bot.pid"
+LOG_FILE="/tmp/kstock_bot.log"
+VERSION="v8.7"
+
+# ── 색상 ─────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# ── 헬퍼 ─────────────────────────────────
+
+_get_pid() {
+    pgrep -f "kstock.app" 2>/dev/null | head -1
+}
+
+_is_running() {
+    [ -n "$(_get_pid)" ]
+}
+
+_print_header() {
+    echo -e "${CYAN}${BOLD}K-Quant Bot ${VERSION}${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+# ── 명령어 ───────────────────────────────
+
+cmd_start() {
+    _print_header
+    if _is_running; then
+        local pid=$(_get_pid)
+        echo -e "${YELLOW}이미 실행 중입니다 (PID: $pid)${NC}"
+        return 0
+    fi
+    echo -e "봇 시작 중..."
+    PYTHONPATH=src nohup python3 -c "from kstock.app import main; main()" > "$LOG_FILE" 2>&1 &
+    local new_pid=$!
+    echo "$new_pid" > "$PID_FILE"
+    sleep 3
+    if _is_running; then
+        echo -e "${GREEN}봇 시작 완료 (PID: $new_pid)${NC}"
+    else
+        echo -e "${RED}봇 시작 실패. 로그 확인: ./kbot logs${NC}"
+        return 1
+    fi
+}
+
+cmd_stop() {
+    _print_header
+    local pid=$(_get_pid)
+    if [ -z "$pid" ]; then
+        echo -e "${YELLOW}봇이 실행 중이지 않습니다${NC}"
+        rm -f "$PID_FILE"
+        return 0
+    fi
+    echo -e "봇 종료 중 (PID: $pid)..."
+    kill "$pid" 2>/dev/null || true
+    # 5초 대기 후 강제 종료
+    for i in $(seq 1 5); do
+        if ! _is_running; then
+            break
+        fi
+        sleep 1
+    done
+    if _is_running; then
+        echo -e "${YELLOW}강제 종료...${NC}"
+        kill -9 "$pid" 2>/dev/null || true
+        sleep 1
+    fi
+    rm -f "$PID_FILE"
+    echo -e "${GREEN}봇 종료됨${NC}"
+}
+
+cmd_restart() {
+    cmd_stop
+    sleep 2
+    cmd_start
+}
+
+cmd_status() {
+    _print_header
+    local pid=$(_get_pid)
+    if [ -z "$pid" ]; then
+        echo -e "${RED}상태: 중지됨${NC}"
+        return 0
+    fi
+    # 가동시간
+    local uptime
+    uptime=$(ps -p "$pid" -o etime= 2>/dev/null | tr -d ' ')
+    # 메모리 (RSS in MB)
+    local mem_kb
+    mem_kb=$(ps -p "$pid" -o rss= 2>/dev/null | tr -d ' ')
+    local mem_mb=$((mem_kb / 1024))
+    # 프로세스 수
+    local proc_count
+    proc_count=$(pgrep -f "kstock.app" 2>/dev/null | wc -l | tr -d ' ')
+
+    echo -e "${GREEN}상태: 실행 중${NC}"
+    echo -e "  PID:      $pid"
+    echo -e "  가동시간: $uptime"
+    echo -e "  메모리:   ${mem_mb}MB"
+    echo -e "  프로세스: ${proc_count}개"
+    echo -e "  버전:     $VERSION"
+    echo -e "  로그:     $LOG_FILE"
+
+    # 409 Conflict 체크
+    if [ -f "$LOG_FILE" ]; then
+        local conflicts
+        conflicts=$(tail -100 "$LOG_FILE" 2>/dev/null | grep -c "409 Conflict" || true)
+        if [ "$conflicts" -gt 5 ]; then
+            echo -e "  ${RED}409 충돌: ${conflicts}회 (최근 100줄)${NC}"
+        fi
+    fi
+}
+
+cmd_logs() {
+    local lines=${1:-50}
+    if [ ! -f "$LOG_FILE" ]; then
+        echo "로그 파일 없음: $LOG_FILE"
+        return 1
+    fi
+    tail -"$lines" "$LOG_FILE"
+}
+
+cmd_errors() {
+    local lines=${1:-30}
+    if [ ! -f "$LOG_FILE" ]; then
+        echo "로그 파일 없음: $LOG_FILE"
+        return 1
+    fi
+    grep -E "ERROR|WARNING|CRITICAL|Exception|Traceback" "$LOG_FILE" | tail -"$lines"
+}
+
+cmd_tail() {
+    if [ ! -f "$LOG_FILE" ]; then
+        echo "로그 파일 없음: $LOG_FILE"
+        return 1
+    fi
+    echo -e "${CYAN}실시간 로그 (Ctrl+C로 종료)${NC}"
+    tail -f "$LOG_FILE"
+}
+
+cmd_health() {
+    _print_header
+    echo "워치독 실행 중..."
+    if [ -f "$SCRIPT_DIR/scripts/bot_watchdog.sh" ]; then
+        bash "$SCRIPT_DIR/scripts/bot_watchdog.sh"
+    else
+        # 인라인 체크
+        if _is_running; then
+            local pid=$(_get_pid)
+            local proc_count
+            proc_count=$(pgrep -f "kstock.app" 2>/dev/null | wc -l | tr -d ' ')
+            if [ "$proc_count" -gt 1 ]; then
+                echo -e "${RED}중복 프로세스 감지: ${proc_count}개${NC}"
+            else
+                echo -e "${GREEN}정상 (PID: $pid)${NC}"
+            fi
+        else
+            echo -e "${RED}봇이 실행 중이지 않습니다${NC}"
+        fi
+    fi
+}
+
+cmd_macro() {
+    PYTHONPATH=src python3 "$SCRIPT_DIR/scripts/tg.py" --macro --no-send
+}
+
+cmd_holdings() {
+    PYTHONPATH=src python3 "$SCRIPT_DIR/scripts/tg.py" --holdings --no-send
+}
+
+cmd_version() {
+    echo "$VERSION"
+}
+
+cmd_pid() {
+    local pid=$(_get_pid)
+    if [ -n "$pid" ]; then
+        echo "$pid"
+    else
+        echo "not running"
+        return 1
+    fi
+}
+
+cmd_help() {
+    _print_header
+    echo ""
+    echo "사용법: ./kbot <명령>"
+    echo ""
+    echo -e "  ${BOLD}프로세스 관리${NC}"
+    echo "    start        봇 시작"
+    echo "    stop         봇 종료"
+    echo "    restart      봇 재시작"
+    echo "    status       상태 확인"
+    echo "    pid          PID만 출력"
+    echo ""
+    echo -e "  ${BOLD}로그${NC}"
+    echo "    logs [N]     최근 로그 N줄 (기본 50)"
+    echo "    errors [N]   ERROR/WARNING만 (기본 30)"
+    echo "    tail         실시간 로그 모니터링"
+    echo ""
+    echo -e "  ${BOLD}정보${NC}"
+    echo "    health       워치독 실행"
+    echo "    macro        매크로 스냅샷"
+    echo "    holdings     보유종목 목록"
+    echo "    version      봇 버전"
+    echo ""
+}
+
+# ── 메인 ─────────────────────────────────
+
+case "${1:-help}" in
+    start)    cmd_start ;;
+    stop)     cmd_stop ;;
+    restart)  cmd_restart ;;
+    status)   cmd_status ;;
+    logs)     cmd_logs "${2:-50}" ;;
+    errors)   cmd_errors "${2:-30}" ;;
+    tail)     cmd_tail ;;
+    health)   cmd_health ;;
+    macro)    cmd_macro ;;
+    holdings) cmd_holdings ;;
+    version)  cmd_version ;;
+    pid)      cmd_pid ;;
+    help|-h|--help) cmd_help ;;
+    *)
+        echo -e "${RED}알 수 없는 명령: $1${NC}"
+        cmd_help
+        exit 1
+        ;;
+esac

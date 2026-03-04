@@ -1241,9 +1241,7 @@ class AdminExtrasMixin:
                 ),
             ])
 
-        buttons.append([
-            InlineKeyboardButton("❌ 닫기", callback_data="dismiss:fav"),
-        ])
+        buttons.append(make_feedback_row("즐겨찾기"))
 
         text = "\n".join(lines)
         return text, InlineKeyboardMarkup(buttons)
@@ -1330,9 +1328,7 @@ class AdminExtrasMixin:
                 "다음 →", callback_data=f"fav:tab:{category}:{page + 1}",
             ))
         buttons.append(nav_row)
-        buttons.append([
-            InlineKeyboardButton("❌ 닫기", callback_data="dismiss:fav"),
-        ])
+        buttons.append(make_feedback_row("즐겨찾기탭"))
 
         text = "\n".join(lines)
         if len(text) > 3900:
@@ -1410,20 +1406,21 @@ class AdminExtrasMixin:
                 InlineKeyboardButton("📊 차트", callback_data=f"fav:chart:{ticker}"),
             ],
             [
-                InlineKeyboardButton("🔄 분류변경", callback_data=f"fav:classify:{ticker}"),
-                InlineKeyboardButton(
-                    "🤖 매니저분석",
-                    callback_data=f"mgr:{horizon or 'swing'}:{ticker}",
-                ),
+                InlineKeyboardButton("🔄 분류", callback_data=f"fav:classify:{ticker}"),
+                InlineKeyboardButton("🤖 분석", callback_data=f"mgr:{horizon or 'swing'}:{ticker}"),
+            ],
+            [
+                InlineKeyboardButton("🗑 삭제", callback_data=f"fav:rm:{ticker}"),
+                InlineKeyboardButton("💰 매수", callback_data=f"kis_buy:{ticker}"),
             ],
         ]
 
-        # 돌아가기 버튼: 소속 탭으로 복귀
+        # 돌아가기 + 피드백
         back_cat = horizon if horizon else "unclassified"
         buttons.append([
-            InlineKeyboardButton(
-                "🔙 돌아가기", callback_data=f"fav:tab:{back_cat}:0",
-            ),
+            InlineKeyboardButton("🔙 돌아가기", callback_data=f"fav:tab:{back_cat}:0"),
+            InlineKeyboardButton("👍", callback_data="fb:like:종목상세"),
+            InlineKeyboardButton("👎", callback_data="fb:dislike:종목상세"),
         ])
 
         return "\n".join(lines), InlineKeyboardMarkup(buttons)
@@ -1529,8 +1526,13 @@ class AdminExtrasMixin:
             if ticker:
                 self.db.add_watchlist(ticker, name)
                 await query.edit_message_text(
-                    f"⭐ {name}({ticker})을 즐겨찾기에 등록했습니다!\n\n"
-                    "⭐ 즐겨찾기 메뉴에서 확인하세요."
+                    f"⭐ {name}({ticker})을 즐겨찾기에 등록했습니다!",
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("⭐ 즐겨찾기 보기", callback_data="fav:refresh"),
+                            InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+                        ],
+                    ]),
                 )
             return
 
@@ -1559,10 +1561,12 @@ class AdminExtrasMixin:
                     await query.edit_message_text(
                         f"🤖 AI 추천 완료: {name}\n\n"
                         f"유형: {mgr.get('emoji', '')} {mgr.get('title', rec_hz)}\n"
-                        f"담당: {mgr.get('name', '')}\n\n"
-                        f"변경하려면 즐겨찾기에서 '변경' 버튼을 누르세요.",
+                        f"담당: {mgr.get('name', '')}",
                         reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("⭐ 즐겨찾기 보기", callback_data="fav:refresh")],
+                            [
+                                InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
+                                InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
+                            ],
                             [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
                         ]),
                     )
@@ -1578,6 +1582,12 @@ class AdminExtrasMixin:
             # 종목 기술적 분석 차트 이미지 생성 및 전송
             ticker = parts[1] if len(parts) > 1 else ""
             name = self._resolve_name(ticker, ticker)
+            nav_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
+                    InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
+                ],
+            ])
             await safe_edit_or_reply(query, f"📊 {name} 차트 생성 중...")
             try:
                 from kstock.features.chart_gen import generate_stock_chart
@@ -1588,20 +1598,21 @@ class AdminExtrasMixin:
                             photo=f,
                             caption=f"📊 {name} ({ticker}) 기술적 분석 차트",
                         )
+                    # 차트 이미지 아래 네비게이션 버튼
+                    await query.message.reply_text(
+                        f"📊 {name} 차트 확인 완료",
+                        reply_markup=nav_kb,
+                    )
                 else:
                     await query.message.reply_text(
                         f"📊 {name}: 차트 데이터를 가져올 수 없습니다.",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
-                        ]),
+                        reply_markup=nav_kb,
                     )
             except Exception:
                 logger.debug("_action_favorites chart generation failed for %s", ticker, exc_info=True)
                 await query.message.reply_text(
-                    f"📊 {name}: 차트 생성 실패 (잠시 후 다시 시도해주세요)",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
-                    ]),
+                    f"📊 {name}: 차트 생성 실패",
+                    reply_markup=nav_kb,
                 )
             return
 
@@ -1609,6 +1620,12 @@ class AdminExtrasMixin:
             # 종목별 뉴스 조회
             ticker = parts[1] if len(parts) > 1 else ""
             name = self._resolve_name(ticker, ticker)
+            nav_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
+                    InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
+                ],
+            ])
             try:
                 from kstock.ingest.naver_finance import get_stock_news
                 news = await get_stock_news(ticker, limit=5)
@@ -1617,21 +1634,12 @@ class AdminExtrasMixin:
                     for i, n in enumerate(news[:5], 1):
                         lines.append(f"{i}. {n['title']}")
                         lines.append(f"   {n.get('date', '')} | {n.get('source', '')}")
-                    fav_kb = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
-                    ])
-                    await safe_edit_or_reply(query, "\n".join(lines), reply_markup=fav_kb)
+                    await safe_edit_or_reply(query, "\n".join(lines), reply_markup=nav_kb)
                 else:
-                    fav_kb = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
-                    ])
-                    await safe_edit_or_reply(query, f"📰 {name}: 최근 뉴스가 없습니다.", reply_markup=fav_kb)
+                    await safe_edit_or_reply(query, f"📰 {name}: 최근 뉴스가 없습니다.", reply_markup=nav_kb)
             except Exception:
                 logger.debug("_action_favorites news fetch failed for %s", ticker, exc_info=True)
-                fav_kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
-                ])
-                await safe_edit_or_reply(query, f"📰 {name}: 뉴스 조회 실패 (잠시 후 다시 시도해주세요)", reply_markup=fav_kb)
+                await safe_edit_or_reply(query, f"📰 {name}: 뉴스 조회 실패", reply_markup=nav_kb)
             return
 
         if action == "rm":
@@ -1639,7 +1647,15 @@ class AdminExtrasMixin:
             if ticker:
                 name = self._resolve_name(ticker, ticker)
                 self.db.remove_watchlist(ticker)
-                await query.edit_message_text(f"⭐ {name} 즐겨찾기에서 삭제되었습니다.")
+                await query.edit_message_text(
+                    f"⭐ {name} 즐겨찾기에서 삭제되었습니다.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
+                            InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+                        ],
+                    ]),
+                )
             return
 
         if action == "classify":
@@ -1697,10 +1713,13 @@ class AdminExtrasMixin:
             await query.edit_message_text(
                 f"✅ {name} 투자유형 설정 완료\n\n"
                 f"유형: {mgr_emoji} {mgr.get('title', horizon)}\n"
-                f"담당: {mgr_name}\n\n"
-                f"⭐ 즐겨찾기에서 확인하세요.",
+                f"담당: {mgr_name}",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⭐ 즐겨찾기 보기", callback_data="fav:refresh")],
+                    [
+                        InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
+                        InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
+                    ],
+                    [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
                 ]),
             )
             return
@@ -1773,7 +1792,9 @@ class AdminExtrasMixin:
                 )])
             buttons.append([
                 InlineKeyboardButton("🔙 즐겨찾기", callback_data="fav:refresh"),
-                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+                InlineKeyboardButton("👍", callback_data="fb:like:매니저"),
+                InlineKeyboardButton("👎", callback_data="fb:dislike:매니저"),
+                InlineKeyboardButton("❌", callback_data="dismiss:0"),
             ])
 
             await query.edit_message_text(
@@ -2316,26 +2337,48 @@ class AdminExtrasMixin:
         # 관심종목 섹션
         if wl_only:
             lines.append(f"👀 관심 종목 ({len(wl_only)})")
-            for w in wl_only[:10]:
-                name = (w.get("name", "") or w.get("ticker", ""))[:12]
-                lines.append(f"  - {name}")
-            if len(wl_only) > 10:
-                lines.append(f"  ... 외 {len(wl_only) - 10}종목")
+            if len(wl_only) > 8:
+                # 8개 초과 시 텍스트로 표시
+                for w in wl_only[:10]:
+                    name = (w.get("name", "") or w.get("ticker", ""))[:12]
+                    lines.append(f"  - {name}")
+                if len(wl_only) > 10:
+                    lines.append(f"  ... 외 {len(wl_only) - 10}종목")
         else:
             lines.append("👀 관심 종목 없음")
 
-        buttons = [
+        buttons = []
+
+        # 관심종목 클릭 버튼 (8개까지)
+        if wl_only and len(wl_only) <= 8:
+            row = []
+            for w in wl_only[:8]:
+                wname = (w.get("name", "") or w.get("ticker", ""))[:6]
+                cb = f"fav:stock:{w['ticker']}"
+                if len(cb) <= 64:
+                    row.append(InlineKeyboardButton(wname, callback_data=cb))
+                if len(row) == 3:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+
+        buttons.append(
             [InlineKeyboardButton(
                 f"{mgr['emoji']} 보유종목 분석", callback_data=f"mgr:{payload}",
             )],
+        )
+        buttons.append(
             [InlineKeyboardButton(
                 "🔍 매수 스캔", callback_data=f"mgr_scan:{payload}",
             )],
-            [
-                InlineKeyboardButton("👨‍💼 대시보드", callback_data="fav:managers"),
-                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
-            ],
-        ]
+        )
+        buttons.append([
+            InlineKeyboardButton("👨‍💼 대시보드", callback_data="fav:managers"),
+            InlineKeyboardButton("👍", callback_data="fb:like:매니저탭"),
+            InlineKeyboardButton("👎", callback_data="fb:dislike:매니저탭"),
+            InlineKeyboardButton("❌", callback_data="dismiss:0"),
+        ])
 
         text = "\n".join(lines)
         if len(text) > 3900:
@@ -2431,15 +2474,31 @@ class AdminExtrasMixin:
         if not report:
             report = f"{mgr['emoji']} {mgr['name']}: 분석 실패. 잠시 후 다시 시도해주세요."
 
-        buttons = [
+        # 관심종목 바로가기 버튼 (최대 6개, 2열)
+        buttons = []
+        stock_row = []
+        for w in stocks[:6]:
+            sname = (w.get("name", "") or w.get("ticker", ""))[:6]
+            cb = f"fav:stock:{w['ticker']}"
+            if len(cb) <= 64:
+                stock_row.append(InlineKeyboardButton(f"📋 {sname}", callback_data=cb))
+            if len(stock_row) == 3:
+                buttons.append(stock_row)
+                stock_row = []
+        if stock_row:
+            buttons.append(stock_row)
+
+        buttons.append(
             [InlineKeyboardButton(
                 f"{mgr['emoji']} 관리화면", callback_data=f"mgr_tab:{payload}",
             )],
-            [
-                InlineKeyboardButton("👨‍💼 대시보드", callback_data="fav:managers"),
-                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
-            ],
-        ]
+        )
+        buttons.append([
+            InlineKeyboardButton("👨‍💼 대시보드", callback_data="fav:managers"),
+            InlineKeyboardButton("👍", callback_data="fb:like:매수스캔"),
+            InlineKeyboardButton("👎", callback_data="fb:dislike:매수스캔"),
+            InlineKeyboardButton("❌", callback_data="dismiss:0"),
+        ])
         await query.message.reply_text(
             report[:4000], reply_markup=InlineKeyboardMarkup(buttons),
         )
