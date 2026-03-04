@@ -719,23 +719,136 @@ class CommandsMixin:
     async def _menu_swing(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """스윙 트레이딩 기회 조회."""
-        from kstock.bot.messages import format_swing_alert
+        """스윙 트레이딩 기회 조회 — 관심종목 기술적 스캔."""
+        import asyncio as _aio
 
-        active_swings = self.db.get_active_swing_trades()
-        if active_swings:
-            lines = ["\u26a1 활성 스윙 거래\n"]
-            for sw in active_swings[:5]:
-                pnl = sw.get("pnl_pct", 0)
+        placeholder = await update.message.reply_text(
+            "\u26a1 스윙 기회 스캔 중... (약 15초)"
+        )
+        try:
+            # 관심종목 중 swing/scalp 카테고리
+            watchlist = self.db.get_watchlist()
+            holdings = self.db.get_active_holdings()
+            held = {h["ticker"] for h in holdings}
+            candidates = [
+                w for w in watchlist
+                if w["ticker"] not in held
+                and w.get("horizon") in ("swing", "scalp", "")
+            ][:30]
+
+            if not candidates:
+                candidates = [w for w in watchlist if w["ticker"] not in held][:20]
+
+            from kstock.features.technical import compute_indicators
+
+            async def _scan(w):
+                try:
+                    ticker = w["ticker"]
+                    market = "KOSPI"
+                    for s in self.all_tickers:
+                        if s["code"] == ticker:
+                            market = s.get("market", "KOSPI")
+                            break
+                    ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
+                    if ohlcv is None or ohlcv.empty or len(ohlcv) < 20:
+                        return None
+                    tech = compute_indicators(ohlcv)
+                    close = float(ohlcv["close"].iloc[-1])
+                    prev = float(ohlcv["close"].iloc[-2])
+                    dc = ((close - prev) / prev * 100) if prev > 0 else 0
+                    # 스윙 매수 조건: RSI 과매도 + BB 하단 + MACD 골든크로스 가점
+                    score = 0
+                    if tech.rsi <= 35:
+                        score += 30
+                    elif tech.rsi <= 45:
+                        score += 15
+                    if tech.bb_pctb <= 0.2:
+                        score += 25
+                    elif tech.bb_pctb <= 0.35:
+                        score += 10
+                    if tech.macd_signal_cross > 0:
+                        score += 20
+                    if tech.volume_ratio >= 1.5:
+                        score += 15
+                    elif tech.volume_ratio >= 1.2:
+                        score += 5
+                    if score >= 25:
+                        return {
+                            "ticker": ticker, "name": (w.get("name") or ticker)[:8],
+                            "price": close, "dc": dc, "score": score,
+                            "rsi": tech.rsi, "bb": tech.bb_pctb,
+                            "macd_x": tech.macd_signal_cross, "vr": tech.volume_ratio,
+                        }
+                except Exception:
+                    pass
+                return None
+
+            results = []
+            for i in range(0, len(candidates), 15):
+                batch = candidates[i:i + 15]
+                batch_r = await _aio.gather(*[_scan(w) for w in batch], return_exceptions=True)
+                for r in batch_r:
+                    if isinstance(r, dict):
+                        results.append(r)
+
+            results.sort(key=lambda x: x["score"], reverse=True)
+            top = results[:8]
+
+            if not top:
+                try:
+                    await placeholder.edit_text(
+                        "\u26a1 현재 스윙 매수 조건(RSI 과매도 + BB 하단)을 "
+                        "충족하는 관심종목이 없습니다.\n\n"
+                        "즐겨찾기에 종목을 추가하면 더 많은 기회를 스캔합니다."
+                    )
+                except Exception:
+                    pass
+                return
+
+            lines = [f"\u26a1 스윙 기회 ({len(results)}종목 감지)\n"]
+            for i, r in enumerate(top, 1):
+                sig = "🟢" if r["score"] >= 50 else "🟡"
+                mc = "↑" if r["macd_x"] > 0 else ("↓" if r["macd_x"] < 0 else "-")
+                ds = "+" if r["dc"] > 0 else ""
                 lines.append(
-                    f"{sw['name']} {_won(sw['entry_price'])} -> "
-                    f"목표 {_won(sw.get('target_price', 0))} "
-                    f"({pnl:+.1f}%)"
+                    f"{i}. {sig} {r['name']} ({r['score']}점)\n"
+                    f"   {r['price']:,.0f}원({ds}{r['dc']:.1f}%) "
+                    f"RSI:{r['rsi']:.0f} BB:{r['bb']:.2f} MACD:{mc}"
                 )
-            msg = "\n".join(lines)
-        else:
-            msg = "\u26a1 현재 활성 스윙 거래가 없습니다.\n\n스캔 중 조건 충족 종목 발견 시 알려드리겠습니다."
-        await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
+
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            buttons = []
+            btn_row = []
+            for r in top[:6]:
+                cb = f"fav:diag:{r['ticker']}"
+                if len(cb) <= 64:
+                    btn_row.append(InlineKeyboardButton(f"🔍 {r['name']}", callback_data=cb))
+                if len(btn_row) == 3:
+                    buttons.append(btn_row)
+                    btn_row = []
+            if btn_row:
+                buttons.append(btn_row)
+            buttons.append([
+                InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
+                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+            ])
+
+            try:
+                await placeholder.edit_text(
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            except Exception:
+                await update.message.reply_text(
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+        except Exception as e:
+            logger.error("Swing scan error: %s", e, exc_info=True)
+            try:
+                await placeholder.edit_text("\u26a0\ufe0f 스윙 스캔 오류가 발생했습니다.")
+            except Exception:
+                pass
 
     # -- v3.5 handlers ---------------------------------------------------------
 
@@ -1794,29 +1907,59 @@ class CommandsMixin:
     async def _menu_short(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """공매도 분석 메뉴 — 보유종목 버튼 표시."""
+        """공매도 분석 메뉴 — 보유종목 + 관심종목 버튼 표시."""
         holdings = self.db.get_active_holdings()
-        buttons = []
+        buttons: list[list[InlineKeyboardButton]] = []
+        seen_tickers: set[str] = set()
+
+        # 1) 보유종목
         for h in holdings[:6]:
             ticker = h.get("ticker", "")
             name = h.get("name", ticker)
-            if ticker:
+            if ticker and ticker not in seen_tickers:
                 buttons.append([InlineKeyboardButton(
                     f"📊 {name} 공매도", callback_data=f"short:{ticker}",
                 )])
+                seen_tickers.add(ticker)
 
-        if buttons:
+        if len(holdings) > 1:
             buttons.append([InlineKeyboardButton(
                 "📊 전체 보유종목 요약", callback_data="short:all",
             )])
-            await update.message.reply_text(
-                "📊 공매도/레버리지 분석\n\n"
-                "보유종목을 선택하면 공매도 현황을 분석합니다:",
-                reply_markup=InlineKeyboardMarkup(buttons),
-            )
+
+        # 2) 관심종목도 추가 (보유종목에 없는 것만)
+        watchlist = self.db.get_watchlist()
+        wl_row: list[InlineKeyboardButton] = []
+        for w in watchlist:
+            ticker = w.get("ticker", "")
+            name = w.get("name", ticker)
+            if ticker and ticker not in seen_tickers:
+                wl_row.append(InlineKeyboardButton(
+                    f"📊 {name[:6]}", callback_data=f"short:{ticker}",
+                ))
+                seen_tickers.add(ticker)
+                if len(wl_row) == 3:
+                    buttons.append(wl_row)
+                    wl_row = []
+                if len(seen_tickers) >= 15:
+                    break
+        if wl_row:
+            buttons.append(wl_row)
+
+        buttons.append([InlineKeyboardButton(
+            "🔙 더보기", callback_data="menu:more",
+        )])
+
+        header = "📊 공매도/레버리지 분석\n\n"
+        if holdings:
+            header += "보유종목 + 관심종목 공매도 현황을 분석합니다:"
         else:
-            # 보유종목 없으면 기존 방식
-            await self.cmd_short(update, context)
+            header += "관심종목의 공매도 현황을 분석합니다:\n(보유종목이 없어 관심종목을 표시합니다)"
+
+        await update.message.reply_text(
+            header,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
     async def _action_short_analysis(self, query, context, payload: str) -> None:
         """공매도 분석 콜백 — 종목별 또는 전체."""
@@ -2532,97 +2675,124 @@ class CommandsMixin:
     async def cmd_surge(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle /surge - scan for surge stocks in real-time."""
+        """Handle /surge - scan for surge stocks (watchlist + universe top 30)."""
+        import asyncio as _aio
         try:
             self._persist_chat_id(update)
             placeholder = await update.message.reply_text(
-                "\U0001f525 급등주 실시간 스캔 중..."
+                "\U0001f525 급등주 스캔 중... (약 15초)"
             )
 
-            # 실시간 스캔: 유니버스 전체 종목의 등락률/거래량 체크
-            stocks_data = []
+            # 관심종목 + 유니버스 상위 30개 조합 (중복 제거)
+            watchlist = self.db.get_watchlist()
+            wl_codes = {w["ticker"] for w in watchlist}
+            scan_items = []
+            seen = set()
+            # 1) 관심종목 우선
+            for w in watchlist:
+                code = w["ticker"]
+                if code not in seen:
+                    name = w.get("name") or code
+                    market = "KOSPI"
+                    for s in self.all_tickers:
+                        if s["code"] == code:
+                            name = s.get("name", name)
+                            market = s.get("market", "KOSPI")
+                            break
+                    scan_items.append({"code": code, "name": name, "market": market})
+                    seen.add(code)
+            # 2) 유니버스 보충 (최대 60개)
             for item in self.all_tickers:
+                if len(scan_items) >= 60:
+                    break
+                if item["code"] not in seen:
+                    scan_items.append({"code": item["code"], "name": item["name"],
+                                       "market": item.get("market", "KOSPI")})
+                    seen.add(item["code"])
+
+            async def _check_one(item):
                 try:
-                    code = item["code"]
-                    market = item.get("market", "KOSPI")
-                    ohlcv = await self.yf_client.get_ohlcv(code, market, period="1mo")
+                    ohlcv = await self.yf_client.get_ohlcv(item["code"], item["market"], period="1mo")
                     if ohlcv is None or ohlcv.empty or len(ohlcv) < 2:
-                        continue
+                        return None
                     close = ohlcv["close"].astype(float)
                     volume = ohlcv["volume"].astype(float)
-                    cur_price = float(close.iloc[-1])
-                    prev_price = float(close.iloc[-2])
-                    change_pct = ((cur_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
-                    avg_vol_20 = float(volume.tail(20).mean()) if len(volume) >= 20 else float(volume.mean())
-                    cur_vol = float(volume.iloc[-1])
-                    vol_ratio = cur_vol / avg_vol_20 if avg_vol_20 > 0 else 0
-                    mkt_cap = cur_price * 1e6  # 대략적 시총 (정확하지 않지만 필터용)
-
-                    # 급등 조건: +3% 이상 또는 거래량 2배 이상
-                    if change_pct >= 3.0 or vol_ratio >= 2.0:
-                        stocks_data.append({
-                            "ticker": code,
-                            "name": item["name"],
-                            "price": cur_price,
-                            "change_pct": change_pct,
-                            "volume": cur_vol,
-                            "avg_volume_20": avg_vol_20,
-                            "volume_ratio": vol_ratio,
-                            "market_cap": mkt_cap,
-                            "daily_volume": cur_vol * cur_price,
-                            "is_managed": False,
-                            "is_warning": False,
-                            "listing_days": 999,
-                            "has_news": False,
-                            "has_disclosure": False,
-                            "inst_net": 0,
-                            "foreign_net": 0,
-                            "retail_net": 0,
-                            "prev_vol_ratio": 0,
-                            "detected_time": datetime.now(KST).strftime("%H:%M"),
-                            "past_suspicious_count": 0,
-                        })
+                    cur = float(close.iloc[-1])
+                    prev = float(close.iloc[-2])
+                    chg = ((cur - prev) / prev * 100) if prev > 0 else 0
+                    avg_v = float(volume.tail(20).mean()) if len(volume) >= 20 else float(volume.mean())
+                    cur_v = float(volume.iloc[-1])
+                    vr = cur_v / avg_v if avg_v > 0 else 0
+                    if chg >= 3.0 or vr >= 2.0:
+                        return {"ticker": item["code"], "name": item["name"],
+                                "price": cur, "change_pct": chg, "vol_ratio": vr,
+                                "in_watchlist": item["code"] in wl_codes}
                 except Exception:
-                    logger.debug("cmd_surge stock data build failed", exc_info=True)
-                    continue
+                    pass
+                return None
+
+            # 병렬 스캔 (20개씩 배치)
+            stocks_data = []
+            for i in range(0, len(scan_items), 20):
+                batch = scan_items[i:i + 20]
+                results = await _aio.gather(*[_check_one(it) for it in batch], return_exceptions=True)
+                for r in results:
+                    if isinstance(r, dict):
+                        stocks_data.append(r)
 
             if not stocks_data:
                 try:
                     await placeholder.edit_text(
-                        "\U0001f525 현재 급등 조건을 충족하는 종목이 없습니다."
+                        "\U0001f525 현재 급등 조건(+3% 또는 거래량 2배)을 충족하는 종목이 없습니다.\n\n"
+                        "장중(09:00~15:30)에 다시 시도해보세요."
                     )
                 except Exception:
-                    logger.debug("cmd_surge edit_text failed for empty result", exc_info=True)
+                    pass
                 return
 
-            # 등락률 기준 정렬, 상위 10개
             stocks_data.sort(key=lambda s: s["change_pct"], reverse=True)
             top = stocks_data[:10]
-
-            lines = [f"\U0001f525 급등주 실시간 스캔 ({len(stocks_data)}종목 감지)\n"]
+            lines = [f"\U0001f525 급등주 스캔 ({len(stocks_data)}종목 감지)\n"]
             for i, s in enumerate(top, 1):
                 icon = "\U0001f4c8" if s["change_pct"] >= 5 else "\U0001f525" if s["change_pct"] >= 3 else "\u26a1"
+                star = "⭐" if s.get("in_watchlist") else ""
                 lines.append(
-                    f"{i}. {icon} {s['name']}({s['ticker']}) "
-                    f"{s['change_pct']:+.1f}% "
-                    f"거래량 {s['volume_ratio']:.1f}배"
+                    f"{i}. {icon} {s['name']} {s['change_pct']:+.1f}% "
+                    f"거래량 {s['vol_ratio']:.1f}배 {star}"
                 )
-                # DB에도 저장
                 self.db.add_surge_stock(
                     ticker=s["ticker"], name=s["name"],
-                    scan_time=s["detected_time"],
-                    change_pct=s["change_pct"],
-                    volume_ratio=s["volume_ratio"],
+                    scan_time=datetime.now(KST).strftime("%H:%M"),
+                    change_pct=s["change_pct"], volume_ratio=s["vol_ratio"],
                     triggers="price_surge" if s["change_pct"] >= 5 else "combined",
-                    market_cap=s["market_cap"],
-                    health_grade="HEALTHY" if s["change_pct"] < 10 else "CAUTION",
+                    market_cap=0, health_grade="HEALTHY" if s["change_pct"] < 10 else "CAUTION",
                 )
 
+            # 종목 버튼
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            buttons = []
+            btn_row = []
+            for s in top[:6]:
+                cb = f"fav:stock:{s['ticker']}"
+                if len(cb) <= 64:
+                    btn_row.append(InlineKeyboardButton(f"{s['name'][:6]}", callback_data=cb))
+                if len(btn_row) == 3:
+                    buttons.append(btn_row)
+                    btn_row = []
+            if btn_row:
+                buttons.append(btn_row)
+            buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+
             try:
-                await placeholder.edit_text("\n".join(lines))
+                await placeholder.edit_text(
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
             except Exception:
-                logger.debug("cmd_surge edit_text failed, falling back", exc_info=True)
-                await update.message.reply_text("\n".join(lines), reply_markup=get_reply_markup(context))
+                await update.message.reply_text(
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
         except Exception as e:
             logger.error("Surge command error: %s", e, exc_info=True)
             await update.message.reply_text(
@@ -2678,118 +2848,129 @@ class CommandsMixin:
     async def cmd_accumulation(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle /accumulation - real-time stealth accumulation scan."""
+        """Handle /accumulation - stealth accumulation scan (parallel)."""
+        import asyncio as _aio
         try:
             self._persist_chat_id(update)
             placeholder = await update.message.reply_text(
-                "\U0001f575\ufe0f 매집 패턴 실시간 탐지 중..."
+                "\U0001f575\ufe0f 매집 패턴 탐지 중... (약 15초)"
             )
 
-            # 유니버스 종목의 기관/외인 수급 데이터 수집
-            stocks_data = []
-            for item in self.all_tickers[:30]:  # 상위 30종목만 (속도)
+            # 관심종목 + 유니버스 상위 조합 (최대 40개)
+            watchlist = self.db.get_watchlist()
+            scan_items = []
+            seen = set()
+            for w in watchlist:
+                code = w["ticker"]
+                if code not in seen:
+                    name = w.get("name") or code
+                    market = "KOSPI"
+                    for s in self.all_tickers:
+                        if s["code"] == code:
+                            name = s.get("name", name)
+                            market = s.get("market", "KOSPI")
+                            break
+                    scan_items.append({"code": code, "name": name, "market": market})
+                    seen.add(code)
+            for item in self.all_tickers:
+                if len(scan_items) >= 40:
+                    break
+                if item["code"] not in seen:
+                    scan_items.append({"code": item["code"], "name": item["name"],
+                                       "market": item.get("market", "KOSPI")})
+                    seen.add(item["code"])
+
+            async def _scan_one(item):
                 try:
-                    code = item["code"]
-                    market = item.get("market", "KOSPI")
-                    ohlcv = await self.yf_client.get_ohlcv(code, market, period="3mo")
+                    ohlcv = await self.yf_client.get_ohlcv(item["code"], item["market"], period="3mo")
                     if ohlcv is None or ohlcv.empty or len(ohlcv) < 20:
-                        continue
+                        return None
                     close = ohlcv["close"].astype(float)
                     volume = ohlcv["volume"].astype(float)
-
-                    # 20일 가격 변화율
-                    if len(close) >= 20:
-                        price_20d_ago = float(close.iloc[-20])
-                        price_now = float(close.iloc[-1])
-                        prc_chg = ((price_now - price_20d_ago) / price_20d_ago * 100) if price_20d_ago > 0 else 0
-                    else:
-                        prc_chg = 0
-
-                    # 거래량 기반 의사-수급 데이터 (실제 기관/외인 데이터 없이 추정)
-                    # 거래량이 평균 대비 높으면 기관/외인 매수로 추정
-                    avg_vol = float(volume.tail(20).mean()) if len(volume) >= 20 else float(volume.mean())
-                    daily_inst = []
-                    daily_foreign = []
+                    p20 = float(close.iloc[-20])
+                    pnow = float(close.iloc[-1])
+                    prc_chg = ((pnow - p20) / p20 * 100) if p20 > 0 else 0
+                    avg_vol = float(volume.tail(20).mean())
+                    daily_inst, daily_foreign = [], []
                     for j in range(-20, 0):
                         if abs(j) <= len(volume):
                             v = float(volume.iloc[j])
-                            ratio = v / avg_vol if avg_vol > 0 else 1
-                            # 거래량 1.5배 이상이면 기관 매수로 추정
-                            inst_est = v * 0.3 if ratio > 1.5 else -v * 0.1
-                            foreign_est = v * 0.2 if ratio > 1.3 else -v * 0.1
-                            daily_inst.append(inst_est)
-                            daily_foreign.append(foreign_est)
-
-                    stocks_data.append({
-                        "ticker": code,
-                        "name": item["name"],
-                        "daily_inst": daily_inst,
-                        "daily_foreign": daily_foreign,
-                        "price_change_20d": prc_chg,
-                        "disclosure_text": "",
-                    })
+                            r = v / avg_vol if avg_vol > 0 else 1
+                            daily_inst.append(v * 0.3 if r > 1.5 else -v * 0.1)
+                            daily_foreign.append(v * 0.2 if r > 1.3 else -v * 0.1)
+                    return {
+                        "ticker": item["code"], "name": item["name"],
+                        "daily_inst": daily_inst, "daily_foreign": daily_foreign,
+                        "price_change_20d": prc_chg, "disclosure_text": "",
+                    }
                 except Exception:
-                    logger.debug("cmd_accumulation stock data build failed", exc_info=True)
-                    continue
+                    return None
+
+            # 병렬 스캔 (15개씩)
+            stocks_data = []
+            for i in range(0, len(scan_items), 15):
+                batch = scan_items[i:i + 15]
+                results = await _aio.gather(*[_scan_one(it) for it in batch], return_exceptions=True)
+                for r in results:
+                    if isinstance(r, dict):
+                        stocks_data.append(r)
 
             if not stocks_data:
                 try:
-                    await placeholder.edit_text(
-                        "\U0001f575\ufe0f 분석 가능한 종목 데이터가 없습니다."
-                    )
+                    await placeholder.edit_text("\U0001f575\ufe0f 분석 가능한 종목 데이터가 없습니다.")
                 except Exception:
-                    logger.debug("cmd_accumulation edit_text failed for empty result", exc_info=True)
+                    pass
                 return
 
-            # 매집 패턴 탐지
             detections = scan_accumulations(stocks_data)
-
             if not detections:
                 try:
                     await placeholder.edit_text(
-                        "\U0001f575\ufe0f 현재 매집 패턴이 감지되지 않았습니다.\n"
-                        f"({len(stocks_data)}종목 스캔 완료)"
-                    )
+                        f"\U0001f575\ufe0f 현재 매집 패턴이 감지되지 않았습니다.\n"
+                        f"({len(stocks_data)}종목 스캔 완료)")
                 except Exception:
-                    logger.debug("cmd_accumulation edit_text failed for no detection", exc_info=True)
+                    pass
                 return
 
             lines = [f"\U0001f575\ufe0f 스텔스 매집 감지 ({len(detections)}종목)\n"]
             for i, d in enumerate(detections[:10], 1):
                 lines.append(
-                    f"{i}. {d.name} ({d.ticker}) "
-                    f"스코어 {d.total_score}"
-                )
-                lines.append(
-                    f"   기관 누적: {d.inst_total / 1e8:.0f}억, "
-                    f"외인 누적: {d.foreign_total / 1e8:.0f}억, "
-                    f"20일 등락: {d.price_change_20d:+.1f}%"
-                )
-                # DB에도 저장
+                    f"{i}. {d.name} ({d.ticker}) 스코어 {d.total_score}\n"
+                    f"   기관: {d.inst_total / 1e8:.0f}억 "
+                    f"외인: {d.foreign_total / 1e8:.0f}억 "
+                    f"20일: {d.price_change_20d:+.1f}%")
                 import json
-                patterns_json = json.dumps(
+                pj = json.dumps(
                     [{"type": p.pattern_type, "days": p.streak_days, "score": p.score}
-                     for p in d.patterns],
-                    ensure_ascii=False,
-                ) if d.patterns else "[]"
+                     for p in d.patterns], ensure_ascii=False) if d.patterns else "[]"
                 self.db.add_stealth_accumulation(
-                    ticker=d.ticker, name=d.name,
-                    total_score=d.total_score,
-                    patterns_json=patterns_json,
-                    price_change_20d=d.price_change_20d,
-                    inst_total=d.inst_total,
-                    foreign_total=d.foreign_total,
-                )
+                    ticker=d.ticker, name=d.name, total_score=d.total_score,
+                    patterns_json=pj, price_change_20d=d.price_change_20d,
+                    inst_total=d.inst_total, foreign_total=d.foreign_total)
+
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            buttons = []
+            btn_row = []
+            for d in detections[:6]:
+                cb = f"fav:stock:{d.ticker}"
+                if len(cb) <= 64:
+                    btn_row.append(InlineKeyboardButton(f"📋 {d.name[:6]}", callback_data=cb))
+                if len(btn_row) == 3:
+                    buttons.append(btn_row)
+                    btn_row = []
+            if btn_row:
+                buttons.append(btn_row)
+            buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
 
             try:
-                await placeholder.edit_text("\n".join(lines))
+                await placeholder.edit_text(
+                    "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
             except Exception:
-                logger.debug("cmd_accumulation edit_text failed, falling back", exc_info=True)
-                await update.message.reply_text("\n".join(lines), reply_markup=get_reply_markup(context))
+                await update.message.reply_text(
+                    "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
         except Exception as e:
             logger.error("Accumulation command error: %s", e, exc_info=True)
             await update.message.reply_text(
-                "\u26a0\ufe0f 매집 탐지 중 오류가 발생했습니다.", reply_markup=get_reply_markup(context),
-            )
+                "\u26a0\ufe0f 매집 탐지 중 오류가 발생했습니다.", reply_markup=get_reply_markup(context))
 
 
