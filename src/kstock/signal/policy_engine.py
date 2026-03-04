@@ -14,14 +14,30 @@ import yaml
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PATH = Path("config/policy_calendar.yaml")
+_CRISIS_PATH = Path("config/crisis_events.yaml")
 
 
 def _load_config(path: Path | None = None) -> dict:
     p = path or _DEFAULT_PATH
     if not p.exists():
-        return {"events": [], "leading_sectors": {"tier1": [], "tier2": []}}
-    with open(p) as f:
-        return yaml.safe_load(f) or {}
+        config: dict = {"events": [], "leading_sectors": {"tier1": [], "tier2": []}}
+    else:
+        with open(p) as f:
+            config = yaml.safe_load(f) or {}
+
+    # crisis_events.yaml 에서 활성 위기 이벤트 병합
+    try:
+        if _CRISIS_PATH.exists():
+            with open(_CRISIS_PATH, encoding="utf-8") as f:
+                crisis_data = yaml.safe_load(f) or {}
+            crisis_events = config.setdefault("_crisis_events", [])
+            for ce in crisis_data.get("active_crises", []):
+                if ce.get("severity", "") != "resolved":
+                    crisis_events.append(ce)
+    except Exception as e:
+        logger.debug("Crisis events load failed: %s", e)
+
+    return config
 
 
 def _pattern_to_event(pattern: dict, year: int) -> dict:
@@ -95,23 +111,15 @@ def get_active_events(today: date | None = None, config: dict | None = None) -> 
             ev["_is_crisis"] = True  # 위기 정책 마커
             active.insert(0, ev)  # 최상단 배치
 
-    # v6.6: crisis_events.yaml 에서 활성 위기 이벤트 로드
-    try:
-        crisis_path = Path("config/crisis_events.yaml")
-        if crisis_path.exists():
-            with open(crisis_path, encoding="utf-8") as f:
-                crisis_data = yaml.safe_load(f) or {}
-            for ce in crisis_data.get("active_crises", []):
-                if ce.get("severity", "") != "resolved":
-                    ev = {
-                        "name": ce.get("name", "위기 이벤트"),
-                        "effect": "crisis",
-                        "description": ce.get("description", ""),
-                        "_is_crisis": True,
-                    }
-                    active.insert(0, ev)
-    except Exception as e:
-        logger.debug("Crisis events load failed: %s", e)
+    # v6.6: crisis_events.yaml 에서 활성 위기 이벤트 로드 (_load_config에서 병합됨)
+    for ce in config.get("_crisis_events", []):
+        ev = {
+            "name": ce.get("name", "위기 이벤트"),
+            "effect": "crisis",
+            "description": ce.get("description", ""),
+            "_is_crisis": True,
+        }
+        active.insert(0, ev)
 
     return active
 
@@ -235,7 +243,8 @@ def get_telegram_summary(today: date | None = None, config: dict | None = None) 
 
     # 일반 정책 이벤트
     if normal_events:
-        lines.append("\n\U0001f3db\ufe0f 정책/정치 이벤트")
+        prefix = "\n" if crisis_events else ""
+        lines.append(f"{prefix}\U0001f3db\ufe0f 정책/정치 이벤트")
         for ev in normal_events:
             emoji = effect_emoji.get(ev.get("effect", ""), "\u26aa")
             name = ev.get("name", "")

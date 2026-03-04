@@ -822,6 +822,7 @@ class CoreHandlersMixin:
             "📈 시황": self._menu_market_status,
             "💰 잔고": self._menu_balance,
             "⭐ 즐겨찾기": self._menu_favorites,
+            "🖥 원격접속": self._menu_remote_access,
             "🤖 에이전트": self._menu_agent_chat,
             "📋 리포트": self._menu_reports,
             "💬 AI질문": self._menu_ai_chat,
@@ -869,7 +870,7 @@ class CoreHandlersMixin:
             context.user_data.pop("awaiting_optimize_ticker", None)
             # Claude 대화 모드: CLAUDE_MODE_MENU에 포함된 버튼은 모드 유지
             _claude_safe_buttons = {
-                "💻 클로드", "🔙 대화 종료", "🤖 에이전트",
+                "💻 클로드", "🔙 대화 종료", "🤖 에이전트", "🖥 원격접속",
                 "📊 분석", "📈 시황", "💰 잔고", "⭐ 즐겨찾기",
                 "💬 AI질문", "📋 리포트", "⚙️ 더보기",
             }
@@ -1597,6 +1598,8 @@ class CoreHandlersMixin:
                 "rate": self._action_daily_rate,
                 # v5.9: 더보기 인라인 메뉴 → 텍스트 메뉴 호출
                 "menu": self._action_menu_dispatch,
+                # v8.3: 원격접속 메뉴
+                "remote": self._action_remote,
             }
             handler = dispatch.get(action)
             if handler:

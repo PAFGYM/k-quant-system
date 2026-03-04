@@ -760,8 +760,10 @@ class TestDBShortSelling:
     """Verify short_selling table operations."""
 
     def test_add_and_get(self, store):
+        from datetime import datetime
+        today = datetime.utcnow().strftime("%Y-%m-%d")
         rid = store.add_short_selling(
-            ticker="005930", date="2026-02-23",
+            ticker="005930", date=today,
             short_volume=100000, total_volume=500000,
             short_ratio=20.0, short_balance=50000,
             short_balance_ratio=5.0,
@@ -772,21 +774,29 @@ class TestDBShortSelling:
         assert rows[0]["short_ratio"] == 20.0
 
     def test_unique_constraint(self, store):
-        store.add_short_selling("005930", "2026-02-23", short_ratio=10.0)
+        from datetime import datetime
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        store.add_short_selling("005930", today, short_ratio=10.0)
         # Same ticker+date should be ignored
-        result = store.add_short_selling("005930", "2026-02-23", short_ratio=15.0)
+        result = store.add_short_selling("005930", today, short_ratio=15.0)
         assert result is None
 
     def test_get_latest(self, store):
-        store.add_short_selling("005930", "2026-02-22", short_ratio=5.0)
-        store.add_short_selling("005930", "2026-02-23", short_ratio=8.0)
+        from datetime import datetime, timedelta
+        today = datetime.utcnow()
+        d1 = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        d2 = today.strftime("%Y-%m-%d")
+        store.add_short_selling("005930", d1, short_ratio=5.0)
+        store.add_short_selling("005930", d2, short_ratio=8.0)
         latest = store.get_short_selling_latest("005930")
         assert latest is not None
         assert latest["short_ratio"] == 8.0
 
     def test_get_overheated(self, store):
-        store.add_short_selling("005930", "2026-02-23", short_ratio=25.0)
-        store.add_short_selling("000660", "2026-02-23", short_ratio=5.0)
+        from datetime import datetime
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        store.add_short_selling("005930", today, short_ratio=25.0)
+        store.add_short_selling("000660", today, short_ratio=5.0)
         overheated = store.get_overheated_shorts(min_ratio=20.0, days=7)
         assert len(overheated) >= 1
         assert overheated[0]["ticker"] == "005930"
@@ -806,8 +816,10 @@ class TestDBInverseETF:
     """Verify inverse_etf table operations."""
 
     def test_add_and_get(self, store):
+        from datetime import datetime
+        today = datetime.utcnow().strftime("%Y-%m-%d")
         rid = store.add_inverse_etf(
-            ticker="114800", date="2026-02-23",
+            ticker="114800", date=today,
             name="KODEX 인버스", sector="코스피",
             volume=5000000, price=5500, change_pct=-1.2,
         )
@@ -816,8 +828,10 @@ class TestDBInverseETF:
         assert len(rows) >= 1
 
     def test_get_by_sector(self, store):
-        store.add_inverse_etf("114800", "2026-02-23", sector="코스피")
-        store.add_inverse_etf("251340", "2026-02-23", sector="코스닥")
+        from datetime import datetime
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        store.add_inverse_etf("114800", today, sector="코스피")
+        store.add_inverse_etf("251340", today, sector="코스닥")
         rows = store.get_inverse_etf_by_sector("코스피", days=7)
         assert len(rows) >= 1
         assert all(r["sector"] == "코스피" for r in rows)
@@ -831,8 +845,10 @@ class TestDBMarginBalance:
     """Verify margin_balance table operations."""
 
     def test_add_and_get(self, store):
+        from datetime import datetime
+        today = datetime.utcnow().strftime("%Y-%m-%d")
         rid = store.add_margin_balance(
-            ticker="005930", date="2026-02-23",
+            ticker="005930", date=today,
             credit_buy=1000, credit_sell=500,
             credit_balance=5000, credit_ratio=3.5,
             collateral_balance=2000,
@@ -843,15 +859,21 @@ class TestDBMarginBalance:
         assert rows[0]["credit_ratio"] == 3.5
 
     def test_get_latest(self, store):
-        store.add_margin_balance("005930", "2026-02-22", credit_ratio=3.0)
-        store.add_margin_balance("005930", "2026-02-23", credit_ratio=4.0)
+        from datetime import datetime, timedelta
+        today = datetime.utcnow()
+        d1 = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        d2 = today.strftime("%Y-%m-%d")
+        store.add_margin_balance("005930", d1, credit_ratio=3.0)
+        store.add_margin_balance("005930", d2, credit_ratio=4.0)
         latest = store.get_margin_balance_latest("005930")
         assert latest is not None
         assert latest["credit_ratio"] == 4.0
 
     def test_unique_constraint(self, store):
-        store.add_margin_balance("005930", "2026-02-23", credit_ratio=3.0)
-        result = store.add_margin_balance("005930", "2026-02-23", credit_ratio=5.0)
+        from datetime import datetime
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        store.add_margin_balance("005930", today, credit_ratio=3.0)
+        result = store.add_margin_balance("005930", today, credit_ratio=5.0)
         assert result is None
 
     def test_empty_results(self, store):

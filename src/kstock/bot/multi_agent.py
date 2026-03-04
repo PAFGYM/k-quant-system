@@ -320,15 +320,20 @@ def format_data_for_agent(agent_key: str, stock_data: dict) -> str:
 
         elif agent_key == "sentiment":
             lines = []
-            # 외국인 수급
+            # 뉴스 요약
+            news = stock_data.get("news_summary", "")
+            if news:
+                lines.append(f"뉴스: {news}")
+
+            # 외인 수급
             frgn_5d = stock_data.get("foreign_net_5d")
             frgn_detail = stock_data.get("foreign_flow_detail", "")
             if frgn_5d is not None:
-                lines.append(f"외국인 5일 누적 순매수: {frgn_5d:+,}주")
+                lines.append(f"외인 5일 누적 순매수: {frgn_5d:+,}주")
                 if frgn_detail:
                     lines.append(f"  일별: {frgn_detail}")
             else:
-                lines.append("외국인 수급: 데이터없음")
+                lines.append("외인 수급: 데이터없음")
 
             # 기관 수급
             inst_5d = stock_data.get("inst_net_5d")
@@ -347,7 +352,7 @@ def format_data_for_agent(agent_key: str, stock_data: dict) -> str:
 
             # 추가 데이터
             if stock_data.get("foreign_ratio"):
-                lines.append(f"외국인 지분율: {stock_data['foreign_ratio']:.1f}%")
+                lines.append(f"외인 지분율: {stock_data['foreign_ratio']:.1f}%")
 
             return "\n".join(lines) if lines else "수급 데이터 없음"
 
@@ -389,21 +394,15 @@ def parse_agent_score(response_text: str) -> int:
         # 1차: 점수: XX 패턴
         match = _SCORE_PATTERN.search(response_text)
         if match:
-            score = int(match.group(1))
-            if 0 <= score <= 100:
-                return score
+            return max(0, min(100, int(match.group(1))))
         # 2차: "72점" 또는 "65/100" 패턴
         fallback = _SCORE_FALLBACK.search(response_text)
         if fallback:
-            score = int(fallback.group(1))
-            if 0 <= score <= 100:
-                return score
+            return max(0, min(100, int(fallback.group(1))))
         # 3차: bold 안의 숫자
         bold = _SCORE_BOLD.search(response_text)
         if bold:
-            score = int(bold.group(1))
-            if 0 <= score <= 100:
-                return score
+            return max(0, min(100, int(bold.group(1))))
         logger.warning("점수 추출 실패 — 응답 앞 300자: %s", response_text[:300])
         return 50  # default
     except Exception:

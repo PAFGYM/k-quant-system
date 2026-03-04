@@ -146,12 +146,18 @@ class PositionSizer:
 
         # 트레일링 스탑 상태 추적 (ticker → TrailingStopState)
         self._trailing_states: dict[str, TrailingStopState] = {}
+        # 이 세션에서 _update_trailing_stop이 호출된 티커 집합
+        self._active_tickers: set[str] = set()
 
         # DB에서 저장된 트레일링 스탑 상태 복원
         self._load_trailing_stops_from_db()
 
     def _load_trailing_stops_from_db(self) -> None:
-        """재시작 시 DB에서 트레일링 스탑 상태를 복원한다."""
+        """재시작 시 DB에서 트레일링 스탑 상태를 복원한다.
+
+        고점(high_price)만 복원하고 is_active는 복원하지 않는다.
+        is_active/stop_price는 _update_trailing_stop 호출 시 현재가 기준으로 재계산된다.
+        """
         try:
             from kstock.core.persistence import load_trailing_stops
             saved = load_trailing_stops()
@@ -161,11 +167,7 @@ class PositionSizer:
                     high_price=data["peak_price"],
                     trail_pct=data.get("stop_pct", 0.07),
                 )
-                if data.get("entry_price", 0) > 0:
-                    # 활성화 여부 판단: entry_price가 있으면 이전에 활성화됐을 가능성
-                    state.is_active = True
-                    state.activated_at = data["entry_price"]
-                    state.stop_price = state.high_price * (1 - state.trail_pct)
+                # is_active는 복원하지 않음 — _update_trailing_stop에서 현재가 기준으로 재평가
                 self._trailing_states[ticker] = state
             if saved:
                 logger.info("Restored %d trailing stop states from DB", len(saved))
@@ -828,6 +830,13 @@ class PositionSizer:
 
         state = self._trailing_states[ticker]
         state.trail_pct = config["trail_pct"]
+        self._active_tickers.add(ticker)
+
+        # DB 복원 상태에서 고점이 현재가보다 훨씬 높으면 (비활성 상태) 리셋
+        # 새 포지션 또는 다른 매수가로 시작하는 경우를 처리
+        if not state.is_active and state.high_price > current_price * 1.5:
+            state.high_price = current_price
+            state.stop_price = 0.0
 
         # 고점 갱신
         _peak_changed = False
@@ -841,6 +850,9 @@ class PositionSizer:
         if pnl_pct >= config["activate_at"] and not state.is_active:
             state.is_active = True
             state.activated_at = current_price
+            # 활성화 시점에 고점이 현재가보다 높으면 (DB 잔재 등) 현재가로 리셋
+            if state.high_price > current_price:
+                state.high_price = current_price
             state.stop_price = state.high_price * (1 - state.trail_pct)
             _peak_changed = True
             logger.info(
@@ -924,8 +936,8 @@ class PositionSizer:
         return self._trailing_states.get(ticker)
 
     def get_all_trailing_states(self) -> dict[str, TrailingStopState]:
-        """전체 트레일링 스탑 상태 조회."""
-        return dict(self._trailing_states)
+        """이 세션에서 업데이트된 트레일링 스탑 상태 조회."""
+        return {t: s for t, s in self._trailing_states.items() if t in self._active_tickers}
 
 
 # ── 포맷 헬퍼 ──────────────────────────────────────────────

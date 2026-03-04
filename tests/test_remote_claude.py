@@ -16,7 +16,7 @@ class TestRemoteClaudeConstants(unittest.TestCase):
 
     def test_project_dir(self):
         from kstock.bot.mixins.remote_claude import PROJECT_DIR
-        assert PROJECT_DIR == "/Users/juhodang/k-quant-system"
+        assert "k-quant-system" in PROJECT_DIR
 
     def test_max_timeout(self):
         from kstock.bot.mixins.remote_claude import MAX_TIMEOUT

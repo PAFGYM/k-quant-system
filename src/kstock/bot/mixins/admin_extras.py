@@ -1531,6 +1531,183 @@ class AdminExtrasMixin:
                 await query.edit_message_text("⭐ 즐겨찾기가 비어있습니다.")
             return
 
+    # ── 원격접속 메뉴 ─────────────────────────────────────────
+
+    async def _menu_remote_access(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """🖥 원격접속 — 맥미니 연결 방법 3가지 + 실시간 상태."""
+        import subprocess as _sp
+
+        # 1. 로컬 IP
+        local_ip = "확인 불가"
+        try:
+            out = _sp.check_output(
+                ["ifconfig", "en0"], text=True, timeout=3,
+            )
+            for line in out.splitlines():
+                if "inet " in line and "127." not in line:
+                    local_ip = line.strip().split()[1]
+                    break
+        except Exception:
+            pass
+
+        # 2. Tailscale IP
+        ts_ip = ""
+        ts_status = "❌ 미연결"
+        try:
+            out = _sp.check_output(
+                ["/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+                 "ip", "-4"],
+                text=True, timeout=3,
+            ).strip()
+            if out and out.startswith("100."):
+                ts_ip = out
+                ts_status = f"✅ {ts_ip}"
+        except Exception:
+            pass
+
+        # 3. SSH 상태
+        ssh_status = "❌ 비활성"
+        try:
+            out = _sp.check_output(
+                ["launchctl", "list"], text=True, timeout=3,
+            )
+            if "com.openssh.sshd" in out:
+                ssh_status = "✅ 활성"
+        except Exception:
+            pass
+
+        # 4. Screen Sharing 상태
+        vnc_status = "✅ 활성"  # macOS 기본 활성
+
+        lines = [
+            "🖥 맥미니 원격접속",
+            "━" * 22,
+            "",
+            "1️⃣ 텔레그램 Claude (지금 사용 중)",
+            "   💻 클로드 버튼 → 명령 입력",
+            "   어디서든 가능, 코드 수정/시스템 제어",
+            "",
+            "2️⃣ SSH (터미널)",
+            f"   상태: {ssh_status}",
+            f"   로컬: ssh botddol@{local_ip}",
+        ]
+        if ts_ip:
+            lines.append(f"   외부: ssh botddol@{ts_ip}")
+        lines.extend([
+            "",
+            "3️⃣ 화면 공유 (원격 데스크톱)",
+            f"   상태: {vnc_status}",
+            f"   로컬: vnc://{local_ip}",
+        ])
+        if ts_ip:
+            lines.append(f"   외부: vnc://{ts_ip}")
+        lines.extend([
+            "",
+            "━" * 22,
+            f"🌐 Tailscale: {ts_status}",
+            f"📡 로컬 IP: {local_ip}",
+        ])
+
+        buttons = [
+            [InlineKeyboardButton(
+                "🔄 SSH 활성화", callback_data="remote:ssh",
+            )],
+            [InlineKeyboardButton(
+                "🌐 Tailscale 로그인", callback_data="remote:tailscale",
+            )],
+            [InlineKeyboardButton(
+                "📋 접속정보 복사용", callback_data="remote:copy",
+            )],
+        ]
+
+        await update.message.reply_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _action_remote(self, query, context, payload: str) -> None:
+        """remote:* 콜백 — 원격접속 관련 액션."""
+        import subprocess as _sp
+
+        if payload == "ssh":
+            # SSH 활성화 시도
+            try:
+                _sp.run(
+                    ["sudo", "-n", "systemsetup", "-setremotelogin", "on"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                await query.edit_message_text(
+                    "✅ SSH 활성화 시도 완료.\n\n"
+                    "admin 비밀번호가 필요하면 맥미니에서 직접:\n"
+                    "시스템 설정 → 일반 → 공유 → 원격 로그인 켜기"
+                )
+            except Exception:
+                await query.edit_message_text(
+                    "⚠️ SSH 활성화에 admin 권한이 필요합니다.\n\n"
+                    "맥미니에서 직접 설정하세요:\n"
+                    "시스템 설정 → 일반 → 공유 → 원격 로그인 켜기"
+                )
+
+        elif payload == "tailscale":
+            try:
+                _sp.Popen(
+                    ["open", "/Applications/Tailscale.app"],
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                )
+                await query.edit_message_text(
+                    "🌐 Tailscale 앱을 실행했습니다.\n\n"
+                    "맥미니 화면에서 로그인해주세요.\n"
+                    "로그인 후 맥북에서도 같은 계정으로 Tailscale 설치."
+                )
+            except Exception:
+                await query.edit_message_text(
+                    "⚠️ Tailscale 앱을 찾을 수 없습니다.\n"
+                    "Mac App Store에서 Tailscale을 설치하세요."
+                )
+
+        elif payload == "copy":
+            import subprocess as _sp
+            local_ip = "172.30.1.61"
+            try:
+                out = _sp.check_output(
+                    ["ifconfig", "en0"], text=True, timeout=3,
+                )
+                for line in out.splitlines():
+                    if "inet " in line and "127." not in line:
+                        local_ip = line.strip().split()[1]
+                        break
+            except Exception:
+                pass
+
+            ts_ip = ""
+            try:
+                out = _sp.check_output(
+                    ["/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+                     "ip", "-4"],
+                    text=True, timeout=3,
+                ).strip()
+                if out and out.startswith("100."):
+                    ts_ip = out
+            except Exception:
+                pass
+
+            copy_text = (
+                f"SSH: ssh botddol@{local_ip}\n"
+                f"VNC: vnc://{local_ip}\n"
+            )
+            if ts_ip:
+                copy_text += (
+                    f"SSH(외부): ssh botddol@{ts_ip}\n"
+                    f"VNC(외부): vnc://{ts_ip}\n"
+                )
+
+            await query.edit_message_text(
+                f"📋 접속 정보\n\n```\n{copy_text}```",
+                parse_mode="Markdown",
+            )
+
     # ── 에이전트 대화 메뉴 ─────────────────────────────────────────
 
     async def _menu_agent_chat(

@@ -150,8 +150,10 @@ class TestDBNewTables:
     # -- risk_violations -------------------------------------------------------
 
     def test_add_and_get_risk_violations(self, db):
+        from datetime import datetime
+        today = datetime.utcnow().strftime("%Y-%m-%d")
         rid = db.add_risk_violation(
-            "2026-02-23", "concentration", severity="high",
+            today, "concentration", severity="high",
             description="단일종목 25% 초과",
             recommended_action="비중 축소",
         )
@@ -222,8 +224,10 @@ class TestDBNewTables:
     # -- hallucination_log -----------------------------------------------------
 
     def test_add_and_get_hallucination_stats(self, db):
+        from datetime import datetime
+        today = datetime.utcnow().strftime("%Y-%m-%d")
         hid = db.add_hallucination_log(
-            "2026-02-23", query="삼성전자 전망",
+            today, query="삼성전자 전망",
             response_preview="좋습니다...",
             verified_count=3, unverified_count=1,
             unverified_claims="목표가 100,000원",

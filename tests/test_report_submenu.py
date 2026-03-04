@@ -19,7 +19,10 @@ def store(tmp_path):
 @pytest.fixture
 def store_with_reports(store):
     """Store pre-populated with sample reports."""
+    from datetime import datetime, timedelta
+    today = datetime.utcnow().date()
     for i in range(3):
+        d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
         store.add_report(
             source="naver",
             title=f"에코프로 목표가 상향 레포트 {i}",
@@ -28,7 +31,7 @@ def store_with_reports(store):
             target_price=200000 + i * 10000,
             prev_target_price=190000,
             opinion="매수",
-            date=f"2026-02-2{i}",
+            date=d,
         )
     store.add_report(
         source="naver",
@@ -38,7 +41,7 @@ def store_with_reports(store):
         target_price=580000,
         prev_target_price=580000,
         opinion="매수",
-        date="2026-02-23",
+        date=today.strftime("%Y-%m-%d"),
     )
     # Target downgrade
     store.add_report(
@@ -49,7 +52,7 @@ def store_with_reports(store):
         target_price=30000,
         prev_target_price=50000,
         opinion="중립",
-        date="2026-02-22",
+        date=(today - timedelta(days=1)).strftime("%Y-%m-%d"),
     )
     # Sector report
     store.add_report(
@@ -60,7 +63,7 @@ def store_with_reports(store):
         target_price=0,
         prev_target_price=0,
         opinion="",
-        date="2026-02-23",
+        date=today.strftime("%Y-%m-%d"),
     )
     return store
 
