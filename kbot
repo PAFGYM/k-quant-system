@@ -77,13 +77,14 @@ _ctrl() {
     # Send command to running bot via Unix socket
     local cmd="$1"
     shift
-    local args="${1:-{}}"
+    local args="${1:-\{\}}"
     PYTHONPATH=src python3 -c "
 import json, sys
 from kstock.bot.control_client import send_command
-r = send_command('$cmd', json.loads('$args'))
+args = json.loads(sys.argv[1])
+r = send_command(sys.argv[2], args)
 if not r.get('ok'):
-    print(f'Error: {r.get(\"error\", \"unknown\")}', file=sys.stderr)
+    print('Error: ' + r.get('error', 'unknown'), file=sys.stderr)
     sys.exit(1)
 result = r.get('result', '')
 if isinstance(result, str):
@@ -91,7 +92,7 @@ if isinstance(result, str):
 elif isinstance(result, list):
     for item in result:
         if isinstance(item, dict):
-            icon = '▶' if item.get('enabled', True) else '⏸'
+            icon = chr(9654) if item.get('enabled', True) else chr(9198)
             print(f'  {icon} {item.get(\"name\", \"?\"):30s} next: {item.get(\"next_run\", \"-\")}')
         else:
             print(item)
@@ -100,7 +101,7 @@ elif isinstance(result, dict):
         print(f'  {k}: {v}')
 else:
     print(json.dumps(result, ensure_ascii=False, indent=2))
-"
+" "$args" "$cmd"
 }
 
 # ── 프로세스 관리 ─────────────────────────
