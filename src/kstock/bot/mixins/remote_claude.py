@@ -129,8 +129,8 @@ class RemoteClaudeMixin:
                 CLAUDE_CLI, "-p", prompt,
                 "--output-format", "text",
                 "--dangerously-skip-permissions",
-                "--model", "haiku",
-                "--max-turns", "3",
+                "--model", "sonnet",
+                "--max-turns", "10",
             ]
             if continue_conversation:
                 cmd.append("--continue")
