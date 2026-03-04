@@ -645,10 +645,12 @@ class SchedulerMixin:
             logger.error("job_auto_classify failed: %s", e)
 
     async def _send_manager_watchlist_scan(self, context, macro) -> None:
-        """매니저별 관심종목 매수 스캔 — 아침 브리핑 후 실행."""
+        """매니저별 관심종목 매수 스캔 — 기술적 데이터 보강 후 AI 분석."""
         try:
             from collections import defaultdict
-            from kstock.bot.investment_managers import scan_manager_domain, MANAGERS
+            from kstock.bot.investment_managers import (
+                scan_manager_domain, MANAGERS, compute_recovery_score,
+            )
 
             watchlist = self.db.get_watchlist()
             if not watchlist:
@@ -672,12 +674,46 @@ class SchedulerMixin:
                     continue
                 if hz not in MANAGERS:
                     continue
-                # 가격 데이터 보강
+
+                # ── 기술적 데이터 보강 (가격 + RSI + BB + MACD + 거래량) ──
                 try:
-                    price_data = await self._get_price(w["ticker"], 0)
-                    w["price"] = price_data if isinstance(price_data, (int, float)) else 0
-                except Exception:
-                    w["price"] = 0
+                    # 가격 상세 (등락률 포함)
+                    detail = await self._get_price_detail(w["ticker"], 0)
+                    w["price"] = detail.get("price", 0)
+                    w["day_change"] = detail.get("day_change_pct", 0)
+
+                    # OHLCV → 기술적 지표 계산
+                    market = "KOSPI"
+                    for s in self.all_tickers:
+                        if s["code"] == w["ticker"]:
+                            market = s.get("market", "KOSPI")
+                            break
+                    ohlcv = await self.yf_client.get_ohlcv(
+                        w["ticker"], market, period="3mo",
+                    )
+                    if ohlcv is not None and not ohlcv.empty and len(ohlcv) >= 20:
+                        from kstock.features.technical import compute_indicators
+                        tech = compute_indicators(ohlcv)
+                        w["rsi"] = tech.rsi
+                        w["bb_pctb"] = tech.bb_pctb
+                        w["macd_cross"] = tech.macd_signal_cross
+                        w["vol_ratio"] = tech.volume_ratio * 100  # %로 변환
+                        # 52주 고점 대비 하락폭
+                        if tech.high_52w > 0 and w["price"] > 0:
+                            w["drop_from_high"] = (
+                                (w["price"] - tech.high_52w) / tech.high_52w
+                            ) * 100
+                        else:
+                            w["drop_from_high"] = 0
+                        # 회복 탄력성 점수
+                        w["recovery_score"] = compute_recovery_score(
+                            tech, w.get("day_change", 0),
+                        )
+                except Exception as e:
+                    logger.debug("Watchlist enrich %s: %s", w.get("ticker"), e)
+                    if "price" not in w:
+                        w["price"] = 0
+
                 by_manager[hz].append(w)
 
             current_alert = getattr(self, '_alert_mode', 'normal')

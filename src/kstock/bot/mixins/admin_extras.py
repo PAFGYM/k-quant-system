@@ -2375,13 +2375,41 @@ class AdminExtrasMixin:
             )
             return
 
-        # 가격 데이터 보강
+        # 기술적 데이터 보강 (가격 + RSI + BB + MACD + 거래량)
         for w in stocks:
             try:
-                p = await self._get_price(w["ticker"], 0)
-                w["price"] = p if isinstance(p, (int, float)) else 0
+                detail = await self._get_price_detail(w["ticker"], 0)
+                w["price"] = detail.get("price", 0)
+                w["day_change"] = detail.get("day_change_pct", 0)
+
+                market = "KOSPI"
+                for s in self.all_tickers:
+                    if s["code"] == w["ticker"]:
+                        market = s.get("market", "KOSPI")
+                        break
+                ohlcv = await self.yf_client.get_ohlcv(
+                    w["ticker"], market, period="3mo",
+                )
+                if ohlcv is not None and not ohlcv.empty and len(ohlcv) >= 20:
+                    from kstock.features.technical import compute_indicators
+                    tech = compute_indicators(ohlcv)
+                    w["rsi"] = tech.rsi
+                    w["bb_pctb"] = tech.bb_pctb
+                    w["macd_cross"] = tech.macd_signal_cross
+                    w["vol_ratio"] = tech.volume_ratio * 100
+                    if tech.high_52w > 0 and w["price"] > 0:
+                        w["drop_from_high"] = (
+                            (w["price"] - tech.high_52w) / tech.high_52w
+                        ) * 100
+                    else:
+                        w["drop_from_high"] = 0
+                    from kstock.bot.investment_managers import compute_recovery_score
+                    w["recovery_score"] = compute_recovery_score(
+                        tech, w.get("day_change", 0),
+                    )
             except Exception:
-                w["price"] = 0
+                if "price" not in w:
+                    w["price"] = 0
 
         # 시장 상황
         market_text = ""

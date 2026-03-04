@@ -636,6 +636,39 @@ async def get_manager_greeting(holding_type: str, name: str, ticker: str) -> str
     )
 
 
+# ── 회복 탄력성 점수 ───────────────────────────────────────
+
+def compute_recovery_score(tech, day_change: float = 0) -> int:
+    """기술적 지표 기반 회복 탄력성 점수 (0~100).
+
+    과매도 반등 가능성이 높을수록 높은 점수.
+    tech: TechnicalIndicators 또는 유사 객체 (rsi, bb_pctb, macd_signal_cross 등).
+    """
+    score = 0
+    # RSI 과매도 (30↓: +30, 40↓: +15)
+    if tech.rsi <= 30:
+        score += 30
+    elif tech.rsi <= 40:
+        score += 15
+    # BB 하단 근접 (%B 0.2↓: +20, 0.3↓: +10)
+    if tech.bb_pctb <= 0.2:
+        score += 20
+    elif tech.bb_pctb <= 0.3:
+        score += 10
+    # MACD 골든크로스 (+15)
+    if tech.macd_signal_cross > 0:
+        score += 15
+    # 거래량 급증 (200%+: +20, 150%+: +10)
+    if tech.volume_ratio >= 2.0:
+        score += 20
+    elif tech.volume_ratio >= 1.5:
+        score += 10
+    # RSI 상승 다이버전스 (+15) — 가격↓ but RSI↑
+    if getattr(tech, "rsi_divergence", 0) > 0:
+        score += 15
+    return min(score, 100)
+
+
 # ── 매니저 관심종목 매수 스캔 ──────────────────────────────
 
 async def scan_manager_domain(
@@ -663,13 +696,26 @@ async def scan_manager_domain(
     if not api_key:
         return ""
 
-    # 종목 데이터 정리 (보유 제외, 관심만)
+    # 종목 데이터 정리 — 기술적 지표 포함
     stocks_text = ""
-    for w in watchlist_stocks[:15]:
+    # 전시모드: 회복 탄력성 순으로 정렬 (RSI 낮고 거래량 높은 종목 우선)
+    sorted_stocks = list(watchlist_stocks[:20])
+    if alert_mode in ("wartime", "elevated"):
+        sorted_stocks.sort(key=lambda w: (
+            w.get("rsi", 50),  # RSI 낮은 순 (과매도)
+            -(w.get("vol_ratio", 0) or 0),  # 거래량 높은 순
+        ))
+
+    for w in sorted_stocks[:15]:
         price = w.get("price", 0)
         change = w.get("day_change", 0)
         rsi = w.get("rsi", 0)
         vol_ratio = w.get("vol_ratio", 0)
+        bb_pctb = w.get("bb_pctb", -1)
+        macd_cross = w.get("macd_cross", 0)
+        drop_from_high = w.get("drop_from_high", 0)
+        recovery_score = w.get("recovery_score", 0)
+
         line = f"- {w.get('name', '')} ({w.get('ticker', '')})"
         if price > 0:
             line += f": {price:,.0f}원"
@@ -679,6 +725,14 @@ async def scan_manager_domain(
             line += f", RSI {rsi:.0f}"
         if vol_ratio > 0:
             line += f", 거래량비 {vol_ratio:.0f}%"
+        if 0 <= bb_pctb <= 1:
+            line += f", BB {bb_pctb:.2f}"
+        if macd_cross != 0:
+            line += ", MACD골든크로스" if macd_cross > 0 else ""
+        if drop_from_high < -10:
+            line += f", 고점대비 {drop_from_high:.0f}%"
+        if recovery_score > 0:
+            line += f", 회복점수 {recovery_score:.0f}"
         stocks_text += line + "\n"
 
     if not stocks_text.strip():
@@ -687,11 +741,23 @@ async def scan_manager_domain(
     situation = ""
     if alert_mode == "wartime":
         situation = (
-            "\n[🔴 전시 모드] 매수 매우 신중. 확신 80%↑ 종목만 추천. "
-            "방어 섹터 우선. 추천 없으면 '관망'으로.\n"
+            "\n[🔴 전시 모드 — 하락장 기회 탐색]\n"
+            "국내 증시가 크게 하락한 상황이다.\n"
+            "핵심 분석 포인트:\n"
+            "1. 회복 탄력성: RSI 30↓ + 거래량 급증 = 과매도 반등 후보\n"
+            "2. 바닥 신호: BB 하단(0.2↓) + MACD 골든크로스 = 반전 신호\n"
+            "3. 방어력: 고점 대비 하락폭이 시장보다 작은 종목 = 강한 종목\n"
+            "4. 수급 전환: 외인/기관 매도 → 매수 전환 포착\n\n"
+            "추천 기준: 확신 80%↑, 분할매수 필수, 방어섹터 우선.\n"
+            "추천 시 '단타 적합' 또는 '스윙 적합' 명시.\n"
+            "추천 없으면 '현재 관망 — 바닥 확인 후 진입'으로.\n"
         )
     elif alert_mode == "elevated":
-        situation = "\n[🟠 경계 모드] 분할 매수만 권장. 한번에 풀 매수 금지.\n"
+        situation = (
+            "\n[🟠 경계 모드]\n"
+            "분할 매수만 권장. 한번에 풀 매수 금지.\n"
+            "RSI 과매도 + 거래량 증가 종목 우선 검토.\n"
+        )
 
     system_prompt = (
         f"너는 {manager['name']}의 투자 철학을 따르는 '{manager['title']}'이다.\n"
@@ -702,14 +768,23 @@ async def scan_manager_domain(
         f"제공된 가격 데이터만 사용. 학습 데이터의 과거 가격 절대 금지.\n"
         f"관심종목 중에서 지금 매수 타이밍인 종목을 골라 추천.\n"
         f"추천 종목이 없으면 '현재 매수 타이밍 종목 없음'이라고 답해.\n"
-        f"추천 시: 종목명, 매수 이유(2줄), 목표가/손절가 제시.\n"
+        f"추천 시: 종목명, 매수 이유(2줄), 목표가/손절가, 단타/스윙 적합 여부 제시.\n"
     )
 
     user_prompt = (
         f"[시장 상황]\n{market_context}\n\n"
-        f"[{manager['emoji']} 관심 종목]\n{stocks_text}\n"
-        f"위 종목 중 매수 추천 종목이 있으면 1~3개 선정하고 이유를 설명해줘."
+        f"[{manager['emoji']} 관심 종목 — 기술적 데이터 포함]\n{stocks_text}\n"
     )
+    if alert_mode == "wartime":
+        user_prompt += (
+            "위 종목 중:\n"
+            "1. 회복 탄력성이 좋은 종목 (과매도 반등 후보)\n"
+            "2. 단타/스윙으로 적합한 종목\n"
+            "3. 매수하면 안 되는 종목 (추가 하락 위험)\n"
+            "을 구분해서 분석해줘."
+        )
+    else:
+        user_prompt += "위 종목 중 매수 추천 종목이 있으면 1~3개 선정하고 이유를 설명해줘."
 
     try:
         import httpx
