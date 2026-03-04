@@ -23,6 +23,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 USER_NAME = "주호님"
@@ -136,12 +138,39 @@ class PositionSizer:
         self,
         account_value: float = 200_000_000,
         limits: dict | None = None,
+        alert_mode: str = "normal",
     ) -> None:
         self.account_value = account_value
         self.limits = {**DEFAULT_LIMITS, **(limits or {})}
+        self._alert_mode = alert_mode
 
         # 트레일링 스탑 상태 추적 (ticker → TrailingStopState)
         self._trailing_states: dict[str, TrailingStopState] = {}
+
+        # DB에서 저장된 트레일링 스탑 상태 복원
+        self._load_trailing_stops_from_db()
+
+    def _load_trailing_stops_from_db(self) -> None:
+        """재시작 시 DB에서 트레일링 스탑 상태를 복원한다."""
+        try:
+            from kstock.core.persistence import load_trailing_stops
+            saved = load_trailing_stops()
+            for ticker, data in saved.items():
+                state = TrailingStopState(
+                    ticker=ticker,
+                    high_price=data["peak_price"],
+                    trail_pct=data.get("stop_pct", 0.07),
+                )
+                if data.get("entry_price", 0) > 0:
+                    # 활성화 여부 판단: entry_price가 있으면 이전에 활성화됐을 가능성
+                    state.is_active = True
+                    state.activated_at = data["entry_price"]
+                    state.stop_price = state.high_price * (1 - state.trail_pct)
+                self._trailing_states[ticker] = state
+            if saved:
+                logger.info("Restored %d trailing stop states from DB", len(saved))
+        except Exception:
+            logger.warning("Failed to load trailing stops from DB, starting fresh")
 
     # ── 핵심: 포지션 사이즈 계산 ──────────────────────────
     def calculate(
@@ -185,9 +214,20 @@ class PositionSizer:
             # 2. ATR 변동성 조정
             atr_adj = self._atr_adjust(kelly, atr_pct)
 
-            # 3. 집중도 제한 적용
-            max_single = self.limits["max_single_weight"]
-            max_sector = self.limits["max_sector_weight"]
+            # 3. 집중도 제한 적용 — 통합 제약 조건 참조
+            from kstock.core.risk_policy import get_risk_constraints
+            constraints = get_risk_constraints()
+            max_single = constraints.max_single_weight
+            max_sector = constraints.max_sector_weight
+
+            # 3-1. 전시(wartime) 모드: 포지션 50% 축소
+            _wartime = self._alert_mode == "wartime"
+            if _wartime:
+                from kstock.core.risk_policy import wartime_adjustments as _wt_adj
+                _wt = _wt_adj()
+                max_single *= _wt.max_position_ratio
+                max_sector *= _wt.max_position_ratio
+
             available_weight = min(
                 max_single - existing_weight,
                 max_sector - sector_weight,
@@ -202,6 +242,14 @@ class PositionSizer:
             invest_amount = self.account_value * available_weight
             shares = int(invest_amount / current_price)
             shares = max(shares, 0)
+
+            # 슬리피지 기본 추정 (대량 주문 시 수량 축소)
+            if shares > 0 and current_price > 0:
+                order_value = shares * current_price
+                if order_value > self.account_value * 0.10:  # 계좌의 10% 이상
+                    slippage_adj = 0.95  # 5% 축소
+                    shares = max(1, int(shares * slippage_adj))
+
             actual_amount = shares * current_price
 
             # 6. 기대 수익률
@@ -217,6 +265,8 @@ class PositionSizer:
                 existing_weight, sector_weight, shares, current_price,
                 expected_return,
             )
+            if _wartime:
+                reason = f"[전시모드 50%축소] {reason}"
 
             result = PositionSize(
                 ticker=ticker,
@@ -247,6 +297,208 @@ class PositionSizer:
                 ticker=ticker, name=name,
                 reason="계산 중 오류 발생",
             )
+
+    # ── Dynamic Kelly ─────────────────────────────────────
+    def calculate_dynamic_kelly(
+        self,
+        ticker: str,
+        current_price: float,
+        atr_pct: float = 1.5,
+        trade_history: list[dict] | None = None,
+        target_pct: float = 0.10,
+        stop_pct: float = -0.05,
+        existing_weight: float = 0.0,
+        sector_weight: float = 0.0,
+        name: str = "",
+        min_trades: int = 10,
+    ) -> PositionSize:
+        """Dynamic Kelly: 실제 거래 이력에서 승률/손익비 자동 산출.
+
+        Args:
+            trade_history: 최근 거래 리스트. 각 dict:
+                - pnl_pct: float (수익률, e.g., 0.05 = +5%)
+                - is_win: bool (수익 여부)
+            min_trades: 최소 거래 수 (미달 시 기본값 사용)
+
+        Returns:
+            PositionSize with dynamically computed Kelly fraction.
+        """
+        # 거래 이력에서 승률/손익비 자동 계산
+        if trade_history and len(trade_history) >= min_trades:
+            wins = [t for t in trade_history if t.get("is_win", False)]
+            losses = [t for t in trade_history if not t.get("is_win", False)]
+
+            win_rate = len(wins) / len(trade_history)
+
+            avg_win = (
+                sum(abs(t.get("pnl_pct", 0)) for t in wins) / len(wins)
+                if wins else target_pct
+            )
+            avg_loss = (
+                sum(abs(t.get("pnl_pct", 0)) for t in losses) / len(losses)
+                if losses else abs(stop_pct)
+            )
+
+            # 동적 target/stop: 실제 평균 수익/손실 반영
+            dynamic_target = avg_win
+            dynamic_stop = -avg_loss
+
+            logger.info(
+                "Dynamic Kelly [%s]: win_rate=%.1f%%, avg_win=%.1f%%, avg_loss=%.1f%% (from %d trades)",
+                ticker, win_rate * 100, avg_win * 100, avg_loss * 100, len(trade_history),
+            )
+        else:
+            win_rate = 0.55  # 기본값
+            dynamic_target = target_pct
+            dynamic_stop = stop_pct
+            if trade_history:
+                logger.info(
+                    "Dynamic Kelly [%s]: insufficient trades (%d < %d), using defaults",
+                    ticker, len(trade_history), min_trades,
+                )
+
+        return self.calculate(
+            ticker=ticker,
+            current_price=current_price,
+            atr_pct=atr_pct,
+            win_rate=win_rate,
+            target_pct=dynamic_target,
+            stop_pct=dynamic_stop,
+            existing_weight=existing_weight,
+            sector_weight=sector_weight,
+            name=name,
+        )
+
+    @staticmethod
+    def get_trade_stats(trade_history: list[dict]) -> dict:
+        """거래 이력 통계 산출.
+
+        Returns:
+            dict with: win_rate, avg_win_pct, avg_loss_pct, profit_factor,
+            max_consecutive_loss, sharpe_like_ratio
+        """
+        if not trade_history:
+            return {
+                "win_rate": 0.55, "avg_win_pct": 0.0, "avg_loss_pct": 0.0,
+                "profit_factor": 1.0, "max_consecutive_loss": 0,
+                "total_trades": 0, "sharpe_like_ratio": 0.0,
+            }
+
+        wins = [t for t in trade_history if t.get("is_win", False)]
+        losses = [t for t in trade_history if not t.get("is_win", False)]
+
+        win_rate = len(wins) / len(trade_history) if trade_history else 0.55
+        avg_win = (
+            sum(abs(t.get("pnl_pct", 0)) for t in wins) / len(wins)
+            if wins else 0.0
+        )
+        avg_loss = (
+            sum(abs(t.get("pnl_pct", 0)) for t in losses) / len(losses)
+            if losses else 0.0
+        )
+
+        gross_win = sum(abs(t.get("pnl_pct", 0)) for t in wins)
+        gross_loss = sum(abs(t.get("pnl_pct", 0)) for t in losses)
+        profit_factor = gross_win / gross_loss if gross_loss > 0 else float('inf')
+
+        # Max consecutive losses
+        max_consec = 0
+        current_consec = 0
+        for t in trade_history:
+            if not t.get("is_win", False):
+                current_consec += 1
+                max_consec = max(max_consec, current_consec)
+            else:
+                current_consec = 0
+
+        # Sharpe-like ratio
+        pnls = [t.get("pnl_pct", 0) for t in trade_history]
+        mean_pnl = np.mean(pnls) if pnls else 0.0
+        std_pnl = np.std(pnls) if len(pnls) > 1 else 1.0
+        sharpe = float(mean_pnl / std_pnl) if std_pnl > 0 else 0.0
+
+        return {
+            "win_rate": round(win_rate, 4),
+            "avg_win_pct": round(avg_win, 4),
+            "avg_loss_pct": round(avg_loss, 4),
+            "profit_factor": round(profit_factor, 2),
+            "max_consecutive_loss": max_consec,
+            "total_trades": len(trade_history),
+            "sharpe_like_ratio": round(sharpe, 4),
+        }
+
+    # ── 슬리피지 추정 ──────────────────────────────────────
+    @staticmethod
+    def estimate_slippage(
+        order_shares: int,
+        current_price: float,
+        avg_daily_volume: float = 1_000_000,
+        spread_bps: float = 10.0,
+    ) -> dict:
+        """체결 슬리피지 추정.
+
+        Almgren-Chriss 간소화 모델: 시장충격 + 스프레드 비용.
+
+        Args:
+            order_shares: 주문 수량
+            current_price: 현재가
+            avg_daily_volume: 평균 일 거래량 (주)
+            spread_bps: 스프레드 (bp, 기본 10bp = 0.1%)
+
+        Returns:
+            dict with: impact_pct, spread_cost_pct, total_slippage_pct,
+            adjusted_shares, effective_price
+        """
+        try:
+            if order_shares <= 0 or current_price <= 0 or avg_daily_volume <= 0:
+                return {
+                    "impact_pct": 0.0, "spread_cost_pct": 0.0,
+                    "total_slippage_pct": 0.0, "adjusted_shares": order_shares,
+                    "effective_price": current_price,
+                }
+
+            # 참여율
+            participation = order_shares / avg_daily_volume
+
+            # 시장 충격: eta * sigma * (participation)^0.6
+            # 간소화: sigma ≈ 2% (한국 주식 평균 일일 변동)
+            sigma = 0.02
+            eta = 0.142  # Almgren-Chriss 계수
+
+            temp_impact = eta * sigma * (participation ** 0.6) * 100  # %
+
+            # 스프레드 비용
+            spread_cost = spread_bps / 100 / 2  # half-spread (%)
+
+            # 총 슬리피지
+            total = temp_impact + spread_cost
+
+            # 조정 가격
+            effective_price = current_price * (1 + total / 100)
+
+            # 슬리피지 반영 수량 조정
+            if total > 0.5:  # 0.5% 이상이면 수량 축소
+                reduction = min(total / 5, 0.3)  # 최대 30% 축소
+                adjusted_shares = max(1, int(order_shares * (1 - reduction)))
+            else:
+                adjusted_shares = order_shares
+
+            return {
+                "impact_pct": round(temp_impact, 4),
+                "spread_cost_pct": round(spread_cost, 4),
+                "total_slippage_pct": round(total, 4),
+                "adjusted_shares": adjusted_shares,
+                "effective_price": round(effective_price, 0),
+                "participation_rate": round(participation, 4),
+            }
+
+        except Exception:
+            logger.exception("슬리피지 추정 실패")
+            return {
+                "impact_pct": 0.0, "spread_cost_pct": 0.0,
+                "total_slippage_pct": 0.0, "adjusted_shares": order_shares,
+                "effective_price": current_price,
+            }
 
     # ── 차익실현 체크 ─────────────────────────────────────
     def check_profit_taking(
@@ -578,9 +830,11 @@ class PositionSizer:
         state.trail_pct = config["trail_pct"]
 
         # 고점 갱신
+        _peak_changed = False
         if current_price > state.high_price:
             state.high_price = current_price
             state.stop_price = state.high_price * (1 - state.trail_pct)
+            _peak_changed = True
 
         # 활성화 체크
         pnl_pct = (current_price - buy_price) / buy_price if buy_price > 0 else 0
@@ -588,10 +842,22 @@ class PositionSizer:
             state.is_active = True
             state.activated_at = current_price
             state.stop_price = state.high_price * (1 - state.trail_pct)
+            _peak_changed = True
             logger.info(
                 "Trailing stop activated: %s at %s (trail=%.0f%%)",
                 ticker, f"{current_price:,.0f}", state.trail_pct * 100,
             )
+
+        # DB 영속화: 고점 갱신 또는 활성화 시 저장
+        if _peak_changed:
+            try:
+                from kstock.core.persistence import save_trailing_stop
+                save_trailing_stop(
+                    ticker, state.high_price,
+                    entry_price=buy_price, stop_pct=state.trail_pct,
+                )
+            except Exception:
+                logger.debug("Failed to persist trailing stop for %s", ticker)
 
         return state
 
@@ -646,6 +912,12 @@ class PositionSizer:
     def reset_trailing_stop(self, ticker: str) -> None:
         """종목 매도 시 트레일링 스탑 상태 초기화."""
         self._trailing_states.pop(ticker, None)
+        # DB에서도 삭제
+        try:
+            from kstock.core.persistence import delete_trailing_stop
+            delete_trailing_stop(ticker)
+        except Exception:
+            logger.debug("Failed to delete trailing stop from DB for %s", ticker)
 
     def get_trailing_state(self, ticker: str) -> TrailingStopState | None:
         """특정 종목 트레일링 스탑 상태 조회."""

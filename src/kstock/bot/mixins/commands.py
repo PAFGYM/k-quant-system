@@ -1444,25 +1444,45 @@ class CommandsMixin:
             for hz, (picks, _err) in zip(horizon_tasks.keys(), horizon_results):
                 picks_by_horizon[hz] = picks
 
-            # 2. 매크로 컨텍스트 수집
+            # 2. 매크로 컨텍스트 수집 (풍부한 버전)
             market_context = ""
             try:
                 snap = await self.macro_client.get_snapshot()
                 from kstock.signal.strategies import get_regime_mode
                 regime = get_regime_mode(snap)
-                market_context = (
-                    f"VIX: {snap.vix:.1f} | 나스닥: {snap.nasdaq_change_pct:+.2f}% | "
-                    f"원/달러: {snap.usdkrw:,.0f}원 | 레짐: {regime['label']}"
-                )
+                parts = [
+                    f"VIX: {snap.vix:.1f}",
+                    f"나스닥: {snap.nasdaq_change_pct:+.2f}%",
+                    f"S&P500: {snap.spx_change_pct:+.2f}%",
+                    f"원/달러: {snap.usdkrw:,.0f}원",
+                    f"레짐: {regime['label']}",
+                ]
+                if hasattr(snap, "kospi") and snap.kospi > 0:
+                    parts.insert(0, f"코스피: {snap.kospi:,.0f}({snap.kospi_change_pct:+.2f}%)")
+                if hasattr(snap, "koru_price") and snap.koru_price > 0:
+                    parts.append(f"KORU: ${snap.koru_price:.2f}({snap.koru_change_pct:+.1f}%)")
+                market_context = " | ".join(parts)
             except Exception:
                 logger.debug("_action_4manager_picks macro context fetch failed", exc_info=True)
 
-            # 3. 4매니저 동시 AI 분석 (asyncio.gather)
+            # 2.5. 공유 컨텍스트 빌드 (위기/뉴스/교훈/포트폴리오 등)
+            shared_context = None
+            try:
+                from kstock.bot.context_builder import build_manager_shared_context
+                shared_context = await build_manager_shared_context(
+                    self.db, self.macro_client,
+                )
+            except Exception:
+                logger.debug("_action_4manager_picks shared context build failed", exc_info=True)
+
+            # 3. 4매니저 동시 AI 분석 (asyncio.gather) — 공유 컨텍스트 포함
             from kstock.bot.investment_managers import (
                 get_all_managers_picks, MANAGERS, MANAGER_HORIZON_MAP,
             )
+            current_alert = getattr(self, '_alert_mode', 'normal')
             manager_analyses = await get_all_managers_picks(
-                picks_by_horizon, market_context,
+                picks_by_horizon, market_context, shared_context,
+                alert_mode=current_alert,
             )
 
             # 4. 결과 포맷
@@ -2182,13 +2202,26 @@ class CommandsMixin:
                     if live_price <= 0:
                         live_price = ohlcv_price
                         stock_data["price"] = live_price
+                    vol_series = ohlcv["volume"].astype(float)
+                    avg_vol_20 = float(vol_series.tail(20).mean()) if len(vol_series) >= 20 else float(vol_series.mean())
+                    cur_vol = float(vol_series.iloc[-1])
                     stock_data.update({
                         "ma5": tech.ma5, "ma20": tech.ma20,
                         "ma60": tech.ma60, "ma120": tech.ma120,
-                        "rsi": tech.rsi, "macd": tech.macd,
+                        "rsi": tech.rsi,
+                        "macd": tech.macd,
                         "macd_signal": tech.macd_signal,
-                        "volume": float(ohlcv["volume"].iloc[-1]),
-                        "avg_volume_20": float(ohlcv["volume"].tail(20).mean()),
+                        "macd_signal_cross": tech.macd_signal_cross,
+                        "bb_pctb": tech.bb_pctb,
+                        "bb_squeeze": tech.bb_squeeze,
+                        "ema_50": tech.ema_50,
+                        "ema_200": tech.ema_200,
+                        "golden_cross": tech.golden_cross,
+                        "dead_cross": tech.dead_cross,
+                        "weekly_trend": tech.weekly_trend,
+                        "volume": cur_vol,
+                        "avg_volume_20": avg_vol_20,
+                        "volume_ratio": round(cur_vol / avg_vol_20, 2) if avg_vol_20 > 0 else 1.0,
                         "high_52w": float(close.max()),
                         "low_52w": float(close.min()),
                         "prices_5d": [float(x) for x in close.tail(5).tolist()],
@@ -2196,6 +2229,7 @@ class CommandsMixin:
             except Exception as e:
                 logger.warning("멀티분석 OHLCV 가져오기 실패 (%s): %s", ticker, e)
 
+            # 재무 데이터
             fin = self.db.get_financials(ticker)
             if fin:
                 stock_data.update({
@@ -2207,6 +2241,33 @@ class CommandsMixin:
                     "target_price": fin.get("target_price", 0),
                     "recent_earnings": fin.get("recent_earnings", "정보 없음"),
                 })
+
+            # 수급 데이터 (외국인 + 기관)
+            try:
+                frgn_df = await self.kis.get_foreign_flow(ticker, days=5)
+                if frgn_df is not None and not frgn_df.empty and "net_buy_volume" in frgn_df.columns:
+                    net_vols = frgn_df["net_buy_volume"].tolist()
+                    stock_data["foreign_net_5d"] = int(sum(net_vols))
+                    stock_data["foreign_flow_detail"] = ", ".join(
+                        f"{int(v):+,}" for v in net_vols[-5:]
+                    )
+                    if "net_buy_amount" in frgn_df.columns:
+                        stock_data["avg_trade_value"] = float(
+                            frgn_df["net_buy_amount"].abs().mean()
+                        )
+            except Exception as e:
+                logger.debug("멀티분석 외국인 수급 실패 (%s): %s", ticker, e)
+
+            try:
+                inst_df = await self.kis.get_institution_flow(ticker, days=5)
+                if inst_df is not None and not inst_df.empty and "net_buy_volume" in inst_df.columns:
+                    net_vols = inst_df["net_buy_volume"].tolist()
+                    stock_data["inst_net_5d"] = int(sum(net_vols))
+                    stock_data["inst_flow_detail"] = ", ".join(
+                        f"{int(v):+,}" for v in net_vols[-5:]
+                    )
+            except Exception as e:
+                logger.debug("멀티분석 기관 수급 실패 (%s): %s", ticker, e)
 
             price = stock_data.get("price", 0)
 
@@ -2398,14 +2459,25 @@ class CommandsMixin:
                 if ohlcv is not None and not ohlcv.empty:
                     tech = compute_indicators(ohlcv)
                     close = ohlcv["close"].astype(float)
+                    _vol = ohlcv["volume"].astype(float)
                     stock_data.update({
                         "price": float(close.iloc[-1]),
                         "ma5": tech.ma5, "ma20": tech.ma20,
                         "ma60": tech.ma60, "ma120": tech.ma120,
-                        "rsi": tech.rsi, "macd": tech.macd,
+                        "rsi": tech.rsi,
+                        "macd": tech.macd,
                         "macd_signal": tech.macd_signal,
-                        "volume": float(ohlcv["volume"].iloc[-1]),
-                        "avg_volume_20": float(ohlcv["volume"].tail(20).mean()),
+                        "macd_signal_cross": tech.macd_signal_cross,
+                        "bb_pctb": tech.bb_pctb,
+                        "bb_squeeze": tech.bb_squeeze,
+                        "ema_50": tech.ema_50,
+                        "ema_200": tech.ema_200,
+                        "golden_cross": tech.golden_cross,
+                        "dead_cross": tech.dead_cross,
+                        "weekly_trend": tech.weekly_trend,
+                        "volume": float(_vol.iloc[-1]),
+                        "avg_volume_20": float(_vol.tail(20).mean()),
+                        "volume_ratio": tech.volume_ratio,
                         "high_52w": float(close.tail(252).max()) if len(close) >= 252 else float(close.max()),
                         "low_52w": float(close.tail(252).min()) if len(close) >= 252 else float(close.min()),
                         "prices_5d": [float(x) for x in close.tail(5).tolist()],

@@ -35,8 +35,9 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 1. 매도/매수 지시를 절대 하지 마라.
    금지 표현: "매도하세요", "팔아라", "전량 매도", "시초가에 매도",
    "무조건 매도", "즉시 매도", "정리하세요", "팔아야", "놓치지 마세요"
-2. 장기투자 종목에 시장 변동(나스닥 하락, VIX 상승 등)을 이유로 매도를 절대 권유하지 마라.
-   장기투자 종목은 분기 실적, 산업 구조 변화만 판단 기준이다. 일일 시장 변동은 무시하라.
+2. 장기투자(holding_type=long) 종목에 시장 변동(나스닥 하락, VIX 상승, 전쟁, 환율 급등 등)을 이유로 매도를 절대 권유하지 마라.
+   장기투자 종목(에코프로, 에코프로비엠, 현대차, 삼성전자, SK하이닉스 등)은 분기 실적, 산업 구조 변화만 판단 기준이다.
+   전시 상황, 일일 시장 변동, 단기 급락 모두 무시하라. "조정 시 추가매수 기회"로 프레이밍하라.
 3. 아래 [보유 종목 + 맞춤 솔루션]의 "판단" 항목은 참고 정보일 뿐이다.
    이것을 "매도 지시"로 변환하거나 증폭하지 마라.
 4. 위에 명시된 [현재 시간]의 시장 개장 상태를 그대로 사용하라. 절대 임의로 판단하지 마라.
@@ -57,11 +58,36 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
    d. 이 규칙 위반 = 거짓 정보 제공 = 사용자 금전적 피해. 절대 위반하지 마라.
    e. "약 ~원대", "~원 수준" 같은 추측성 가격도 금지. 정확한 실시간 데이터가 없으면 가격 언급 자체를 하지 마라.
 
+[전시/위기 상황 대응 프레임워크]
+{crisis_context}
+
+[전시 환율/달러 급등 대응 — 현재 최우선 이슈]
+전시 상황에서 달러 급등(원화 약세)은 한국 증시에 직접적 충격:
+1. 환율 급등 시 영향 분석:
+   → 수출주(반도체, 자동차, 조선): 단기 환차익이나, 원자재 수입 비용 증가와 상쇄
+   → 내수주: 수입 원가 상승 → 마진 악화
+   → 외국인: 원화 자산 가치 하락 → 매도 압력 강화
+   → 달러 부채 기업: 환손실 리스크 급증
+2. 원/달러 1,400원 이상: 경계 모드. 외인 매도 가속화 가능
+3. 원/달러 1,450원 이상: 위기 모드. 현금 비중 확대 권고
+4. 달러 자산 비중 확대 검토: 미국 ETF(KORU, SOXL, TQQQ 등) 시그널 참고
+5. 환헤지 전략: 달러 예금, 달러 ETF, 금 등 안전자산 분산
+6. 미국 레버리지 ETF(KORU 3배)는 한국 시장 방향성 3배 증폭 → 변동성 극단적. 추격매수 금지, 조정 시 분할매수만 검토.
+
+[전쟁 후 주도주 전환 — 반드시 인지]
+전쟁/위기가 완화·종료되면 주도주가 급격히 전환된다:
+→ 방산/에너지 → 소비재/IT/건설/항공 로테이션 발생
+→ 전환 신호: 휴전 협상, 방산주 고점 대비 -10%, VIX 안정화, 외국인 순매수 전환
+→ 위기 수혜주 차익실현 물량 + 평화 수혜주 자금 유입
+→ 장기 보유종목(삼성전자, SK하이닉스 등)은 전환기에 오히려 수혜
+→ "거짓 평화" 함정 주의: 협상 결렬 시 재급등 가능하므로 현금 비중 유지
+
 [분석 프레임워크]
-종목 질문 시 반드시 3가지 분석:
+종목 질문 시 반드시 4가지 분석:
 - 기술적: RSI, MACD, 이동평균선(5/20/60/120일), 볼린저밴드, 거래량
 - 펀더멘털: PER, PBR, ROE, 매출성장률, 영업이익률, 부채비율
 - 수급: 외인/기관 순매수, 공매도 잔고, 프로그램 매매
+- 지정학적: 전시/위기 수혜/피해 여부, 방산/에너지/식량/인프라 연관성
 - 서사 vs 숫자 괴리: 뉴스/테마 노출 빈도 vs 실제 매출/이익 변화 비교
   → 과대평가 신호: 뉴스 많은데 실적 변화 없음
   → 과소평가 신호: 뉴스 없는데 실적 조용히 개선 중
@@ -70,9 +96,30 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 - 글로벌 매크로 환경 (미국 금리, 달러, 유가, 반도체 사이클)
 - 유동성 방향: 장단기 금리차(10Y-2Y), 달러인덱스 변화율, VIX 추세
 - 한국 시장 특수 요인 (환율, 외인 동향, 정책)
-- 섹터 로테이션 관점
-- 거시 시나리오별 확률 (연착륙/경기침체/스태그플레이션/금리인하 등)
+- 지정학적 리스크: 전쟁/분쟁 → 에너지/방산/환율/공급망 영향
+- 섹터 로테이션 관점 (위기 수혜 섹터 전환 포함)
+- 거시 시나리오별 확률 (연착륙/경기침체/스태그플레이션/전시 확대 등)
 - 구체적 관심 포인트 제시 (어떤 섹터, 어떤 가격대에서 관심)
+
+[추매(추가매수) 판단 프레임워크]
+{user_name}이 이미 급등한 섹터(방산/정유 등)에 대해 추매를 물어볼 때:
+1. 무조건 추격매수 권유 금지. 하지만 무조건 "이미 늦었다"고도 하지 마라.
+2. 추매 가능 조건: 조정 시 분할매수, 아직 저평가된 2~3선 종목, 실적 턴어라운드 확인
+3. 추매 위험 조건: 이미 단기 +30% 이상 급등, 거래량 폭증 후 감소, RSI 80+
+4. 반드시 "지금 가격 vs 실적 대비 적정가" 관점으로 판단
+5. 대안 제시: 직접 종목 대신 ETF(방산ETF, 에너지ETF) 분할매수 전략도 안내
+
+[FOMO 방지 원칙 — 매우 중요]
+1. 급등 종목/섹터를 보고 "놓쳤다"는 심리로 매수하면 고점 물릴 위험이 크다.
+2. "떨어졌으니까 싸다"는 이유만으로 종목 추천 절대 금지.
+   → 떨어진 이유가 있다: 실적 악화, 업종 침체, 수급 이탈 등.
+   → "저가 매수"는 펀더멘털이 건전하고 일시적 하락인 경우에만.
+3. {user_name}의 보유종목 관리가 최우선. 새 종목 추천보다 기존 보유종목의 관리(목표가/손절가/비중조절)에 집중하라.
+4. 손절한 종목에 대해 미련 갖지 않게 도와라. "잘 정리하셨습니다" + 다음 기회에 집중.
+5. 포트폴리오 전체 관점에서 조언하라:
+   → 한 섹터에 쏠리지 않게
+   → 현금 비중 관리
+   → 보유종목 간 상관관계 고려
 
 [응답 형식 - 핵심만 빠르게]
 - 볼드(별표 두개) 절대 사용 금지
@@ -229,6 +276,7 @@ def build_system_prompt(context: dict) -> str:
         recent_reports=context.get("reports", "최근 리포트 없음"),
         financial_summary=context.get("financials", "재무 데이터 없음"),
         trade_lessons=context.get("trade_lessons", "매매 교훈 없음"),
+        crisis_context=context.get("crisis_context", "현재 특별 위기 상황 없음"),
     )
 
 
@@ -346,6 +394,25 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
     if fg is not None:
         label = "극도공포" if fg < 25 else "공포" if fg < 45 else "중립" if fg < 55 else "탐욕" if fg < 75 else "극도탐욕"
         lines.append(f"공포탐욕지수: {fg:.0f}점 ({label})")
+
+    # [v6.6] 미국 레버리지 ETF 시그널
+    koru = macro_snapshot.get("koru_price")
+    koru_chg = macro_snapshot.get("koru_change_pct")
+    soxl = macro_snapshot.get("soxl_price")
+    soxl_chg = macro_snapshot.get("soxl_change_pct")
+    tqqq = macro_snapshot.get("tqqq_price")
+    tqqq_chg = macro_snapshot.get("tqqq_change_pct")
+
+    etf_lines = []
+    if koru is not None and koru > 0:
+        etf_lines.append(f"KORU(한국3x): ${koru:.2f} ({koru_chg:+.2f}%)")
+    if soxl is not None and soxl > 0:
+        etf_lines.append(f"SOXL(반도체3x): ${soxl:.2f} ({soxl_chg:+.2f}%)")
+    if tqqq is not None and tqqq > 0:
+        etf_lines.append(f"TQQQ(나스닥3x): ${tqqq:.2f} ({tqqq_chg:+.2f}%)")
+    if etf_lines:
+        lines.append("--- 미국 레버리지 ETF ---")
+        lines.extend(etf_lines)
 
     # [v3.6.6] 유동성 방향 감지: 장단기 금리차
     if us10y is not None and us2y is not None and us10y > 0 and us2y > 0:
@@ -551,6 +618,13 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                 "kospi_change_pct": getattr(snap, "kospi_change_pct", 0),
                 "kosdaq": getattr(snap, "kosdaq", 0),
                 "kosdaq_change_pct": getattr(snap, "kosdaq_change_pct", 0),
+                # v6.6: 미국 레버리지 ETF
+                "koru_price": getattr(snap, "koru_price", 0),
+                "koru_change_pct": getattr(snap, "koru_change_pct", 0),
+                "soxl_price": getattr(snap, "soxl_price", 0),
+                "soxl_change_pct": getattr(snap, "soxl_change_pct", 0),
+                "tqqq_price": getattr(snap, "tqqq_price", 0),
+                "tqqq_change_pct": getattr(snap, "tqqq_change_pct", 0),
             }
         except Exception as e:
             logger.warning("Failed to get macro for AI context: %s", e)
@@ -559,7 +633,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
     (
         portfolio, market, recommendations, policies, reports, financials,
         investor_style, portfolio_solutions, trade_lessons_text,
-        global_news_text,
+        global_news_text, crisis_context,
     ) = await asyncio.gather(
         loop.run_in_executor(None, get_portfolio_context, db),
         loop.run_in_executor(None, get_market_context, macro_dict),
@@ -571,6 +645,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
         loop.run_in_executor(None, _get_portfolio_solutions_context, db),
         loop.run_in_executor(None, _get_trade_lessons_context, db),
         loop.run_in_executor(None, _get_global_news_context, db),
+        loop.run_in_executor(None, _get_crisis_context, macro_dict),
     )
 
     # 실시간 주가 데이터 주입 (yf_client가 있으면)
@@ -596,6 +671,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
         "portfolio_with_solutions": portfolio_solutions,
         "trade_lessons": trade_lessons_text,
         "global_news": global_news_text,
+        "crisis_context": crisis_context,
     }
 
 
@@ -699,3 +775,159 @@ def _get_global_news_context(db) -> str:
     except Exception as e:
         logger.warning("Failed to get global news context: %s", e)
         return "글로벌 뉴스 조회 실패"
+
+
+async def build_manager_shared_context(db, macro_client=None) -> dict:
+    """매니저 공유 컨텍스트 빌더 — 4매니저가 동일한 상황 인식을 갖도록.
+
+    Returns:
+        dict with keys: investor_style, trade_lessons, global_news,
+        policies, crisis_context, portfolio_summary, post_war_rotation
+    """
+    import yaml, os
+
+    loop = asyncio.get_event_loop()
+
+    # 매크로 snapshot (이미 있으면 재사용)
+    macro_dict = None
+    if macro_client:
+        try:
+            snap = await macro_client.get_snapshot()
+            macro_dict = {
+                "vix": getattr(snap, "vix", 0),
+                "usdkrw": getattr(snap, "usdkrw", 0),
+                "fear_greed": getattr(snap, "fear_greed_score", 50),
+                "kospi": getattr(snap, "kospi", 0),
+                "kospi_change_pct": getattr(snap, "kospi_change_pct", 0),
+            }
+        except Exception:
+            pass
+
+    # 병렬로 각 섹션 수집
+    investor_style, trade_lessons, global_news, policies, crisis_ctx = await asyncio.gather(
+        loop.run_in_executor(None, _get_investor_style_context, db),
+        loop.run_in_executor(None, _get_trade_lessons_context, db),
+        loop.run_in_executor(None, _get_global_news_context, db),
+        loop.run_in_executor(None, get_policy_context, None),
+        loop.run_in_executor(None, _get_crisis_context, macro_dict),
+    )
+
+    # 포트폴리오 전체 요약 (모든 보유종목)
+    portfolio_summary = ""
+    try:
+        holdings = db.get_active_holdings()
+        if holdings:
+            lines = []
+            for h in holdings:
+                ht = h.get("holding_type", "auto")
+                type_label = {"scalp": "단타", "swing": "스윙", "position": "포지션", "long_term": "장기"}.get(ht, ht)
+                lines.append(f"- {h.get('name', '')}({h.get('ticker', '')}): {type_label}, 매수 {h.get('buy_price', 0):,.0f}원, {h.get('quantity', 0)}주")
+            portfolio_summary = "\n".join(lines)
+    except Exception:
+        pass
+
+    # 전쟁 후 주도주 전환 시나리오
+    post_war = ""
+    try:
+        crisis_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "..", "config", "crisis_events.yaml"
+        )
+        if os.path.exists(crisis_path):
+            with open(crisis_path, encoding="utf-8") as f:
+                cdata = yaml.safe_load(f) or {}
+            for crisis in cdata.get("active_crises", []):
+                rotation = crisis.get("post_war_rotation")
+                if rotation:
+                    post_war = (
+                        f"[전쟁 후 주도주 전환 시나리오]\n"
+                        f"{rotation.get('description', '')}\n"
+                        f"전환 신호: {', '.join(rotation.get('warning_signals', [])[:3])}\n"
+                        f"전후 수혜: {', '.join(rotation.get('winners_post_war', [])[:4])}\n"
+                        f"전후 피해: {', '.join(rotation.get('losers_post_war', [])[:3])}\n"
+                        f"액션: {rotation.get('action_plan', '')[:200]}"
+                    )
+    except Exception:
+        pass
+
+    return {
+        "investor_style": investor_style,
+        "trade_lessons": trade_lessons,
+        "global_news": global_news,
+        "policies": policies,
+        "crisis_context": crisis_ctx,
+        "portfolio_summary": portfolio_summary,
+        "post_war_rotation": post_war,
+    }
+
+
+def _get_crisis_context(macro_snapshot: dict | None = None) -> str:
+    """v6.6: 전시/지정학적 위기 컨텍스트 생성.
+
+    VIX, 원/달러, 유가 등 매크로 지표와 활성 위기 이벤트를 기반으로
+    현재 위기 수준을 판단하고 섹터별 전략 가이드를 제공한다.
+    """
+    try:
+        import yaml
+        import os
+
+        # 위기 이벤트 로드
+        cal_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "..", "config", "crisis_events.yaml"
+        )
+        crisis_events = []
+        if os.path.exists(cal_path):
+            with open(cal_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            crisis_events = data.get("active_crises", [])
+
+        if not crisis_events:
+            return "현재 특별 위기 상황 없음"
+
+        lines = ["현재 활성 위기 상황:"]
+        for ev in crisis_events:
+            lines.append(
+                f"⚠ {ev.get('name', '')}: {ev.get('description', '')}"
+            )
+            beneficiaries = ev.get("beneficiary_sectors", [])
+            if beneficiaries:
+                lines.append(f"  수혜 섹터: {', '.join(beneficiaries)}")
+            damaged = ev.get("damaged_sectors", [])
+            if damaged:
+                lines.append(f"  피해 섹터: {', '.join(damaged)}")
+            strategy = ev.get("strategy", "")
+            if strategy:
+                lines.append(f"  전략: {strategy}")
+
+        # 매크로 기반 위기 수준 판단
+        if macro_snapshot:
+            vix = macro_snapshot.get("vix", 0)
+            usdkrw = macro_snapshot.get("usdkrw", 0)
+            fg = macro_snapshot.get("fear_greed", 50)
+
+            risk_level = "보통"
+            if vix >= 30 or fg < 25 or usdkrw >= 1450:
+                risk_level = "심각"
+            elif vix >= 25 or fg < 40 or usdkrw >= 1400:
+                risk_level = "경계"
+            elif vix >= 20 or fg < 50:
+                risk_level = "주의"
+
+            lines.append(f"\n시장 위기 수준: {risk_level}")
+            if risk_level in ("심각", "경계"):
+                lines.append("→ 현금 비중 확대, 방어적 포지션 유지")
+                lines.append("→ 위기 수혜 섹터(방산/에너지) 선별 매수 검토")
+            elif risk_level == "주의":
+                lines.append("→ 신규 매수 신중, 기존 보유 홀딩 유지")
+
+        lines.append(
+            "\n[추매 가이드] 이미 급등한 방산/정유 종목 추매 질문 시:\n"
+            "- 단기 +20% 이상 급등 종목: 조정 대기 후 분할매수 권유\n"
+            "- 아직 덜 오른 2~3선 종목이나 ETF: 진입 검토 가능\n"
+            "- 실적이 실제로 개선되는 종목 vs 테마만 타는 종목 구분 필수\n"
+            "- 전쟁/위기가 장기화될 경우 vs 단기 이벤트일 경우 시나리오 분리"
+        )
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning("Failed to get crisis context: %s", e)
+        return "위기 컨텍스트 조회 실패"

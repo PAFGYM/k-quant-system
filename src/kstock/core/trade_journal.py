@@ -70,6 +70,38 @@ class JournalReport:
     repeat_mistakes: list[str] = field(default_factory=list)
 
 
+@dataclass
+class TradeJournalEntry:
+    """개별 거래 저널 엔트리."""
+    trade_id: str = ""
+    ticker: str = ""
+    name: str = ""
+    action: str = ""         # BUY / SELL
+    quantity: int = 0
+    price: float = 0.0
+    timestamp: str = ""
+    # 매수 시 기록
+    buy_reason: str = ""       # 매수 사유 (전략명 + 핵심 이유)
+    strategy: str = ""         # A/B/C/D/E/F/G
+    signal_score: float = 0.0  # 신호 점수 (0-100)
+    market_regime: str = ""    # 매수 시점 시장 레짐
+    vix_at_entry: float = 0.0  # 매수 시점 VIX
+    kelly_fraction: float = 0.0
+    # 매도 시 기록
+    sell_reason: str = ""       # 매도 사유
+    exit_signal: str = ""       # trailing_stop / stop_loss / target / manual
+    pnl_pct: float = 0.0       # 수익률
+    pnl_amount: float = 0.0    # 수익 금액
+    hold_days: int = 0          # 보유 일수
+    # 비용
+    commission: float = 0.0
+    slippage_pct: float = 0.0
+    transaction_cost_total: float = 0.0
+    # 메타
+    is_win: bool = False
+    lessons_learned: str = ""   # AI가 자동 생성하는 교훈
+
+
 # ── SECTOR_MAP (risk_manager 호환) ────────────────────────────────────
 
 SECTOR_MAP: dict[str, str] = {
@@ -87,10 +119,64 @@ SECTOR_MAP: dict[str, str] = {
 
 
 class TradeJournal:
-    """매매일지 AI 복기 시스템."""
+    """매매일지 AI 복기 시스템.
+
+    거래 저널 — 모든 매매를 기록하고 학습에 활용.
+    """
 
     def __init__(self, db=None):
         self.db = db
+        self._entries: list[TradeJournalEntry] = []
+
+    # ── 거래 저널 기록/조회 ────────────────────────────────────────
+
+    def record_entry(self, entry: TradeJournalEntry) -> None:
+        """거래 기록 추가."""
+        if not entry.trade_id:
+            import uuid
+            entry.trade_id = str(uuid.uuid4())[:8]
+        if not entry.timestamp:
+            entry.timestamp = datetime.now().isoformat()
+        self._entries.append(entry)
+        logger.info("Trade journal: %s %s %s @ %s",
+                     entry.action, entry.ticker, entry.quantity, entry.price)
+
+    def get_recent_trades(self, n: int = 30, ticker: str = "") -> list[dict]:
+        """최근 N개 거래를 Dynamic Kelly용 dict 리스트로 반환."""
+        entries = self._entries
+        if ticker:
+            entries = [e for e in entries if e.ticker == ticker]
+        # 매도 완료된 거래만 (pnl 있는 것)
+        completed = [e for e in entries if e.action == "SELL" and e.pnl_pct != 0]
+        recent = completed[-n:]
+        return [
+            {"pnl_pct": e.pnl_pct, "is_win": e.is_win}
+            for e in recent
+        ]
+
+    def get_strategy_performance(self) -> dict[str, dict]:
+        """전략별 성과 통계."""
+        from collections import defaultdict
+        stats = defaultdict(lambda: {"wins": 0, "losses": 0, "total_pnl": 0.0, "trades": 0})
+        for e in self._entries:
+            if e.action != "SELL" or e.strategy == "":
+                continue
+            s = stats[e.strategy]
+            s["trades"] += 1
+            s["total_pnl"] += e.pnl_pct
+            if e.is_win:
+                s["wins"] += 1
+            else:
+                s["losses"] += 1
+
+        result = {}
+        for strat, s in stats.items():
+            result[strat] = {
+                **s,
+                "win_rate": s["wins"] / s["trades"] if s["trades"] > 0 else 0,
+                "avg_pnl": s["total_pnl"] / s["trades"] if s["trades"] > 0 else 0,
+            }
+        return result
 
     # ── 매매 기록 수집 ─────────────────────────────────────────────
 
@@ -537,3 +623,265 @@ def format_journal_short(report: JournalReport) -> str:
         f"거래 {report.total_trades}회 | 승률 {report.win_rate:.0f}% | "
         f"{pnl_emoji} 평균 {report.avg_pnl:+.1f}%"
     )
+
+
+# ── Closed-Loop 학습: 신호 → 거래 → 피드백 → 가중치 ─────────────
+
+@dataclass
+class SignalFeedback:
+    """신호 품질 피드백 — 거래 결과로 신호 가중치를 조정."""
+    strategy: str
+    ticker: str
+    signal_action: str      # 신호가 추천한 action (BUY/SELL)
+    actual_pnl_pct: float   # 실제 수익률
+    signal_score: float     # 당시 신호 점수
+    was_correct: bool       # 방향성 맞았는지
+    feedback_date: str = ""
+
+
+def compute_signal_quality(
+    feedbacks: list[dict],
+    min_samples: int = 10,
+) -> dict[str, dict]:
+    """전략별 신호 품질 지표를 산출.
+
+    Args:
+        feedbacks: list of {strategy, actual_pnl_pct, was_correct, signal_score}
+        min_samples: 최소 샘플 수 (미달 시 기본값 반환)
+
+    Returns:
+        {strategy: {hit_rate, avg_pnl, sharpe, quality_score, weight_adj}}
+    """
+    from collections import defaultdict
+
+    by_strategy: dict[str, list] = defaultdict(list)
+    for f in feedbacks:
+        by_strategy[f.get("strategy", "unknown")].append(f)
+
+    results: dict[str, dict] = {}
+    for strat, records in by_strategy.items():
+        if len(records) < min_samples:
+            results[strat] = {
+                "hit_rate": 0.5, "avg_pnl": 0.0, "sharpe": 0.0,
+                "quality_score": 50.0, "weight_adj": 1.0,
+                "sample_size": len(records), "sufficient": False,
+            }
+            continue
+
+        hits = sum(1 for r in records if r.get("was_correct", False))
+        pnls = [r.get("actual_pnl_pct", 0.0) for r in records]
+
+        hit_rate = hits / len(records)
+        avg_pnl = sum(pnls) / len(pnls)
+
+        # Sharpe-like ratio
+        import numpy as np
+        std_pnl = float(np.std(pnls)) if len(pnls) > 1 else 1.0
+        sharpe = avg_pnl / std_pnl if std_pnl > 0.001 else 0.0
+
+        # Quality score: 0-100 (hit_rate 40% + sharpe 30% + consistency 30%)
+        consistency = 1.0 - (std_pnl / (abs(avg_pnl) + 0.01))
+        consistency = max(0.0, min(1.0, consistency))
+
+        quality = (hit_rate * 40) + (min(sharpe, 2.0) / 2.0 * 30) + (consistency * 30)
+        quality = max(0.0, min(100.0, quality))
+
+        # Weight adjustment: quality_score / 50 (baseline)
+        weight_adj = max(0.3, min(2.0, quality / 50.0))
+
+        results[strat] = {
+            "hit_rate": round(hit_rate, 4),
+            "avg_pnl": round(avg_pnl, 4),
+            "sharpe": round(sharpe, 4),
+            "quality_score": round(quality, 2),
+            "weight_adj": round(weight_adj, 4),
+            "sample_size": len(records),
+            "sufficient": True,
+        }
+
+    return results
+
+
+def generate_feedback_report(quality: dict[str, dict]) -> str:
+    """Closed-Loop 학습 결과 텔레그램 리포트."""
+    lines = [
+        "🔄 Closed-Loop 신호 품질 분석",
+        "━" * 25,
+        "",
+    ]
+
+    for strat, q in sorted(quality.items()):
+        emoji = "🟢" if q["quality_score"] >= 60 else "🟡" if q["quality_score"] >= 40 else "🔴"
+        sufficient = "✓" if q.get("sufficient") else "⚠️부족"
+        lines.append(
+            f"{emoji} {strat}: {q['quality_score']:.0f}점 "
+            f"(적중 {q['hit_rate']:.0%}, Sharpe {q['sharpe']:.2f}) "
+            f"→ 가중치 x{q['weight_adj']:.2f} [{sufficient}]"
+        )
+
+    lines.append("")
+    lines.append("가중치 자동 조정이 다음 스캔부터 적용됩니다.")
+    return "\n".join(lines)
+
+
+# ── 백테스팅 프레임워크: VaR 검증 + 전략 적중률 ─────────────────
+
+@dataclass
+class BacktestResult:
+    """백테스트 검증 결과."""
+    period_days: int = 0
+    var_violations: int = 0          # VaR 한도 초과 일수
+    var_violation_rate: float = 0.0  # 실제 초과율 (목표: ≤5%)
+    var_model_valid: bool = True     # VaR 모델 유효 여부
+    strategy_hit_rates: dict = field(default_factory=dict)  # {strategy: hit_rate}
+    daily_pnl_sharpe: float = 0.0
+    max_drawdown_pct: float = 0.0
+    total_return_pct: float = 0.0
+
+
+def backtest_var_accuracy(
+    daily_pnl_history: list[float],
+    daily_var_estimates: list[float],
+    confidence: float = 0.95,
+) -> dict:
+    """VaR 모델 정확도 백테스트.
+
+    실제 손실이 VaR 추정치를 초과한 날의 비율을 검증.
+    정상: 초과율 ≤ (1 - confidence) (95% VaR면 5% 이하)
+
+    Args:
+        daily_pnl_history: 일일 수익률 리스트 (음수 = 손실)
+        daily_var_estimates: 해당 날짜의 VaR 추정치 (양수)
+        confidence: VaR 신뢰 수준 (기본 95%)
+
+    Returns:
+        dict with: violations, violation_rate, expected_rate,
+        model_valid, kupiec_test_pass
+    """
+    try:
+        import numpy as np
+
+        n = min(len(daily_pnl_history), len(daily_var_estimates))
+        if n < 20:
+            return {
+                "violations": 0, "violation_rate": 0.0,
+                "expected_rate": 1 - confidence, "model_valid": True,
+                "n_days": n, "sufficient": False,
+            }
+
+        violations = 0
+        for i in range(n):
+            actual_loss = -daily_pnl_history[i]  # 양수로 변환
+            var_est = abs(daily_var_estimates[i])
+            if actual_loss > var_est:
+                violations += 1
+
+        violation_rate = violations / n
+        expected_rate = 1 - confidence
+
+        # Kupiec POF test (간소화): 비율이 기대치의 2배 이내면 통과
+        model_valid = violation_rate <= expected_rate * 2.0
+
+        return {
+            "violations": violations,
+            "violation_rate": round(violation_rate, 4),
+            "expected_rate": expected_rate,
+            "model_valid": model_valid,
+            "n_days": n,
+            "sufficient": True,
+        }
+
+    except Exception:
+        logger.exception("VaR 백테스트 실패")
+        return {
+            "violations": 0, "violation_rate": 0.0,
+            "expected_rate": 1 - confidence, "model_valid": True,
+            "n_days": 0, "sufficient": False,
+        }
+
+
+def backtest_strategy_accuracy(
+    trade_records: list[dict],
+) -> dict[str, dict]:
+    """전략별 실제 적중률/손익 백테스트.
+
+    Args:
+        trade_records: [{strategy, action, pnl_pct, ticker, date}]
+
+    Returns:
+        {strategy: {total, wins, hit_rate, avg_win, avg_loss, profit_factor}}
+    """
+    try:
+        from collections import defaultdict
+        import numpy as np
+
+        by_strat: dict[str, list] = defaultdict(list)
+        for t in trade_records:
+            by_strat[t.get("strategy", "unknown")].append(t)
+
+        results = {}
+        for strat, trades in by_strat.items():
+            pnls = [t.get("pnl_pct", 0.0) for t in trades]
+            wins = [p for p in pnls if p > 0]
+            losses = [p for p in pnls if p <= 0]
+
+            hit_rate = len(wins) / len(pnls) if pnls else 0.0
+            avg_win = float(np.mean(wins)) if wins else 0.0
+            avg_loss = float(np.mean(losses)) if losses else 0.0
+            gross_win = sum(wins)
+            gross_loss = abs(sum(losses))
+            pf = gross_win / gross_loss if gross_loss > 0 else float('inf')
+
+            results[strat] = {
+                "total": len(pnls),
+                "wins": len(wins),
+                "losses": len(losses),
+                "hit_rate": round(hit_rate, 4),
+                "avg_win_pct": round(avg_win, 4),
+                "avg_loss_pct": round(avg_loss, 4),
+                "profit_factor": round(pf, 2),
+                "net_pnl_pct": round(sum(pnls), 4),
+            }
+
+        return results
+
+    except Exception:
+        logger.exception("전략 백테스트 실패")
+        return {}
+
+
+def format_backtest_report(
+    var_result: dict,
+    strategy_results: dict[str, dict],
+) -> str:
+    """백테스트 결과 텔레그램 포맷."""
+    lines = [
+        "📊 백테스트 검증 리포트",
+        "━" * 25,
+        "",
+    ]
+
+    # VaR 검증
+    if var_result.get("sufficient"):
+        var_emoji = "✅" if var_result["model_valid"] else "⛔"
+        lines.append(
+            f"{var_emoji} VaR 모델 검증\n"
+            f"   초과 일수: {var_result['violations']}일 / {var_result['n_days']}일\n"
+            f"   초과율: {var_result['violation_rate']:.1%} "
+            f"(목표 ≤{var_result['expected_rate']:.0%})\n"
+        )
+    else:
+        lines.append("⚠️ VaR 검증: 데이터 부족 (20일 이상 필요)\n")
+
+    # 전략별 적중률
+    lines.append("📈 전략별 성과")
+    for strat, r in sorted(strategy_results.items()):
+        emoji = "🟢" if r["hit_rate"] >= 0.55 else "🟡" if r["hit_rate"] >= 0.45 else "🔴"
+        lines.append(
+            f"   {emoji} {strat}: 적중 {r['hit_rate']:.0%} "
+            f"| PF {r['profit_factor']:.1f} "
+            f"| 순손익 {r['net_pnl_pct']:+.1f}% "
+            f"({r['total']}건)"
+        )
+
+    return "\n".join(lines)

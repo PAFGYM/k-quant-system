@@ -34,6 +34,35 @@ class TechnicalIndicators:
     volume_ratio: float = 1.0  # current vol / 20d avg vol
     bb_squeeze: bool = False  # bandwidth contracting
     return_3m_pct: float = 0.0  # 3-month return for relative strength
+    # v8.1: Moving averages & MACD line/signal (used by multi-agent)
+    ma5: float = 0.0
+    ma20: float = 0.0
+    ma60: float = 0.0
+    ma120: float = 0.0
+    macd: float = 0.0  # alias for macd_histogram (compat)
+    macd_signal: float = 0.0  # MACD signal line value
+    # v8.1: Divergence detection
+    rsi_divergence: int = 0   # 1=bullish divergence, -1=bearish divergence, 0=none
+    macd_divergence: int = 0  # 1=bullish divergence, -1=bearish divergence, 0=none
+
+
+@dataclass
+class NormalizedIndicators:
+    """모든 지표를 0~1 범위로 정규화한 결과.
+
+    0 = 가장 약세/위험, 1 = 가장 강세/안전.
+    """
+    rsi: float = 0.5          # 0=극과매도, 1=극과매수 (투자 관점에선 역전)
+    rsi_opportunity: float = 0.5  # RSI 매수 기회 (0=과매수, 1=과매도=기회)
+    bb_position: float = 0.5  # 0=하단, 1=상단
+    bb_opportunity: float = 0.5  # BB 매수 기회 (0=상단, 1=하단=기회)
+    macd_strength: float = 0.5  # MACD 시그널 강도
+    trend_strength: float = 0.5  # EMA 기반 추세 강도
+    momentum: float = 0.5      # 3개월 수익률 기반 모멘텀
+    volume_signal: float = 0.5  # 거래량 시그널
+    volatility_risk: float = 0.5  # 변동성 리스크 (0=고변동, 1=안정)
+    breakout_score: float = 0.0   # 돌파 점수
+    composite: float = 0.5    # 가중 합성 점수
 
 
 def _rsi(close: pd.Series, length: int = 14) -> pd.Series:
@@ -78,6 +107,84 @@ def _atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) ->
     return true_range.rolling(window=length).mean()
 
 
+def _detect_rsi_divergence(close: pd.Series, rsi_series: pd.Series, lookback: int = 20) -> int:
+    """Detect RSI divergence.
+
+    Bullish divergence (1): price makes lower low but RSI makes higher low
+    Bearish divergence (-1): price makes higher high but RSI makes lower high
+    """
+    if len(close) < lookback + 5:
+        return 0
+
+    recent = close.iloc[-lookback:]
+    recent_rsi = rsi_series.iloc[-lookback:]
+
+    # Remove NaN
+    if recent_rsi.isna().any():
+        return 0
+
+    # Find local lows (last 2)
+    half = lookback // 2
+    price_low1 = recent.iloc[:half].min()
+    price_low2 = recent.iloc[half:].min()
+    rsi_low1 = recent_rsi.iloc[:half].min()
+    rsi_low2 = recent_rsi.iloc[half:].min()
+
+    # Bullish: price lower low, RSI higher low
+    if price_low2 < price_low1 and rsi_low2 > rsi_low1 + 2:
+        return 1
+
+    # Find local highs
+    price_high1 = recent.iloc[:half].max()
+    price_high2 = recent.iloc[half:].max()
+    rsi_high1 = recent_rsi.iloc[:half].max()
+    rsi_high2 = recent_rsi.iloc[half:].max()
+
+    # Bearish: price higher high, RSI lower high
+    if price_high2 > price_high1 and rsi_high2 < rsi_high1 - 2:
+        return -1
+
+    return 0
+
+
+def _detect_macd_divergence(close: pd.Series, macd_hist: pd.Series, lookback: int = 20) -> int:
+    """Detect MACD histogram divergence.
+
+    Bullish (1): price lower low, MACD histogram higher low
+    Bearish (-1): price higher high, MACD histogram lower high
+    """
+    if len(close) < lookback + 5:
+        return 0
+
+    recent = close.iloc[-lookback:]
+    recent_macd = macd_hist.iloc[-lookback:]
+
+    if recent_macd.isna().any():
+        return 0
+
+    half = lookback // 2
+
+    # Lows
+    price_low1 = recent.iloc[:half].min()
+    price_low2 = recent.iloc[half:].min()
+    macd_low1 = recent_macd.iloc[:half].min()
+    macd_low2 = recent_macd.iloc[half:].min()
+
+    if price_low2 < price_low1 and macd_low2 > macd_low1:
+        return 1
+
+    # Highs
+    price_high1 = recent.iloc[:half].max()
+    price_high2 = recent.iloc[half:].max()
+    macd_high1 = recent_macd.iloc[:half].max()
+    macd_high2 = recent_macd.iloc[half:].max()
+
+    if price_high2 > price_high1 and macd_high2 < macd_high1:
+        return -1
+
+    return 0
+
+
 def compute_indicators(df: pd.DataFrame) -> TechnicalIndicators:
     """Compute RSI(14), BB(20,2), MACD(12,26,9), ATR(14) from OHLCV data.
 
@@ -111,9 +218,11 @@ def compute_indicators(df: pd.DataFrame) -> TechnicalIndicators:
         bb_bandwidth = 0.0
 
     # MACD(12, 26, 9)
-    _, _, macd_hist = _macd(close, fast=12, slow=26, signal=9)
+    macd_line_s, signal_line_s, macd_hist = _macd(close, fast=12, slow=26, signal=9)
     macd_hist_val = float(macd_hist.iloc[-1]) if not np.isnan(macd_hist.iloc[-1]) else 0.0
     macd_hist_prev = float(macd_hist.iloc[-2]) if len(macd_hist) > 1 and not np.isnan(macd_hist.iloc[-2]) else 0.0
+    macd_line_val = float(macd_line_s.iloc[-1]) if not np.isnan(macd_line_s.iloc[-1]) else 0.0
+    signal_line_val = float(signal_line_s.iloc[-1]) if not np.isnan(signal_line_s.iloc[-1]) else 0.0
 
     if macd_hist_val > 0 and macd_hist_prev <= 0:
         macd_cross = 1
@@ -170,6 +279,16 @@ def compute_indicators(df: pd.DataFrame) -> TechnicalIndicators:
     else:
         ret_3m = 0.0
 
+    # v8.1: Simple moving averages
+    ma5_val = float(close.tail(5).mean()) if len(close) >= 5 else float(close.iloc[-1])
+    ma20_val = float(close.tail(20).mean()) if len(close) >= 20 else float(close.iloc[-1])
+    ma60_val = float(close.tail(60).mean()) if len(close) >= 60 else 0.0
+    ma120_val = float(close.tail(120).mean()) if len(close) >= 120 else 0.0
+
+    # v8.1: Divergence detection
+    rsi_div = _detect_rsi_divergence(close, rsi_series)
+    macd_div = _detect_macd_divergence(close, macd_hist)
+
     return TechnicalIndicators(
         rsi=round(rsi_val, 2),
         bb_pctb=round(float(bb_pctb), 4),
@@ -187,7 +306,123 @@ def compute_indicators(df: pd.DataFrame) -> TechnicalIndicators:
         volume_ratio=round(vol_ratio, 2),
         bb_squeeze=bb_squeeze,
         return_3m_pct=round(float(ret_3m), 2),
+        ma5=round(ma5_val, 2),
+        ma20=round(ma20_val, 2),
+        ma60=round(ma60_val, 2),
+        ma120=round(ma120_val, 2),
+        macd=round(macd_line_val, 4),
+        macd_signal=round(signal_line_val, 4),
+        rsi_divergence=rsi_div,
+        macd_divergence=macd_div,
     )
+
+
+def normalize_indicators(
+    tech: TechnicalIndicators,
+    weights: dict[str, float] | None = None,
+) -> NormalizedIndicators:
+    """기술적 지표를 0~1 범위로 정규화.
+
+    Args:
+        tech: 원본 기술적 지표.
+        weights: 합성 점수 가중치. 기본값 사용 시 None.
+
+    Returns:
+        NormalizedIndicators with all values in [0, 1].
+    """
+    # RSI: 0-100 → 0-1
+    rsi_norm = max(0.0, min(1.0, tech.rsi / 100.0))
+    # RSI 매수 기회: 과매도일수록 높음 (역전)
+    rsi_opp = 1.0 - rsi_norm
+
+    # BB %B: already 0-1 range roughly
+    bb_pos = max(0.0, min(1.0, tech.bb_pctb))
+    bb_opp = 1.0 - bb_pos  # 하단일수록 매수 기회
+
+    # MACD: sigmoid 변환으로 -∞~+∞ → 0~1
+    macd_str = _sigmoid(tech.macd_histogram * 100)  # scale up for sensitivity
+
+    # Trend: EMA 50 vs 200 기반
+    if tech.ema_200 > 0 and tech.ema_50 > 0:
+        ema_ratio = tech.ema_50 / tech.ema_200
+        trend = _sigmoid((ema_ratio - 1.0) * 20)  # 1.0 = neutral
+    else:
+        trend = 0.5
+    if tech.golden_cross:
+        trend = min(trend + 0.15, 1.0)
+    elif tech.dead_cross:
+        trend = max(trend - 0.15, 0.0)
+
+    # Momentum: 3개월 수익률 기반
+    mom = _sigmoid(tech.return_3m_pct / 10.0)  # ±30% → roughly 0-1
+
+    # Volume: 1.0 = 평균, 2.0+ = 강한 신호
+    vol_sig = _sigmoid((tech.volume_ratio - 1.0) * 2)
+
+    # Volatility risk: ATR% 역전 (낮을수록 안전)
+    # ATR 1% = 안정, 5%+ = 매우 위험
+    vol_risk = max(0.0, min(1.0, 1.0 - (tech.atr_pct - 1.0) / 5.0))
+
+    # Breakout score
+    breakout = 0.0
+    if tech.high_52w > 0 and tech.ema_50 > 0:
+        near_high = tech.ema_50 / tech.high_52w
+        if near_high >= 0.98:
+            breakout = 0.8
+        elif near_high >= 0.95:
+            breakout = 0.5
+        elif near_high >= 0.90:
+            breakout = 0.2
+    if tech.bb_squeeze:
+        breakout = min(breakout + 0.2, 1.0)
+
+    # Composite weighted average
+    if weights is None:
+        weights = {
+            "rsi_opportunity": 0.15,
+            "bb_opportunity": 0.10,
+            "macd_strength": 0.15,
+            "trend_strength": 0.20,
+            "momentum": 0.15,
+            "volume_signal": 0.10,
+            "volatility_risk": 0.10,
+            "breakout_score": 0.05,
+        }
+
+    composite = (
+        weights.get("rsi_opportunity", 0.15) * rsi_opp
+        + weights.get("bb_opportunity", 0.10) * bb_opp
+        + weights.get("macd_strength", 0.15) * macd_str
+        + weights.get("trend_strength", 0.20) * trend
+        + weights.get("momentum", 0.15) * mom
+        + weights.get("volume_signal", 0.10) * vol_sig
+        + weights.get("volatility_risk", 0.10) * vol_risk
+        + weights.get("breakout_score", 0.05) * breakout
+    )
+    composite = max(0.0, min(1.0, composite))
+
+    return NormalizedIndicators(
+        rsi=round(rsi_norm, 4),
+        rsi_opportunity=round(rsi_opp, 4),
+        bb_position=round(bb_pos, 4),
+        bb_opportunity=round(bb_opp, 4),
+        macd_strength=round(macd_str, 4),
+        trend_strength=round(trend, 4),
+        momentum=round(mom, 4),
+        volume_signal=round(vol_sig, 4),
+        volatility_risk=round(vol_risk, 4),
+        breakout_score=round(breakout, 4),
+        composite=round(composite, 4),
+    )
+
+
+def _sigmoid(x: float) -> float:
+    """Sigmoid function: maps (-inf, +inf) to (0, 1)."""
+    import math
+    try:
+        return 1.0 / (1.0 + math.exp(-x))
+    except OverflowError:
+        return 0.0 if x < 0 else 1.0
 
 
 def compute_weekly_trend(df: pd.DataFrame) -> str:

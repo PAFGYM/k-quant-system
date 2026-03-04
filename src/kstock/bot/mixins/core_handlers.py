@@ -1396,28 +1396,73 @@ class CoreHandlersMixin:
                 logger.debug("_handle_stock_analysis financials fetch failed for %s", code, exc_info=True)
                 fund_data = "재무 데이터 없음"
 
-            # 매매 레벨 계산 (현재가 기반)
+            # v8.2: 현재 시장 상황 반영형 매매 레벨
             trade_levels = ""
+            situation_ctx = ""
+            alert_mode = getattr(self, '_alert_mode', 'normal')
+            try:
+                macro = await self.macro_client.get_snapshot()
+                vix = getattr(macro, "vix", 15)
+                spx_chg = getattr(macro, "spx_change_pct", 0)
+
+                if alert_mode == "wartime":
+                    situation_ctx = (
+                        f"[🔴 전시 상황]\n"
+                        f"현재 전시 경계 모드 — 국내 증시 폭락장.\n"
+                        f"VIX: {vix:.1f}, S&P500: {spx_chg:+.1f}%\n"
+                        f"전시 대응 원칙: 신규 매수 자제, 손절 강화(-5%), 현금 확보 40%+\n"
+                        f"방어 섹터(의료/필수소비재/유틸리티) 외 경기민감 종목은 축소 검토.\n\n"
+                    )
+                elif alert_mode == "elevated":
+                    situation_ctx = (
+                        f"[🟡 긴장 상황]\n"
+                        f"시장 변동성 확대 중. VIX: {vix:.1f}\n"
+                        f"보수적 접근 필요. 신규 매수는 확신 높은 경우만.\n\n"
+                    )
+            except Exception:
+                pass
+
             if cur_price > 0:
-                trade_levels = (
-                    f"[매매 참고 레벨 - 현재가 {cur_price:,.0f}원 기준]\n"
-                    f"적극 매수: {cur_price * 0.90:,.0f}원 (현재가 -10%)\n"
-                    f"관심 매수: {cur_price * 0.95:,.0f}원 (현재가 -5%)\n"
-                    f"단기 목표: {cur_price * 1.10:,.0f}원 (현재가 +10%)\n"
-                    f"중기 목표: {cur_price * 1.20:,.0f}원 (현재가 +20%)\n"
-                    f"손절 기준: {cur_price * 0.93:,.0f}원 (현재가 -7%)\n"
-                )
+                if alert_mode == "wartime":
+                    # 전시: 보수적 레벨 (손절 -5%, 목표 낮춤)
+                    trade_levels = (
+                        f"[전시 매매 레벨 - 현재가 {cur_price:,.0f}원 기준]\n"
+                        f"🔴 전시 손절: {cur_price * 0.95:,.0f}원 (현재가 -5%)\n"
+                        f"관망 유지: 추가 하락 가능성 열어둘 것\n"
+                        f"반등 시 목표: {cur_price * 1.05:,.0f}원 (+5%)\n"
+                        f"분할 매수 1차: {cur_price * 0.90:,.0f}원 (-10%) — 확신 시만\n"
+                        f"분할 매수 2차: {cur_price * 0.85:,.0f}원 (-15%) — 패닉 매수\n"
+                    )
+                elif alert_mode == "elevated":
+                    trade_levels = (
+                        f"[긴장 매매 레벨 - 현재가 {cur_price:,.0f}원 기준]\n"
+                        f"손절 기준: {cur_price * 0.94:,.0f}원 (현재가 -6%)\n"
+                        f"관심 매수: {cur_price * 0.93:,.0f}원 (현재가 -7%)\n"
+                        f"단기 목표: {cur_price * 1.07:,.0f}원 (현재가 +7%)\n"
+                        f"중기 목표: {cur_price * 1.15:,.0f}원 (현재가 +15%)\n"
+                    )
+                else:
+                    trade_levels = (
+                        f"[매매 참고 레벨 - 현재가 {cur_price:,.0f}원 기준]\n"
+                        f"적극 매수: {cur_price * 0.90:,.0f}원 (현재가 -10%)\n"
+                        f"관심 매수: {cur_price * 0.95:,.0f}원 (현재가 -5%)\n"
+                        f"단기 목표: {cur_price * 1.10:,.0f}원 (현재가 +10%)\n"
+                        f"중기 목표: {cur_price * 1.20:,.0f}원 (현재가 +20%)\n"
+                        f"손절 기준: {cur_price * 0.93:,.0f}원 (현재가 -7%)\n"
+                    )
 
             enriched_question = (
                 f"{name}({code}) 종목 분석 요청.\n"
                 f"사용자 질문: {original_text}\n\n"
+                f"{situation_ctx}"
                 f"[실시간 가격]\n{price_data}\n\n"
                 f"[기술적 지표]\n{tech_data}\n\n"
                 f"[펀더멘털]\n{fund_data}\n\n"
                 f"{trade_levels}\n"
                 f"[절대 규칙] 위 [실시간 가격]과 [매매 참고 레벨]의 숫자만 사용하라. "
                 f"너의 학습 데이터에 있는 과거 주가를 절대 사용 금지. "
-                f"매수/매도 포인트 가격은 반드시 위 [매매 참고 레벨]에서 선택하라."
+                f"매수/매도 포인트 가격은 반드시 위 [매매 참고 레벨]에서 선택하라. "
+                f"현재 시장 상황을 반드시 반영하여 분석하라."
             )
 
             from kstock.bot.chat_handler import handle_ai_question

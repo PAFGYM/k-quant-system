@@ -38,20 +38,42 @@ AGENTS = {
         "system_prompt": (
             "당신은 한국 주식 기술적 분석 전문가입니다.\n"
             "주어진 데이터를 바탕으로 기술적 분석만 수행하세요.\n\n"
-            "분석 항목:\n"
-            "1. 이동평균선 (5/20/60/120일) 배열 상태\n"
-            "2. RSI 과매수/과매도 판단\n"
-            "3. MACD 시그널 (골든크로스/데드크로스)\n"
-            "4. 거래량 추세 (20일 평균 대비)\n"
-            "5. 52주 고점/저점 대비 현재 위치\n"
-            "6. 지지선/저항선\n\n"
+            "## 점수 산정 기준 (반드시 이 룰을 따르세요):\n"
+            "기본 50점에서 아래 항목별로 가감하세요:\n\n"
+            "RSI(14):\n"
+            "- RSI <= 30 (과매도): +15점\n"
+            "- RSI 30~40: +8점\n"
+            "- RSI 40~60: +0점\n"
+            "- RSI 60~70: -5점\n"
+            "- RSI >= 70 (과매수): -15점\n\n"
+            "MACD:\n"
+            "- 골든크로스(MACD > Signal 전환): +10점\n"
+            "- MACD > 0 & 상승추세: +5점\n"
+            "- 데드크로스(MACD < Signal 전환): -10점\n"
+            "- MACD < 0 & 하락추세: -5점\n\n"
+            "이동평균 배열:\n"
+            "- 정배열(5>20>60>120): +10점\n"
+            "- 역배열(5<20<60<120): -10점\n"
+            "- 골든크로스(50일>200일 전환): +5점\n"
+            "- 데드크로스(50일<200일 전환): -5점\n\n"
+            "볼린저밴드:\n"
+            "- 하단밴드 근접(%B<=0.2): +8점\n"
+            "- 상단밴드 근접(%B>=0.8): -5점\n"
+            "- 스퀴즈(밴드폭 축소): +3점(돌파 준비)\n\n"
+            "거래량:\n"
+            "- 20일평균 대비 1.5배 이상: +5점\n"
+            "- 20일평균 대비 0.5배 이하: -3점\n\n"
+            "52주 위치:\n"
+            "- 52주 저점 근처(하위 20%): +5점\n"
+            "- 52주 고점 근처(상위 90%): -3점\n\n"
+            "점수 범위: 최소 10점 ~ 최대 90점\n"
+            "50점은 '완전히 판단 불가'일 때만 사용하세요.\n\n"
             "반드시 아래 형식으로 출력하세요:\n"
             "기술적 점수: [숫자] (0~100 사이)\n"
             "신호: [강한매수/매수/중립/매도/강한매도]\n"
             "핵심 근거: [2~3줄]\n"
             "주의사항: [1줄]\n\n"
-            "데이터가 None인 항목은 '데이터 없음'으로 표기하되, "
-            "있는 데이터만으로 분석하세요. 분석 불가라고 하지 마세요."
+            "데이터가 없는 항목은 무시하되, 있는 데이터로 반드시 점수를 차별화하세요."
         ),
     },
     "fundamental": {
@@ -60,20 +82,20 @@ AGENTS = {
         "system_prompt": (
             "당신은 한국 주식 기본적 분석 전문가입니다.\n"
             "주어진 재무 데이터를 바탕으로 기본적 분석만 수행하세요.\n\n"
-            "분석 항목:\n"
-            "1. PER/PBR 업종 평균 대비\n"
-            "2. 매출/영업이익 성장률 추세\n"
-            "3. ROE/ROA 추세\n"
-            "4. 부채비율 안정성\n"
-            "5. 배당 수익률\n"
-            "6. 컨센서스 대비 실적 서프라이즈 여부\n\n"
+            "## 점수 산정 기준:\n"
+            "기본 50점에서 아래 항목별로 가감하세요:\n\n"
+            "PER: 업종평균 대비 0.7배 이하 +10, 0.7~1.0배 +5, 1.3배 이상 -10\n"
+            "PBR: 1.0 이하 +5, 3.0 이상 -5\n"
+            "ROE: 15% 이상 +10, 8~15% +5, 3% 미만 -10\n"
+            "부채비율: 100% 미만 +5, 200% 이상 -10\n"
+            "매출성장률: 10% 이상 +5, 마이너스 -5\n"
+            "목표가 괴리: 현재가 대비 목표가 20% 이상 +10, 목표가 미만 -5\n\n"
             "반드시 아래 형식으로 출력하세요:\n"
             "기본적 점수: [숫자] (0~100 사이)\n"
             "밸류에이션: [저평가/적정/고평가]\n"
             "핵심 근거: [2~3줄]\n"
             "리스크: [1줄]\n\n"
-            "데이터가 None이거나 0인 항목은 '데이터 없음'으로 표기하되, "
-            "있는 데이터만으로 분석하세요. 분석 불가라고 하지 마세요."
+            "50점은 완전 판단불가일 때만. 있는 데이터로 반드시 차별화된 점수를 매기세요."
         ),
     },
     "sentiment": {
@@ -81,21 +103,26 @@ AGENTS = {
         "model": "claude-haiku-4-5-20251001",
         "system_prompt": (
             "당신은 한국 주식 뉴스 및 시장 심리 분석 전문가입니다.\n"
-            "주어진 뉴스와 수급 데이터를 바탕으로 센티먼트 분석만 수행하세요.\n\n"
-            "분석 항목:\n"
-            "1. 최근 뉴스 감성 (긍정/부정/중립)\n"
-            "2. 기관/외인 수급 동향 (5일/20일)\n"
-            "3. 공매도 잔고 변화\n"
-            "4. 신용잔고 변화\n"
-            "5. 섹터 전체 분위기\n"
-            "6. 정책/규제 영향\n"
-            "7. 글로벌 이벤트 영향\n\n"
+            "주어진 수급 데이터를 바탕으로 센티먼트 분석만 수행하세요.\n\n"
+            "## 점수 산정 기준:\n"
+            "기본 50점에서 아래 항목별로 가감하세요:\n\n"
+            "외국인 수급:\n"
+            "- 5일 연속 순매수: +15점\n"
+            "- 3일 연속 순매수: +8점\n"
+            "- 5일 연속 순매도: -15점\n"
+            "- 3일 연속 순매도: -8점\n\n"
+            "기관 수급:\n"
+            "- 5일 연속 순매수: +10점\n"
+            "- 3일 연속 순매수: +5점\n"
+            "- 5일 연속 순매도: -10점\n\n"
+            "거래대금:\n"
+            "- 최근 5일 평균 거래대금 큰 종목: +3점\n\n"
             "반드시 아래 형식으로 출력하세요:\n"
             "센티먼트 점수: [숫자] (0~100 사이)\n"
             "시장 심리: [탐욕/낙관/중립/비관/공포]\n"
             "핵심 이슈: [2~3줄]\n"
             "변수: [1줄]\n\n"
-            "데이터가 부족하더라도 있는 정보를 바탕으로 반드시 점수를 매기세요."
+            "50점은 완전 판단불가일 때만. 수급 데이터로 반드시 차별화된 점수를 매기세요."
         ),
     },
     "strategist": {
@@ -165,48 +192,164 @@ class MultiAgentReport:
 # Data formatting
 # ---------------------------------------------------------------------------
 
+def _fmt(val, suffix: str = "", default: str = "데이터없음") -> str:
+    """None/NaN을 '데이터없음'으로 변환."""
+    if val is None:
+        return default
+    try:
+        import math
+        if isinstance(val, float) and math.isnan(val):
+            return default
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, float):
+        return f"{val:,.2f}{suffix}"
+    return f"{val}{suffix}"
+
+
+def _interpret_ma_arrangement(stock_data: dict) -> str:
+    """이동평균선 배열 상태 해석."""
+    ma5 = stock_data.get("ma5")
+    ma20 = stock_data.get("ma20")
+    ma60 = stock_data.get("ma60")
+    ma120 = stock_data.get("ma120")
+    if None in (ma5, ma20, ma60, ma120):
+        return "판단불가"
+    try:
+        if ma5 > ma20 > ma60 > ma120:
+            return "정배열(강세)"
+        elif ma5 < ma20 < ma60 < ma120:
+            return "역배열(약세)"
+        elif ma5 > ma20 and ma60 > ma120:
+            return "상승전환 중"
+        elif ma5 < ma20 and ma60 < ma120:
+            return "하락전환 중"
+        else:
+            return "혼조"
+    except (TypeError, ValueError):
+        return "판단불가"
+
+
 def format_data_for_agent(agent_key: str, stock_data: dict) -> str:
     """에이전트별 필요 데이터만 추출해서 전달합니다."""
     try:
         if agent_key == "technical":
-            return (
-                f"이동평균: 5일={stock_data.get('ma5')}, "
-                f"20일={stock_data.get('ma20')}, "
-                f"60일={stock_data.get('ma60')}, "
-                f"120일={stock_data.get('ma120')}\n"
-                f"RSI(14): {stock_data.get('rsi')}\n"
-                f"MACD: {stock_data.get('macd')}, "
-                f"Signal: {stock_data.get('macd_signal')}\n"
-                f"거래량: 오늘={stock_data.get('volume')}, "
-                f"20일평균={stock_data.get('avg_volume_20')}\n"
-                f"52주 고점: {stock_data.get('high_52w')}, "
-                f"저점: {stock_data.get('low_52w')}\n"
-                f"현재가: {stock_data.get('price')}\n"
-                f"최근 5일 종가: {stock_data.get('prices_5d')}"
-            )
+            price = stock_data.get("price", 0)
+            rsi = stock_data.get("rsi")
+            # RSI 해석
+            rsi_comment = ""
+            if rsi is not None:
+                if rsi <= 30:
+                    rsi_comment = " (과매도 구간!)"
+                elif rsi <= 40:
+                    rsi_comment = " (과매도 접근)"
+                elif rsi >= 70:
+                    rsi_comment = " (과매수 구간!)"
+                elif rsi >= 60:
+                    rsi_comment = " (과매수 접근)"
+
+            # MACD 해석
+            macd_cross = stock_data.get("macd_signal_cross", 0)
+            macd_comment = ""
+            if macd_cross == 1:
+                macd_comment = " [골든크로스 발생!]"
+            elif macd_cross == -1:
+                macd_comment = " [데드크로스 발생!]"
+
+            # 52주 위치
+            h52 = stock_data.get("high_52w")
+            l52 = stock_data.get("low_52w")
+            pos_52w = ""
+            if h52 and l52 and price and h52 > l52:
+                pct = (price - l52) / (h52 - l52) * 100
+                pos_52w = f"52주 범위 내 위치: 하위 {pct:.0f}%"
+
+            # 골든/데드크로스
+            gc = stock_data.get("golden_cross")
+            dc = stock_data.get("dead_cross")
+            ema_comment = ""
+            if gc:
+                ema_comment = "EMA 50/200 골든크로스!"
+            elif dc:
+                ema_comment = "EMA 50/200 데드크로스!"
+
+            lines = [
+                f"현재가: {_fmt(price)}원",
+                f"이동평균: 5일={_fmt(stock_data.get('ma5'))}, "
+                f"20일={_fmt(stock_data.get('ma20'))}, "
+                f"60일={_fmt(stock_data.get('ma60'))}, "
+                f"120일={_fmt(stock_data.get('ma120'))}",
+                f"이평선 배열: {_interpret_ma_arrangement(stock_data)}",
+                f"RSI(14): {_fmt(rsi)}{rsi_comment}",
+                f"MACD: {_fmt(stock_data.get('macd'))}, "
+                f"Signal: {_fmt(stock_data.get('macd_signal'))}{macd_comment}",
+                f"볼린저밴드 %B: {_fmt(stock_data.get('bb_pctb'))} "
+                f"(0=하단, 0.5=중간, 1=상단)",
+                f"볼린저밴드 스퀴즈: {'예(돌파 임박)' if stock_data.get('bb_squeeze') else '아니오'}",
+                f"거래량: 오늘={_fmt(stock_data.get('volume'))}, "
+                f"20일평균={_fmt(stock_data.get('avg_volume_20'))}, "
+                f"비율={_fmt(stock_data.get('volume_ratio'))}배",
+                f"52주 고점: {_fmt(h52)}, 저점: {_fmt(l52)}",
+                pos_52w,
+                f"EMA 50: {_fmt(stock_data.get('ema_50'))}, "
+                f"EMA 200: {_fmt(stock_data.get('ema_200'))}",
+                ema_comment,
+                f"주간 추세: {stock_data.get('weekly_trend', '데이터없음')}",
+                f"최근 5일 종가: {stock_data.get('prices_5d', '데이터없음')}",
+            ]
+            return "\n".join(line for line in lines if line)
 
         elif agent_key == "fundamental":
+            price = stock_data.get("price", 0)
+            target = stock_data.get("target_price", 0)
+            upside = ""
+            if price and target and price > 0 and target > 0:
+                upside_pct = (target - price) / price * 100
+                upside = f" (현재가 대비 {upside_pct:+.1f}%)"
             return (
-                f"PER: {stock_data.get('per')}, "
-                f"업종 평균: {stock_data.get('sector_per')}\n"
-                f"PBR: {stock_data.get('pbr')}\n"
-                f"ROE: {stock_data.get('roe')}\n"
-                f"매출 성장률: {stock_data.get('revenue_growth')}\n"
-                f"영업이익 성장률: {stock_data.get('op_growth')}\n"
-                f"부채비율: {stock_data.get('debt_ratio')}\n"
-                f"컨센서스 목표가: {stock_data.get('target_price')}\n"
-                f"최근 실적: {stock_data.get('recent_earnings')}"
+                f"PER: {_fmt(stock_data.get('per'))}, "
+                f"업종 평균 PER: {_fmt(stock_data.get('sector_per'))}\n"
+                f"PBR: {_fmt(stock_data.get('pbr'))}\n"
+                f"ROE: {_fmt(stock_data.get('roe'), '%')}\n"
+                f"매출 성장률: {_fmt(stock_data.get('revenue_growth'), '%')}\n"
+                f"영업이익 성장률: {_fmt(stock_data.get('op_growth'), '%')}\n"
+                f"부채비율: {_fmt(stock_data.get('debt_ratio'), '%')}\n"
+                f"컨센서스 목표가: {_fmt(target)}원{upside}\n"
+                f"최근 실적: {stock_data.get('recent_earnings', '데이터없음')}"
             )
 
         elif agent_key == "sentiment":
-            return (
-                f"최근 뉴스 요약: {stock_data.get('news_summary')}\n"
-                f"기관 순매수(5일): {stock_data.get('inst_net_5d')}\n"
-                f"외인 순매수(5일): {stock_data.get('foreign_net_5d')}\n"
-                f"공매도 잔고 변화: {stock_data.get('short_change')}\n"
-                f"신용잔고 변화: {stock_data.get('margin_change')}\n"
-                f"섹터 동향: {stock_data.get('sector_trend')}"
-            )
+            lines = []
+            # 외국인 수급
+            frgn_5d = stock_data.get("foreign_net_5d")
+            frgn_detail = stock_data.get("foreign_flow_detail", "")
+            if frgn_5d is not None:
+                lines.append(f"외국인 5일 누적 순매수: {frgn_5d:+,}주")
+                if frgn_detail:
+                    lines.append(f"  일별: {frgn_detail}")
+            else:
+                lines.append("외국인 수급: 데이터없음")
+
+            # 기관 수급
+            inst_5d = stock_data.get("inst_net_5d")
+            inst_detail = stock_data.get("inst_flow_detail", "")
+            if inst_5d is not None:
+                lines.append(f"기관 5일 누적 순매수: {inst_5d:+,}주")
+                if inst_detail:
+                    lines.append(f"  일별: {inst_detail}")
+            else:
+                lines.append("기관 수급: 데이터없음")
+
+            # 거래대금
+            avg_val = stock_data.get("avg_trade_value")
+            if avg_val:
+                lines.append(f"5일 평균 거래대금: {avg_val / 1e8:,.0f}억원")
+
+            # 추가 데이터
+            if stock_data.get("foreign_ratio"):
+                lines.append(f"외국인 지분율: {stock_data['foreign_ratio']:.1f}%")
+
+            return "\n".join(lines) if lines else "수급 데이터 없음"
 
         return f"데이터: {stock_data}"
 
@@ -220,30 +363,48 @@ def format_data_for_agent(agent_key: str, stock_data: dict) -> str:
 # ---------------------------------------------------------------------------
 
 _SCORE_PATTERN = re.compile(
-    r"(?:기술적\s*)?(?:기본적\s*)?(?:센티먼트\s*)?(?:종합\s*)?(?:점수|score)\s*[:\uff1a]?\s*(\d{1,3})",
+    r"(?:\*{0,2})"  # optional bold markers
+    r"(?:기술적\s*)?(?:기본적\s*)?(?:센티먼트\s*)?(?:종합\s*)?(?:점수|score)\s*[:\uff1a]?\s*"
+    r"(?:\*{0,2})\s*(\d{1,3})",
     re.IGNORECASE,
 )
-# 폴백: 줄 앞부분에 숫자+점 패턴 (예: "72점", "65/100")
+# 폴백: "72점", "65/100", "점수 72" 패턴
 _SCORE_FALLBACK = re.compile(r"(\d{1,3})\s*(?:점|/\s*100)", re.IGNORECASE)
+# 폴백2: bold 안의 숫자 "**50**"
+_SCORE_BOLD = re.compile(r"\*\*\s*(\d{1,3})\s*\*\*")
 _SIGNAL_PATTERN = re.compile(
     r"(?:신호|signal|판단|밸류에이션|시장\s*심리)\s*[:\uff1a]?\s*"
+    r"(?:\*{0,2})\s*"
     r"(강한매수|매수|중립|매도|강한매도|저평가|적정|고평가|탐욕|낙관|비관|공포)",
+)
+# 폴백: 신호 키워드 단독 매칭
+_SIGNAL_FALLBACK = re.compile(
+    r"(강한매수|강한매도|매수|매도|저평가|고평가|탐욕|공포|낙관|비관)"
 )
 
 
 def parse_agent_score(response_text: str) -> int:
     """응답 텍스트에서 점수(0~100)를 추출합니다."""
     try:
+        # 1차: 점수: XX 패턴
         match = _SCORE_PATTERN.search(response_text)
         if match:
             score = int(match.group(1))
-            return max(0, min(100, score))
-        # 폴백: "72점" 또는 "65/100" 패턴
+            if 0 <= score <= 100:
+                return score
+        # 2차: "72점" 또는 "65/100" 패턴
         fallback = _SCORE_FALLBACK.search(response_text)
         if fallback:
             score = int(fallback.group(1))
-            return max(0, min(100, score))
-        logger.warning("점수 추출 실패 — 응답 앞 200자: %s", response_text[:200])
+            if 0 <= score <= 100:
+                return score
+        # 3차: bold 안의 숫자
+        bold = _SCORE_BOLD.search(response_text)
+        if bold:
+            score = int(bold.group(1))
+            if 0 <= score <= 100:
+                return score
+        logger.warning("점수 추출 실패 — 응답 앞 300자: %s", response_text[:300])
         return 50  # default
     except Exception:
         return 50
@@ -255,6 +416,10 @@ def parse_agent_signal(response_text: str) -> str:
         match = _SIGNAL_PATTERN.search(response_text)
         if match:
             return match.group(1)
+        # 폴백: 본문에서 신호 키워드 단독 매칭
+        fallback = _SIGNAL_FALLBACK.search(response_text)
+        if fallback:
+            return fallback.group(1)
         return "중립"
     except Exception:
         return "중립"
@@ -525,6 +690,17 @@ async def run_multi_agent_analysis(
                     function_name="multi_agent",
                     response=response,
                 )
+            except Exception:
+                pass
+            # [v8.1] 환각 차단 정책 적용
+            try:
+                from kstock.core.response_validator import apply_hallucination_policy
+                raw, h_action = apply_hallucination_policy(
+                    raw, task=agent_key,
+                    current_price=price, ticker=ticker,
+                )
+                if h_action == "block":
+                    logger.warning("[멀티분석] %s 환각 차단됨", agent_key)
             except Exception:
                 pass
             score = parse_agent_score(raw)

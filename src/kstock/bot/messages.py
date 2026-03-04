@@ -411,6 +411,7 @@ def _fear_greed_bar(score: float) -> str:
 def format_market_status(
     macro, regime_mode: dict | None = None,
     sector_text: str = "", fx_message: str = "",
+    alert_mode: str = "normal",
 ) -> str:
     regime_map = {
         "risk_on": "\U0001f7e2 적극 공격",
@@ -452,12 +453,18 @@ def format_market_status(
     lines = [
         f"\U0001f30d 시장 현황: {regime_text}",
         f"\U0001f552 {time_str}{cache_tag}",
+    ]
+    if alert_mode == "wartime":
+        lines.append("\U0001f534 전시 경계 모드 \u2014 손절 강화, 신규 매수 자제")
+    elif alert_mode == "elevated":
+        lines.append("\U0001f7e0 경계 모드 \u2014 변동성 확대, 분할 매수 권장")
+    lines.extend([
         "\u2500" * 25,
         "",
         f"{spx_arrow} S&P500: {macro.spx_change_pct:+.2f}%",
         f"{ndx_arrow} 나스닥: {macro.nasdaq_change_pct:+.2f}%",
         f"{vix_arrow} VIX: {macro.vix:.1f} ({macro.vix_change_pct:+.1f}%) {vix_status}",
-    ]
+    ])
 
     # v3.5: US10Y / DXY
     us10y_change = getattr(macro, "us10y_change_pct", 0)

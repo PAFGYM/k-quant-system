@@ -196,13 +196,57 @@ def get_manager_label(holding_type: str) -> str:
 
 # ── 매니저별 AI 분석 ───────────────────────────────────────
 
+def _build_shared_context_prompt(shared_context: dict | None) -> str:
+    """공유 컨텍스트를 매니저 프롬프트 텍스트로 변환."""
+    if not shared_context:
+        return ""
+    sections = []
+
+    crisis = shared_context.get("crisis_context", "")
+    if crisis and "없음" not in crisis:
+        sections.append(f"[현재 위기 상황]\n{crisis[:400]}")
+
+    post_war = shared_context.get("post_war_rotation", "")
+    if post_war:
+        sections.append(f"\n{post_war[:300]}")
+
+    news = shared_context.get("global_news", "")
+    if news and "없음" not in news:
+        sections.append(f"[글로벌 뉴스 — 최신]\n{news[:300]}")
+
+    policies = shared_context.get("policies", "")
+    if policies and "없음" not in policies:
+        sections.append(f"[활성 정책]\n{policies[:200]}")
+
+    lessons = shared_context.get("trade_lessons", "")
+    if lessons and "없음" not in lessons:
+        sections.append(f"[매매 교훈 — 반복 실수 방지]\n{lessons[:200]}")
+
+    style = shared_context.get("investor_style", "")
+    if style and "없음" not in style:
+        sections.append(f"[투자자 성향] {style[:150]}")
+
+    portfolio = shared_context.get("portfolio_summary", "")
+    if portfolio:
+        sections.append(f"[전체 포트폴리오 현황]\n{portfolio[:300]}")
+
+    return "\n\n".join(sections)
+
+
 async def get_manager_analysis(
     manager_key: str,
     holdings: list[dict],
     market_context: str = "",
     question: str = "",
+    shared_context: dict | None = None,
+    alert_mode: str = "normal",
 ) -> str:
-    """매니저 페르소나로 보유종목 분석 (Haiku 기반, 저비용)."""
+    """매니저 페르소나로 보유종목 분석 (Haiku 기반, 저비용).
+
+    v7.0: shared_context를 통해 위기/뉴스/교훈/포트폴리오 등
+    전체 시스템 컨텍스트를 공유받아 일관된 분석 수행.
+    v8.1: alert_mode에 따른 전시/경계 맞춤 분석.
+    """
     manager = MANAGERS.get(manager_key)
     if not manager:
         return f"알 수 없는 매니저 유형: {manager_key}"
@@ -214,12 +258,69 @@ async def get_manager_analysis(
     try:
         import httpx
 
+        # 공유 컨텍스트에서 위기/뉴스/교훈 등 조합
+        shared_prompt = _build_shared_context_prompt(shared_context)
+
+        # 공유 컨텍스트 없으면 기본 위기 로드 (하위 호환)
+        if not shared_prompt:
+            try:
+                import yaml
+                crisis_path = os.path.join(
+                    os.path.dirname(__file__), "..", "..", "config", "crisis_events.yaml"
+                )
+                if os.path.exists(crisis_path):
+                    with open(crisis_path, encoding="utf-8") as f:
+                        cdata = yaml.safe_load(f) or {}
+                    active = cdata.get("active_crises", [])
+                    if active:
+                        shared_prompt = (
+                            "\n[현재 위기 상황]\n"
+                            f"{active[0].get('description', '')}\n"
+                            f"수혜 섹터: {', '.join(active[0].get('beneficiary_sectors', [])[:3])}\n"
+                            f"피해 섹터: {', '.join(active[0].get('damaged_sectors', [])[:3])}\n"
+                        )
+            except Exception:
+                pass
+
+        # 시장 상황별 매매 지침
+        situation_directive = ""
+        if alert_mode == "wartime":
+            situation_directive = (
+                "\n[🔴 전시 경계 모드 — 필수 적용]\n"
+                "현재 국내 증시 전반이 전시/폭락 상황이다.\n"
+                "- 모든 분석에 '전시 상황'을 반드시 반영하라\n"
+                "- 경기민감 섹터(반도체/2차전지/자동차 등): 비중 축소 또는 손절 권고\n"
+                "- 방어 섹터(의료/필수소비재/유틸리티): 보유 유지 권고\n"
+                "- 신규 매수: 매우 높은 확신 종목만 (신뢰도 80%↑)\n"
+                "- 손절 기준 -5%로 강화 (평시 -7%)\n"
+                "- 현금 비중 40% 이상 유지 권고\n"
+                "- 종목별로 '보유/축소/손절/분할매수' 중 명확한 액션 1개를 제시하라\n"
+            )
+        elif alert_mode == "elevated":
+            situation_directive = (
+                "\n[🟠 경계 모드 — 필수 적용]\n"
+                "현재 변동성 확대 구간이다.\n"
+                "- 손절 기준 -6%로 강화\n"
+                "- 분할 매수 권장, 한번에 풀 매수 금지\n"
+                "- 종목별 '보유/관망/분할매수' 액션을 제시하라\n"
+            )
+
         system_prompt = (
             f"너는 {manager['name']}의 투자 철학을 따르는 '{manager['title']}'이다.\n"
             f"{manager['persona']}\n"
+            f"\n{shared_prompt}\n"
+            f"{situation_directive}\n"
+            f"\n[필수 규칙]\n"
             f"호칭: 주호님\n"
             f"볼드(**) 사용 금지. 이모지로 구분.\n"
-            f"제공된 데이터만 사용. 학습 데이터의 과거 가격 사용 절대 금지.\n"
+            f"장기투자 종목은 전시/단기 변동으로 매도 권유 절대 금지.\n"
+            f"위기 상황에서는 수혜/피해 섹터를 명확히 구분하여 분석.\n"
+            f"전쟁 후 주도주 전환 가능성도 항상 염두.\n"
+            f"[가격 데이터 필수 규칙]\n"
+            f"- 제공된 '현재가' 데이터만 사용. 학습 데이터의 과거 가격 사용 절대 금지.\n"
+            f"- '현재가 미확인' 종목은 가격/수익률 언급하지 마라. '실시간 확인 필요'로 표기.\n"
+            f"- 목업/예전 가격으로 분석하면 주호님에게 큰 손해. 절대 위반 금지.\n"
+            f"종목마다 반드시 구체적 액션(매수/매도/보유/축소/관망) 1개를 명시하라.\n"
             f"간결하게. 종목당 3줄 이내.\n"
         )
 
@@ -257,7 +358,7 @@ async def get_manager_analysis(
                 },
                 json={
                     "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 600,
+                    "max_tokens": 700,
                     "system": system_prompt,
                     "messages": [{"role": "user", "content": user_prompt}],
                 },
@@ -334,8 +435,14 @@ async def _analyze_picks_for_manager(
     manager_key: str,
     picks: list[dict],
     market_context: str = "",
+    shared_context: dict | None = None,
+    alert_mode: str = "normal",
 ) -> str:
-    """단일 매니저가 자기 horizon 종목을 분석 (Haiku 기반)."""
+    """단일 매니저가 자기 horizon 종목을 분석 (Haiku 기반).
+
+    v7.0: shared_context를 통해 위기/포트폴리오 중복/뉴스 반영.
+    v8.1: alert_mode에 따른 전시/경계 맞춤 추천.
+    """
     manager = MANAGERS.get(manager_key)
     if not manager or not picks:
         if manager:
@@ -357,6 +464,9 @@ async def _analyze_picks_for_manager(
     try:
         import httpx
 
+        # 공유 컨텍스트 텍스트 생성
+        shared_prompt = _build_shared_context_prompt(shared_context)
+
         picks_text = ""
         for i, p in enumerate(picks[:3], 1):
             picks_text += (
@@ -367,12 +477,37 @@ async def _analyze_picks_for_manager(
                 f"   목표: +{p.get('target_pct', 0):.0f}% | 손절: {p.get('stop_pct', 0):.0f}%\n"
             )
 
+        # 시장 상황별 지침
+        alert_directive = ""
+        if alert_mode == "wartime":
+            alert_directive = (
+                "\n[🔴 전시 경계 모드]\n"
+                "국내 증시 전반 하락/폭락 상황. 추천 시 반드시 반영:\n"
+                "- 방어 섹터(의료/필수소비재/유틸리티) 종목 우선 추천\n"
+                "- 경기민감 섹터 종목은 '관망' 또는 '진입 보류' 권고\n"
+                "- 매수 추천 시 반드시 분할 진입 강조\n"
+                "- '추천하지 않음'도 가능 — 무리한 추천 금지\n"
+            )
+        elif alert_mode == "elevated":
+            alert_directive = (
+                "\n[🟠 경계 모드]\n"
+                "변동성 확대 구간. 분할 매수 권장, 풀 매수 금지.\n"
+            )
+
         system_prompt = (
             f"너는 {manager['name']}의 투자 철학을 따르는 '{manager['title']}'이다.\n"
             f"{manager['persona']}\n"
+        )
+        if shared_prompt:
+            system_prompt += f"\n{shared_prompt}\n"
+        system_prompt += alert_directive
+        system_prompt += (
+            f"\n[필수 규칙]\n"
             f"호칭: 주호님\n"
             f"볼드(**) 사용 금지. 이모지로 구분.\n"
             f"제공된 데이터만 사용. 학습 데이터의 과거 가격 사용 절대 금지.\n"
+            f"위기 상황에서는 수혜/피해 섹터를 명확히 구분.\n"
+            f"이미 보유 중인 종목과 중복 추천 시 '추가매수' vs '신규 진입' 구분.\n"
             f"종목당 2~3줄. 핵심만. 이유+액션.\n"
         )
 
@@ -383,6 +518,7 @@ async def _analyze_picks_for_manager(
             f"[{manager['emoji']} 후보 종목]\n{picks_text}\n"
             f"위 종목 중 가장 추천하는 1~2개를 선정하고,\n"
             f"{manager['name']}의 관점에서 간결하게 분석해주세요.\n"
+            f"현재 위기/시장 상황을 반드시 반영하세요.\n"
             f"형식: 종목명 — 한줄 핵심 이유 + 액션\n"
         )
 
@@ -396,7 +532,7 @@ async def _analyze_picks_for_manager(
                 },
                 json={
                     "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 400,
+                    "max_tokens": 500,
                     "system": system_prompt,
                     "messages": [{"role": "user", "content": user_prompt}],
                 },
@@ -434,12 +570,20 @@ MANAGER_HORIZON_MAP = {
 async def get_all_managers_picks(
     picks_by_horizon: dict[str, list[dict]],
     market_context: str = "",
+    shared_context: dict | None = None,
+    alert_mode: str = "normal",
 ) -> dict[str, str]:
     """4매니저 동시 분석 (asyncio.gather). 각 매니저가 자기 horizon 종목 분석.
+
+    v7.0: shared_context를 통해 위기/뉴스/교훈/포트폴리오 등
+    전체 시스템 컨텍스트를 공유받아 일관된 추천 수행.
+    v8.1: alert_mode에 따른 전시/경계 맞춤 추천.
 
     Args:
         picks_by_horizon: {"scalp": [picks], "short": [picks], "mid": [...], "long": [...]}
         market_context: 시장 상황 텍스트
+        shared_context: 공유 컨텍스트 (위기/뉴스/교훈/포트폴리오 등)
+        alert_mode: 시장 경계 수준 (normal/elevated/wartime)
 
     Returns:
         {manager_key: analysis_text} — scalp/swing/position/long_term 키
@@ -449,7 +593,9 @@ async def get_all_managers_picks(
     tasks = {}
     for mgr_key, horizon in MANAGER_HORIZON_MAP.items():
         picks = picks_by_horizon.get(horizon, [])
-        tasks[mgr_key] = _analyze_picks_for_manager(mgr_key, picks, market_context)
+        tasks[mgr_key] = _analyze_picks_for_manager(
+            mgr_key, picks, market_context, shared_context, alert_mode,
+        )
 
     results = await asyncio.gather(*tasks.values(), return_exceptions=True)
 

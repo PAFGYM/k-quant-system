@@ -1147,3 +1147,241 @@ def format_risk_report(
             )
 
     return "\n".join(lines)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 스트레스 테스트 엔진
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@dataclass
+class StressScenario:
+    """스트레스 시나리오 정의."""
+    name: str
+    description: str
+    market_shock_pct: float       # KOSPI 충격 (%)
+    sector_shocks: dict = field(default_factory=dict)  # {sector: shock_pct}
+    vix_level: float = 35.0
+    correlation_boost: float = 0.3  # 위기 시 상관관계 상승분
+
+
+@dataclass
+class StressTestResult:
+    """스트레스 테스트 결과."""
+    scenario_name: str
+    portfolio_loss_pct: float
+    worst_stock: str
+    worst_stock_loss_pct: float
+    estimated_recovery_days: int
+    breach_mdd_limit: bool
+    per_stock_impact: dict = field(default_factory=dict)  # {ticker: loss_pct}
+
+
+# 사전 정의 시나리오
+PREDEFINED_SCENARIOS = [
+    StressScenario(
+        name="KOSPI -5%",
+        description="일반 조정 (2-3개월 1회 빈도)",
+        market_shock_pct=-5.0,
+        vix_level=25.0,
+        correlation_boost=0.1,
+    ),
+    StressScenario(
+        name="KOSPI -10%",
+        description="강한 조정 (연 1-2회 빈도, COVID 초기 수준)",
+        market_shock_pct=-10.0,
+        vix_level=30.0,
+        correlation_boost=0.2,
+    ),
+    StressScenario(
+        name="KOSPI -20%",
+        description="금융위기급 폭락 (2008, COVID 3월 수준)",
+        market_shock_pct=-20.0,
+        vix_level=45.0,
+        correlation_boost=0.4,
+    ),
+    StressScenario(
+        name="2차전지 -30%",
+        description="섹터 버블 붕괴 시나리오",
+        market_shock_pct=-8.0,
+        sector_shocks={"2차전지": -30.0, "반도체": -10.0},
+        vix_level=28.0,
+        correlation_boost=0.2,
+    ),
+    StressScenario(
+        name="금리 급등",
+        description="미국 금리 +100bp 충격",
+        market_shock_pct=-7.0,
+        sector_shocks={"성장주": -15.0, "바이오": -12.0, "금융": 5.0},
+        vix_level=28.0,
+        correlation_boost=0.15,
+    ),
+    StressScenario(
+        name="서킷브레이커 발동",
+        description="KOSPI -8% 이상 급락, 전종목 거래정지",
+        market_shock_pct=-8.0,
+        sector_shocks={"전체": -8.0},
+        vix_level=40.0,
+        correlation_boost=0.5,
+    ),
+    StressScenario(
+        name="환율 급등 (1400원 돌파)",
+        description="USD/KRW 1400원 돌파, 외국인 대규모 이탈",
+        market_shock_pct=-6.0,
+        sector_shocks={"수출주": -3.0, "내수주": -8.0, "금융": -7.0},
+        vix_level=30.0,
+        correlation_boost=0.3,
+    ),
+    StressScenario(
+        name="VIX 50 돌파 (극단 패닉)",
+        description="VIX 50 이상 극단적 공포, 글로벌 동반 급락",
+        market_shock_pct=-15.0,
+        sector_shocks={"전체": -15.0},
+        vix_level=50.0,
+        correlation_boost=0.6,
+    ),
+    StressScenario(
+        name="유동성 위기",
+        description="신용경색, 마진콜 연쇄, 거래량 급감",
+        market_shock_pct=-10.0,
+        sector_shocks={"금융": -15.0, "건설": -12.0, "소재": -10.0},
+        vix_level=45.0,
+        correlation_boost=0.4,
+    ),
+    StressScenario(
+        name="반도체 수출 급감",
+        description="글로벌 반도체 수요 급감, 수출 20% 감소",
+        market_shock_pct=-5.0,
+        sector_shocks={"반도체": -25.0, "전자부품": -15.0, "IT": -10.0},
+        vix_level=28.0,
+        correlation_boost=0.2,
+    ),
+]
+
+
+def run_stress_test(
+    holdings: list[dict],
+    scenario: StressScenario,
+    sector_map: dict[str, str] | None = None,
+    beta_map: dict[str, float] | None = None,
+    mdd_limit: float = -0.15,
+) -> StressTestResult:
+    """포트폴리오에 스트레스 시나리오를 적용.
+
+    Args:
+        holdings: [{"ticker", "name", "eval_amount", "weight"}]
+        scenario: 적용할 시나리오
+        sector_map: {ticker: sector}
+        beta_map: {ticker: beta_to_kospi} (없으면 1.0 가정)
+        mdd_limit: MDD 한도 (기본 -15%)
+
+    Returns:
+        StressTestResult
+    """
+    try:
+        if not holdings:
+            return StressTestResult(
+                scenario_name=scenario.name,
+                portfolio_loss_pct=0.0,
+                worst_stock="N/A",
+                worst_stock_loss_pct=0.0,
+                estimated_recovery_days=0,
+                breach_mdd_limit=False,
+            )
+
+        sector_map = sector_map or {}
+        beta_map = beta_map or {}
+
+        total_value = sum(h.get("eval_amount", 0) for h in holdings)
+        if total_value <= 0:
+            return StressTestResult(
+                scenario_name=scenario.name, portfolio_loss_pct=0.0,
+                worst_stock="N/A", worst_stock_loss_pct=0.0,
+                estimated_recovery_days=0, breach_mdd_limit=False,
+            )
+
+        per_stock = {}
+        weighted_loss = 0.0
+        worst_ticker = ""
+        worst_loss = 0.0
+
+        for h in holdings:
+            ticker = h.get("ticker", "")
+            weight = h.get("eval_amount", 0) / total_value
+            beta = beta_map.get(ticker, 1.0)
+            sector = sector_map.get(ticker, "기타")
+
+            # 시장 충격 * 베타
+            stock_loss = scenario.market_shock_pct * beta
+
+            # 섹터별 추가 충격
+            sector_shock = scenario.sector_shocks.get(sector, 0.0)
+            stock_loss += sector_shock
+
+            # 위기 시 상관관계 상승 → 추가 손실
+            stock_loss *= (1.0 + scenario.correlation_boost)
+
+            per_stock[ticker] = round(stock_loss, 2)
+            weighted_loss += weight * stock_loss
+
+            if stock_loss < worst_loss:
+                worst_loss = stock_loss
+                worst_ticker = h.get("name", ticker)
+
+        # 회복 추정: 일 평균 +0.3% 기준
+        recovery_days = int(abs(weighted_loss) / 0.3) if weighted_loss < 0 else 0
+
+        return StressTestResult(
+            scenario_name=scenario.name,
+            portfolio_loss_pct=round(weighted_loss, 2),
+            worst_stock=worst_ticker,
+            worst_stock_loss_pct=round(worst_loss, 2),
+            estimated_recovery_days=recovery_days,
+            breach_mdd_limit=weighted_loss <= mdd_limit * 100,
+            per_stock_impact=per_stock,
+        )
+
+    except Exception:
+        logger.exception("스트레스 테스트 실패: %s", scenario.name)
+        return StressTestResult(
+            scenario_name=scenario.name, portfolio_loss_pct=0.0,
+            worst_stock="N/A", worst_stock_loss_pct=0.0,
+            estimated_recovery_days=0, breach_mdd_limit=False,
+        )
+
+
+def run_all_stress_tests(
+    holdings: list[dict],
+    sector_map: dict[str, str] | None = None,
+    beta_map: dict[str, float] | None = None,
+) -> list[StressTestResult]:
+    """모든 사전정의 시나리오 일괄 실행."""
+    return [
+        run_stress_test(holdings, s, sector_map, beta_map)
+        for s in PREDEFINED_SCENARIOS
+    ]
+
+
+def format_stress_test_report(results: list[StressTestResult]) -> str:
+    """스트레스 테스트 결과 텔레그램 포맷."""
+    lines = [
+        "🔥 스트레스 테스트 결과",
+        "━" * 25,
+        "",
+    ]
+
+    for r in results:
+        breach = "⛔ MDD 한도 초과!" if r.breach_mdd_limit else "✅ 한도 이내"
+        lines.append(
+            f"📌 {r.scenario_name}\n"
+            f"   포트폴리오 손실: {r.portfolio_loss_pct:+.1f}%\n"
+            f"   최악 종목: {r.worst_stock} ({r.worst_stock_loss_pct:+.1f}%)\n"
+            f"   예상 회복: {r.estimated_recovery_days}일\n"
+            f"   {breach}\n"
+        )
+
+    # Summary
+    worst = min(results, key=lambda r: r.portfolio_loss_pct)
+    lines.append(f"최악 시나리오: {worst.scenario_name} ({worst.portfolio_loss_pct:+.1f}%)")
+
+    return "\n".join(lines)

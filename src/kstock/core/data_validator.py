@@ -335,3 +335,158 @@ def format_data_alert(anomalies: list[dict]) -> str:
     except Exception as e:
         logger.error("이상 알림 생성 실패: %s", e, exc_info=True)
         return f"{USER_NAME}, 데이터 이상 알림 생성 중 오류가 발생했습니다."
+
+
+# ---------------------------------------------------------------------------
+# OHLCV DataFrame validation (v8.0)
+# ---------------------------------------------------------------------------
+
+def validate_ohlcv(
+    df: "pd.DataFrame",
+    ticker: str = "",
+    max_price_change: float = 0.50,
+    max_gap_days: int = 5,
+) -> dict:
+    """OHLCV 데이터프레임 유효성 종합 검증.
+
+    Args:
+        df: OHLCV DataFrame (open, high, low, close, volume)
+        ticker: 종목코드
+        max_price_change: 허용 최대 일일 변동률 (50%)
+        max_gap_days: 허용 최대 날짜 갭 (영업일)
+
+    Returns:
+        dict with: valid, issues, cleaned_rows, dropped_rows
+    """
+    try:
+        import pandas as pd
+
+        if df is None or df.empty:
+            return {"valid": False, "issues": ["빈 데이터"], "cleaned_rows": 0, "dropped_rows": 0}
+
+        issues = []
+        dropped = 0
+
+        # 컬럼 정규화
+        col_map = {}
+        for c in df.columns:
+            cl = c.lower()
+            if cl in ("close", "종가"):
+                col_map["close"] = c
+            elif cl in ("open", "시가"):
+                col_map["open"] = c
+            elif cl in ("high", "고가"):
+                col_map["high"] = c
+            elif cl in ("low", "저가"):
+                col_map["low"] = c
+            elif cl in ("volume", "거래량"):
+                col_map["volume"] = c
+
+        # 1. 가격 양수 검증
+        if "close" in col_map:
+            close_col = col_map["close"]
+            neg_mask = df[close_col] <= 0
+            neg_count = int(neg_mask.sum())
+            if neg_count > 0:
+                issues.append(f"음수/0 종가 {neg_count}건")
+                dropped += neg_count
+
+        # 2. 거래량 음수 검증
+        if "volume" in col_map:
+            vol_col = col_map["volume"]
+            neg_vol = int((df[vol_col] < 0).sum())
+            if neg_vol > 0:
+                issues.append(f"음수 거래량 {neg_vol}건")
+                dropped += neg_vol
+
+        # 3. 급변동 검증
+        if "close" in col_map and len(df) > 1:
+            close_col = col_map["close"]
+            pct_change = df[close_col].pct_change().abs()
+            spike_mask = pct_change > max_price_change
+            spike_count = int(spike_mask.sum())
+            if spike_count > 0:
+                issues.append(f"급변동({max_price_change*100:.0f}%+) {spike_count}건")
+
+        # 4. High >= Low 검증
+        if "high" in col_map and "low" in col_map:
+            high_col = col_map["high"]
+            low_col = col_map["low"]
+            invalid_hl = int((df[high_col] < df[low_col]).sum())
+            if invalid_hl > 0:
+                issues.append(f"고가<저가 {invalid_hl}건")
+
+        # 5. NaN 검증
+        if "close" in col_map:
+            nan_count = int(df[col_map["close"]].isna().sum())
+            if nan_count > 0:
+                issues.append(f"결측 종가 {nan_count}건")
+
+        valid = len(issues) == 0
+
+        if issues:
+            logger.warning("[%s] OHLCV 검증 이슈: %s", ticker, "; ".join(issues))
+
+        return {
+            "valid": valid,
+            "issues": issues,
+            "cleaned_rows": len(df) - dropped,
+            "dropped_rows": dropped,
+            "total_rows": len(df),
+        }
+
+    except Exception as e:
+        logger.error("[%s] OHLCV 검증 실패: %s", ticker, e, exc_info=True)
+        return {"valid": False, "issues": [f"검증 오류: {e}"], "cleaned_rows": 0, "dropped_rows": 0}
+
+
+def sanitize_ohlcv(df: "pd.DataFrame", ticker: str = "") -> "pd.DataFrame":
+    """OHLCV 데이터 정제: 이상값 제거 및 보정.
+
+    - 음수/0 가격 행 제거
+    - 음수 거래량 → 0
+    - NaN 종가 forward-fill
+
+    Returns:
+        정제된 DataFrame (원본 미수정, 복사본 반환)
+    """
+    try:
+        import pandas as pd
+
+        if df is None or df.empty:
+            return df
+
+        result = df.copy()
+
+        # 컬럼 찾기
+        close_col = None
+        vol_col = None
+        for c in result.columns:
+            cl = c.lower()
+            if cl in ("close", "종가"):
+                close_col = c
+            elif cl in ("volume", "거래량"):
+                vol_col = c
+
+        # 음수/0 가격 제거
+        if close_col:
+            before = len(result)
+            result = result[result[close_col] > 0]
+            removed = before - len(result)
+            if removed > 0:
+                logger.info("[%s] 음수/0 가격 %d행 제거", ticker, removed)
+            # NaN forward-fill
+            result[close_col] = result[close_col].ffill()
+
+        # 음수 거래량 → 0
+        if vol_col:
+            neg_mask = result[vol_col] < 0
+            if neg_mask.any():
+                result.loc[neg_mask, vol_col] = 0
+                logger.info("[%s] 음수 거래량 %d건 → 0 보정", ticker, int(neg_mask.sum()))
+
+        return result
+
+    except Exception as e:
+        logger.error("[%s] OHLCV 정제 실패: %s", ticker, e, exc_info=True)
+        return df

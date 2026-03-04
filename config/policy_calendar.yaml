@@ -192,6 +192,22 @@ annual_policies:
     adjustments:
       value_bonus: 5
 
+# ========================================
+# 2026 전시/위기 특별 이벤트
+# ========================================
+crisis_policies:
+  - name: "글로벌 지정학적 위기 대응"
+    year: 2026
+    effect: "crisis_rotation"
+    description: "전시/분쟁 확대 시 방산/에너지 수혜, 항공/여행 피해"
+    overweight_sectors: ["방산", "정유/에너지", "조선", "원자력", "사이버보안"]
+    underweight_sectors: ["항공", "여행/레저", "면세"]
+    adjustments:
+      defense_sector_bonus: 15
+      energy_sector_bonus: 10
+      cash_min_pct: 20
+      stop_loss_tight: true
+
 # 2026 주도 섹터 정의
 leading_sectors:
   tier1:  # +5점
@@ -200,7 +216,10 @@ leading_sectors:
     - "바이오"
     - "금융"
     - "에너지/전력"
+    - "조선"
+    - "원자력"
   tier2:  # +2점
     - "자동차"
     - "미디어/엔터"
     - "소프트웨어"
+    - "사이버보안"

@@ -861,7 +861,9 @@ CREATE TABLE IF NOT EXISTS global_news (
     impact_score    INTEGER DEFAULT 0,
     is_urgent       INTEGER DEFAULT 0,
     published       TEXT    DEFAULT '',
-    created_at      TEXT    NOT NULL
+    created_at      TEXT    NOT NULL,
+    content_summary TEXT    DEFAULT '',
+    video_id        TEXT    DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_global_news_created ON global_news(created_at);
 CREATE INDEX IF NOT EXISTS idx_global_news_urgent ON global_news(is_urgent, created_at);
@@ -1138,6 +1140,18 @@ class StoreBase:
                 )
             except sqlite3.OperationalError:
                 pass
+            # Migrate: global_news — content_summary, video_id (v8.2)
+            for col, sql in [
+                ("content_summary", "ALTER TABLE global_news ADD COLUMN content_summary TEXT DEFAULT ''"),
+                ("video_id", "ALTER TABLE global_news ADD COLUMN video_id TEXT DEFAULT ''"),
+            ]:
+                try:
+                    conn.execute(f"SELECT {col} FROM global_news LIMIT 1")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass
 
     # -- job_runs ---------------------------------------------------------------
 

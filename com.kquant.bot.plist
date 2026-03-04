@@ -6,24 +6,19 @@
     <string>com.kquant.bot</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
-        <string>-m</string>
-        <string>kstock.app</string>
+        <string>/Users/botddol/k-quant-system/scripts/run_bot.sh</string>
     </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PYTHONPATH</key>
-        <string>/Users/botddol/projects/k-quant-system/src</string>
-    </dict>
     <key>WorkingDirectory</key>
-    <string>/Users/botddol/projects/k-quant-system</string>
+    <string>/Users/botddol/k-quant-system</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
-    <string>/Users/botddol/projects/k-quant-system/data/bot.log</string>
+    <string>/Users/botddol/k-quant-system/data/bot.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/botddol/projects/k-quant-system/data/bot_error.log</string>
+    <string>/Users/botddol/k-quant-system/data/bot_error.log</string>
 </dict>
 </plist>

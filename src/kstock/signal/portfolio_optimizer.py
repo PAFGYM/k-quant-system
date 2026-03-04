@@ -281,7 +281,7 @@ def optimize_markowitz(
     target_return: float | None = None,
     risk_free_rate: float = 0.035,
     min_weight: float = 0.0,
-    max_weight: float = 0.3,
+    max_weight: float | None = None,
 ) -> OptimizedPortfolio:
     """Markowitz mean-variance optimization.
 
@@ -296,6 +296,10 @@ def optimize_markowitz(
     Returns:
         OptimizedPortfolio
     """
+    if max_weight is None:
+        from kstock.core.risk_policy import get_risk_constraints
+        max_weight = get_risk_constraints().max_single_weight
+
     trivial = _handle_single_or_empty(ohlcv_map, "markowitz", risk_free_rate)
     if trivial is not None:
         return trivial
@@ -450,7 +454,7 @@ def optimize_black_litterman(
     risk_aversion: float = 2.5,
     tau: float = 0.05,
     risk_free_rate: float = 0.035,
-    max_weight: float = 0.4,
+    max_weight: float | None = None,
 ) -> OptimizedPortfolio:
     """Black-Litterman portfolio optimization.
 
@@ -469,6 +473,10 @@ def optimize_black_litterman(
     Returns:
         OptimizedPortfolio
     """
+    if max_weight is None:
+        from kstock.core.risk_policy import get_risk_constraints
+        max_weight = get_risk_constraints().max_single_weight
+
     trivial = _handle_single_or_empty(ohlcv_map, "black_litterman", risk_free_rate)
     if trivial is not None:
         return trivial
@@ -584,7 +592,7 @@ def optimize_black_litterman(
 
 def optimize_min_variance(
     ohlcv_map: dict[str, pd.DataFrame],
-    max_weight: float = 0.3,
+    max_weight: float | None = None,
     risk_free_rate: float = 0.035,
 ) -> OptimizedPortfolio:
     """Global minimum variance portfolio.
@@ -599,6 +607,10 @@ def optimize_min_variance(
     Returns:
         OptimizedPortfolio
     """
+    if max_weight is None:
+        from kstock.core.risk_policy import get_risk_constraints
+        max_weight = get_risk_constraints().max_single_weight
+
     trivial = _handle_single_or_empty(ohlcv_map, "min_variance", risk_free_rate)
     if trivial is not None:
         return trivial
@@ -652,7 +664,7 @@ def compute_efficient_frontier(
     ohlcv_map: dict[str, pd.DataFrame],
     n_points: int = 20,
     risk_free_rate: float = 0.035,
-    max_weight: float = 0.3,
+    max_weight: float | None = None,
 ) -> EfficientFrontier:
     """Compute the efficient frontier by varying target return.
 
@@ -665,6 +677,10 @@ def compute_efficient_frontier(
     Returns:
         EfficientFrontier
     """
+    if max_weight is None:
+        from kstock.core.risk_policy import get_risk_constraints
+        max_weight = get_risk_constraints().max_single_weight
+
     cov, tickers, mu = _build_covariance_matrix(ohlcv_map)
     N = len(tickers)
 
@@ -807,6 +823,56 @@ def compute_risk_contributions(
         ))
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Lightweight risk-parity weighting (returns-based)
+# ---------------------------------------------------------------------------
+
+
+def risk_parity_weights(
+    returns_matrix: pd.DataFrame,
+    tickers: list[str] | None = None,
+    max_weight: float | None = None,
+) -> dict[str, float]:
+    """Risk Parity 가중치 계산 — 각 자산의 리스크 기여도 동일화.
+
+    Args:
+        returns_matrix: columns=ticker, rows=daily returns
+        tickers: 포함할 종목 (None이면 전체)
+        max_weight: 개별 종목 최대 비중
+
+    Returns:
+        {ticker: weight} where sum(weights) = 1.0
+    """
+    if max_weight is None:
+        from kstock.core.risk_policy import get_risk_constraints
+        max_weight = get_risk_constraints().max_single_weight
+
+    if returns_matrix.empty:
+        return {}
+
+    cols = tickers or list(returns_matrix.columns)
+    rm = returns_matrix[cols].dropna()
+    if len(rm) < 20 or len(cols) < 2:
+        # 균등 배분 fallback
+        w = 1.0 / len(cols)
+        return {t: min(w, max_weight) for t in cols}
+
+    # 각 자산의 변동성 (표준편차)
+    vols = rm.std().values
+    if np.any(vols < 1e-12):
+        vols = np.maximum(vols, 1e-8)
+
+    # Risk parity: w_i ∝ 1/σ_i
+    inv_vols = 1.0 / vols
+    weights = inv_vols / inv_vols.sum()
+
+    # Max weight constraint
+    weights = np.minimum(weights, max_weight)
+    weights = weights / weights.sum()  # 재정규화
+
+    return {t: round(float(w), 4) for t, w in zip(cols, weights)}
 
 
 # ---------------------------------------------------------------------------

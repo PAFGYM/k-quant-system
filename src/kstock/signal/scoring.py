@@ -7,9 +7,27 @@ from pathlib import Path
 
 import yaml
 
+import numpy as np
+
 from kstock.features.technical import TechnicalIndicators
 from kstock.ingest.kis_client import StockInfo
 from kstock.ingest.macro_client import MacroSnapshot
+
+
+def _quantile_score(value: float, historical: list[float] | None, default: float = 0.5) -> float:
+    """값을 백분위 기반 0~1 점수로 변환.
+
+    historical이 없으면 default 반환.
+    """
+    if not historical or len(historical) < 5:
+        return default
+    arr = np.array(historical, dtype=float)
+    arr = arr[~np.isnan(arr)]
+    if len(arr) < 5:
+        return default
+    # percentile rank
+    rank = np.sum(arr <= value) / len(arr)
+    return round(max(0.0, min(1.0, rank)), 4)
 
 
 @dataclass
@@ -42,7 +60,31 @@ def load_scoring_config(config_path: Path | None = None) -> dict:
         return yaml.safe_load(f)
 
 
-def score_macro(macro: MacroSnapshot, thresholds: dict) -> float:
+def get_regime_weights(config: dict, macro: MacroSnapshot) -> dict:
+    """VIX 레짐에 따른 동적 가중치 반환.
+
+    risk_on (VIX<15): 기술적 분석 가중, 리스크 중시
+    risk_off (VIX>25): 매크로/리스크 가중, 기술적 축소
+    panic (VIX>35): 리스크 최우선
+    """
+    regime_weights = config.get("regime_weights", {})
+
+    if macro.vix > 35:
+        regime = "panic"
+    elif macro.vix > 25 or macro.regime == "risk_off":
+        regime = "risk_off"
+    elif macro.vix < 15 or macro.regime == "risk_on":
+        regime = "risk_on"
+    else:
+        regime = "neutral"
+
+    weights = regime_weights.get(regime)
+    if weights:
+        return weights
+    return config["weights"]
+
+
+def score_macro(macro: MacroSnapshot, thresholds: dict, historical: dict | None = None) -> float:
     """Score macro environment (0.0 ~ 1.0, higher = more favorable).
 
     Args:
@@ -59,11 +101,17 @@ def score_macro(macro: MacroSnapshot, thresholds: dict) -> float:
     usdkrw_high = thresholds.get("usdkrw_high", 1350)
     usdkrw_low = thresholds.get("usdkrw_low", 1250)
 
-    # VIX scoring: low VIX = good
-    if macro.vix <= vix_low:
-        score += 0.2
-    elif macro.vix >= vix_high:
-        score -= 0.2
+    # VIX scoring: quantile-based if historical available
+    vix_hist = (historical or {}).get("vix_history")
+    if vix_hist and len(vix_hist) >= 20:
+        vix_pctile = _quantile_score(macro.vix, vix_hist)
+        # Low percentile (low VIX) = good
+        score += (1.0 - vix_pctile) * 0.4 - 0.2  # maps [0,1] -> [-0.2, +0.2]
+    else:
+        if macro.vix <= vix_low:
+            score += 0.2
+        elif macro.vix >= vix_high:
+            score -= 0.2
 
     # SPX change: positive = good
     if macro.spx_change_pct > 0.5:
@@ -80,7 +128,7 @@ def score_macro(macro: MacroSnapshot, thresholds: dict) -> float:
     return round(max(0.0, min(1.0, score)), 4)
 
 
-def score_flow(flow: FlowData, thresholds: dict) -> float:
+def score_flow(flow: FlowData, thresholds: dict, historical: dict | None = None) -> float:
     """Score investor flow (0.0 ~ 1.0, higher = more favorable).
 
     Args:
@@ -96,17 +144,16 @@ def score_flow(flow: FlowData, thresholds: dict) -> float:
     inst_days = thresholds.get("institution_net_buy_days", 3)
     min_value = thresholds.get("min_avg_value_krw", 3_000_000_000)
 
-    # Foreign net buy streak
-    if flow.foreign_net_buy_days >= req_days:
-        score += 0.2
-    elif flow.foreign_net_buy_days <= -req_days:
-        score -= 0.2
+    # Foreign flow: continuous scoring instead of binary
+    if abs(flow.foreign_net_buy_days) >= 1:
+        # Sigmoid-like continuous mapping: [-10,+10] -> [-0.25, +0.25]
+        flow_signal = max(-10, min(10, flow.foreign_net_buy_days))
+        score += flow_signal / 40  # +-10 days -> +-0.25
 
-    # Institutional net buy streak
-    if flow.institution_net_buy_days >= inst_days:
-        score += 0.15
-    elif flow.institution_net_buy_days <= -inst_days:
-        score -= 0.15
+    # Institutional: same continuous approach
+    if abs(flow.institution_net_buy_days) >= 1:
+        inst_signal = max(-10, min(10, flow.institution_net_buy_days))
+        score += inst_signal / 60  # +-10 days -> +-0.167
 
     # Trading value (liquidity)
     if flow.avg_trade_value_krw >= min_value:
@@ -199,6 +246,17 @@ def score_technical(tech: TechnicalIndicators, thresholds: dict) -> float:
     elif tech.macd_signal_cross == -1:
         score -= 0.1
 
+    # Divergence signals (v8.1)
+    if tech.rsi_divergence == 1:  # bullish
+        score += 0.1
+    elif tech.rsi_divergence == -1:  # bearish
+        score -= 0.1
+
+    if tech.macd_divergence == 1:
+        score += 0.1
+    elif tech.macd_divergence == -1:
+        score -= 0.1
+
     return round(max(0.0, min(1.0, score)), 4)
 
 
@@ -248,6 +306,7 @@ def compute_composite_score(
     sentiment_bonus: int = 0,
     leading_sector_bonus: int = 0,
     multi_agent_bonus: int = 0,
+    factor_bonus: int = 0,
 ) -> ScoreBreakdown:
     """Compute the 100-point composite score.
 
@@ -264,13 +323,14 @@ def compute_composite_score(
     if config is None:
         config = load_scoring_config()
 
-    weights = config["weights"]
+    weights = get_regime_weights(config, macro)
     thresholds = config["thresholds"]
     buy_threshold = config.get("buy_threshold", 70)
     watch_threshold = config.get("watch_threshold", 55)
 
-    s_macro = score_macro(macro, thresholds)
-    s_flow = score_flow(flow, thresholds)
+    historical = config.get("historical_data")
+    s_macro = score_macro(macro, thresholds, historical)
+    s_flow = score_flow(flow, thresholds, historical)
     s_fundamental = score_fundamental(info, thresholds)
     s_technical = score_technical(tech, thresholds)
     s_risk = score_risk(tech, info, thresholds)
@@ -295,6 +355,9 @@ def compute_composite_score(
 
     # v6.2: 멀티에이전트 분석 연동 보너스 (+15/+10/+5/-5/-10)
     composite += multi_agent_bonus
+
+    # v7.0: 멀티팩터 모델 연동 보너스 (+10/+5/-5/-10)
+    composite += factor_bonus
 
     # v3.0: max ~160 points possible
     composite = round(max(0.0, min(160.0, composite)), 2)

@@ -1205,7 +1205,7 @@ class AdminExtrasMixin:
             return f"  {de} {item['name']}: {c:,.0f}원 ({ds}{dp:.1f}%){pnl}"
 
         def _item_buttons(item, has_type=True):
-            """종목 1개에 대한 버튼 행: [종목명] [분류] [❌]"""
+            """종목 1개에 대한 버튼 행: [종목명] [📊차트] [분류] [❌]"""
             tk = item["ticker"]
             hz = item["horizon"]
             # 분류 버튼 라벨
@@ -1217,6 +1217,10 @@ class AdminExtrasMixin:
                 InlineKeyboardButton(
                     f"📋 {item['name'][:6]}",
                     callback_data=f"fav:news:{tk}",
+                ),
+                InlineKeyboardButton(
+                    "📊",
+                    callback_data=f"fav:chart:{tk}",
                 ),
                 InlineKeyboardButton(
                     cls_label,
@@ -1331,6 +1335,37 @@ class AdminExtrasMixin:
                 await self._action_favorites(query, context, f"classify:{ticker}")
             return
 
+        if action == "chart":
+            # 종목 기술적 분석 차트 이미지 생성 및 전송
+            ticker = parts[1] if len(parts) > 1 else ""
+            name = self._resolve_name(ticker, ticker)
+            await safe_edit_or_reply(query, f"📊 {name} 차트 생성 중...")
+            try:
+                from kstock.features.chart_gen import generate_stock_chart
+                chart_path = await generate_stock_chart(ticker, name)
+                if chart_path:
+                    with open(chart_path, "rb") as f:
+                        await query.message.reply_photo(
+                            photo=f,
+                            caption=f"📊 {name} ({ticker}) 기술적 분석 차트",
+                        )
+                else:
+                    await query.message.reply_text(
+                        f"📊 {name}: 차트 데이터를 가져올 수 없습니다.",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
+                        ]),
+                    )
+            except Exception:
+                logger.debug("_action_favorites chart generation failed for %s", ticker, exc_info=True)
+                await query.message.reply_text(
+                    f"📊 {name}: 차트 생성 실패 (잠시 후 다시 시도해주세요)",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
+                    ]),
+                )
+            return
+
         if action == "news":
             # 종목별 뉴스 조회
             ticker = parts[1] if len(parts) > 1 else ""
@@ -1432,11 +1467,30 @@ class AdminExtrasMixin:
             return
 
         if action == "managers":
-            # 4명의 매니저 현황 대시보드
+            # 4명의 매니저 현황 대시보드 — 시장 상황 반영
             from kstock.bot.investment_managers import MANAGERS
             watchlist = self.db.get_watchlist()
+            alert_mode = getattr(self, '_alert_mode', 'normal')
 
             lines = ["👨‍💼 투자 매니저 현황\n"]
+
+            # 전시/경계 상황 헤더
+            if alert_mode == "wartime":
+                lines.append(
+                    "🔴 전시 경계 모드\n"
+                    "━" * 22 + "\n"
+                    "단타: 신규 진입 자제, 기존 포지션 축소\n"
+                    "스윙: 손절 -5% 강화, 경기민감 축소\n"
+                    "포지션: 방어섹터 중심 유지\n"
+                    "장기: 변동 무시, 분할매수 기회 탐색\n"
+                )
+            elif alert_mode == "elevated":
+                lines.append(
+                    "🟠 경계 모드 — 변동성 확대\n"
+                    "━" * 22 + "\n"
+                    "전체 매니저: 분할 매수, 손절 -6%\n"
+                )
+
             for mgr_key in ["scalp", "swing", "position", "long_term"]:
                 mgr = MANAGERS[mgr_key]
                 stocks = [w for w in watchlist if w.get("manager") == mgr_key]
@@ -1444,7 +1498,9 @@ class AdminExtrasMixin:
                 if stocks:
                     for s in stocks[:5]:
                         name = s.get("name", s.get("ticker", ""))
-                        lines.append(f"  - {name}")
+                        pnl = float(s.get("pnl_pct", 0) or 0)
+                        pnl_str = f" ({pnl:+.1f}%)" if pnl != 0 else ""
+                        lines.append(f"  - {name}{pnl_str}")
                     lines.append(f"  총 {len(stocks)}종목 관리 중")
                 else:
                     lines.append("  배정된 종목 없음")

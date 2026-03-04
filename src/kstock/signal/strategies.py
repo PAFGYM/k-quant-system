@@ -7,6 +7,9 @@ Strategy D: Sector rotation (sector ETFs)
 Strategy E: Global diversification (US ETFs, gold)
 Strategy F: Momentum (golden cross + relative strength)
 Strategy G: Breakout (52-week high / 20-day high breakout)
+Strategy H: Volatility mean reversion (변동성 역전 전략)
+Strategy I: Earnings momentum (실적 모멘텀 전략)
+Strategy J: Mean reversion breakout (평균회귀 돌파 전략)
 """
 
 from __future__ import annotations
@@ -23,11 +26,68 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class RegimeAdjuster:
+    """VIX/매크로 기반 동적 임계값 조정기.
+
+    VIX < 15 (risk_on): 공격적 — RSI 과매도 35, BUY 임계값 -10
+    VIX 15-25 (neutral): 기본값 유지
+    VIX 25-35 (risk_off): 보수적 — RSI 과매도 25, BUY 임계값 +10
+    VIX > 35 (panic): 극보수 — 신규 매수 거의 차단
+    """
+
+    @staticmethod
+    def get_adjustments(macro) -> dict:
+        """매크로 상태에 따른 조정값 딕셔너리 반환."""
+        vix = getattr(macro, 'vix', 20)
+        regime = getattr(macro, 'regime', 'neutral')
+
+        if vix > 35 or regime == "panic":
+            return {
+                "rsi_oversold": 20,       # 극과매도에서만 반등 매수
+                "rsi_near": 30,
+                "buy_threshold_adj": 20,   # BUY 기준 대폭 상향
+                "score_multiplier": 0.7,   # 전체 점수 30% 감소
+                "bb_lower": 0.10,
+                "vix_inverse_threshold": 30,
+                "label": "극보수",
+            }
+        elif vix > 25 or regime == "risk_off":
+            return {
+                "rsi_oversold": 25,
+                "rsi_near": 35,
+                "buy_threshold_adj": 10,
+                "score_multiplier": 0.85,
+                "bb_lower": 0.15,
+                "vix_inverse_threshold": 25,
+                "label": "보수적",
+            }
+        elif vix < 15 or regime == "risk_on":
+            return {
+                "rsi_oversold": 35,
+                "rsi_near": 45,
+                "buy_threshold_adj": -10,
+                "score_multiplier": 1.15,
+                "bb_lower": 0.25,
+                "vix_inverse_threshold": 20,
+                "label": "공격적",
+            }
+        else:
+            return {
+                "rsi_oversold": 30,
+                "rsi_near": 40,
+                "buy_threshold_adj": 0,
+                "score_multiplier": 1.0,
+                "bb_lower": 0.20,
+                "vix_inverse_threshold": 25,
+                "label": "기본",
+            }
+
+
 @dataclass
 class StrategySignal:
     """Result of a strategy evaluation."""
 
-    strategy: str  # A, B, C, D, E, F, G
+    strategy: str  # A, B, C, D, E, F, G, H, I, J
     strategy_name: str
     strategy_emoji: str
     ticker: str
@@ -49,6 +109,9 @@ STRATEGY_META = {
     "E": {"name": "글로벌 분산", "emoji": "\U0001f30e", "target": 12.0, "stop": -8.0, "days": "장기"},
     "F": {"name": "모멘텀", "emoji": "\U0001f680", "target": 7.0, "stop": -5.0, "days": "2~8주"},
     "G": {"name": "돌파", "emoji": "\U0001f4a5", "target": 5.0, "stop": -2.0, "days": "3~10일"},
+    "H": {"name": "변동성 역전", "emoji": "\U0001f300", "target": 12.0, "stop": -8.0, "days": "3~10일"},
+    "I": {"name": "실적 모멘텀", "emoji": "\U0001f4c8", "target": 15.0, "stop": -7.0, "days": "20~60일"},
+    "J": {"name": "평균회귀 돌파", "emoji": "\U0001f3af", "target": 10.0, "stop": -5.0, "days": "5~15일"},
 }
 
 # ETF categorization
@@ -72,6 +135,7 @@ def evaluate_strategy_a(
 ) -> StrategySignal | None:
     """Strategy A: Foreign oversold bounce."""
     meta = STRATEGY_META["A"]
+    adj = RegimeAdjuster.get_adjustments(macro)
 
     if ticker in ALL_ETFS:
         return None
@@ -83,10 +147,10 @@ def evaluate_strategy_a(
         sig_score += 30
         reasons.append(f"외인 매도 {abs(flow.foreign_net_buy_days)}일 연속")
 
-    if tech.rsi <= 30:
+    if tech.rsi <= adj["rsi_oversold"]:
         sig_score += 25
         reasons.append(f"RSI {tech.rsi:.1f} 과매도")
-    elif tech.rsi <= 40:
+    elif tech.rsi <= adj["rsi_near"]:
         sig_score += 10
         reasons.append(f"RSI {tech.rsi:.1f} 근접")
 
@@ -94,7 +158,7 @@ def evaluate_strategy_a(
         sig_score += 20
         reasons.append(f"기관 순매수 {flow.institution_net_buy_days}일")
 
-    if tech.bb_pctb <= 0.2:
+    if tech.bb_pctb <= adj["bb_lower"]:
         sig_score += 15
         reasons.append("볼린저밴드 하단 터치")
 
@@ -105,7 +169,11 @@ def evaluate_strategy_a(
     if sig_score < 40:
         return None
 
-    action = "BUY" if sig_score >= 65 else "WATCH" if sig_score >= 50 else "HOLD"
+    sig_score *= adj["score_multiplier"]
+    reasons.append(f"시장 레짐: {adj['label']}")
+
+    buy_adj = adj["buy_threshold_adj"]
+    action = "BUY" if sig_score >= 65 + buy_adj else "WATCH" if sig_score >= 50 + buy_adj else "HOLD"
 
     return StrategySignal(
         strategy="A", strategy_name=meta["name"], strategy_emoji=meta["emoji"],
@@ -133,6 +201,7 @@ def evaluate_strategy_b(
     - Max hold 5 days, max position 15%, stop -3%
     """
     meta = STRATEGY_META["B"]
+    adj = RegimeAdjuster.get_adjustments(macro)
 
     is_leverage = ticker in LEVERAGE_ETFS
     is_inverse = ticker in INVERSE_ETFS
@@ -143,7 +212,7 @@ def evaluate_strategy_b(
     sig_score = 0.0
 
     if is_inverse and not is_leverage:
-        if macro.vix > 25:
+        if macro.vix > adj["vix_inverse_threshold"]:
             sig_score += 35
             reasons.append(f"VIX {macro.vix:.1f} 급등 -> 인버스 기회")
         if macro.vix_change_pct >= 15:
@@ -170,7 +239,7 @@ def evaluate_strategy_b(
             sig_score += 15
             reasons.append("리스크온 환경")
         # v2.5: BB squeeze breakout
-        if tech.bb_squeeze and tech.bb_pctb > 0.8:
+        if tech.bb_squeeze and tech.bb_pctb > 0.5:
             sig_score += 15
             reasons.append("BB 스퀴즈 상방 돌파")
 
@@ -212,10 +281,10 @@ def evaluate_strategy_c(
     debt = info_dict.get("debt_ratio", 0)
     per = info_dict.get("per", 0)
 
-    if div_yield >= 3.0:
+    if div_yield >= 2.5:
         sig_score += 25
         reasons.append(f"배당수익률 {div_yield:.1f}%")
-    elif div_yield >= 2.0:
+    elif div_yield >= 1.5:
         sig_score += 10
         reasons.append(f"배당수익률 {div_yield:.1f}%")
 
@@ -237,8 +306,13 @@ def evaluate_strategy_c(
         sig_score += 10
         reasons.append(f"PER {per:.1f} (저평가)")
 
-    if tech.rsi <= 50:
+    # 장기투자: 장기 추세 확인 (하락 추세에서 매집)
+    if tech.ema_50 > tech.ema_200 > 0:
         sig_score += 10
+        reasons.append("장기 상승 추세 확인")
+    elif tech.rsi <= 35:
+        sig_score += 5
+        reasons.append(f"RSI {tech.rsi:.1f} 과매도 매집 기회")
 
     if is_dividend_etf:
         sig_score += 20
@@ -387,6 +461,7 @@ def evaluate_strategy_f(
     ticker: str,
     name: str,
     tech: TechnicalIndicators,
+    macro: MacroSnapshot | None = None,
     rs_rank: int = 0,
     rs_total: int = 1,
 ) -> StrategySignal | None:
@@ -440,7 +515,16 @@ def evaluate_strategy_f(
     if sig_score < 40:
         return None
 
-    action = "BUY" if sig_score >= 65 else "WATCH" if sig_score >= 50 else "HOLD"
+    # Apply regime adjustments if macro data available
+    if macro is not None:
+        adj = RegimeAdjuster.get_adjustments(macro)
+        sig_score *= adj["score_multiplier"]
+        reasons.append(f"시장 레짐: {adj['label']}")
+        buy_adj = adj["buy_threshold_adj"]
+    else:
+        buy_adj = 0
+
+    action = "BUY" if sig_score >= 65 + buy_adj else "WATCH" if sig_score >= 50 + buy_adj else "HOLD"
 
     return StrategySignal(
         strategy="F", strategy_name=meta["name"], strategy_emoji=meta["emoji"],
@@ -455,6 +539,7 @@ def evaluate_strategy_g(
     ticker: str,
     name: str,
     tech: TechnicalIndicators,
+    macro: MacroSnapshot | None = None,
 ) -> StrategySignal | None:
     """Strategy G: Breakout.
 
@@ -472,7 +557,7 @@ def evaluate_strategy_g(
 
     reasons = []
     sig_score = 0.0
-    current = tech.ema_50  # approximate current price
+    current = getattr(tech, 'close', 0) or tech.ema_50  # prefer actual close price
 
     # 52-week high breakout
     if tech.high_52w > 0 and current > 0:
@@ -509,12 +594,275 @@ def evaluate_strategy_g(
     if sig_score < 40:
         return None
 
-    action = "BUY" if sig_score >= 60 else "WATCH"
+    # Apply regime adjustments if macro data available
+    if macro is not None:
+        adj = RegimeAdjuster.get_adjustments(macro)
+        sig_score *= adj["score_multiplier"]
+        reasons.append(f"시장 레짐: {adj['label']}")
+        buy_adj = adj["buy_threshold_adj"]
+    else:
+        buy_adj = 0
+
+    action = "BUY" if sig_score >= 60 + buy_adj else "WATCH"
 
     return StrategySignal(
         strategy="G", strategy_name=meta["name"], strategy_emoji=meta["emoji"],
         ticker=ticker, name=name, action=action,
         score=min(sig_score, 100), confidence=min(sig_score / 100, 1.0),
+        target_pct=meta["target"], stop_pct=meta["stop"],
+        holding_days=meta["days"], reasons=reasons,
+    )
+
+
+def evaluate_strategy_h(
+    ticker: str,
+    name: str,
+    tech: TechnicalIndicators,
+    macro: MacroSnapshot,
+) -> StrategySignal | None:
+    """Strategy H: Volatility mean reversion (변동성 역전 전략).
+
+    Targets individual stocks and ETFs when volatility is extremely high,
+    looking for reversal candidates at volatility peaks.
+
+    Conditions:
+    - ATR% > 5.0 AND RSI < 35 → reversal candidate
+    - Bollinger %B < 0.1 → extreme oversold bounce
+    - VIX > 25 but declining (macro.spx_change_pct > 0) → volatility peak
+    - Score: count of conditions met * 30 (max 90)
+    - Stop: -8%, Target: +12%, Holding: 3~10 days
+    """
+    meta = STRATEGY_META["H"]
+    regime = getattr(macro, 'regime', 'neutral')
+
+    reasons = []
+    conditions_met = 0
+
+    # Condition 1: ATR% > 5.0 AND RSI < 35 → reversal candidate
+    if tech.atr_pct > 5.0 and tech.rsi < 35:
+        conditions_met += 1
+        reasons.append(f"ATR% {tech.atr_pct:.1f}% + RSI {tech.rsi:.1f} (역전 후보)")
+
+    # Condition 2: Bollinger %B < 0.1 → extreme oversold bounce
+    if tech.bb_pctb < 0.1:
+        conditions_met += 1
+        reasons.append(f"BB %B {tech.bb_pctb:.3f} (극단적 과매도)")
+
+    # Condition 3: VIX > 25 but declining (SPX positive) → volatility peak
+    if macro.vix > 25 and macro.spx_change_pct > 0:
+        conditions_met += 1
+        reasons.append(f"VIX {macro.vix:.1f} 고점 하락 전환 (S&P500 {macro.spx_change_pct:+.1f}%)")
+
+    sig_score = min(conditions_met * 30, 90)
+
+    if sig_score < 30:
+        return None
+
+    # Regime filtering: skip in risk_on if score < 70 (works best in risk_off/panic)
+    if regime == "risk_on" and sig_score < 70:
+        return None
+
+    reasons.append(f"충족 조건: {conditions_met}/3")
+
+    # Confidence: 0.6 base + 0.1 per extra condition beyond first
+    confidence = min(0.6 + max(0, conditions_met - 1) * 0.1, 1.0)
+
+    action = "BUY" if sig_score >= 60 else "WATCH"
+
+    if regime in ("risk_off", "panic"):
+        reasons.append(f"시장 레짐: {'리스크오프' if regime == 'risk_off' else '패닉'} (변동성 역전 유리)")
+    else:
+        reasons.append(f"시장 레짐: {regime}")
+
+    return StrategySignal(
+        strategy="H", strategy_name=meta["name"], strategy_emoji=meta["emoji"],
+        ticker=ticker, name=name, action=action,
+        score=min(sig_score, 100), confidence=confidence,
+        target_pct=meta["target"], stop_pct=meta["stop"],
+        holding_days=meta["days"], reasons=reasons,
+    )
+
+
+def evaluate_strategy_i(
+    ticker: str,
+    name: str,
+    info_dict: dict,
+    tech: TechnicalIndicators,
+    macro: MacroSnapshot,
+) -> StrategySignal | None:
+    """Strategy I: Earnings momentum (실적 모멘텀 전략).
+
+    Targets individual stocks with strong earnings at reasonable prices.
+
+    Conditions:
+    - ROE > 15% AND PER < sector_per → quality at reasonable price
+    - Revenue growth > 10% → growing business
+    - Target price upside > 15% → analyst consensus bullish
+    - Debt ratio < 100% → healthy balance sheet
+    - EMA50 > EMA200 → uptrend confirmation
+    - Score: count of conditions met * 20 (max 100)
+    - Stop: -7%, Target: +15%, Holding: 20~60 days
+    """
+    meta = STRATEGY_META["I"]
+    regime = getattr(macro, 'regime', 'neutral')
+
+    # Skip ETFs — this strategy is for individual stocks
+    if ticker in ALL_ETFS:
+        return None
+
+    # Skip in panic regime
+    if regime == "panic":
+        return None
+
+    reasons = []
+    conditions_met = 0
+
+    roe = info_dict.get("roe", 0)
+    per = info_dict.get("per", 0)
+    sector_per = info_dict.get("sector_per", 15)
+    revenue_growth = info_dict.get("revenue_growth", 0)
+    target_price = info_dict.get("target_price", 0)
+    current_price = info_dict.get("current_price", 0)
+    debt_ratio = info_dict.get("debt_ratio", 0)
+
+    # Condition 1: ROE > 15% AND PER < sector_per → quality at reasonable price
+    if roe > 15 and 0 < per < sector_per:
+        conditions_met += 1
+        reasons.append(f"ROE {roe:.1f}% + PER {per:.1f} < 섹터 {sector_per:.1f} (우량 저평가)")
+
+    # Condition 2: Revenue growth > 10%
+    if revenue_growth > 10:
+        conditions_met += 1
+        reasons.append(f"매출 성장률 {revenue_growth:.1f}% (성장 기업)")
+
+    # Condition 3: Target price upside > 15%
+    if target_price > 0 and current_price > 0:
+        upside = (target_price - current_price) / current_price * 100
+        if upside > 15:
+            conditions_met += 1
+            reasons.append(f"목표가 괴리율 {upside:+.1f}% (애널리스트 긍정)")
+
+    # Condition 4: Debt ratio < 100%
+    if 0 < debt_ratio < 100:
+        conditions_met += 1
+        reasons.append(f"부채비율 {debt_ratio:.0f}% (재무건전)")
+
+    # Condition 5: EMA50 > EMA200 → uptrend confirmation
+    if tech.ema_50 > tech.ema_200 > 0:
+        conditions_met += 1
+        reasons.append("EMA50 > EMA200 (상승 추세 확인)")
+
+    sig_score = min(conditions_met * 20, 100)
+
+    if sig_score < 60:
+        return None
+
+    reasons.append(f"충족 조건: {conditions_met}/5")
+
+    # Confidence: 0.5 base + 0.1 per extra condition beyond first
+    confidence = min(0.5 + max(0, conditions_met - 1) * 0.1, 1.0)
+
+    action = "BUY" if sig_score >= 60 else "WATCH"
+
+    reasons.append(f"시장 레짐: {regime}")
+
+    return StrategySignal(
+        strategy="I", strategy_name=meta["name"], strategy_emoji=meta["emoji"],
+        ticker=ticker, name=name, action=action,
+        score=min(sig_score, 100), confidence=confidence,
+        target_pct=meta["target"], stop_pct=meta["stop"],
+        holding_days=meta["days"], reasons=reasons,
+    )
+
+
+def evaluate_strategy_j(
+    ticker: str,
+    name: str,
+    tech: TechnicalIndicators,
+    macro: MacroSnapshot,
+) -> StrategySignal | None:
+    """Strategy J: Mean reversion breakout (평균회귀 돌파 전략).
+
+    Targets stocks with BB squeeze about to break out.
+
+    Conditions:
+    - BB squeeze detected (tech.bb_squeeze == True)
+    - Volume ratio > 1.3 (increasing volume)
+    - RSI between 40-60 (neutral, ready to move)
+    - MACD signal cross == 1 (bullish momentum starting)
+    - Price near MA20 (within 3%)
+    - Score: count of conditions met * 25 (max 100)
+    - Stop: -5%, Target: +10%, Holding: 5~15 days
+    """
+    meta = STRATEGY_META["J"]
+    regime = getattr(macro, 'regime', 'neutral')
+
+    # Works for stocks; skip pure leverage/inverse ETFs
+    if ticker in LEVERAGE_ETFS or ticker in INVERSE_ETFS:
+        return None
+
+    reasons = []
+    conditions_met = 0
+
+    # Condition 1: BB squeeze detected
+    if tech.bb_squeeze:
+        conditions_met += 1
+        reasons.append("BB 스퀴즈 감지 (밴드 압축)")
+
+    # Condition 2: Volume ratio > 1.3
+    if tech.volume_ratio > 1.3:
+        conditions_met += 1
+        reasons.append(f"거래량 증가 (평균 {tech.volume_ratio:.1f}배)")
+
+    # Condition 3: RSI between 40-60 (neutral zone)
+    if 40 <= tech.rsi <= 60:
+        conditions_met += 1
+        reasons.append(f"RSI {tech.rsi:.1f} (중립 구간, 방향 대기)")
+
+    # Condition 4: MACD signal cross == 1 (bullish)
+    if tech.macd_signal_cross == 1:
+        conditions_met += 1
+        reasons.append("MACD 골든크로스 (상승 모멘텀 시작)")
+
+    # Condition 5: Price near MA20 (within 3%)
+    if tech.ma20 > 0:
+        close_price = getattr(tech, 'close', 0) or tech.ema_50
+        if close_price > 0:
+            distance_pct = abs(close_price - tech.ma20) / tech.ma20 * 100
+            if distance_pct <= 3.0:
+                conditions_met += 1
+                reasons.append(f"MA20 근접 (괴리율 {distance_pct:.1f}%)")
+
+    sig_score = min(conditions_met * 25, 100)
+
+    # Regime filtering:
+    # Best in neutral/risk_on, still works in risk_off with score >= 75
+    if regime == "risk_off" and sig_score < 75:
+        return None
+    if regime == "panic":
+        return None
+
+    if sig_score < 50:
+        return None
+
+    reasons.append(f"충족 조건: {conditions_met}/5")
+
+    # Confidence: 0.55 base + 0.1 per extra condition beyond first
+    confidence = min(0.55 + max(0, conditions_met - 1) * 0.1, 1.0)
+
+    action = "BUY" if sig_score >= 50 else "WATCH"
+
+    if regime == "risk_on":
+        reasons.append("시장 레짐: 리스크온 (돌파 유리)")
+    elif regime == "neutral":
+        reasons.append("시장 레짐: 중립")
+    else:
+        reasons.append(f"시장 레짐: {regime}")
+
+    return StrategySignal(
+        strategy="J", strategy_name=meta["name"], strategy_emoji=meta["emoji"],
+        ticker=ticker, name=name, action=action,
+        score=min(sig_score, 100), confidence=confidence,
         target_pct=meta["target"], stop_pct=meta["stop"],
         holding_days=meta["days"], reasons=reasons,
     )
@@ -613,13 +961,25 @@ def evaluate_all_strategies(
     if result_e:
         signals.append(result_e)
 
-    result_f = evaluate_strategy_f(ticker, name, tech, rs_rank, rs_total)
+    result_f = evaluate_strategy_f(ticker, name, tech, macro, rs_rank, rs_total)
     if result_f:
         signals.append(result_f)
 
-    result_g = evaluate_strategy_g(ticker, name, tech)
+    result_g = evaluate_strategy_g(ticker, name, tech, macro)
     if result_g:
         signals.append(result_g)
+
+    result_h = evaluate_strategy_h(ticker, name, tech, macro)
+    if result_h:
+        signals.append(result_h)
+
+    result_i = evaluate_strategy_i(ticker, name, info_dict, tech, macro)
+    if result_i:
+        signals.append(result_i)
+
+    result_j = evaluate_strategy_j(ticker, name, tech, macro)
+    if result_j:
+        signals.append(result_j)
 
     signals.sort(key=lambda s: s.score, reverse=True)
     return signals
@@ -627,15 +987,26 @@ def evaluate_all_strategies(
 
 def get_regime_mode(macro: MacroSnapshot) -> dict:
     """Determine market mode based on macro regime."""
-    if macro.regime == "risk_off" or macro.vix > 25:
+    if macro.vix > 35:
+        return {
+            "mode": "panic",
+            "emoji": "\U0001f6a8",
+            "label": "패닉 모드",
+            "message": "극단적 공포. 신규 매수 전면 중단. 현금 + 인버스만",
+            "allocations": {
+                "A": 0, "B": 25, "C": 10, "D": 0,
+                "E": 10, "F": 0, "G": 0, "H": 5, "I": 0, "J": 0, "cash": 50,
+            },
+        }
+    elif macro.regime == "risk_off" or macro.vix > 25:
         return {
             "mode": "defense",
             "emoji": "\U0001f6e1\ufe0f",
             "label": "방어 모드",
             "message": "지금은 사지 마세요. 인버스로 헷징하세요",
             "allocations": {
-                "A": 5, "B": 25, "C": 15, "D": 5,
-                "E": 15, "F": 0, "G": 0, "cash": 35,
+                "A": 5, "B": 20, "C": 15, "D": 5,
+                "E": 10, "F": 0, "G": 0, "H": 5, "I": 5, "J": 0, "cash": 35,
             },
         }
     elif macro.regime == "risk_on" or macro.vix < 15:
@@ -645,8 +1016,8 @@ def get_regime_mode(macro: MacroSnapshot) -> dict:
             "label": "공격 모드",
             "message": "시장이 좋습니다. 적극 매수 구간",
             "allocations": {
-                "A": 20, "B": 15, "C": 10, "D": 15,
-                "E": 10, "F": 20, "G": 5, "cash": 5,
+                "A": 15, "B": 10, "C": 5, "D": 10,
+                "E": 5, "F": 15, "G": 5, "H": 5, "I": 15, "J": 10, "cash": 5,
             },
         }
     else:
@@ -656,7 +1027,7 @@ def get_regime_mode(macro: MacroSnapshot) -> dict:
             "label": "균형 모드",
             "message": "개별종목 반등 + 장기 적립식 병행",
             "allocations": {
-                "A": 15, "B": 10, "C": 20, "D": 10,
-                "E": 15, "F": 10, "G": 5, "cash": 15,
+                "A": 10, "B": 10, "C": 15, "D": 10,
+                "E": 10, "F": 5, "G": 5, "H": 5, "I": 10, "J": 5, "cash": 15,
             },
         }

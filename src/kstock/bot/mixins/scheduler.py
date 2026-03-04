@@ -37,6 +37,15 @@ class SchedulerMixin:
     _SURGE_THRESHOLD_PCT = 3.0
     _surge_callback_registered: bool = False
 
+    # ── 동시성 보호 ──────────────────────────────────────
+    _state_lock: asyncio.Lock | None = None
+
+    def _ensure_lock(self) -> asyncio.Lock:
+        """Lock 초기화 보장 (lazy init)."""
+        if self._state_lock is None:
+            self._state_lock = asyncio.Lock()
+        return self._state_lock
+
     # ── 경계 모드 (Alert Mode) ─────────────────────────────
     # v6.2.2: 전시/긴장/일상 3단계 — 자동 에스컬레이션 + 디에스컬레이션
     _ALERT_MODES = {
@@ -135,12 +144,11 @@ class SchedulerMixin:
             cfg = self._ALERT_MODES[mode]
             return f"{cfg['label']} 이미 {cfg['label']} 모드입니다"
 
-        self._alert_mode = mode
-        self._alert_mode_since = _time.monotonic()
+        async with self._ensure_lock():
+            self._alert_mode = mode
+            self._alert_mode_since = _time.monotonic()
+            self._SURGE_THRESHOLD_PCT = self._ALERT_MODES[mode]["surge_threshold"]
         cfg = self._ALERT_MODES[mode]
-
-        # 급등 감지 임계값 동적 변경
-        self._SURGE_THRESHOLD_PCT = cfg["surge_threshold"]
 
         # DB 저장 (재시작 후 복원)
         try:
@@ -166,6 +174,26 @@ class SchedulerMixin:
             f"🇺🇸 미국 선물: {cfg['us_futures_interval'] // 60}분"
         )
 
+        # 전시 모드 진입 시 전략 조정 메시지 추가
+        wartime_strategy_msg = ""
+        if mode == "wartime":
+            try:
+                from kstock.core.risk_policy import wartime_adjustments
+                wt = wartime_adjustments()
+                wartime_strategy_msg = (
+                    f"\n\n🛡️ 전시 전략 조정 발동\n"
+                    f"{'━' * 20}\n"
+                    f"🔴 손절 강화: -7% → {wt.stop_loss_pct * 100:.0f}%\n"
+                    f"📉 포지션 축소: 평시 대비 {wt.max_position_ratio * 100:.0f}%\n"
+                    f"💵 최대 노출: {wt.max_portfolio_exposure * 100:.0f}% (현금 {(1 - wt.max_portfolio_exposure) * 100:.0f}% 확보)\n"
+                    f"🚫 매수 제한: 신뢰도 {wt.min_buy_confidence * 100:.0f}% 이상만 허용\n"
+                    f"🛡️ 방어 섹터 선호: {', '.join(wt.defensive_sectors)}\n"
+                    f"⚠️ 축소 대상: {', '.join(wt.cyclical_sectors)}"
+                )
+                msg += wartime_strategy_msg
+            except Exception:
+                logger.debug("Wartime strategy message generation failed", exc_info=True)
+
         # 텔레그램 알림
         if notify and self.chat_id and context:
             try:
@@ -190,11 +218,139 @@ class SchedulerMixin:
             except Exception as e:
                 logger.debug("Alert mode notification failed: %s", e)
 
+            # 전시 모드 진입 시 보유종목 점검 실행
+            if mode == "wartime":
+                try:
+                    wartime_report = await self._wartime_holdings_check()
+                    if wartime_report:
+                        await context.bot.send_message(
+                            chat_id=self.chat_id,
+                            text=wartime_report,
+                        )
+                except Exception:
+                    logger.debug("Wartime holdings check failed", exc_info=True)
+
         logger.info(
             "Alert mode changed: %s → %s (reason: %s)",
             prev, mode, reason or "manual",
         )
         return msg
+
+    async def _wartime_holdings_check(self) -> str | None:
+        """전시 모드 진입 시 보유종목 점검.
+
+        모든 보유종목을 분석하여:
+        - 경기민감(고베타) 종목: 축소/매도 권장
+        - 방어(저베타) 종목: 보유 유지 권장
+        - 전시 손절가 재산정 (-5%)
+        """
+        try:
+            from kstock.core.risk_policy import (
+                wartime_adjustments,
+                is_sector_defensive,
+                is_sector_cyclical,
+            )
+            from kstock.core.risk_manager import SECTOR_MAP
+
+            holdings = self.db.get_active_holdings()
+            if not holdings:
+                return None
+
+            wt = wartime_adjustments()
+
+            reduce_lines: list[str] = []   # 축소/매도 권장
+            hold_lines: list[str] = []     # 보유 유지 권장
+            stop_lines: list[str] = []     # 새 손절가
+
+            for h in holdings:
+                ticker = h.get("ticker", "")
+                name = h.get("name", ticker)
+                bp = h.get("buy_price", 0)
+                qty = h.get("quantity", 0)
+                sector = SECTOR_MAP.get(ticker, "기타")
+
+                if bp <= 0 or qty <= 0:
+                    continue
+
+                # 현재가 조회
+                try:
+                    detail = await self._get_price_detail(ticker, bp)
+                    cur = detail["price"]
+                except Exception:
+                    cur = bp
+
+                pnl_pct = (cur - bp) / bp if bp > 0 else 0
+
+                # 전시 손절가 (-5%)
+                new_stop = round(cur * (1 + wt.stop_loss_pct))
+                pnl_str = f"{pnl_pct * 100:+.1f}%"
+                eval_amount = cur * qty
+
+                if is_sector_cyclical(sector):
+                    # 경기민감 → 축소/매도 권장
+                    action = "축소 권장" if pnl_pct >= 0 else "매도 검토"
+                    reduce_lines.append(
+                        f"  🔴 {name} ({sector})\n"
+                        f"     {bp:,.0f}→{cur:,.0f}원 ({pnl_str})\n"
+                        f"     평가금 {eval_amount:,.0f}원 | {action}"
+                    )
+                elif is_sector_defensive(sector):
+                    # 방어 섹터 → 보유 유지
+                    hold_lines.append(
+                        f"  🟢 {name} ({sector})\n"
+                        f"     {bp:,.0f}→{cur:,.0f}원 ({pnl_str})\n"
+                        f"     평가금 {eval_amount:,.0f}원 | 보유 유지"
+                    )
+                else:
+                    # 기타 섹터 → 손실 중이면 축소, 아니면 관망
+                    if pnl_pct < -0.03:
+                        reduce_lines.append(
+                            f"  🟡 {name} ({sector})\n"
+                            f"     {bp:,.0f}→{cur:,.0f}원 ({pnl_str})\n"
+                            f"     평가금 {eval_amount:,.0f}원 | 손실 축소 검토"
+                        )
+                    else:
+                        hold_lines.append(
+                            f"  ⚪ {name} ({sector})\n"
+                            f"     {bp:,.0f}→{cur:,.0f}원 ({pnl_str})\n"
+                            f"     평가금 {eval_amount:,.0f}원 | 관망"
+                        )
+
+                # 전시 손절가
+                stop_lines.append(
+                    f"  {name}: {new_stop:,.0f}원 (현재가 대비 {wt.stop_loss_pct * 100:.0f}%)"
+                )
+
+            # 리포트 조립
+            lines = [
+                "🛡️ 전시 보유종목 긴급 점검",
+                "━" * 22,
+            ]
+
+            if reduce_lines:
+                lines.append("\n📉 축소/매도 검토 (경기민감·고베타)")
+                lines.extend(reduce_lines)
+
+            if hold_lines:
+                lines.append("\n📊 보유 유지 (방어·저베타)")
+                lines.extend(hold_lines)
+
+            if stop_lines:
+                lines.append(f"\n🔴 전시 손절가 (기준: {wt.stop_loss_pct * 100:.0f}%)")
+                lines.extend(stop_lines)
+
+            lines.extend([
+                "",
+                "━" * 22,
+                "💡 전시 모드에서는 현금 비중 확대와",
+                "   방어 섹터 중심 운용을 권장합니다.",
+            ])
+
+            return "\n".join(lines)
+
+        except Exception:
+            logger.exception("Wartime holdings check failed")
+            return None
 
     async def _reschedule_for_alert_mode(self, context, cfg: dict) -> None:
         """경계 모드에 따라 반복 스케줄 동적 재조정."""
@@ -405,7 +561,10 @@ class SchedulerMixin:
                 msg = (
                     f"☀️ 오전 브리핑\n"
                     f"오늘 국내 시장 전망: {signal_emoji} {signal_label}\n\n"
-                    + format_market_status(macro, regime_mode)
+                    + format_market_status(
+                        macro, regime_mode,
+                        alert_mode=getattr(self, '_alert_mode', 'normal'),
+                    )
                 )
 
             await context.bot.send_message(chat_id=self.chat_id, text=msg)
@@ -442,11 +601,14 @@ class SchedulerMixin:
                 f"환율={macro.usdkrw:,.0f}원, 레짐={macro.regime}"
             )
 
+            current_alert = getattr(self, '_alert_mode', 'normal')
             for mtype, mholdings in by_type.items():
                 if mtype not in MANAGERS or not mholdings:
                     continue
                 try:
-                    report = await get_manager_analysis(mtype, mholdings, market_text)
+                    report = await get_manager_analysis(
+                        mtype, mholdings, market_text, alert_mode=current_alert,
+                    )
                     if report:
                         await context.bot.send_message(
                             chat_id=self.chat_id, text=report[:4000],
@@ -497,12 +659,16 @@ class SchedulerMixin:
             # v6.1: 글로벌 뉴스 컨텍스트 추가
             news_ctx = ""
             try:
-                news_items = self.db.get_recent_global_news(limit=5, hours=12)
+                news_items = self.db.get_recent_global_news(limit=8, hours=12)
                 if news_items:
                     news_lines = []
                     for n in news_items:
                         urgency = "🚨" if n.get("is_urgent") else "📰"
                         news_lines.append(f"  {urgency} {n.get('title', '')}")
+                        # v8.2: YouTube 영상 내용 요약 포함
+                        summary = n.get("content_summary", "")
+                        if summary:
+                            news_lines.append(f"    📝 {summary[:150]}")
                     news_ctx = "\n[글로벌 뉴스 헤드라인]\n" + "\n".join(news_lines) + "\n"
             except Exception:
                 logger.debug("job_morning_briefing global news fetch failed", exc_info=True)
@@ -541,9 +707,27 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("Morning briefing flow data failed", exc_info=True)
 
-            # v6.2.2: 경계 모드 컨텍스트
+            # v6.2.2 / v8.1: 경계 모드 컨텍스트 — 전시 상황 구체화
             alert_ctx = ""
-            if hasattr(self, '_alert_mode') and self._alert_mode != "normal":
+            current_alert = getattr(self, '_alert_mode', 'normal')
+            if current_alert == "wartime":
+                alert_ctx = (
+                    "\n[🔴 전시 경계 모드 — 필수 반영]\n"
+                    "국내 증시 전반 폭락/전시 상황. 브리핑에 반드시 반영:\n"
+                    "- 모든 종목 판단에 '전시 상황'을 명시적으로 반영\n"
+                    "- 경기민감 섹터: 비중 축소 또는 손절 권고\n"
+                    "- 방어 섹터: 보유 유지 권고\n"
+                    "- 신규 매수: 극히 제한적, 분할 진입만\n"
+                    "- 손절 기준 -5%로 강화\n"
+                    "- '현재 상황을 이해하고 있다'는 느낌을 반드시 전달\n\n"
+                )
+            elif current_alert == "elevated":
+                acfg = self._get_alert_config()
+                alert_ctx = (
+                    f"\n[🟠 경계 모드: {acfg['label']}]\n"
+                    "변동성 확대 구간. 손절 -6%, 분할 매수 권장.\n\n"
+                )
+            elif current_alert != "normal":
                 acfg = self._get_alert_config()
                 alert_ctx = f"\n[⚠️ 현재 경계 모드: {acfg['label']}]\n"
 
@@ -601,18 +785,37 @@ class SchedulerMixin:
         market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
         if not (market_open <= now <= market_close):
             return
-        # 보유종목 캐시 갱신 (매도 가이드용)
-        self._holdings_cache = self.db.get_active_holdings()
-        self._holdings_index = {
-            h.get("ticker", ""): h for h in self._holdings_cache if h.get("ticker")
-        }
+        # 보유종목 캐시 갱신 (매도 가이드용) — 동시성 보호
+        _new_holdings = self.db.get_active_holdings()
+        async with self._ensure_lock():
+            self._holdings_cache = _new_holdings
+            self._holdings_index = {
+                h.get("ticker", ""): h for h in self._holdings_cache if h.get("ticker")
+            }
         try:
             results = await self._scan_all_stocks()
             self._last_scan_results = results
             self._scan_cache_time = now
             macro = await self.macro_client.get_snapshot()
-            for r in results:
-                await self._check_and_send_alerts(context.bot, r, macro)
+
+            # v7.0: Alert fatigue 방지 — 우선순위 기반 Top-N 알림
+            # 점수순 정렬 후 상위 5개만 알림 발송 (나머지는 로그만)
+            MAX_ALERTS_PER_SCAN = 5
+            sorted_results = sorted(
+                results,
+                key=lambda r: getattr(r.score, "composite", 0),
+                reverse=True,
+            )
+            alert_count = 0
+            for r in sorted_results:
+                if alert_count >= MAX_ALERTS_PER_SCAN:
+                    break
+                # 알림 대상 여부: BUY/WATCH 시그널만
+                sig = getattr(r.score, "signal", "HOLD")
+                if sig in ("BUY", "STRONG_BUY", "WATCH", "MILD_BUY"):
+                    await self._check_and_send_alerts(context.bot, r, macro)
+                    alert_count += 1
+
             await self._check_holdings(context.bot)
 
             # 장중 급등 종목 감지 + 장기 우량주 추천
@@ -2413,12 +2616,14 @@ class SchedulerMixin:
             if not self._surge_callback_registered:
                 self.ws.on_update(self._on_realtime_update)
                 self._surge_callback_registered = True
-                # 보유종목 캐시 초기화
-                self._holdings_cache = self.db.get_active_holdings()
-                self._holdings_index = {
-                    h.get("ticker", ""): h
-                    for h in self._holdings_cache if h.get("ticker")
-                }
+                # 보유종목 캐시 초기화 — 동시성 보호
+                _init_holdings = self.db.get_active_holdings()
+                async with self._ensure_lock():
+                    self._holdings_cache = _init_holdings
+                    self._holdings_index = {
+                        h.get("ticker", ""): h
+                        for h in self._holdings_cache if h.get("ticker")
+                    }
                 logger.info("Realtime surge/sell-guide callback registered")
 
             logger.info("WebSocket connected: %d tickers subscribed", subscribed)
@@ -2875,10 +3080,12 @@ class SchedulerMixin:
                     sold_pct=sold_pct / 100 if sold_pct > 1 else sold_pct,
                 )
 
-                # 손절/트레일링 스탑만 즉시 발송 (1일 1회 제한)
+                # 손절/트레일링 스탑만 즉시 발송
+                # v6.6: 워타임 시 쿨다운 4시간, 평상시 24시간
                 if alert and alert.alert_type in ("stop_loss", "trailing_stop"):
+                    _sl_cooldown_hours = 4 if getattr(self, '_alert_mode', 'normal') == 'wartime' else 24
                     if not self.db.has_recent_alert(
-                        ticker, f"profit_{alert.alert_type}", hours=24,
+                        ticker, f"profit_{alert.alert_type}", hours=_sl_cooldown_hours,
                     ):
                         self.db.insert_alert(
                             ticker, f"profit_{alert.alert_type}",
@@ -3150,6 +3357,115 @@ class SchedulerMixin:
                 lines.extend(trail_items)
                 lines.append("")
 
+            # === 5. 고급 리스크 분석 (VaR + 동적 상관관계) ===
+            try:
+                from kstock.core.advanced_risk import (
+                    compute_advanced_var,
+                    compute_dynamic_correlation,
+                    format_risk_report,
+                )
+                import pandas as pd
+                import numpy as np
+
+                # 보유 종목의 OHLCV 데이터로 수익률 행렬 구성
+                tickers_held = [h.get("ticker", "") for h in holdings if h.get("ticker")]
+                returns_data = {}
+                for t in tickers_held[:10]:  # 상위 10종목만 (성능)
+                    try:
+                        ohlcv = self.db.get_ohlcv(t, days=120)
+                        if ohlcv and len(ohlcv) >= 30:
+                            closes = [row.get("close", 0) for row in ohlcv]
+                            rets = np.diff(np.log(np.array(closes, dtype=float)))
+                            returns_data[t] = rets
+                    except Exception:
+                        continue
+
+                if len(returns_data) >= 2:
+                    # 수익률 행렬 구성
+                    min_len = min(len(v) for v in returns_data.values())
+                    rm_dict = {t: v[-min_len:] for t, v in returns_data.items()}
+                    rm = pd.DataFrame(rm_dict)
+
+                    # 포트폴리오 가중치
+                    port_weights = {}
+                    for h in holdings:
+                        t = h.get("ticker", "")
+                        if t in returns_data:
+                            cp = h.get("current_price", 0) or h.get("buy_price", 0)
+                            qty = h.get("quantity", 1)
+                            port_weights[t] = (cp * qty) / total_value if total_value > 0 else 0
+
+                    # VaR 계산 (Cornish-Fisher 보정)
+                    var_result = compute_advanced_var(
+                        rm, port_weights,
+                        confidence=0.95, horizon=1,
+                        method="parametric",
+                    )
+
+                    if var_result.var_pct > 0:
+                        has_issues = True
+                        lines.append("📉 고급 VaR 분석")
+                        lines.append(f"  1일 VaR(95%): {var_result.var_pct:.2f}%")
+                        lines.append(f"  CVaR: {var_result.cvar_pct:.2f}%")
+                        # Component VaR 상위 3
+                        if var_result.component_var:
+                            sorted_cv = sorted(
+                                var_result.component_var.items(),
+                                key=lambda x: -x[1],
+                            )[:3]
+                            for t, cv in sorted_cv:
+                                n = next(
+                                    (h["name"] for h in holdings if h.get("ticker") == t),
+                                    t,
+                                )
+                                lines.append(f"    {n}: {cv:.2f}%")
+                        lines.append("")
+
+                    # 상위 보유종목 간 동적 상관관계
+                    top_tickers = sorted(
+                        port_weights.items(), key=lambda x: -x[1],
+                    )[:3]
+                    if len(top_tickers) >= 2:
+                        corr_items = []
+                        for i in range(len(top_tickers)):
+                            for j in range(i + 1, len(top_tickers)):
+                                t_a, _ = top_tickers[i]
+                                t_b, _ = top_tickers[j]
+                                if t_a in rm.columns and t_b in rm.columns:
+                                    dc = compute_dynamic_correlation(
+                                        rm[t_a].values, rm[t_b].values,
+                                        ticker_a=t_a, ticker_b=t_b,
+                                    )
+                                    regime_emoji = {"normal": "🟢", "stress": "🟡", "crisis": "🔴"}.get(dc.regime, "⚪")
+                                    n_a = next((h["name"] for h in holdings if h.get("ticker") == t_a), t_a)
+                                    n_b = next((h["name"] for h in holdings if h.get("ticker") == t_b), t_b)
+                                    corr_items.append(
+                                        f"  {n_a}-{n_b}: {dc.rolling_60d:.2f} {regime_emoji}"
+                                    )
+                        if corr_items:
+                            lines.append("🔗 종목간 상관관계")
+                            lines.extend(corr_items)
+                            lines.append("")
+
+            except Exception as e:
+                logger.debug("Advanced risk in EOD report: %s", e)
+
+            # === 6. VIX 리스크 정책 현황 ===
+            try:
+                from kstock.core.risk_policy import vix_adjusted_policy
+                _macro = await self.macro_client.get_snapshot()
+                if _macro and hasattr(_macro, "vix") and _macro.vix > 0:
+                    policy = vix_adjusted_policy(_macro.vix)
+                    lines.append(f"📋 리스크 정책: {policy['regime_label']}")
+                    lines.append(f"  VIX: {_macro.vix:.1f}")
+                    lines.append(f"  종목 한도: {policy['max_single_weight']*100:.0f}%")
+                    lines.append(f"  현금 바닥: {policy['cash_floor_pct']}%")
+                    if not policy["new_buy_allowed"]:
+                        lines.append("  🚫 신규 매수 차단 중")
+                    lines.append("")
+            except Exception as e:
+                logger.debug("VIX policy in EOD report: %s", e)
+
             # === 발송 ===
             if not has_issues and not trail_items:
                 lines.append("✅ 리스크 위반 없음. 포트폴리오 정상.")
@@ -3222,29 +3538,30 @@ class SchedulerMixin:
                         except Exception:
                             logger.debug("job_health_check recovery attempt failed for %s", fc.name, exc_info=True)
 
-                # 에러 항목만 알림 (warning은 로그만)
-                # v5.4: 동일 알림 반복 방지 — 4시간 쿨다운
-                errors = [c for c in failed if c.status == "error"]
-                if errors:
-                    if not hasattr(self, '_health_alert_cache'):
-                        self._health_alert_cache = {}
-                    from datetime import datetime
-                    now = datetime.now(KST)
-                    new_errors = []
-                    for c in errors:
-                        last_sent = self._health_alert_cache.get(c.name)
-                        if last_sent and (now - last_sent).total_seconds() < 14400:
-                            continue  # 4시간 내 이미 전송됨
-                        new_errors.append(c)
-                        self._health_alert_cache[c.name] = now
+                # v8.1: error + warning 모두 알림 (쿨다운 적용)
+                if not hasattr(self, '_health_alert_cache'):
+                    self._health_alert_cache = {}
+                from datetime import datetime
+                now = datetime.now(KST)
+                new_alerts = []
+                for c in failed:
+                    cooldown = 14400 if c.status == "error" else 28800  # error 4h, warning 8h
+                    last_sent = self._health_alert_cache.get(c.name)
+                    if last_sent and (now - last_sent).total_seconds() < cooldown:
+                        continue
+                    new_alerts.append(c)
+                    self._health_alert_cache[c.name] = now
 
-                    if new_errors:
-                        lines = ["🏥 시스템 헬스체크 알림", "━" * 22, ""]
-                        for c in new_errors:
-                            lines.append(f"🔴 {c.name}: {c.message}")
-                        await context.bot.send_message(
-                            chat_id=self.chat_id, text="\n".join(lines),
-                        )
+                if new_alerts:
+                    lines = ["시스템 헬스체크 알림", "━" * 22, ""]
+                    for c in new_alerts:
+                        icon = "!!" if c.status == "error" else "!"
+                        lines.append(f"{icon} {c.name}: {c.message}")
+                    lines.append("")
+                    lines.append(f"총 {len(checks)}개 체크 중 {len(failed)}개 이상")
+                    await context.bot.send_message(
+                        chat_id=self.chat_id, text="\n".join(lines),
+                    )
 
             # 서킷 브레이커 상태 로그
             try:
@@ -3777,6 +4094,7 @@ class SchedulerMixin:
                 detect_crisis_from_macro,
                 format_crisis_alert,
                 translate_titles_to_korean,
+                enrich_youtube_summaries,
             )
 
             # 1. RSS 뉴스 수집
@@ -3784,6 +4102,12 @@ class SchedulerMixin:
             if items:
                 # 1-1. 영문 제목 → 한글 번역
                 items = await translate_titles_to_korean(items)
+
+                # 1-2. YouTube 영상 자막 기반 내용 요약 (v8.2)
+                try:
+                    items = await enrich_youtube_summaries(items, max_summaries=5)
+                except Exception as e:
+                    logger.debug("YouTube summary enrichment failed: %s", e)
 
                 # NewsItem → dict 변환 후 DB 저장
                 news_dicts = [
@@ -3796,6 +4120,8 @@ class SchedulerMixin:
                         "impact_score": item.impact_score,
                         "is_urgent": item.is_urgent,
                         "published": item.published,
+                        "content_summary": item.content_summary,
+                        "video_id": item.video_id,
                     }
                     for item in items
                 ]

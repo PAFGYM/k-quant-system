@@ -72,6 +72,10 @@ def main() -> None:
         logger.error("TELEGRAM_BOT_TOKEN not set in .env file!")
         sys.exit(1)
 
+    # SQLite 영속성 레이어 초기화 (재시작 시 상태 복원)
+    from kstock.core.persistence import init_tables
+    init_tables()
+
     # 중복 실행 방지: 기존 프로세스 모두 kill
     _kill_existing_bot()
 
@@ -84,7 +88,7 @@ def main() -> None:
     app = bot.build_app()
     bot.schedule_jobs(app)
 
-    logger.info("K-Quant System v6.4.0 started. Press Ctrl+C to stop.")
+    logger.info("K-Quant System v8.2.0 started. Press Ctrl+C to stop.")
     # 409 처리: run_polling 내부에서 deleteWebhook + 자동 재시도
     # bootstrap_retries=5: 시작 시 409 발생하면 최대 5회 재시도
     app.run_polling(

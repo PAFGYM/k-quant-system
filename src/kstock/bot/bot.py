@@ -51,6 +51,17 @@ def main() -> None:
 
     while True:
         try:
+            # 이전 이벤트 루프가 닫혀있을 수 있으므로 새로 생성
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
             app = bot.build_app()
             bot.schedule_jobs(app)
             logger.info("K-Quant v3.6 bot starting (polling)...")

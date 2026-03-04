@@ -516,6 +516,7 @@ class MenusKisMixin:
             macro, regime_mode,
             sector_text=sector_text,
             fx_message=fx_signal.message,
+            alert_mode=getattr(self, '_alert_mode', 'normal'),
         )
 
         # v3.0: policy events

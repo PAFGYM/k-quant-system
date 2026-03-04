@@ -59,3 +59,38 @@ sell_reason:
     near_high_pct: 95.0
     volume_multiplier: 2.5
     disparity_pct: 110.0
+
+# v7.0: Market regime-specific weight overrides
+# When VIX is in a specific regime, these weights replace the default
+regime_weights:
+  risk_on:    # VIX < 15
+    macro: 0.05
+    flow: 0.25
+    fundamental: 0.25
+    technical: 0.30
+    risk: 0.15
+  neutral:    # VIX 15-25
+    macro: 0.10
+    flow: 0.30
+    fundamental: 0.30
+    technical: 0.20
+    risk: 0.10
+  risk_off:   # VIX > 25
+    macro: 0.20
+    flow: 0.20
+    fundamental: 0.20
+    technical: 0.15
+    risk: 0.25
+  panic:      # VIX > 35
+    macro: 0.25
+    flow: 0.15
+    fundamental: 0.15
+    technical: 0.10
+    risk: 0.35
+
+# Factor integration bonus
+factor_bonus:
+  quintile_1: 10   # Top 20% factor ranking -> +10
+  quintile_2: 5    # 60-80% -> +5
+  quintile_4: -5   # 20-40% -> -5
+  quintile_5: -10  # Bottom 20% -> -10

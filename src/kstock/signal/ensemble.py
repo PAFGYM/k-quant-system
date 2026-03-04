@@ -175,6 +175,175 @@ def compute_signal_agreement(votes: List[SignalVote]) -> float:
     return max(0.0, min(1.0, agreement))
 
 
+def compute_weighted_agreement(votes: List[SignalVote]) -> float:
+    """가중 엔트로피 기반 신호 일치도.
+
+    confidence를 가중치로 반영하여 높은 확신의 동의가
+    낮은 확신의 동의보다 중요하게 평가됨.
+    """
+    if not votes:
+        return 0.0
+
+    weighted_counts = {"BUY": 0.0, "SELL": 0.0, "HOLD": 0.0}
+    total_weight = 0.0
+    for v in votes:
+        action = _normalize_action(v.action)
+        w = v.confidence * v.weight
+        weighted_counts[action] += w
+        total_weight += w
+
+    if total_weight <= 0:
+        return 0.0
+
+    h = 0.0
+    for w in weighted_counts.values():
+        if w > 0:
+            p = w / total_weight
+            h -= p * math.log(p)
+
+    h_max = math.log(3)
+    if h_max == 0:
+        return 1.0
+
+    return max(0.0, min(1.0, 1.0 - h / h_max))
+
+
+def compute_strategy_diversity(
+    ticker_votes: Dict[str, List[SignalVote]],
+) -> dict:
+    """전략 다양성 측정 — 전략 간 상관관계 및 독립성 분석.
+
+    높은 다양성 = 앙상블의 예측력 향상.
+
+    Args:
+        ticker_votes: {ticker: [SignalVote, ...]} 여러 종목의 투표 데이터
+
+    Returns:
+        dict with: diversity_score (0-1), strategy_correlations,
+        redundant_pairs, effective_n_strategies
+    """
+    if not ticker_votes:
+        return {"diversity_score": 0.0, "strategy_correlations": {},
+                "redundant_pairs": [], "effective_n_strategies": 0}
+
+    # 전략별 action 벡터 생성 (BUY=1, HOLD=0, SELL=-1)
+    action_map = {"BUY": 1, "HOLD": 0, "SELL": -1}
+    strategies: Dict[str, List[int]] = {}
+
+    tickers_list = list(ticker_votes.keys())
+    for ticker in tickers_list:
+        for v in ticker_votes[ticker]:
+            strat = v.strategy
+            if strat not in strategies:
+                strategies[strat] = []
+            action = _normalize_action(v.action)
+            strategies[strat].append(action_map.get(action, 0))
+
+    # 전략이 2개 미만이면 다양성 측정 불가
+    strat_names = list(strategies.keys())
+    n_strats = len(strat_names)
+    if n_strats < 2:
+        return {"diversity_score": 1.0, "strategy_correlations": {},
+                "redundant_pairs": [], "effective_n_strategies": n_strats}
+
+    # 전략 간 상관행렬
+    import numpy as np
+
+    # 모든 벡터를 동일 길이로 맞추기
+    max_len = max(len(v) for v in strategies.values())
+    matrix = np.zeros((n_strats, max_len))
+    for i, name in enumerate(strat_names):
+        vec = strategies[name]
+        matrix[i, :len(vec)] = vec
+
+    # 상관관계
+    correlations = {}
+    redundant = []
+
+    for i in range(n_strats):
+        for j in range(i + 1, n_strats):
+            if max_len < 3:
+                corr = 0.0
+            else:
+                std_i = np.std(matrix[i])
+                std_j = np.std(matrix[j])
+                if std_i < 1e-8 or std_j < 1e-8:
+                    corr = 0.0
+                else:
+                    corr = float(np.corrcoef(matrix[i], matrix[j])[0, 1])
+                    if np.isnan(corr):
+                        corr = 0.0
+
+            pair_key = f"{strat_names[i]}-{strat_names[j]}"
+            correlations[pair_key] = round(corr, 4)
+
+            if abs(corr) > 0.8:
+                redundant.append(pair_key)
+
+    # Diversity score: 1 - avg(|correlation|)
+    if correlations:
+        avg_corr = np.mean([abs(c) for c in correlations.values()])
+        diversity = 1.0 - avg_corr
+    else:
+        diversity = 1.0
+
+    # Effective N: N / (1 + (N-1) * avg_corr)
+    avg_abs_corr = np.mean([abs(c) for c in correlations.values()]) if correlations else 0.0
+    effective_n = n_strats / (1 + (n_strats - 1) * avg_abs_corr) if avg_abs_corr < 1.0 else 1.0
+
+    return {
+        "diversity_score": round(float(diversity), 4),
+        "strategy_correlations": correlations,
+        "redundant_pairs": redundant,
+        "effective_n_strategies": round(float(effective_n), 2),
+        "total_strategies": n_strats,
+    }
+
+
+def apply_signal_decay(
+    votes: List[SignalVote],
+    signal_ages_hours: Dict[str, float] | None = None,
+    half_life_hours: float = 24.0,
+) -> List[SignalVote]:
+    """신호 감쇠: 시간 경과에 따라 확신도를 지수적으로 감소.
+
+    신선한 신호일수록 높은 가중치, 오래된 신호는 감쇠.
+
+    Args:
+        votes: 원본 투표 리스트
+        signal_ages_hours: {strategy: hours_since_generation}
+        half_life_hours: 반감기 (시간). 기본 24시간.
+
+    Returns:
+        감쇠 적용된 새 투표 리스트 (원본 미수정)
+    """
+    if not signal_ages_hours:
+        return votes
+
+    decayed: List[SignalVote] = []
+    for v in votes:
+        age = signal_ages_hours.get(v.strategy, 0.0)
+        if age <= 0:
+            decayed.append(v)
+            continue
+
+        # 지수 감쇠: decay = 0.5^(age / half_life)
+        decay_factor = 0.5 ** (age / half_life_hours)
+        decay_factor = max(0.1, decay_factor)  # 최소 10% 유지
+
+        new_vote = SignalVote(
+            strategy=v.strategy,
+            action=v.action,
+            confidence=round(v.confidence * decay_factor, 4),
+            score=round(v.score * decay_factor, 2),
+            weight=v.weight,
+            reasons=v.reasons + [f"신호감쇠 {decay_factor:.0%} ({age:.0f}h)"],
+        )
+        decayed.append(new_vote)
+
+    return decayed
+
+
 def compute_strategy_weights(
     performance_history: List[dict],
     decay_factor: float = 0.95,
@@ -266,6 +435,7 @@ def compute_strategy_weights(
 def vote(
     signals: Sequence[Union[SignalVote, dict]],
     config: Optional[EnsembleConfig] = None,
+    vix: float = 0,
 ) -> VoteResult:
     """Compute ensemble consensus from multiple strategy signals.
 
@@ -314,14 +484,38 @@ def vote(
     buy_pct = buy_score / total_weighted
     sell_pct = sell_score / total_weighted
 
+    # v8.1: Regime-aware thresholds + dissent penalty
+    buy_thresh = cfg.buy_threshold
+    sell_thresh = cfg.sell_threshold
+    strong_thresh = cfg.strong_threshold
+
+    if vix > 30:  # panic: require higher agreement for BUY
+        buy_thresh = min(0.85, buy_thresh + 0.15)
+        strong_thresh = min(0.95, strong_thresh + 0.10)
+    elif vix > 25:  # fear
+        buy_thresh = min(0.80, buy_thresh + 0.10)
+    elif vix < 15:  # calm: slightly relax
+        buy_thresh = max(0.50, buy_thresh - 0.05)
+
+    # Dissent penalty: if strongest dissenter has high confidence, reduce consensus
+    dissent_penalty = 0.0
+    if buy_pct > sell_pct and sell_votes:
+        max_dissent = max(v.confidence * v.weight for v in sell_votes)
+        net_strength = abs(buy_score - sell_score) / total_weighted
+        if max_dissent > net_strength * 0.5:
+            dissent_penalty = 0.05
+
+    buy_pct_adj = buy_pct - dissent_penalty
+    sell_pct_adj = sell_pct - dissent_penalty
+
     # Consensus determination
-    if buy_pct >= cfg.strong_threshold:
+    if buy_pct_adj >= strong_thresh:
         consensus = "STRONG_BUY"
-    elif buy_pct >= cfg.buy_threshold:
+    elif buy_pct_adj >= buy_thresh:
         consensus = "BUY"
-    elif sell_pct >= cfg.strong_threshold:
+    elif sell_pct_adj >= strong_thresh:
         consensus = "STRONG_SELL"
-    elif sell_pct >= cfg.sell_threshold:
+    elif sell_pct_adj >= sell_thresh:
         consensus = "SELL"
     else:
         consensus = "HOLD"
@@ -384,6 +578,7 @@ def vote(
 def vote_batch(
     ticker_signals: Dict[str, List[Union[SignalVote, dict]]],
     config: Optional[EnsembleConfig] = None,
+    vix: float = 0,
 ) -> List[VoteResult]:
     """Batch vote for multiple tickers.
 
@@ -396,7 +591,7 @@ def vote_batch(
     """
     results: List[VoteResult] = []
     for ticker, sigs in ticker_signals.items():
-        result = vote(sigs, config=config)
+        result = vote(sigs, config=config, vix=vix)
         result.ticker = ticker
         results.append(result)
 
@@ -408,6 +603,7 @@ def adaptive_vote(
     signals: Sequence[Union[SignalVote, dict]],
     performance_history: List[dict],
     config: Optional[EnsembleConfig] = None,
+    vix: float = 0,
 ) -> VoteResult:
     """Vote with dynamically adjusted strategy weights.
 
@@ -426,7 +622,7 @@ def adaptive_vote(
         if v.strategy in weights:
             v.weight = weights[v.strategy].adjusted_weight
 
-    return vote(votes, config=config)
+    return vote(votes, config=config, vix=vix)
 
 
 def filter_top_consensus(
@@ -453,6 +649,7 @@ def vote_with_guard(
     market_regime: str = "normal",
     signal_source: str = "",
     hit_rate_30d: float = 0.5,
+    vix: float = 0,
 ) -> VoteResult:
     """vote() + 장기보유 보호 + 신뢰도 등급 통합.
 
@@ -479,7 +676,7 @@ def vote_with_guard(
     )
 
     # 1. 기본 투표
-    result = vote(signals, config=config)
+    result = vote(signals, config=config, vix=vix)
 
     # 2. 신뢰도 등급 계산
     try:

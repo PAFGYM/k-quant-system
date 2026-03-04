@@ -333,6 +333,57 @@ def compute_investment_factor(
 
 
 # ---------------------------------------------------------------------------
+# Dynamic regime-based factor weighting
+# ---------------------------------------------------------------------------
+
+
+def get_regime_factor_weights(
+    macro_regime: str = "neutral",
+    vix: float = 20.0,
+) -> dict[str, float]:
+    """시장 레짐에 따른 동적 팩터 가중치.
+
+    risk_on:  모멘텀/성장 강조 (momentum, size)
+    neutral:  균등
+    risk_off: 품질/저변동 강조 (quality, volatility, value)
+    panic:    방어/저변동 극대화
+
+    Returns:
+        {factor_name: weight} where sum(weights) = 1.0
+    """
+    if vix > 35 or macro_regime == "panic":
+        return {
+            "size": 0.05,
+            "value": 0.15,
+            "momentum": 0.05,
+            "quality": 0.30,
+            "volatility": 0.35,
+            "investment": 0.10,
+        }
+    elif vix > 25 or macro_regime == "risk_off":
+        return {
+            "size": 0.08,
+            "value": 0.20,
+            "momentum": 0.07,
+            "quality": 0.25,
+            "volatility": 0.25,
+            "investment": 0.15,
+        }
+    elif vix < 15 or macro_regime == "risk_on":
+        return {
+            "size": 0.15,
+            "value": 0.10,
+            "momentum": 0.30,
+            "quality": 0.15,
+            "volatility": 0.10,
+            "investment": 0.20,
+        }
+    else:
+        # Equal weight
+        return {f: 1.0 / 6 for f in _FACTOR_NAMES}
+
+
+# ---------------------------------------------------------------------------
 # Higher-Level Functions
 # ---------------------------------------------------------------------------
 
@@ -556,6 +607,127 @@ def compute_factor_loadings(
     )
 
 
+def fama_macbeth_regression(
+    factor_matrix: pd.DataFrame,
+    forward_returns: dict[str, float],
+    n_periods: int = 1,
+) -> dict:
+    """Fama-MacBeth 횡단면 회귀: 팩터 프리미엄 추정.
+
+    각 기간별 횡단면 회귀를 실행하고 시계열 평균으로
+    팩터 리스크 프리미엄을 추정.
+
+    Args:
+        factor_matrix: (N_stocks x K_factors) z-score matrix
+        forward_returns: {ticker: forward_return_pct}
+        n_periods: 기간 수 (단일 기간이면 1)
+
+    Returns:
+        dict with: factor_premiums, t_stats, significant_factors,
+        cross_sectional_r2
+    """
+    try:
+        # 공통 종목 필터
+        common = [t for t in factor_matrix.index if t in forward_returns]
+        if len(common) < 10:
+            return {
+                "factor_premiums": {},
+                "t_stats": {},
+                "significant_factors": [],
+                "cross_sectional_r2": 0.0,
+                "n_stocks": len(common),
+                "sufficient": False,
+            }
+
+        X = factor_matrix.loc[common].values
+        y = np.array([forward_returns[t] for t in common])
+
+        factors = list(factor_matrix.columns)
+        k = X.shape[1]
+
+        # OLS: y = X @ gamma + epsilon
+        ones = np.ones((len(common), 1))
+        X_full = np.hstack([ones, X])
+
+        try:
+            XtX_inv = np.linalg.inv(X_full.T @ X_full)
+        except np.linalg.LinAlgError:
+            XtX_inv = np.linalg.pinv(X_full.T @ X_full)
+
+        gamma = XtX_inv @ (X_full.T @ y)
+        residuals = y - X_full @ gamma
+
+        # R-squared
+        ss_res = float(np.sum(residuals ** 2))
+        ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 1e-15 else 0.0
+        r2 = max(0.0, min(1.0, r2))
+
+        # Standard errors
+        sigma2 = ss_res / max(len(common) - k - 1, 1)
+        se = np.sqrt(np.abs(np.diag(XtX_inv) * sigma2))
+
+        t_stats_arr = np.zeros(k + 1)
+        for i in range(k + 1):
+            t_stats_arr[i] = gamma[i] / se[i] if se[i] > 1e-15 else 0.0
+
+        factor_premiums = {f: float(gamma[i + 1]) for i, f in enumerate(factors)}
+        t_stats = {f: float(t_stats_arr[i + 1]) for i, f in enumerate(factors)}
+        significant = [f for f in factors if abs(t_stats.get(f, 0)) > 2.0]
+
+        return {
+            "factor_premiums": {k: round(v, 6) for k, v in factor_premiums.items()},
+            "t_stats": {k: round(v, 3) for k, v in t_stats.items()},
+            "significant_factors": significant,
+            "cross_sectional_r2": round(r2, 4),
+            "intercept": round(float(gamma[0]), 6),
+            "intercept_t": round(float(t_stats_arr[0]), 3),
+            "n_stocks": len(common),
+            "sufficient": True,
+        }
+
+    except Exception:
+        logger.exception("Fama-MacBeth 회귀 실패")
+        return {
+            "factor_premiums": {}, "t_stats": {},
+            "significant_factors": [], "cross_sectional_r2": 0.0,
+            "n_stocks": 0, "sufficient": False,
+        }
+
+
+def compute_dynamic_factor_bonus(
+    factor_profile: "MultiFactorProfile",
+    factor_premiums: dict[str, float] | None = None,
+) -> int:
+    """팩터 프리미엄 기반 동적 보너스 점수 산출.
+
+    Fama-MacBeth 결과를 활용하여 통계적으로 유의한
+    팩터에 더 높은 가중치를 부여.
+
+    Returns:
+        int: -15 ~ +15 보너스 점수
+    """
+    try:
+        if not factor_premiums:
+            # 기존 방식: quintile 기반 고정 보너스
+            q = factor_profile.quintile
+            return {1: 10, 2: 5, 3: 0, 4: -5, 5: -10}.get(q, 0)
+
+        # 유의한 팩터의 exposure × premium 합산
+        premium_score = 0.0
+        for exp in factor_profile.exposures:
+            premium = factor_premiums.get(exp.factor_name, 0.0)
+            premium_score += exp.z_score * premium
+
+        # -15 ~ +15 범위로 매핑
+        bonus = int(max(-15, min(15, premium_score * 100)))
+        return bonus
+
+    except Exception:
+        logger.exception("Dynamic factor bonus 계산 실패")
+        return 0
+
+
 def score_stock_multifactor(
     ticker: str,
     factor_matrix: pd.DataFrame,
@@ -657,5 +829,191 @@ def format_factor_profile(profile: MultiFactorProfile) -> str:
     }
     lines.append(f"  Rating: {q_text.get(profile.quintile, 'N/A')}")
     lines.append(f"{'='*28}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Rolling Validation / Backtesting
+# ---------------------------------------------------------------------------
+
+
+def rolling_factor_backtest(
+    factor_data_history: list[dict],
+    forward_returns_history: list[dict],
+    window: int = 60,
+    step: int = 20,
+) -> dict:
+    """Roll through historical data to validate factor model performance.
+
+    Args:
+        factor_data_history: List of dicts, each with {ticker: {factor_name: value}} per period
+        forward_returns_history: List of dicts, each with {ticker: forward_return} per period
+        window: Rolling window size in periods
+        step: Step size between windows
+
+    Returns:
+        Dict with rolling IC, turnover, and stability metrics.
+    """
+    if len(factor_data_history) < window + 1:
+        return {"error": "insufficient_data", "min_required": window + 1}
+
+    results = {
+        "ic_by_factor": {},  # factor -> [ic values]
+        "premium_by_factor": {},  # factor -> [premium values]
+        "hit_rate_by_factor": {},  # factor -> hit rate (IC > 0)
+        "ic_stability": {},  # factor -> IC mean / IC std
+        "total_windows": 0,
+    }
+
+    factor_names: set[str] = set()
+    for fd in factor_data_history[:3]:
+        for ticker_data in fd.values():
+            factor_names.update(ticker_data.keys())
+            break
+
+    for fname in factor_names:
+        results["ic_by_factor"][fname] = []
+        results["premium_by_factor"][fname] = []
+
+    n_windows = 0
+    for start in range(0, len(factor_data_history) - window, step):
+        end = start + window
+        if end >= len(forward_returns_history):
+            break
+
+        # Get factor data at end of window
+        current_factors = factor_data_history[end - 1]
+        # Get forward returns (next period)
+        if end < len(forward_returns_history):
+            fwd_rets = forward_returns_history[end]
+        else:
+            continue
+
+        # Common tickers
+        common = set(current_factors.keys()) & set(fwd_rets.keys())
+        if len(common) < 10:
+            continue
+
+        common_sorted = sorted(common)
+        n_windows += 1
+
+        for fname in factor_names:
+            factor_vals: list[float] = []
+            ret_vals: list[float] = []
+            for t in common_sorted:
+                fv = current_factors[t].get(fname, 0)
+                rv = fwd_rets[t]
+                if fv is not None and rv is not None:
+                    factor_vals.append(fv)
+                    ret_vals.append(rv)
+
+            if len(factor_vals) >= 10:
+                # Rank IC (Spearman)
+                try:
+                    from scipy import stats as scipy_stats
+
+                    ic, _ = scipy_stats.spearmanr(factor_vals, ret_vals)
+                except ImportError:
+                    # Manual Spearman rank correlation
+                    def _rank(arr: list[float]) -> list[int]:
+                        temp = sorted(range(len(arr)), key=lambda i: arr[i])
+                        ranks = [0] * len(arr)
+                        for i, idx in enumerate(temp):
+                            ranks[idx] = i
+                        return ranks
+
+                    r1 = _rank(factor_vals)
+                    r2 = _rank(ret_vals)
+                    _n = len(r1)
+                    d_sq = sum((a - b) ** 2 for a, b in zip(r1, r2))
+                    ic = 1 - 6 * d_sq / (_n * (_n * _n - 1))
+
+                try:
+                    if not np.isnan(ic):
+                        results["ic_by_factor"][fname].append(ic)
+                except Exception:
+                    pass
+
+                # Simple premium: mean return of top quintile - bottom quintile
+                sorted_pairs = sorted(
+                    zip(factor_vals, ret_vals), key=lambda x: x[0]
+                )
+                n = len(sorted_pairs)
+                q_size = max(1, n // 5)
+                bottom_ret = np.mean([p[1] for p in sorted_pairs[:q_size]])
+                top_ret = np.mean([p[1] for p in sorted_pairs[-q_size:]])
+                results["premium_by_factor"][fname].append(top_ret - bottom_ret)
+
+    results["total_windows"] = n_windows
+
+    # Compute summary stats
+    for fname in factor_names:
+        ics = results["ic_by_factor"].get(fname, [])
+        if ics:
+            ic_mean = np.mean(ics)
+            ic_std = float(np.std(ics)) if len(ics) > 1 else 1.0
+            results["hit_rate_by_factor"][fname] = round(
+                sum(1 for x in ics if x > 0) / len(ics) * 100, 1
+            )
+            results["ic_stability"][fname] = (
+                round(ic_mean / ic_std, 3) if ic_std > 0.001 else 0
+            )
+        else:
+            results["hit_rate_by_factor"][fname] = 0
+            results["ic_stability"][fname] = 0
+
+    return results
+
+
+def format_factor_validation_report(results: dict) -> str:
+    """Format rolling factor backtest results as readable report."""
+    if "error" in results:
+        return f"팩터 검증 불가: {results['error']}"
+
+    lines = [
+        "=== 멀티팩터 모델 롤링 검증 결과 ===",
+        f"총 검증 윈도우: {results['total_windows']}개",
+        "",
+        "팩터별 IC (Information Coefficient):",
+    ]
+
+    for fname in sorted(results["ic_by_factor"].keys()):
+        ics = results["ic_by_factor"][fname]
+        if ics:
+            ic_mean = np.mean(ics)
+            hit = results["hit_rate_by_factor"].get(fname, 0)
+            stability = results["ic_stability"].get(fname, 0)
+            grade = (
+                "A"
+                if stability > 0.5
+                else "B"
+                if stability > 0.3
+                else "C"
+                if stability > 0.1
+                else "D"
+            )
+            lines.append(
+                f"  {fname}: IC평균={ic_mean:.3f}, 적중률={hit}%, "
+                f"안정성={stability:.2f} [{grade}]"
+            )
+
+    lines.append("")
+    lines.append("팩터별 롱숏 프리미엄:")
+    for fname in sorted(results["premium_by_factor"].keys()):
+        prems = results["premium_by_factor"][fname]
+        if prems:
+            prem_mean = np.mean(prems) * 100
+            lines.append(f"  {fname}: 평균 {prem_mean:+.2f}%/기간")
+
+    # Recommendations
+    lines.append("")
+    lines.append("권장사항:")
+    strong = [f for f, s in results["ic_stability"].items() if s > 0.3]
+    weak = [f for f, s in results["ic_stability"].items() if s < 0.1]
+    if strong:
+        lines.append(f"  강한 팩터: {', '.join(strong)} → 가중치 상향 권장")
+    if weak:
+        lines.append(f"  약한 팩터: {', '.join(weak)} → 가중치 하향 또는 제거 검토")
 
     return "\n".join(lines)

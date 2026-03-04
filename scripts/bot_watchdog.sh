@@ -3,7 +3,7 @@
 # 봇 프로세스 상태 + 409 Conflict 감지 + 자동 복구
 # 사용: crontab에 등록하거나 수동 실행
 
-cd /Users/juhodang/k-quant-system
+cd /Users/botddol/k-quant-system
 
 LOG_FILE="bot.log"
 WATCHDOG_LOG="data/watchdog.log"

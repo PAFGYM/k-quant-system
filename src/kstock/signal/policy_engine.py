@@ -85,6 +85,34 @@ def get_active_events(today: date | None = None, config: dict | None = None) -> 
             ev = _annual_to_event(policy)
             active.append(ev)
 
+    # v6.6: Crisis policies (전시/위기 정책 — 항상 최상단 표시)
+    for crisis in config.get("crisis_policies", []):
+        year = crisis.get("year", today.year)
+        if year == today.year:
+            ev = dict(crisis)
+            ev["start"] = f"{year}-01-01"
+            ev["end"] = f"{year}-12-31"
+            ev["_is_crisis"] = True  # 위기 정책 마커
+            active.insert(0, ev)  # 최상단 배치
+
+    # v6.6: crisis_events.yaml 에서 활성 위기 이벤트 로드
+    try:
+        crisis_path = Path("config/crisis_events.yaml")
+        if crisis_path.exists():
+            with open(crisis_path, encoding="utf-8") as f:
+                crisis_data = yaml.safe_load(f) or {}
+            for ce in crisis_data.get("active_crises", []):
+                if ce.get("severity", "") != "resolved":
+                    ev = {
+                        "name": ce.get("name", "위기 이벤트"),
+                        "effect": "crisis",
+                        "description": ce.get("description", ""),
+                        "_is_crisis": True,
+                    }
+                    active.insert(0, ev)
+    except Exception as e:
+        logger.debug("Crisis events load failed: %s", e)
+
     return active
 
 
@@ -173,7 +201,6 @@ def get_telegram_summary(today: date | None = None, config: dict | None = None) 
     if not events:
         return ""
 
-    lines = ["\U0001f3db\ufe0f 정책/정치 이벤트"]
     effect_emoji = {
         "bullish": "\U0001f7e2",
         "bullish_sector": "\U0001f7e2",
@@ -184,17 +211,40 @@ def get_telegram_summary(today: date | None = None, config: dict | None = None) 
         "volatile": "\U0001f534",
         "mixed": "\U0001f7e0",
         "bearish_selective": "\U0001f534",
+        "crisis": "\U0001f6a8",           # 🚨
+        "crisis_rotation": "\U0001f6a8",   # 🚨
     }
 
-    for ev in events:
-        emoji = effect_emoji.get(ev.get("effect", ""), "\u26aa")
-        name = ev.get("name", "")
-        desc = ev.get("description", "")
-        line = f"{emoji} {name}"
-        if desc:
-            first_line = desc.split("\n")[0].strip()
-            line += f"\n  {first_line}"
-        lines.append(line)
+    # 위기 이벤트와 일반 이벤트 분리
+    crisis_events = [e for e in events if e.get("_is_crisis")]
+    normal_events = [e for e in events if not e.get("_is_crisis")]
+
+    lines = []
+
+    # 위기 이벤트 먼저 표시 (있으면)
+    if crisis_events:
+        lines.append("\U0001f6a8 전시/위기 상황")
+        for ev in crisis_events:
+            name = ev.get("name", "")
+            desc = ev.get("description", "")
+            line = f"\U0001f534 {name}"
+            if desc:
+                first_line = desc.split("\n")[0].strip()
+                line += f"\n  {first_line}"
+            lines.append(line)
+
+    # 일반 정책 이벤트
+    if normal_events:
+        lines.append("\n\U0001f3db\ufe0f 정책/정치 이벤트")
+        for ev in normal_events:
+            emoji = effect_emoji.get(ev.get("effect", ""), "\u26aa")
+            name = ev.get("name", "")
+            desc = ev.get("description", "")
+            line = f"{emoji} {name}"
+            if desc:
+                first_line = desc.split("\n")[0].strip()
+                line += f"\n  {first_line}"
+            lines.append(line)
 
     adj = get_adjustments(today, config)
     if adj:

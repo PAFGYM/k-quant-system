@@ -6,6 +6,7 @@ AI 컨텍스트와 브리핑에 반영한다.
 v6.0: 초기 버전 — RSS 피드 기반
 v6.1: 위기 감지 + 매크로 선행지표 연동 + 적응형 빈도
 v6.2.2: 영문 뉴스 제목 한글 번역 자동화
+v8.2: YouTube 경제방송 확대 (10채널) + 자막 기반 내용 요약
 """
 from __future__ import annotations
 
@@ -43,6 +44,19 @@ RSS_FEEDS: list[dict] = [
         "lang": "ko",
         "category": "geopolitics",
     },
+    # 한국 경제 전문 매체
+    {
+        "name": "매일경제",
+        "url": "https://www.mk.co.kr/rss/30000001/",
+        "lang": "ko",
+        "category": "market",
+    },
+    {
+        "name": "매경 경제",
+        "url": "https://www.mk.co.kr/rss/30100041/",
+        "lang": "ko",
+        "category": "economy",
+    },
     # 글로벌 영문 뉴스
     {
         "name": "CNBC World",
@@ -55,6 +69,72 @@ RSS_FEEDS: list[dict] = [
         "url": "https://www.reutersagency.com/feed/?taxonomy=best-sectors&post_type=best",
         "lang": "en",
         "category": "market",
+    },
+]
+
+# ── 유튜브 경제방송 채널 RSS 피드 (v8.2 확대) ──────────────
+YOUTUBE_FEEDS: list[dict] = [
+    # 경제 전문 방송
+    {
+        "name": "삼프로TV",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UChlv4GSd7OQl3js-jkLOnFA",
+        "lang": "ko",
+        "category": "youtube_finance",
+    },
+    {
+        "name": "한국경제TV",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCF8AeLlUbEpKju6v1H6p8Eg",
+        "lang": "ko",
+        "category": "youtube_news",
+    },
+    {
+        "name": "SBS Biz",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCbMjg2EvXs_RUGW-KrdM3pw",
+        "lang": "ko",
+        "category": "youtube_news",
+    },
+    {
+        "name": "이데일리TV",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC8Sv6O3Ux8ePVqorx8aOBMg",
+        "lang": "ko",
+        "category": "youtube_news",
+    },
+    {
+        "name": "MTN머니투데이",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UClErHbdZKUnD1NyIUeQWvuQ",
+        "lang": "ko",
+        "category": "youtube_news",
+    },
+    {
+        "name": "매일경제TV",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCnfwIKyFYRuqZzzKBDt6JOA",
+        "lang": "ko",
+        "category": "youtube_news",
+    },
+    {
+        "name": "토마토증권통",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCgJ5pT6S2NuTVP-6-AlLZew",
+        "lang": "ko",
+        "category": "youtube_finance",
+    },
+    # 투자 분석 채널
+    {
+        "name": "뉴욕주민",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC3dYEYtdihZpsexdC9-qKDA",
+        "lang": "ko",
+        "category": "youtube_us_market",
+    },
+    {
+        "name": "월가아재",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCpqD9_OJNtF6suPpi6mOQCQ",
+        "lang": "ko",
+        "category": "youtube_finance",
+    },
+    {
+        "name": "박곰희TV",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCr7XsrSrvAn_WcU4kF99bbQ",
+        "lang": "ko",
+        "category": "youtube_finance",
     },
 ]
 
@@ -105,6 +185,8 @@ class NewsItem:
     lang: str = "ko"
     impact_score: int = 0  # 시장 영향도 (0-10)
     is_urgent: bool = False
+    content_summary: str = ""  # v8.2: 영상 내용 요약 (자막 기반)
+    video_id: str = ""  # v8.2: YouTube video ID
 
 
 def _compute_impact(title: str) -> tuple[int, bool]:
@@ -119,7 +201,7 @@ def _compute_impact(title: str) -> tuple[int, bool]:
 
 
 def _parse_rss(xml_text: str, feed: dict) -> list[NewsItem]:
-    """RSS XML 파싱 → NewsItem 리스트."""
+    """RSS XML 파싱 → NewsItem 리스트. RSS 2.0 + Atom(YouTube) 지원."""
     items = []
     try:
         root = ET.fromstring(xml_text)
@@ -128,9 +210,11 @@ def _parse_rss(xml_text: str, feed: dict) -> list[NewsItem]:
         if channel is not None:
             entries = channel.findall("item")
         else:
-            # Atom feed
+            # Atom feed (YouTube 등)
             ns = {"atom": "http://www.w3.org/2005/Atom"}
             entries = root.findall("atom:entry", ns)
+            if not entries:
+                entries = root.findall("{http://www.w3.org/2005/Atom}entry")
             if not entries:
                 entries = root.findall("entry")
 
@@ -139,35 +223,64 @@ def _parse_rss(xml_text: str, feed: dict) -> list[NewsItem]:
             link = ""
             pub_date = ""
 
-            # RSS 2.0
-            t = entry.find("title")
+            # Atom namespace 태그 시도 (YouTube Atom 피드용)
+            atom_ns = "{http://www.w3.org/2005/Atom}"
+            t = entry.find(f"{atom_ns}title")
+            if t is None:
+                t = entry.find("title")
             if t is not None and t.text:
                 title = t.text.strip()
-            l = entry.find("link")
+
+            # Link: Atom은 href 속성, RSS 2.0은 text
+            l = entry.find(f"{atom_ns}link")
+            if l is None:
+                l = entry.find("link")
             if l is not None:
-                link = (l.text or l.get("href", "")).strip()
+                link = (l.get("href", "") or l.text or "").strip()
+
+            # Published date
             p = entry.find("pubDate")
             if p is not None and p.text:
                 pub_date = p.text.strip()
-            # Atom fallback
             if not pub_date:
-                p2 = entry.find("published") or entry.find("updated")
-                if p2 is not None and p2.text:
-                    pub_date = p2.text.strip()
+                for tag in [f"{atom_ns}published", f"{atom_ns}updated",
+                            "published", "updated"]:
+                    p2 = entry.find(tag)
+                    if p2 is not None and p2.text:
+                        pub_date = p2.text.strip()
+                        break
 
             if not title:
                 continue
 
             impact, urgent = _compute_impact(title)
+
+            # YouTube 피드: 소스명에 🎬 아이콘 추가 + video_id 추출
+            source_name = feed["name"]
+            is_youtube = "youtube" in feed.get("category", "")
+            vid = ""
+            if is_youtube:
+                source_name = f"🎬{source_name}"
+                # YouTube video ID 추출 (yt:videoId 태그 또는 URL에서)
+                yt_ns = "{http://www.youtube.com/xml/schemas/2015}"
+                vid_el = entry.find(f"{yt_ns}videoId")
+                if vid_el is not None and vid_el.text:
+                    vid = vid_el.text.strip()
+                elif link:
+                    vid_match = re.search(r'[?&]v=([a-zA-Z0-9_-]{11})', link)
+                    if vid_match:
+                        vid = vid_match.group(1)
+
             items.append(NewsItem(
                 title=title,
-                source=feed["name"],
+                source=source_name,
                 url=link,
                 published=pub_date,
                 category=feed.get("category", "market"),
                 lang=feed.get("lang", "ko"),
                 impact_score=impact,
                 is_urgent=urgent,
+                video_id=vid,
             ))
 
     except ET.ParseError as e:
@@ -181,8 +294,11 @@ def _parse_rss(xml_text: str, feed: dict) -> list[NewsItem]:
 async def fetch_global_news(
     max_per_feed: int = 5,
     feeds: list[dict] | None = None,
+    include_youtube: bool = True,
 ) -> list[NewsItem]:
     """글로벌 뉴스 RSS 피드에서 헤드라인 수집 (병렬).
+
+    v6.6: YouTube 금융 채널 RSS도 함께 수집.
 
     Returns:
         NewsItem 리스트 (impact_score 내림차순 정렬)
@@ -190,6 +306,8 @@ async def fetch_global_news(
     import httpx
 
     target_feeds = feeds or RSS_FEEDS
+    if include_youtube and not feeds:
+        target_feeds = target_feeds + YOUTUBE_FEEDS
     all_items: list[NewsItem] = []
 
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
@@ -227,6 +345,7 @@ def format_news_for_context(items: list[NewsItem], max_items: int = 8) -> str:
     """AI 컨텍스트용 뉴스 포맷.
 
     시스템 프롬프트에 주입할 간결한 형식.
+    v8.2: YouTube 영상 내용 요약도 포함.
     """
     if not items:
         return "글로벌 이슈 없음"
@@ -243,12 +362,15 @@ def format_news_for_context(items: list[NewsItem], max_items: int = 8) -> str:
         urgency = "🚨" if item.is_urgent else "📰"
         impact = f"[영향:{item.impact_score}/10]" if item.impact_score > 0 else ""
         lines.append(f"{urgency} [{item.source}] {item.title} {impact}")
+        if item.content_summary:
+            # 컨텍스트에 요약 핵심 150자 포함
+            lines.append(f"   → {item.content_summary[:150]}")
 
     return "\n".join(lines) if lines else "글로벌 이슈 없음"
 
 
 def format_news_for_telegram(items: list[NewsItem], max_items: int = 10) -> str:
-    """텔레그램 알림용 뉴스 포맷."""
+    """텔레그램 알림용 뉴스 포맷 (v8.2: YouTube 내용 요약 포함)."""
     if not items:
         return ""
 
@@ -266,11 +388,25 @@ def format_news_for_telegram(items: list[NewsItem], max_items: int = 10) -> str:
         for item in urgent[:5]:
             lines.append(f"  {item.title}")
             lines.append(f"  — {item.source}")
+            if item.content_summary:
+                lines.append(f"  📝 {item.content_summary[:200]}")
 
-    if normal:
+    # YouTube 요약이 있는 항목 우선 표시
+    yt_summarized = [i for i in normal if i.content_summary]
+    yt_other = [i for i in normal if not i.content_summary and "🎬" in i.source]
+    non_yt = [i for i in normal if "🎬" not in i.source]
+
+    if yt_summarized:
+        lines.append("\n🎬 경제방송 요약")
+        for item in yt_summarized[:5]:
+            lines.append(f"\n  [{item.source}] {item.title}")
+            lines.append(f"  📝 {item.content_summary}")
+
+    remaining = max_items - len(urgent[:5]) - len(yt_summarized[:5])
+    rest = yt_other + non_yt
+    if rest and remaining > 0:
         lines.append("\n📰 주요 뉴스")
-        remaining = max_items - len(urgent[:5])
-        for item in normal[:remaining]:
+        for item in rest[:remaining]:
             lines.append(f"  {item.title}")
             lines.append(f"  — {item.source}")
 
@@ -531,3 +667,158 @@ def format_crisis_alert(signal: CrisisSignal) -> str:
         lines.append("\n🚨 포트폴리오 긴급 점검을 권장합니다")
 
     return "\n".join(lines)
+
+
+# ── YouTube 영상 자막 추출 + AI 내용 요약 (v8.2) ──────────
+
+def _extract_video_id(url: str) -> str:
+    """YouTube URL에서 video_id 추출."""
+    m = re.search(r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})', url)
+    return m.group(1) if m else ""
+
+
+def fetch_transcript(video_id: str, max_chars: int = 8000) -> str:
+    """YouTube 자막(transcript) 추출.
+
+    한국어 자막 우선, 영어 순으로 시도.
+    youtube_transcript_api v1.2+ 인스턴스 API 사용.
+    """
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+
+        api = YouTubeTranscriptApi()
+
+        # 한국어 → 영어 순서로 시도
+        for lang in [["ko"], ["en"]]:
+            try:
+                result = api.fetch(video_id, languages=lang)
+                texts = [seg.text for seg in result if hasattr(seg, "text")]
+                if texts:
+                    full_text = " ".join(texts)
+                    return full_text[:max_chars]
+            except Exception:
+                continue
+
+        return ""
+
+    except Exception as e:
+        logger.debug("Transcript fetch failed for %s: %s", video_id, e)
+        return ""
+
+
+async def summarize_transcript(
+    transcript: str,
+    title: str,
+    source: str,
+) -> str:
+    """AI로 자막 내용을 경제/투자 관점으로 요약.
+
+    비용: ~$0.002/호출 (Haiku, ~2000 토큰 입력)
+    """
+    if not transcript or len(transcript) < 50:
+        return ""
+
+    import httpx
+
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ""
+
+    # 자막 텍스트를 3000자로 제한 (비용 절감)
+    text = transcript[:3000]
+
+    prompt = (
+        f"다음은 [{source}]의 경제/투자 유튜브 영상 '{title}'의 자막입니다.\n\n"
+        f"{text}\n\n"
+        "위 내용을 경제/투자 관점에서 3~5줄로 핵심 요약해줘.\n"
+        "규칙:\n"
+        "- 언급된 종목명, 수치, 전망을 빠짐없이 포함\n"
+        "- 시장에 미치는 영향(호재/악재)을 명시\n"
+        "- 불필요한 인사말/광고 내용 제외\n"
+        "- 한국어로, 간결하게"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 400,
+                    "temperature": 0.2,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if resp.status_code != 200:
+                logger.debug("Summary API error %d", resp.status_code)
+                return ""
+
+            result = resp.json()["content"][0]["text"]
+            # 토큰 추적
+            try:
+                from kstock.core.token_tracker import track_usage_global
+                track_usage_global(
+                    provider="anthropic",
+                    model="claude-haiku-4-5-20251001",
+                    function_name="youtube_summary",
+                    response=resp,
+                )
+            except Exception:
+                pass
+            return result.strip()
+
+    except Exception as e:
+        logger.debug("Summary generation failed: %s", e)
+        return ""
+
+
+async def enrich_youtube_summaries(
+    items: list[NewsItem],
+    max_summaries: int = 5,
+) -> list[NewsItem]:
+    """YouTube 영상 뉴스에 자막 기반 내용 요약을 추가.
+
+    RSS로 수집된 YouTube 항목 중 최신 max_summaries개에 대해
+    자막을 추출하고 AI 요약을 생성한다.
+
+    Args:
+        items: NewsItem 리스트 (YouTube video_id가 있는 항목)
+        max_summaries: 요약할 최대 영상 수 (비용 제어)
+    """
+    yt_items = [it for it in items if it.video_id]
+    if not yt_items:
+        return items
+
+    count = 0
+    for item in yt_items:
+        if count >= max_summaries:
+            break
+
+        # 자막 추출 (동기 — youtube_transcript_api는 동기 라이브러리)
+        transcript = await asyncio.get_event_loop().run_in_executor(
+            None, fetch_transcript, item.video_id,
+        )
+
+        if not transcript:
+            continue
+
+        # AI 요약
+        summary = await summarize_transcript(
+            transcript, item.title, item.source.replace("🎬", ""),
+        )
+
+        if summary:
+            item.content_summary = summary
+            count += 1
+            logger.info(
+                "YouTube summary: [%s] %s (%d chars)",
+                item.source, item.title[:30], len(summary),
+            )
+
+    logger.info("Enriched %d/%d YouTube items with summaries", count, len(yt_items))
+    return items

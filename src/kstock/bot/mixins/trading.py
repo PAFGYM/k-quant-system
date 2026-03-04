@@ -644,12 +644,29 @@ class TradingMixin:
             if hasattr(macro, "kosdaq") and macro.kosdaq > 0:
                 parts.insert(1, f"코스닥={macro.kosdaq:,.0f}")
             parts.append(f"환율={macro.usdkrw:,.0f}원")
+            if hasattr(macro, "koru_price") and macro.koru_price > 0:
+                parts.append(f"KORU=${macro.koru_price:.2f}")
             market_text = ", ".join(parts)
         except Exception:
             logger.debug("_action_manager_analysis macro snapshot failed", exc_info=True)
             market_text = ""
 
-        report = await get_manager_analysis(mgr_type, type_holdings, market_text)
+        # 공유 컨텍스트 빌드 (위기/뉴스/교훈/포트폴리오)
+        shared_context = None
+        try:
+            from kstock.bot.context_builder import build_manager_shared_context
+            shared_context = await build_manager_shared_context(
+                self.db, self.macro_client,
+            )
+        except Exception:
+            logger.debug("_action_manager_view shared context build failed", exc_info=True)
+
+        current_alert = getattr(self, '_alert_mode', 'normal')
+        report = await get_manager_analysis(
+            mgr_type, type_holdings, market_text,
+            shared_context=shared_context,
+            alert_mode=current_alert,
+        )
 
         # 후속 액션 버튼
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -958,7 +975,8 @@ class TradingMixin:
         return total_eval, total_invested
 
     def _format_balance_lines(self, holdings, total_eval, total_invested) -> list[str]:
-        """잔고 현황 텍스트 포맷."""
+        """잔고 현황 텍스트 포맷 — 시장 상황 반영 액션 포함."""
+        alert_mode = getattr(self, '_alert_mode', 'normal')
         total_pnl = total_eval - total_invested
         total_pnl_rate = (total_pnl / total_invested * 100) if total_invested > 0 else 0
         pnl_sign = "+" if total_pnl >= 0 else ""
@@ -982,10 +1000,25 @@ class TradingMixin:
         lines = [
             f"\U0001f4b0 주호님 잔고 현황",
             f"\u2500" * 25,
+        ]
+
+        # 전시/위기 상황 헤더
+        if alert_mode == "wartime":
+            lines.append(
+                "\U0001f534 전시 경계 모드 \u2014 국내 증시 전반 하락장\n"
+                "   손절 강화(-5%) | 신규 매수 자제 | 현금 비중 확대"
+            )
+        elif alert_mode == "elevated":
+            lines.append(
+                "\U0001f7e0 경계 모드 \u2014 변동성 확대 구간\n"
+                "   손절 기준 -6% | 분할 매수 권장"
+            )
+
+        lines.extend([
             f"\U0001f4b5 총 평가금액: {total_eval:,.0f}원",
             f"\U0001f4b4 총 투자금액: {total_invested:,.0f}원",
             f"\U0001f4b0 총 손익: {pnl_arrow} {pnl_sign}{total_pnl:,.0f}원 ({pnl_sign}{total_pnl_rate:.2f}%)",
-        ]
+        ])
         if margin_count > 0:
             lines.append(f"\U0001f4b3 신용/마진: {margin_count}종목 ({margin_eval:,.0f}원)")
         lines.extend(["", f"보유종목 ({len(holdings)}개)", "\u2500" * 25])
@@ -1039,8 +1072,52 @@ class TradingMixin:
                 day_sign = "+" if day_chg_pct > 0 else ""
                 line += f"\n   오늘 {day_emoji} {day_sign}{day_chg:,.0f}원 ({day_sign}{day_chg_pct:.1f}%)"
 
+            # 상황별 종목 액션 가이드
+            if alert_mode == "wartime":
+                stop_price = bp * 0.95
+                action_tag = self._wartime_holding_action(pnl, h)
+                line += f"\n   {action_tag} | 전시 손절: {stop_price:,.0f}원"
+            elif alert_mode == "elevated":
+                stop_price = bp * 0.94
+                if pnl < -5:
+                    line += f"\n   \u26a0\ufe0f 손절 검토 | 경계 손절: {stop_price:,.0f}원"
+                elif pnl < 0:
+                    line += f"\n   \U0001f6e1 보유 관망 | 경계 손절: {stop_price:,.0f}원"
+
             lines.append(line)
         return lines
+
+    @staticmethod
+    def _wartime_holding_action(pnl_pct: float, holding: dict) -> str:
+        """전시 모드 종목별 액션 태그 결정."""
+        from kstock.core.risk_policy import DEFENSIVE_SECTORS, CYCLICAL_SECTORS
+        sector = str(holding.get("sector", "") or "")
+        horizon = str(holding.get("holding_type", "") or holding.get("horizon", "") or "")
+
+        # 장기투자는 보유 유지 기본
+        if horizon in ("long_term", "position"):
+            if pnl_pct < -15:
+                return "\U0001f534 장기 보유 — 추가 하락 시 분할매수 검토"
+            return "\U0001f7e2 장기 보유 유지 — 전시 변동 무시"
+
+        # 경기민감 섹터 → 축소 검토
+        if any(s in sector for s in CYCLICAL_SECTORS):
+            if pnl_pct < -5:
+                return "\U0001f534 경기민감 — 축소/손절 검토"
+            return "\U0001f7e0 경기민감 — 비중 축소 검토"
+
+        # 방어 섹터 → 보유 유지
+        if any(s in sector for s in DEFENSIVE_SECTORS):
+            return "\U0001f7e2 방어섹터 — 보유 유지"
+
+        # 일반 종목
+        if pnl_pct < -8:
+            return "\U0001f534 전시 대응 — 손절 또는 분할매수 결정 필요"
+        if pnl_pct < -3:
+            return "\U0001f7e0 전시 관망 — 추가 하락 대비"
+        if pnl_pct > 5:
+            return "\U0001f7e2 이익 실현 검토 — 전시 변동성 활용"
+        return "\U0001f6e1 전시 보유 — 관망"
 
     def _build_balance_buttons(self, holdings: list[dict]) -> list[list]:
         """잔고 화면용 InlineKeyboard 버튼 구성."""

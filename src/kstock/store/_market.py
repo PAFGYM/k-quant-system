@@ -587,8 +587,8 @@ class MarketMixin:
                 conn.execute(
                     "INSERT INTO global_news "
                     "(title, source, url, category, lang, impact_score, "
-                    "is_urgent, published, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "is_urgent, published, created_at, content_summary, video_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         item.get("title", ""),
                         item.get("source", ""),
@@ -599,6 +599,8 @@ class MarketMixin:
                         1 if item.get("is_urgent") else 0,
                         item.get("published", ""),
                         now,
+                        item.get("content_summary", ""),
+                        item.get("video_id", ""),
                     ),
                 )
                 saved += 1

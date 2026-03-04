@@ -10,11 +10,21 @@ import traceback
 
 logger = logging.getLogger(__name__)
 
-# Claude CLI path
-CLAUDE_CLI = "/Users/juhodang/.nvm/versions/node/v20.20.0/bin/claude"
+# Claude CLI path (auto-detect)
+_CLAUDE_CLI_CANDIDATES = [
+    "/Users/botddol/.local/bin/claude",
+    "/Users/botddol/.nvm/versions/node/v20.20.0/bin/claude",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+]
+
+CLAUDE_CLI = next(
+    (p for p in _CLAUDE_CLI_CANDIDATES if os.path.exists(p)),
+    _CLAUDE_CLI_CANDIDATES[0],
+)
 
 # Project directory
-PROJECT_DIR = "/Users/juhodang/k-quant-system"
+PROJECT_DIR = "/Users/botddol/k-quant-system"
 
 # Maximum execution time (seconds)
 MAX_TIMEOUT = 600  # 10 minutes
@@ -184,59 +194,61 @@ class RemoteClaudeMixin:
     async def _menu_claude_code(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """💻 클로드 버튼 — 자유 대화 모드 진입 + AI 빠른 기능 버튼.
+        """💻 클로드 버튼 — 순수 AI 에이전트 대화 모드.
 
-        v6.2.2: 모바일 최적화 UX — 카테고리별 빠른 명령 + 작업 지시 안내 강화.
+        v8.2: 버튼 제거, 현재 시장 상황 자동 주입 + 자유 대화만.
         """
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         context.user_data["claude_mode"] = True
         context.user_data["claude_turn"] = 0
 
-        # 경계 모드 표시
-        alert_label = ""
-        if hasattr(self, '_alert_mode') and self._alert_mode != "normal":
-            acfg = self._ALERT_MODES.get(self._alert_mode, {})
-            alert_label = f"\n{acfg.get('label', '')} 경계 모드 활성화"
+        # 현재 시장 상황 자동 수집
+        market_ctx = ""
+        try:
+            macro = await self.macro_client.get_snapshot()
+            vix = getattr(macro, "vix", 0)
+            spx_chg = getattr(macro, "spx_change_pct", 0)
+            krw = getattr(macro, "usdkrw", 0)
 
-        buttons = [
-            # Row 1: 가장 많이 쓰는 AI 분석
-            [
-                InlineKeyboardButton("🎯 4매니저 추천", callback_data="quick_q:mgr4"),
-                InlineKeyboardButton("📊 시장 분석", callback_data="quick_q:market"),
-            ],
-            # Row 2: 포트폴리오 + 수급
-            [
-                InlineKeyboardButton("💼 포트폴리오", callback_data="quick_q:portfolio"),
-                InlineKeyboardButton("🏢 외인/기관", callback_data="quick_q:flow"),
-            ],
-            # Row 3: 매수/리스크
-            [
-                InlineKeyboardButton("🔥 매수 추천", callback_data="quick_q:buy_pick"),
-                InlineKeyboardButton("⚠️ 리스크 점검", callback_data="quick_q:risk"),
-            ],
-            # Row 4: 경계모드 + 봇 상태
-            [
-                InlineKeyboardButton("🚨 경계모드", callback_data="adm:alert"),
-                InlineKeyboardButton("📋 봇 상태", callback_data="adm:status"),
-            ],
-        ]
+            alert_mode = getattr(self, '_alert_mode', 'normal')
+            alert_labels = {"normal": "🟢 일상", "elevated": "🟡 긴장", "wartime": "🔴 전시"}
+            alert_str = alert_labels.get(alert_mode, alert_mode)
+
+            market_ctx = (
+                f"\n📊 현재 시장\n"
+                f"  VIX: {vix:.1f} | S&P500: {spx_chg:+.1f}%\n"
+                f"  환율: {krw:,.0f}원 | 경계: {alert_str}\n"
+            )
+
+            # 보유종목 요약
+            holdings = await self._load_holdings_with_fallback()
+            if holdings:
+                total_pnl = 0
+                losing = 0
+                for h in holdings:
+                    pnl = h.get("pnl_pct", 0)
+                    total_pnl += pnl
+                    if pnl < -5:
+                        losing += 1
+                avg_pnl = total_pnl / len(holdings) if holdings else 0
+                market_ctx += (
+                    f"  보유: {len(holdings)}종목 | 평균수익: {avg_pnl:+.1f}%\n"
+                )
+                if losing > 0:
+                    market_ctx += f"  ⚠️ -5% 이하: {losing}종목\n"
+        except Exception:
+            pass
+
         await update.message.reply_text(
-            f"🤖 Claude AI 모드{alert_label}\n"
-            f"{'━' * 20}\n\n"
-            f"💬 주식 질문 → AI 즉답\n"
-            f"🛠 작업 지시 → 코드 수정/구현 자동 실행\n"
-            f"📸 스크린샷 → 이미지 분석\n\n"
-            f"예시 작업 지시:\n"
-            f"  '급등 감지 임계값 1%로 바꿔줘'\n"
-            f"  '전시 모드로 변경해줘'\n"
-            f"  '매도 전략 로직 개선해줘'\n\n"
-            f"⬇️ 빠른 AI 분석:",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-        # 하단 키보드는 유지
-        await update.message.reply_text(
-            "⌨️ 아래 메뉴로 다른 기능도 이용 가능합니다",
-            reply_markup=CLAUDE_MODE_MENU,
+            f"🤖 AI 에이전트{market_ctx}\n"
+            f"{'━' * 20}\n"
+            f"무엇이든 물어보세요. 현재 시장 상황을\n"
+            f"반영해서 답변합니다.\n\n"
+            f"예시:\n"
+            f"  '지금 내 종목 어떻게 해야해?'\n"
+            f"  '이 장에서 뭘 사야해?'\n"
+            f"  '손절 기준 다시 잡아줘'\n"
+            f"  '시장 전망 분석해줘'",
+            reply_markup=get_reply_markup(context),
         )
 
     async def _exit_claude_mode(

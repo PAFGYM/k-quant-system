@@ -62,6 +62,13 @@ class MacroSnapshot:
     # v3.5: Fear & Greed composite (0-100)
     fear_greed_score: float = 50.0
     fear_greed_label: str = "중립"
+    # v6.6: 미국 레버리지 ETF 시그널
+    koru_price: float = 0.0       # Direxion 3x Korea Bull
+    koru_change_pct: float = 0.0
+    soxl_price: float = 0.0       # Direxion 3x Semiconductor Bull
+    soxl_change_pct: float = 0.0
+    tqqq_price: float = 0.0       # ProShares 3x NASDAQ-100
+    tqqq_change_pct: float = 0.0
 
 
 def _snapshot_to_json(snap: MacroSnapshot) -> str:
@@ -245,6 +252,7 @@ class MacroClient:
         symbols = [
             "^VIX", "^GSPC", "^IXIC", "KRW=X", "^TNX", "DX-Y.NYB",
             "BTC-USD", "GC=F", "^KS11", "^KQ11",
+            "KORU", "SOXL", "TQQQ",  # v6.6: 미국 레버리지 ETF
         ]
         data = yf.download(symbols, period="5d", group_by="ticker", progress=False)
 
@@ -307,6 +315,25 @@ class MacroClient:
             kosdaq_prev = float(kosdaq_hist.iloc[-2])
             kosdaq_change = (kosdaq_val - kosdaq_prev) / kosdaq_prev * 100 if kosdaq_prev > 0 else 0
 
+        # v6.6: 미국 레버리지 ETF
+        def _etf_data(ticker_key: str):
+            try:
+                if ticker_key not in data.columns.get_level_values(0):
+                    return 0.0, 0.0
+                hist = data[ticker_key]["Close"].dropna()
+                if len(hist) < 2:
+                    return 0.0, 0.0
+                price = float(hist.iloc[-1])
+                prev = float(hist.iloc[-2])
+                chg = (price - prev) / prev * 100 if prev > 0 else 0
+                return price, chg
+            except Exception:
+                return 0.0, 0.0
+
+        koru_price, koru_change = _etf_data("KORU")
+        soxl_price, soxl_change = _etf_data("SOXL")
+        tqqq_price, tqqq_change = _etf_data("TQQQ")
+
         regime = self._classify_regime(spx_change, vix, usdkrw_change)
 
         # Fear & Greed composite score (0=극도공포, 100=극도탐욕)
@@ -350,6 +377,13 @@ class MacroClient:
             dxy_change_pct=round(dxy_change, 2),
             fear_greed_score=fg_score,
             fear_greed_label=fg_label,
+            # v6.6: 미국 레버리지 ETF
+            koru_price=round(koru_price, 2),
+            koru_change_pct=round(koru_change, 2),
+            soxl_price=round(soxl_price, 2),
+            soxl_change_pct=round(soxl_change, 2),
+            tqqq_price=round(tqqq_price, 2),
+            tqqq_change_pct=round(tqqq_change, 2),
         )
 
     @staticmethod
