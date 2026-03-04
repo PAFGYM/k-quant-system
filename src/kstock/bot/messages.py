@@ -1162,3 +1162,164 @@ def format_aggressive_score_signal(score_val: float, signal: str) -> str:
     if score_val >= 110:
         return f"\U0001f7e2 {USER_NAME}, \uad1c\ucc2e\uc740 \uae30\ud68c\uc785\ub2c8\ub2e4. \uc2a4\uc719 \ub9e4\uc218! ({score_val:.0f}\uc810)"
     return format_v3_score_signal(score_val, signal)
+
+
+# ── v8.5: 온보딩 + 가이드 + 오늘의 할 일 ────────────────────────
+
+ONBOARDING_STEPS = [
+    {
+        "id": 1, "title": "종목 분석", "emoji": "📊",
+        "desc": (
+            "종목명만 입력하면 AI가 즉시 분석합니다.\n"
+            "삼성전자, SK하이닉스 등 어떤 종목이든 OK!"
+        ),
+        "try_label": "📊 삼성전자 분석 체험",
+        "try_cb": "onboard:try:analysis",
+    },
+    {
+        "id": 2, "title": "잔고 확인", "emoji": "💰",
+        "desc": (
+            "보유종목 수익률과 매도/보유 가이드를 확인합니다.\n"
+            "전담 매니저가 종목별 코멘트를 달아줍니다."
+        ),
+        "try_label": "💰 잔고 보기",
+        "try_cb": "onboard:try:balance",
+    },
+    {
+        "id": 3, "title": "즐겨찾기", "emoji": "⭐",
+        "desc": (
+            "75종목을 카테고리별로 관리하는 대시보드입니다.\n"
+            "보유종목 표시, 매니저 분류, 자동 편입까지!"
+        ),
+        "try_label": "⭐ 즐겨찾기 열기",
+        "try_cb": "onboard:try:favorites",
+    },
+    {
+        "id": 4, "title": "시장 현황", "emoji": "📈",
+        "desc": (
+            "미국/한국 시장 + VIX + 환율 + 공포탐욕 지수를\n"
+            "한 화면에서 확인합니다."
+        ),
+        "try_label": "📈 시황 보기",
+        "try_cb": "onboard:try:market",
+    },
+    {
+        "id": 5, "title": "AI 질문", "emoji": "💬",
+        "desc": (
+            "투자 관련 아무 질문이나 하면 AI가 답변합니다.\n"
+            "'반도체 전망?', '현금 비중 늘려야 해?' 등"
+        ),
+        "try_label": "💬 AI에게 질문하기",
+        "try_cb": "onboard:try:ai",
+    },
+    {
+        "id": 6, "title": "투자 매니저", "emoji": "🤖",
+        "desc": (
+            "4명의 전설적 투자자가 보유종목을 분석합니다.\n"
+            "⚡리버모어 🔥오닐 📊린치 💎버핏"
+        ),
+        "try_label": "🤖 매니저 보기",
+        "try_cb": "onboard:try:manager",
+    },
+    {
+        "id": 7, "title": "자동 알림", "emoji": "🔔",
+        "desc": (
+            "매일 아침 브리핑, 장중 급등/급락 알림,\n"
+            "매도 타이밍이 자동으로 옵니다.\n\n"
+            "07:30 모닝브리핑 | 09~15시 실시간 알림\n"
+            "14:30 단타청산 | 16:00 일일보고서 | 21:00 자가진단"
+        ),
+        "try_label": "🔔 알림 설정 확인",
+        "try_cb": "onboard:try:alerts",
+    },
+]
+
+MENU_TIPS: dict[str, str] = {
+    "analysis": "💡 종목명을 입력하면 AI가 즉시 매수/매도 판단을 해드립니다",
+    "market": "💡 신호등(🟢🟡🔴)으로 오늘 공격/방어 전략을 확인하세요",
+    "balance": "💡 보유종목별 전담 매니저가 매도/보유 의견을 드립니다",
+    "favorites": "💡 카테고리 탭으로 75종목을 한눈에 관리하세요",
+    "ai_chat": "💡 투자 질문을 자유롭게 입력하세요. AI가 답변합니다",
+    "reports": "💡 최신 증권사 리포트와 섹터별 전망을 확인하세요",
+    "more": "💡 급등주/스윙/매집탐지 등 고급 기능을 사용해보세요",
+}
+
+
+def format_onboarding_step(step: dict, current: int, total: int) -> str:
+    """온보딩 스텝 1개를 진행바와 함께 포맷."""
+    filled = current
+    empty = total - current
+    bar = "\u2588" * filled + "\u2591" * empty
+    return (
+        f"\U0001f4d6 {USER_NAME}, K-Quant 둘러보기\n"
+        f"[{bar}] {current}/{total}\n"
+        f"{'━' * 22}\n\n"
+        f"{step['emoji']} Step {step['id']}: {step['title']}\n\n"
+        f"{step['desc']}\n"
+    )
+
+
+def format_onboarding_complete() -> str:
+    """온보딩 완료 메시지."""
+    return (
+        f"\U0001f389 {USER_NAME}, 온보딩 완료!\n"
+        f"{'━' * 22}\n\n"
+        "K-Quant의 핵심 기능을 모두 둘러보셨습니다.\n\n"
+        "\U0001f4cc 매일 07:30 모닝 브리핑으로 하루가 시작됩니다\n"
+        "\U0001f4cc 장중에는 자동 알림이 매도/매수 타이밍을 알려줍니다\n"
+        "\U0001f4cc 궁금한 건 아무때나 AI에게 물어보세요\n"
+        "\U0001f4cc 오늘의 할 일에서 해야 할 액션을 확인하세요\n\n"
+        "이제 메인 메뉴에서 자유롭게 사용해보세요! \U0001f447"
+    )
+
+
+def format_daily_actions(actions: list[dict], alert_mode: str = "normal") -> str:
+    """오늘의 할 일 포맷."""
+    mode_label = {
+        "normal": "\U0001f7e2 일상",
+        "elevated": "\U0001f7e1 경계",
+        "wartime": "\U0001f534 전시",
+    }.get(alert_mode, "")
+
+    if not actions:
+        return (
+            f"\U0001f4cb {USER_NAME}, 오늘의 할 일\n"
+            f"{'━' * 22}\n"
+            f"경계 모드: {mode_label}\n\n"
+            "오늘은 특별한 조치가 필요 없습니다.\n"
+            "시장 상황을 지켜보세요! \U0001f440"
+        )
+
+    priority_labels = {
+        "urgent": "\U0001f534 긴급 조치",
+        "caution": "\U0001f7e1 주의 필요",
+        "opportunity": "\U0001f7e2 매수 기회",
+        "check": "\u26aa 확인 사항",
+    }
+
+    lines = [
+        f"\U0001f4cb {USER_NAME}, 오늘의 할 일",
+        "━" * 22,
+        f"경계 모드: {mode_label}",
+        "",
+    ]
+
+    for p in ("urgent", "caution", "opportunity", "check"):
+        items = [a for a in actions if a.get("priority") == p]
+        if not items:
+            continue
+        lines.append(priority_labels[p])
+        for item in items:
+            lines.append(f"  {item['name']}: {item['action']}")
+            lines.append(f"    \u2514 {item['reason']}")
+        lines.append("")
+
+    cnt = {p: sum(1 for a in actions if a.get("priority") == p)
+           for p in ("urgent", "caution", "opportunity", "check")}
+    lines.append("━" * 22)
+    lines.append(
+        f"총 {len(actions)}건 | "
+        f"\U0001f534{cnt['urgent']} \U0001f7e1{cnt['caution']} "
+        f"\U0001f7e2{cnt['opportunity']} \u26aa{cnt['check']}"
+    )
+    return "\n".join(lines)

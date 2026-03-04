@@ -571,6 +571,10 @@ class SchedulerMixin:
 
             # v3.9: 매니저별 보유종목 분석 (holding_type별 그룹핑)
             await self._send_manager_briefings(context, macro)
+
+            # v8.5: 오늘의 할 일 (Daily Action Planner)
+            await self._send_daily_actions(context, macro)
+
             self.db.upsert_job_run("morning_briefing", _today(), status="success")
             logger.info("Morning briefing sent")
         except Exception as e:
@@ -619,6 +623,129 @@ class SchedulerMixin:
             logger.info("Manager briefings sent: %s", list(by_type.keys()))
         except Exception as e:
             logger.debug("Manager briefings error: %s", e)
+
+    async def _generate_daily_actions(self, macro) -> list[dict]:
+        """보유종목 + 시장 상황 기반 오늘의 할 일 생성."""
+        actions = []
+        holdings = self.db.get_active_holdings()
+        alert_mode = getattr(self, '_alert_mode', 'normal')
+
+        for h in holdings:
+            ticker = h.get("ticker", "")
+            name = (h.get("name", "") or ticker)[:8]
+            buy_price = float(h.get("buy_price", 0) or 0)
+            if buy_price <= 0:
+                continue
+
+            cur = float(h.get("current_price", 0) or 0)
+            try:
+                cur = (await self._get_price(ticker, base_price=buy_price)) or cur
+            except Exception:
+                pass
+            if cur <= 0:
+                continue
+
+            pnl = (cur - buy_price) / buy_price * 100
+            stop = float(h.get("stop_price", buy_price * 0.95) or buy_price * 0.95)
+            target = float(h.get("target_1", buy_price * 1.03) or buy_price * 1.03)
+            ht = h.get("holding_type", "swing")
+
+            # 긴급: 손절가 도달
+            if cur <= stop or pnl <= -5:
+                actions.append({
+                    "priority": "urgent", "ticker": ticker, "name": name,
+                    "action": "손절 필요",
+                    "reason": f"{pnl:+.1f}% (손절가 도달)",
+                    "callback_data": f"detail:{ticker}",
+                })
+            # 긴급: 전시모드 -3%
+            elif alert_mode == "wartime" and pnl <= -3:
+                actions.append({
+                    "priority": "urgent", "ticker": ticker, "name": name,
+                    "action": "전시 손절 검토",
+                    "reason": f"{pnl:+.1f}% (전시 경계모드 -3%)",
+                    "callback_data": f"detail:{ticker}",
+                })
+            # 주의: 목표가 근접
+            elif pnl >= 3 and cur >= target * 0.98:
+                actions.append({
+                    "priority": "caution", "ticker": ticker, "name": name,
+                    "action": "1차 익절 검토",
+                    "reason": f"+{pnl:.1f}% 수익, 목표가 근접",
+                    "callback_data": f"detail:{ticker}",
+                })
+            # 주의: 단타 보유일 초과
+            elif ht == "scalp" and pnl < 3:
+                actions.append({
+                    "priority": "caution", "ticker": ticker, "name": name,
+                    "action": "단타 청산 검토",
+                    "reason": f"단타 종목 {pnl:+.1f}%",
+                    "callback_data": f"detail:{ticker}",
+                })
+            # 주의: 큰 변동
+            elif abs(pnl) >= 5:
+                p = "caution"
+                act = "큰 수익 관리" if pnl > 0 else "큰 손실 점검"
+                actions.append({
+                    "priority": p, "ticker": ticker, "name": name,
+                    "action": act,
+                    "reason": f"{pnl:+.1f}%",
+                    "callback_data": f"detail:{ticker}",
+                })
+
+        # 기회: 시장 레짐
+        try:
+            regime = detect_regime(macro)
+            if regime.mode in ("risk_on", "bubble_attack"):
+                actions.append({
+                    "priority": "opportunity", "ticker": "", "name": "시장 레짐",
+                    "action": "공격 투자 환경",
+                    "reason": f"{regime.emoji} {regime.label} — 신규 매수 기회",
+                    "callback_data": "fav:tab::0",
+                })
+        except Exception:
+            pass
+
+        # 확인: 포트폴리오 점검
+        if len(holdings) >= 2:
+            actions.append({
+                "priority": "check", "ticker": "", "name": "포트폴리오",
+                "action": "비중 점검",
+                "reason": f"보유 {len(holdings)}종목 밸런스 확인",
+                "callback_data": "fav:tab:holding:0",
+            })
+
+        # 정렬
+        order = {"urgent": 0, "caution": 1, "opportunity": 2, "check": 3}
+        actions.sort(key=lambda a: order.get(a.get("priority", ""), 4))
+        return actions
+
+    async def _send_daily_actions(self, context, macro) -> None:
+        """오늘의 할 일 메시지 전송."""
+        try:
+            actions = await self._generate_daily_actions(macro)
+            alert_mode = getattr(self, '_alert_mode', 'normal')
+            text = format_daily_actions(actions, alert_mode=alert_mode)
+
+            buttons = []
+            for a in actions[:6]:
+                cb = a.get("callback_data", "")
+                if cb:
+                    emoji = {"urgent": "\U0001f534", "caution": "\U0001f7e1",
+                             "opportunity": "\U0001f7e2", "check": "\u26aa"
+                             }.get(a["priority"], "")
+                    label = f"{emoji} {a['name']}: {a['action']}"[:40]
+                    buttons.append([InlineKeyboardButton(label, callback_data=cb)])
+            buttons.append(make_feedback_row("daily_actions"))
+
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text=text,
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            logger.info("Daily actions sent: %d items", len(actions))
+        except Exception as e:
+            logger.debug("Daily actions failed: %s", e)
 
     async def _generate_morning_briefing_v2(
         self, macro: MacroSnapshot, regime_mode: dict

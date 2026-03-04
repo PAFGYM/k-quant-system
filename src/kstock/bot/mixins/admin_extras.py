@@ -874,6 +874,8 @@ class AdminExtrasMixin:
              InlineKeyboardButton("📡 KIS설정", callback_data="menu:kis_setup")],
             [InlineKeyboardButton("🔔 알림 설정", callback_data="menu:notification"),
              InlineKeyboardButton("⚙️ 최적화", callback_data="menu:optimize")],
+            [InlineKeyboardButton("📋 오늘의 할 일", callback_data="menu:daily_actions"),
+             InlineKeyboardButton("📖 온보딩", callback_data="menu:onboarding")],
             [InlineKeyboardButton("🛠 관리자", callback_data="menu:admin")],
             [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:more")],
         ]
@@ -2054,5 +2056,168 @@ class AdminExtrasMixin:
                 await query.edit_message_text("\n".join(lines))
             else:
                 await query.edit_message_text("📈 아직 추천 내역이 없습니다.")
+
+    # ── v8.5: 온보딩 + 오늘의 할 일 ───────────────────────────────────
+
+    async def _menu_onboarding(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """인터랙티브 온보딩 — 7단계 가이드 투어."""
+        import json
+        progress_raw = self.db.get_kv("onboarding_progress")
+        progress = json.loads(progress_raw) if progress_raw else {"step": 1}
+        step_num = progress.get("step", 1)
+        if step_num > len(ONBOARDING_STEPS):
+            text = format_onboarding_complete()
+            buttons = [[
+                InlineKeyboardButton("🔄 처음부터 다시", callback_data="onboard:restart:0"),
+                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+            ]]
+            await update.message.reply_text(
+                text, reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+        step = ONBOARDING_STEPS[step_num - 1]
+        text = format_onboarding_step(step, step_num, len(ONBOARDING_STEPS))
+        buttons = []
+        buttons.append([InlineKeyboardButton(
+            step["try_label"], callback_data=step["try_cb"],
+        )])
+        nav = []
+        if step_num < len(ONBOARDING_STEPS):
+            nav.append(InlineKeyboardButton(
+                "다음 >>", callback_data=f"onboard:next:{step_num + 1}",
+            ))
+        nav.append(InlineKeyboardButton(
+            "건너뛰기", callback_data="onboard:skip:0",
+        ))
+        buttons.append(nav)
+        await update.message.reply_text(
+            text, reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _action_onboarding(self, query, context, payload: str) -> None:
+        """온보딩 콜백 — try/next/skip/restart."""
+        import json
+        sub, _, val = payload.partition(":")
+
+        if sub == "restart":
+            self.db.set_kv("onboarding_progress", json.dumps({"step": 1}))
+            step = ONBOARDING_STEPS[0]
+            text = format_onboarding_step(step, 1, len(ONBOARDING_STEPS))
+            buttons = [
+                [InlineKeyboardButton(step["try_label"], callback_data=step["try_cb"])],
+                [InlineKeyboardButton("다음 >>", callback_data="onboard:next:2"),
+                 InlineKeyboardButton("건너뛰기", callback_data="onboard:skip:0")],
+            ]
+            await safe_edit_or_reply(
+                query, text, reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        if sub == "skip":
+            self.db.set_kv("onboarding_progress", json.dumps({
+                "step": len(ONBOARDING_STEPS) + 1,
+            }))
+            await safe_edit_or_reply(query, format_onboarding_complete())
+            return
+
+        if sub == "next":
+            step_num = int(val) if val else 2
+            self.db.set_kv("onboarding_progress", json.dumps({"step": step_num}))
+            if step_num > len(ONBOARDING_STEPS):
+                await safe_edit_or_reply(query, format_onboarding_complete())
+                return
+            step = ONBOARDING_STEPS[step_num - 1]
+            text = format_onboarding_step(step, step_num, len(ONBOARDING_STEPS))
+            buttons = [
+                [InlineKeyboardButton(step["try_label"], callback_data=step["try_cb"])],
+            ]
+            nav = []
+            if step_num < len(ONBOARDING_STEPS):
+                nav.append(InlineKeyboardButton(
+                    "다음 >>", callback_data=f"onboard:next:{step_num + 1}",
+                ))
+            nav.append(InlineKeyboardButton(
+                "건너뛰기", callback_data="onboard:skip:0",
+            ))
+            buttons.append(nav)
+            await safe_edit_or_reply(
+                query, text, reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        if sub == "try":
+            # 체험 → 해당 메뉴로 연결
+            progress_raw = self.db.get_kv("onboarding_progress")
+            progress = json.loads(progress_raw) if progress_raw else {"step": 1}
+            current_step = progress.get("step", 1)
+            # 자동으로 다음 스텝 전진
+            self.db.set_kv("onboarding_progress", json.dumps({
+                "step": current_step + 1,
+            }))
+
+            try_map = {
+                "analysis": ("📊 분석 체험", self._menu_analysis_hub),
+                "balance": ("💰 잔고 체험", self.cmd_balance),
+                "favorites": ("⭐ 즐겨찾기 체험", self._menu_favorites),
+                "market": ("📈 시황 체험", self._menu_market_status),
+                "ai_chat": ("💬 AI질문 체험", self._menu_ai_chat),
+                "agents": ("🤖 에이전트 체험", self._menu_agent_chat),
+                "alerts": ("🔔 알림 스케줄", self._menu_notification_settings),
+            }
+            info = try_map.get(val)
+            if info:
+                label, handler = info
+                await safe_edit_or_reply(query, f"✨ {label}으로 이동합니다!")
+                # 핸들러 호출 — update.message가 없으므로 query.message로 대체
+                class _FakeUpdate:
+                    def __init__(self, msg):
+                        self.message = msg
+                        self.effective_user = query.from_user
+                fake = _FakeUpdate(query.message)
+                try:
+                    await handler(fake, context)
+                except Exception as e:
+                    logger.debug("onboarding try handler error: %s", e)
+            else:
+                await safe_edit_or_reply(query, "✅ 체험 기능이 준비 중입니다.")
+
+    async def _menu_daily_actions(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """오늘의 할 일 — 수동 접근."""
+        await update.message.reply_text("📋 오늘의 할 일 생성 중...")
+        try:
+            macro = None
+            try:
+                macro_client = MacroClient()
+                macro = await macro_client.snapshot()
+            except Exception:
+                pass
+            actions = await self._generate_daily_actions(macro)
+            text = format_daily_actions(
+                actions,
+                alert_mode=getattr(self, "_alert_mode", "normal"),
+            )
+            buttons = []
+            for act in actions[:5]:
+                goto = act.get("goto")
+                if goto:
+                    buttons.append([InlineKeyboardButton(
+                        f"{act['emoji']} {act['title'][:20]}",
+                        callback_data=f"goto:{goto}",
+                    )])
+            buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+            await send_long_message(
+                update.message, text,
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception as e:
+            logger.error("daily_actions error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "⚠️ 오늘의 할 일 생성 중 오류가 발생했습니다.",
+                reply_markup=get_reply_markup(context),
+            )
 
 

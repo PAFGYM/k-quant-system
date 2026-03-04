@@ -811,6 +811,20 @@ class CoreHandlersMixin:
                 reply_markup=get_reply_markup(context),
             )
 
+    async def _maybe_show_tip(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, tip_key: str,
+    ) -> None:
+        """메뉴 첫 진입 시 1줄 컨텍스트 팁 표시 (세션당 1회)."""
+        seen = context.user_data.get("seen_tips", set())
+        if tip_key in seen:
+            return
+        tip_text = MENU_TIPS.get(tip_key)
+        if not tip_text:
+            return
+        seen.add(tip_key)
+        context.user_data["seen_tips"] = seen
+        await update.message.reply_text(tip_text)
+
     async def handle_menu_text(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -846,6 +860,9 @@ class CoreHandlersMixin:
             "💻 클로드": self._menu_claude_code,
             "🔙 대화 종료": self._exit_claude_mode,
             "🛠 관리자": self._menu_admin,
+            # ── v8.5: 온보딩 + 오늘의 할 일 ──
+            "📖 온보딩": self._menu_onboarding,
+            "📋 오늘의 할 일": self._menu_daily_actions,
             # ── 이전 메뉴 하위호환 ──
             "\U0001f4d6 사용법 가이드": self._menu_usage_guide,
             "\U0001f514 알림": self._menu_notification_settings,
@@ -873,10 +890,21 @@ class CoreHandlersMixin:
                 "💻 클로드", "🔙 대화 종료", "🤖 에이전트", "🖥 원격접속",
                 "📊 분석", "📈 시황", "💰 잔고", "⭐ 즐겨찾기",
                 "💬 AI질문", "📋 리포트", "⚙️ 더보기",
+                "📖 온보딩", "📋 오늘의 할 일",
             }
             if text not in _claude_safe_buttons:
                 context.user_data.pop("claude_mode", None)
                 context.user_data.pop("claude_turn", None)
+            # v8.5: 메뉴 컨텍스트 팁 (세션당 1회)
+            _tip_map = {
+                "📊 분석": "analysis", "📈 시황": "market",
+                "💰 잔고": "balance", "⭐ 즐겨찾기": "favorites",
+                "💬 AI질문": "ai_chat", "📋 리포트": "reports",
+                "⚙️ 더보기": "more",
+            }
+            tip_key = _tip_map.get(text)
+            if tip_key:
+                await self._maybe_show_tip(update, context, tip_key)
             try:
                 await handler(update, context)
             except Exception as e:
@@ -1007,6 +1035,11 @@ class CoreHandlersMixin:
                 if prompt:
                     await self._execute_claude_prompt(update, prompt)
                     return
+
+            # 0-6. v8.5: "온보딩" 키워드 → 온보딩 시작
+            if text.strip() in ("온보딩", "가이드", "둘러보기"):
+                await self._menu_onboarding(update, context)
+                return
 
             # 1. 자연어 보유종목 등록/매도 감지
             trade = self._detect_trade_input(text)
@@ -1600,6 +1633,8 @@ class CoreHandlersMixin:
                 "menu": self._action_menu_dispatch,
                 # v8.3: 원격접속 메뉴
                 "remote": self._action_remote,
+                # v8.5: 온보딩
+                "onboard": self._action_onboarding,
             }
             handler = dispatch.get(action)
             if handler:
@@ -1645,6 +1680,9 @@ class CoreHandlersMixin:
             "notification": self._menu_notification_settings,
             "optimize": self._menu_optimize,
             "admin": self._menu_admin,
+            # v8.5
+            "daily_actions": self._menu_daily_actions,
+            "onboarding": self._menu_onboarding,
         }
         # v6.2.1: 기능별 로딩 메시지
         _loading_msg = {
@@ -1663,6 +1701,8 @@ class CoreHandlersMixin:
             "notification": "🔔 알림 설정 로딩 중...",
             "optimize": "⚙️ 최적화 설정 로딩 중...",
             "admin": "🛠 관리자 메뉴 로딩 중...",
+            "daily_actions": "📋 오늘의 할 일 생성 중...",
+            "onboarding": "📖 온보딩 가이드 로딩 중...",
         }
         handler = menu_map.get(payload)
         if not handler:

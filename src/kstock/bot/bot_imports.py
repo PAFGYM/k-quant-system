@@ -51,6 +51,12 @@ from kstock.bot.messages import (
     format_watch_alert,
     format_weekly_learning_report,
     format_welcome,
+    # v8.5: 온보딩 + 가이드 + 오늘의 할 일
+    ONBOARDING_STEPS,
+    MENU_TIPS,
+    format_onboarding_step,
+    format_onboarding_complete,
+    format_daily_actions,
 )
 from kstock.features.technical import (
     TechnicalIndicators,
