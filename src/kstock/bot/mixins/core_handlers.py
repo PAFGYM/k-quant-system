@@ -264,6 +264,13 @@ class CoreHandlersMixin:
             days=(0, 1, 2, 3, 4),
             name="supply_demand_collect",
         )
+        # v9.0: 프로그램 매매 수집 (16:15, 평일 장 마감 후)
+        jq.run_daily(
+            self.job_program_trading_collect,
+            time=dt_time(hour=16, minute=15, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="program_trading_collect",
+        )
         # KIS WebSocket: 장 시작 전 연결 (08:50), 장 종료 후 해제 (15:35)
         jq.run_daily(
             self.job_ws_connect,

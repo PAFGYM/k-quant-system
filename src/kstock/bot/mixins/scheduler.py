@@ -1001,6 +1001,19 @@ class SchedulerMixin:
                 regime_labels = {"low": "저변동", "normal": "보통", "high": "고변동", "extreme": "극단"}
                 vol_ctx = f"변동성레짐={regime_labels.get(vol_regime, vol_regime)}(한국Vol={kr_vol:.1f}%)\n"
 
+            # v9.0: 프로그램 매매 데이터
+            prog_ctx = ""
+            try:
+                prog_data = self.db.get_program_trading(days=3, market="KOSPI")
+                if prog_data:
+                    latest = prog_data[0]
+                    prog_ctx = (
+                        f"[프로그램매매] 전체={latest['total_net']:+,.0f}억 "
+                        f"(차익={latest['arb_net']:+,.0f}, 비차익={latest['non_arb_net']:+,.0f})\n"
+                    )
+            except Exception:
+                pass
+
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
                 f"[시장 데이터]\n"
@@ -1012,7 +1025,8 @@ class SchedulerMixin:
                 f"금=${macro.gold_price:,.0f}({macro.gold_change_pct:+.1f}%), "
                 f"레짐={macro.regime}, 모드={regime_mode.get('label', '')}\n"
                 f"{futures_ctx}"
-                f"{vol_ctx}\n"
+                f"{vol_ctx}"
+                f"{prog_ctx}\n"
                 f"{news_ctx}"
                 f"{special_ctx}"
                 f"{alert_ctx}"
@@ -2651,6 +2665,40 @@ class SchedulerMixin:
             today_str = datetime.now(KST).strftime("%Y-%m-%d")
             self.db.upsert_job_run(
                 "supply_demand_collect", today_str, status="error", message=str(e),
+            )
+
+    async def job_program_trading_collect(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """16:15 평일: 프로그램 매매 데이터 수집 (네이버 금융)."""
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.ingest.program_trading import fetch_program_trading
+
+            data = await asyncio.to_thread(
+                fetch_program_trading, None, "KOSPI", 3
+            )
+            saved = 0
+            for item in data:
+                self.db.save_program_trading({
+                    "date": item.date,
+                    "market": item.market,
+                    "arb_buy": item.arb_buy,
+                    "arb_sell": item.arb_sell,
+                    "arb_net": item.arb_net,
+                    "non_arb_buy": item.non_arb_buy,
+                    "non_arb_sell": item.non_arb_sell,
+                    "non_arb_net": item.non_arb_net,
+                    "total_buy": item.total_buy,
+                    "total_sell": item.total_sell,
+                    "total_net": item.total_net,
+                })
+                saved += 1
+
+            self.db.upsert_job_run("program_trading_collect", today_str, status="success")
+            logger.info("Program trading collected: %d records", saved)
+        except Exception as e:
+            logger.error("Program trading collect failed: %s", e)
+            self.db.upsert_job_run(
+                "program_trading_collect", today_str, status="error", message=str(e),
             )
 
     async def job_weekly_learning(self, context: ContextTypes.DEFAULT_TYPE) -> None:

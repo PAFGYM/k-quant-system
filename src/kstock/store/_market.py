@@ -756,3 +756,52 @@ class MarketMixin:
         except (ValueError, TypeError):
             return None
         return row["ai_summary"]
+
+    # -- program_trading (v9.0) -----------------------------------------------
+
+    def save_program_trading(self, data: dict) -> None:
+        """프로그램 매매 데이터 저장 (UPSERT by date+market)."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO program_trading
+                    (date, market, arb_buy, arb_sell, arb_net,
+                     non_arb_buy, non_arb_sell, non_arb_net,
+                     total_buy, total_sell, total_net)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(date, market) DO UPDATE SET
+                    arb_buy=excluded.arb_buy, arb_sell=excluded.arb_sell,
+                    arb_net=excluded.arb_net,
+                    non_arb_buy=excluded.non_arb_buy,
+                    non_arb_sell=excluded.non_arb_sell,
+                    non_arb_net=excluded.non_arb_net,
+                    total_buy=excluded.total_buy,
+                    total_sell=excluded.total_sell,
+                    total_net=excluded.total_net
+                """,
+                (
+                    data["date"], data.get("market", "KOSPI"),
+                    data.get("arb_buy", 0), data.get("arb_sell", 0),
+                    data.get("arb_net", 0),
+                    data.get("non_arb_buy", 0), data.get("non_arb_sell", 0),
+                    data.get("non_arb_net", 0),
+                    data.get("total_buy", 0), data.get("total_sell", 0),
+                    data.get("total_net", 0),
+                ),
+            )
+
+    def get_program_trading(self, days: int = 5, market: str = "KOSPI") -> list[dict]:
+        """최근 N일 프로그램 매매 데이터 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT date, market, arb_buy, arb_sell, arb_net,
+                       non_arb_buy, non_arb_sell, non_arb_net,
+                       total_buy, total_sell, total_net
+                FROM program_trading
+                WHERE market = ?
+                ORDER BY date DESC LIMIT ?
+                """,
+                (market, days),
+            ).fetchall()
+        return [dict(r) for r in rows]

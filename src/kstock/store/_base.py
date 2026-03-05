@@ -1018,6 +1018,26 @@ CREATE TABLE IF NOT EXISTS sent_news_urls (
     created_at TEXT    DEFAULT (datetime('now'))
 );
 
+-- v9.0: 프로그램 매매 추적
+CREATE TABLE IF NOT EXISTS program_trading (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    date       TEXT    NOT NULL,
+    market     TEXT    NOT NULL DEFAULT 'KOSPI',
+    arb_buy    REAL    DEFAULT 0,
+    arb_sell   REAL    DEFAULT 0,
+    arb_net    REAL    DEFAULT 0,
+    non_arb_buy  REAL  DEFAULT 0,
+    non_arb_sell REAL  DEFAULT 0,
+    non_arb_net  REAL  DEFAULT 0,
+    total_buy  REAL    DEFAULT 0,
+    total_sell REAL    DEFAULT 0,
+    total_net  REAL    DEFAULT 0,
+    created_at TEXT    DEFAULT (datetime('now')),
+    UNIQUE(date, market)
+);
+
+CREATE INDEX IF NOT EXISTS idx_program_trading_date ON program_trading(date);
+
 -- 성능 인덱스: 자주 조회되는 테이블
 CREATE INDEX IF NOT EXISTS idx_holdings_status ON holdings(status);
 CREATE INDEX IF NOT EXISTS idx_holdings_ticker ON holdings(ticker);

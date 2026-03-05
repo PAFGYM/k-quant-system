@@ -519,6 +519,24 @@ class MenusKisMixin:
             alert_mode=getattr(self, '_alert_mode', 'normal'),
         )
 
+        # v9.0: 프로그램 매매 데이터
+        try:
+            prog_data = self.db.get_program_trading(days=3, market="KOSPI")
+            if prog_data:
+                from kstock.ingest.program_trading import analyze_program_trading, format_program_trading, ProgramTradingData
+                ptd_list = [ProgramTradingData(
+                    date=d["date"], market=d["market"],
+                    arb_buy=d["arb_buy"], arb_sell=d["arb_sell"], arb_net=d["arb_net"],
+                    non_arb_buy=d["non_arb_buy"], non_arb_sell=d["non_arb_sell"],
+                    non_arb_net=d["non_arb_net"],
+                    total_buy=d["total_buy"], total_sell=d["total_sell"],
+                    total_net=d["total_net"],
+                ) for d in prog_data]
+                analysis = analyze_program_trading(ptd_list)
+                msg += "\n\n" + format_program_trading(analysis)
+        except Exception:
+            pass
+
         # v3.0: policy events
         policy_text = get_policy_summary()
         if policy_text:

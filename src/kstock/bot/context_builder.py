@@ -485,6 +485,17 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
             spread_signal = "확대 (완화적)"
         lines.append(f"장단기 금리차(10Y-2Y): {spread:+.2f}%p ({spread_signal})")
 
+    # [v9.0] 프로그램 매매
+    prog_data = macro_snapshot.get("program_trading")
+    if prog_data:
+        total_net = prog_data.get("total_net", 0)
+        arb_net = prog_data.get("arb_net", 0)
+        non_arb_net = prog_data.get("non_arb_net", 0)
+        lines.append(
+            f"프로그램매매: 전체 {total_net:+,.0f}억 "
+            f"(차익 {arb_net:+,.0f} / 비차익 {non_arb_net:+,.0f})"
+        )
+
     # [v9.0] 선물만기 경고
     expiry_warn = get_futures_expiry_warning()
     if expiry_warn:
@@ -713,6 +724,13 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                 "korean_vol": getattr(snap, "korean_vol", 0),
                 "vol_regime": getattr(snap, "vol_regime", ""),
             }
+            # v9.0: 프로그램 매매 데이터 추가
+            try:
+                prog_data = db.get_program_trading(days=1, market="KOSPI")
+                if prog_data:
+                    macro_dict["program_trading"] = prog_data[0]
+            except Exception:
+                pass
         except Exception as e:
             logger.warning("Failed to get macro for AI context: %s", e)
 
