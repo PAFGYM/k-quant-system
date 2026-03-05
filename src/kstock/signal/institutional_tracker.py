@@ -619,3 +619,190 @@ def _signal_emoji(signal_text: str) -> str:
     if any(k in text for k in ("주의", "임박")):
         return "\U0001f7e1"
     return "\u26aa"
+
+
+# ---------------------------------------------------------------------------
+# v9.0: 한국 특수 수급 패턴 탐지
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class KoreanFlowPattern:
+    """한국 시장 특수 수급 패턴."""
+
+    pattern_type: str   # ant_trap, stealth_buy, foreign_exit, pension_defense
+    ticker: str
+    name: str
+    signal: str         # 경고, 매수기회, etc.
+    score_adj: int      # 점수 조정 (+15, -10, etc.)
+    description: str
+    days: int           # 패턴 지속 일수
+
+
+def detect_korean_flow_patterns(
+    ticker: str,
+    name: str,
+    supply_data: list[dict],
+    usdkrw_change_pct: float = 0.0,
+) -> list[KoreanFlowPattern]:
+    """보유종목의 수급 데이터로 한국 특수 패턴 탐지.
+
+    Args:
+        ticker: 종목 코드.
+        name: 종목명.
+        supply_data: supply_demand 테이블 데이터 (최신순, 최소 3일).
+        usdkrw_change_pct: USD/KRW 변동률 (%).
+
+    Returns:
+        탐지된 KoreanFlowPattern 리스트.
+    """
+    patterns: list[KoreanFlowPattern] = []
+    if len(supply_data) < 3:
+        return patterns
+
+    # 최근 N일 데이터 추출
+    recent = supply_data[:min(10, len(supply_data))]
+
+    foreign_nets = [d.get("foreign_net", 0) for d in recent]
+    inst_nets = [d.get("institution_net", 0) for d in recent]
+    retail_nets = [d.get("retail_net", 0) for d in recent]
+
+    # --- 1. 개미 함정 ---
+    # 개인 순매수 + 외인/기관 순매도 3일 연속
+    ant_trap_days = 0
+    for i in range(len(recent)):
+        retail = retail_nets[i] if i < len(retail_nets) else 0
+        foreign = foreign_nets[i] if i < len(foreign_nets) else 0
+        inst = inst_nets[i] if i < len(inst_nets) else 0
+        if retail > 0 and foreign < 0 and inst < 0:
+            ant_trap_days += 1
+        else:
+            break
+
+    if ant_trap_days >= 3:
+        patterns.append(KoreanFlowPattern(
+            pattern_type="ant_trap",
+            ticker=ticker,
+            name=name,
+            signal="고점 경고",
+            score_adj=-10,
+            description=(
+                f"개인만 {ant_trap_days}일 순매수, 외인+기관 순매도 → "
+                "개미 함정 위험! 매수 자제"
+            ),
+            days=ant_trap_days,
+        ))
+
+    # --- 2. 외인+기관 동조 매수 ---
+    # 외인 5일+ 연속 매수 + 기관도 동조
+    foreign_buy_days = 0
+    for f in foreign_nets:
+        if f > 0:
+            foreign_buy_days += 1
+        else:
+            break
+
+    inst_buy_days = 0
+    for i_val in inst_nets:
+        if i_val > 0:
+            inst_buy_days += 1
+        else:
+            break
+
+    if foreign_buy_days >= 5 and inst_buy_days >= 3:
+        patterns.append(KoreanFlowPattern(
+            pattern_type="strong_buy",
+            ticker=ticker,
+            name=name,
+            signal="강력 매수",
+            score_adj=+15,
+            description=(
+                f"외인 {foreign_buy_days}일 연속 매수 + 기관 {inst_buy_days}일 동조 → "
+                "강력 매수 신호"
+            ),
+            days=foreign_buy_days,
+        ))
+    elif foreign_buy_days >= 5:
+        patterns.append(KoreanFlowPattern(
+            pattern_type="foreign_inflow",
+            ticker=ticker,
+            name=name,
+            signal="외인 매수 추세",
+            score_adj=+10,
+            description=f"외인 {foreign_buy_days}일 연속 순매수",
+            days=foreign_buy_days,
+        ))
+
+    # --- 3. 외인 철수 ---
+    # 외인 연속 매도 + 환율 상승
+    foreign_sell_days = 0
+    for f in foreign_nets:
+        if f < 0:
+            foreign_sell_days += 1
+        else:
+            break
+
+    if foreign_sell_days >= 10 and usdkrw_change_pct > 0.5:
+        patterns.append(KoreanFlowPattern(
+            pattern_type="foreign_exit",
+            ticker=ticker,
+            name=name,
+            signal="외인 철수 가속",
+            score_adj=-15,
+            description=(
+                f"외인 {foreign_sell_days}일 연속 매도 + 환율 {usdkrw_change_pct:+.1f}% → "
+                "하락 가속 위험"
+            ),
+            days=foreign_sell_days,
+        ))
+    elif foreign_sell_days >= 5:
+        patterns.append(KoreanFlowPattern(
+            pattern_type="foreign_sell",
+            ticker=ticker,
+            name=name,
+            signal="외인 매도 지속",
+            score_adj=-5,
+            description=f"외인 {foreign_sell_days}일 연속 순매도",
+            days=foreign_sell_days,
+        ))
+
+    # --- 4. 연기금 방어 ---
+    # 기관(연기금 포함) 매수 + 외인 매도 = 바닥 확인
+    if inst_buy_days >= 3 and foreign_sell_days >= 3:
+        patterns.append(KoreanFlowPattern(
+            pattern_type="pension_defense",
+            ticker=ticker,
+            name=name,
+            signal="기관 방어 매수",
+            score_adj=+5,
+            description=(
+                f"기관 {inst_buy_days}일 매수 vs 외인 {foreign_sell_days}일 매도 → "
+                "바닥 확인 가능 (기관이 받치는 중)"
+            ),
+            days=inst_buy_days,
+        ))
+
+    return patterns
+
+
+def format_korean_flow_patterns(patterns: list[KoreanFlowPattern]) -> str:
+    """한국 특수 수급 패턴 텔레그램 포맷."""
+    if not patterns:
+        return ""
+
+    lines = ["📊 수급 패턴 감지"]
+    for p in patterns:
+        emoji = {
+            "ant_trap": "🪤",
+            "strong_buy": "🟢🟢",
+            "foreign_inflow": "🟢",
+            "foreign_exit": "🔴🔴",
+            "foreign_sell": "🔴",
+            "pension_defense": "🛡️",
+        }.get(p.pattern_type, "⚪")
+
+        score_text = f"({p.score_adj:+d}점)" if p.score_adj != 0 else ""
+        lines.append(f"  {emoji} {p.name}: {p.signal} {score_text}")
+        lines.append(f"    {p.description}")
+
+    return "\n".join(lines)

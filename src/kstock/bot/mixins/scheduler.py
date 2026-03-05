@@ -1001,6 +1001,28 @@ class SchedulerMixin:
                             pass
                     if flow_lines:
                         flow_ctx = "\n[외인/기관 수급 (3일)]\n" + "\n".join(flow_lines) + "\n"
+
+                    # v9.0: 한국 특수 수급 패턴 탐지
+                    try:
+                        from kstock.signal.institutional_tracker import detect_korean_flow_patterns
+                        pattern_lines = []
+                        for h in holdings[:8]:
+                            ticker = h.get("ticker", "")
+                            name = h.get("name", ticker)
+                            sd = self.db.get_supply_demand(ticker, days=10)
+                            if len(sd) >= 3:
+                                pats = detect_korean_flow_patterns(
+                                    ticker, name, sd,
+                                    usdkrw_change_pct=getattr(macro, "usdkrw_change_pct", 0),
+                                )
+                                for p in pats:
+                                    pattern_lines.append(
+                                        f"  [{p.signal}] {name}: {p.description} ({p.score_adj:+d}점)"
+                                    )
+                        if pattern_lines:
+                            flow_ctx += "\n[수급 패턴 감지]\n" + "\n".join(pattern_lines) + "\n"
+                    except Exception:
+                        pass
             except Exception:
                 logger.debug("Morning briefing flow data failed", exc_info=True)
 
