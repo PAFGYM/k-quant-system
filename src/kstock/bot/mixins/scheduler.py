@@ -1808,12 +1808,29 @@ class SchedulerMixin:
                 top3_lines.append(f"  {sig_emoji} {r.name} (점수 {score:.0f})")
             top3_text = "\n".join(top3_lines) if top3_lines else "  스캔 결과 없음"
 
+            # v9.0: 변동성 레짐 + 프로그램 매매 라인
+            extra_lines = []
+            vr_level = getattr(macro, "vol_regime", "")
+            if vr_level:
+                vr_labels = {"low": "🟢 저변동", "normal": "🟡 보통", "high": "🟠 고변동", "extreme": "🔴 극단"}
+                extra_lines.append(f"변동성: {vr_labels.get(vr_level, vr_level)}")
+            try:
+                _prog = self.db.get_program_trading(days=1, market="KOSPI")
+                if _prog:
+                    _p = _prog[0]
+                    extra_lines.append(f"프로그램: {_p['total_net']:+,.0f}억")
+            except Exception:
+                pass
+            extra_text = " | ".join(extra_lines)
+            if extra_text:
+                extra_text = f"\n{extra_text}"
+
             date_str = now.strftime("%m/%d")
             text_msg = (
                 f"📊 장 마감 리포트 {date_str}\n"
                 f"{'━' * 22}\n\n"
                 f"🎯 결론: {verdict}\n"
-                f"시장: {regime_kr} | S&P {macro.spx_change_pct:+.2f}%\n\n"
+                f"시장: {regime_kr} | S&P {macro.spx_change_pct:+.2f}%{extra_text}\n\n"
                 f"{portfolio_line}\n\n"
                 f"📋 오늘의 Top 종목:\n{top3_text}\n\n"
                 f"📎 상세 분석은 PDF 첨부 확인"
