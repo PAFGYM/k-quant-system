@@ -806,6 +806,75 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
     if realtime_data:
         portfolio = portfolio + "\n\n[실시간 기술지표]\n" + realtime_data
 
+    # v9.0: 산업 생태계 컨텍스트 (보유종목별)
+    try:
+        from kstock.signal.industry_ecosystem import get_industry_context
+        holdings = db.get_active_holdings()
+        industry_lines = []
+        for h in (holdings or [])[:5]:
+            ticker = h.get("ticker", "")
+            ctx = get_industry_context(ticker)
+            if ctx:
+                industry_lines.append(ctx)
+        if industry_lines:
+            portfolio = portfolio + "\n\n" + "\n".join(industry_lines)
+    except Exception:
+        pass
+
+    # v9.0: 한국형 리스크 팩터 → 시장 컨텍스트에 추가
+    try:
+        from kstock.signal.korea_risk import assess_korea_risk, format_korea_risk
+        kr_args = {}
+        if macro_dict:
+            kr_args["vix"] = macro_dict.get("vix", 0)
+            kr_args["usdkrw"] = macro_dict.get("usdkrw", 0)
+            # 환율 변동률은 snap에서
+            if macro_client:
+                snap_obj = getattr(macro_client, '_last_snapshot', None)
+                if snap_obj:
+                    kr_args["usdkrw_change_pct"] = getattr(snap_obj, "usdkrw_change_pct", 0)
+        # 신용잔고
+        try:
+            cred = db.get_credit_balance(days=1)
+            if cred:
+                kr_args["credit_data"] = cred
+        except Exception:
+            pass
+        # ETF
+        try:
+            etf = db.get_etf_flow(days=1)
+            if etf:
+                kr_args["etf_data"] = etf
+        except Exception:
+            pass
+        # 프로그램매매
+        try:
+            prog = db.get_program_trading(days=1, market="KOSPI")
+            if prog:
+                kr_args["program_data"] = prog
+        except Exception:
+            pass
+        # 만기일
+        from kstock.bot.context_builder import get_futures_expiry_warning
+        from calendar import monthcalendar
+        from datetime import datetime
+        now_k = datetime.now(KST)
+        cal = monthcalendar(now_k.year, now_k.month)
+        thursdays = [week[3] for week in cal if week[3] != 0]
+        if len(thursdays) >= 2:
+            expiry_day = thursdays[1]
+            days_until = (datetime(now_k.year, now_k.month, expiry_day, tzinfo=KST).date() - now_k.date()).days
+            if 0 <= days_until <= 5:
+                kr_args["days_to_expiry"] = days_until
+        kr_args["month"] = now_k.month
+        kr_args["day"] = now_k.day
+        assessment = assess_korea_risk(**kr_args)
+        if assessment.total_risk > 0:
+            risk_text = format_korea_risk(assessment)
+            market = market + "\n\n" + risk_text
+    except Exception:
+        logger.debug("Korea risk assessment for context failed", exc_info=True)
+
     return {
         "portfolio": portfolio,
         "market": market,

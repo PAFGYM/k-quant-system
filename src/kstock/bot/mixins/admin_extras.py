@@ -1396,20 +1396,30 @@ class AdminExtrasMixin:
         buttons.append(row1)
         buttons.append(row2)
 
-        # 매수 추천 + 자동분류 + 새로고침
+        # 매수 추천 + 매니저 + 새로고침
         action_row = [
             InlineKeyboardButton(
                 "📈 매수추천", callback_data="fav:buy_scan",
             ),
+            InlineKeyboardButton(
+                "👨‍💼 매니저", callback_data="fav:managers",
+            ),
+        ]
+        buttons.append(action_row)
+
+        action_row2 = [
+            InlineKeyboardButton(
+                "➕ 추가", callback_data="fav:add_mode",
+            ),
         ]
         if counts.get("unclassified", 0) > 0:
-            action_row.append(InlineKeyboardButton(
+            action_row2.append(InlineKeyboardButton(
                 "🤖 자동분류", callback_data="fav:auto_classify",
             ))
-        action_row.append(InlineKeyboardButton(
+        action_row2.append(InlineKeyboardButton(
             "🔄 새로고침", callback_data="fav:refresh",
         ))
-        buttons.append(action_row)
+        buttons.append(action_row2)
 
         buttons.append(make_feedback_row("즐겨찾기"))
 
@@ -1569,6 +1579,15 @@ class AdminExtrasMixin:
         if sector:
             lines.append(f"섹터: {sector}")
 
+        # v9.0: 산업 생태계 정보
+        try:
+            from kstock.signal.industry_ecosystem import format_industry_for_telegram
+            ind = format_industry_for_telegram(ticker)
+            if ind:
+                lines.append(ind)
+        except Exception:
+            pass
+
         # 버튼
         buttons = [
             [
@@ -1582,6 +1601,10 @@ class AdminExtrasMixin:
             [
                 InlineKeyboardButton("🔄 분류", callback_data=f"fav:classify:{ticker}"),
                 InlineKeyboardButton("💰 매수", callback_data=f"kis_buy:{ticker}"),
+            ],
+            [
+                InlineKeyboardButton("🗑 삭제", callback_data=f"fav:rm:{ticker}"),
+                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
             ],
         ]
 

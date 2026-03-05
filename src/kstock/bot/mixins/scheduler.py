@@ -633,7 +633,11 @@ class SchedulerMixin:
                                     tech = compute_indicators(ohlcv)
                                     cp = float(h.get("current_price") or 0)
                                     supply = self.db.get_supply_demand(ticker, days=5)
-                                    h["chart_summary"] = build_chart_summary(tech, cp, supply)
+                                    h["chart_summary"] = build_chart_summary(
+                                        tech, cp, supply,
+                                        ohlcv=ohlcv, ticker=ticker,
+                                        name=h.get("name", ""),
+                                    )
                             except Exception:
                                 logger.debug("Chart enrich %s failed", ticker, exc_info=True)
                     except ImportError:
@@ -654,8 +658,11 @@ class SchedulerMixin:
                                 financials = self.db.get_financials(ticker)
                                 consensus = self.db.get_consensus(ticker)
                                 supply = self.db.get_supply_demand(ticker, days=5)
+                                cp = float(h.get("current_price") or 0)
                                 summary = build_fundamental_summary(
                                     info, financials, consensus, supply,
+                                    current_price=cp, ticker=ticker,
+                                    name=h.get("name", ""),
                                 )
                                 if summary:
                                     h["fundamental_summary"] = summary
@@ -1146,6 +1153,66 @@ class SchedulerMixin:
             except Exception:
                 pass
 
+            # v9.0: 산업 생태계 컨텍스트
+            industry_ctx = ""
+            try:
+                from kstock.signal.industry_ecosystem import format_industry_for_telegram
+                ind_lines = []
+                for h in holdings[:5]:
+                    ticker = h.get("ticker", "")
+                    ind = format_industry_for_telegram(ticker)
+                    if ind:
+                        ind_lines.append(f"  {h.get('name', ticker)}: {ind.split(chr(10))[0]}")
+                if ind_lines:
+                    industry_ctx = "\n[산업 생태계]\n" + "\n".join(ind_lines) + "\n"
+            except Exception:
+                pass
+
+            # v9.0: 한국형 리스크 종합
+            korea_risk_ctx = ""
+            try:
+                from kstock.signal.korea_risk import assess_korea_risk, format_korea_risk
+                kr_args = {
+                    "vix": macro.vix,
+                    "usdkrw": macro.usdkrw,
+                    "usdkrw_change_pct": getattr(macro, "usdkrw_change_pct", 0),
+                    "month": datetime.now(KST).month,
+                    "day": datetime.now(KST).day,
+                }
+                try:
+                    cred = self.db.get_credit_balance(days=1)
+                    if cred:
+                        kr_args["credit_data"] = cred
+                except Exception:
+                    pass
+                try:
+                    etf = self.db.get_etf_flow(days=1)
+                    if etf:
+                        kr_args["etf_data"] = etf
+                except Exception:
+                    pass
+                try:
+                    prog = self.db.get_program_trading(days=1, market="KOSPI")
+                    if prog:
+                        kr_args["program_data"] = prog
+                except Exception:
+                    pass
+                # 만기일
+                from calendar import monthcalendar
+                now_br = datetime.now(KST)
+                cal = monthcalendar(now_br.year, now_br.month)
+                thursdays = [week[3] for week in cal if week[3] != 0]
+                if len(thursdays) >= 2:
+                    expiry_day = thursdays[1]
+                    days_until = (datetime(now_br.year, now_br.month, expiry_day, tzinfo=KST).date() - now_br.date()).days
+                    if 0 <= days_until <= 5:
+                        kr_args["days_to_expiry"] = days_until
+                assessment = assess_korea_risk(**kr_args)
+                if assessment.total_risk > 0:
+                    korea_risk_ctx = f"\n{format_korea_risk(assessment)}\n"
+            except Exception:
+                logger.debug("Morning briefing korea risk failed", exc_info=True)
+
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
                 f"[시장 데이터]\n"
@@ -1160,13 +1227,15 @@ class SchedulerMixin:
                 f"{vol_ctx}"
                 f"{prog_ctx}"
                 f"{credit_ctx}"
-                f"{etf_ctx}\n"
+                f"{etf_ctx}"
+                f"{korea_risk_ctx}\n"
                 f"{news_ctx}"
                 f"{special_ctx}"
                 f"{alert_ctx}"
                 f"[보유종목]\n{holdings_text}\n"
                 f"{flow_ctx}"
                 f"{accum_ctx}"
+                f"{industry_ctx}"
                 f"아래 형식으로 작성해주세요:\n\n"
                 f"1) 시장 요약 (3줄 이내) — 글로벌 뉴스 + 수급 핵심\n"
                 f"2) 보유종목별 판단 — 각 종목마다:\n"
@@ -1521,6 +1590,41 @@ class SchedulerMixin:
         except Exception:
             logger.debug("_eod_market_analysis global news fetch failed", exc_info=True)
 
+        # v9.0: 한국형 리스크 컨텍스트
+        eod_risk_ctx = ""
+        try:
+            from kstock.signal.korea_risk import assess_korea_risk, format_korea_risk
+            kr_args = {
+                "vix": macro.vix,
+                "usdkrw": macro.usdkrw,
+                "usdkrw_change_pct": getattr(macro, "usdkrw_change_pct", 0),
+                "month": datetime.now(KST).month,
+                "day": datetime.now(KST).day,
+            }
+            try:
+                cred = self.db.get_credit_balance(days=1)
+                if cred:
+                    kr_args["credit_data"] = cred
+            except Exception:
+                pass
+            try:
+                etf = self.db.get_etf_flow(days=1)
+                if etf:
+                    kr_args["etf_data"] = etf
+            except Exception:
+                pass
+            try:
+                prog = self.db.get_program_trading(days=1, market="KOSPI")
+                if prog:
+                    kr_args["program_data"] = prog
+            except Exception:
+                pass
+            assessment = assess_korea_risk(**kr_args)
+            if assessment.total_risk > 0:
+                eod_risk_ctx = f"\n{format_korea_risk(assessment)}\n"
+        except Exception:
+            pass
+
         prompt = (
             f"오늘 한국/미국 주식 시장 장 마감 종합 분석을 작성해줘.\n"
             f"4000자 내외의 전문적이고 상세한 분석을 부탁해.\n\n"
@@ -1539,6 +1643,7 @@ class SchedulerMixin:
             f"시장 맥박: {pulse_state}\n"
             f"시장 체제: {macro.regime}{fear_greed}\n"
             f"{eod_news_ctx}"
+            f"{eod_risk_ctx}"
             f"{holdings_ctx}\n\n"
             f"아래 7개 섹션으로 상세히 분석:\n\n"
             f"1. 오늘의 시장 한줄 요약\n"

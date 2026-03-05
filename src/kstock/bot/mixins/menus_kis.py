@@ -570,6 +570,43 @@ class MenusKisMixin:
         except Exception:
             pass
 
+        # v9.0: 한국형 리스크 종합
+        try:
+            from kstock.signal.korea_risk import assess_korea_risk, format_korea_risk
+            kr_args = {}
+            if macro:
+                kr_args["vix"] = getattr(macro, "vix", 0)
+                kr_args["usdkrw"] = getattr(macro, "usdkrw", 0)
+                kr_args["usdkrw_change_pct"] = getattr(macro, "usdkrw_change_pct", 0)
+            try:
+                cred = self.db.get_credit_balance(days=1)
+                if cred:
+                    kr_args["credit_data"] = cred
+            except Exception:
+                pass
+            try:
+                etf = self.db.get_etf_flow(days=1)
+                if etf:
+                    kr_args["etf_data"] = etf
+            except Exception:
+                pass
+            try:
+                prog = self.db.get_program_trading(days=1, market="KOSPI")
+                if prog:
+                    kr_args["program_data"] = prog
+            except Exception:
+                pass
+            from datetime import datetime as _dt
+            from kstock.core.tz import KST as _KST
+            _now = _dt.now(_KST)
+            kr_args["month"] = _now.month
+            kr_args["day"] = _now.day
+            assessment = assess_korea_risk(**kr_args)
+            if assessment.total_risk > 0:
+                msg += "\n\n" + format_korea_risk(assessment)
+        except Exception:
+            pass
+
         # v3.0: policy events
         policy_text = get_policy_summary()
         if policy_text:
