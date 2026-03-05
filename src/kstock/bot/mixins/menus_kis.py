@@ -554,6 +554,22 @@ class MenusKisMixin:
         except Exception:
             pass
 
+        # v9.0: ETF 자금흐름
+        try:
+            etf_data = self.db.get_etf_flow(days=1)
+            if etf_data:
+                from kstock.signal.etf_flow import analyze_etf_flow, format_etf_flow, ETFFlowData
+                current = [ETFFlowData(
+                    code=d["code"], name=d["name"], etf_type=d["etf_type"],
+                    price=d["price"], change_pct=d["change_pct"],
+                    nav=d["nav"], market_cap=d["market_cap"], volume=d["volume"],
+                ) for d in etf_data]
+                prev_data = self.db.get_etf_flow_previous()
+                analysis = analyze_etf_flow(current, prev_data)
+                msg += "\n\n" + format_etf_flow(analysis)
+        except Exception:
+            pass
+
         # v3.0: policy events
         policy_text = get_policy_summary()
         if policy_text:

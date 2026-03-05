@@ -632,9 +632,35 @@ class SchedulerMixin:
                                 if ohlcv is not None and not ohlcv.empty and len(ohlcv) >= 20:
                                     tech = compute_indicators(ohlcv)
                                     cp = float(h.get("current_price") or 0)
-                                    h["chart_summary"] = build_chart_summary(tech, cp)
+                                    supply = self.db.get_supply_demand(ticker, days=5)
+                                    h["chart_summary"] = build_chart_summary(tech, cp, supply)
                             except Exception:
                                 logger.debug("Chart enrich %s failed", ticker, exc_info=True)
+                    except ImportError:
+                        pass
+
+                # position/long_term: 재무 데이터 보강
+                if mtype in ("position", "long_term"):
+                    try:
+                        from kstock.bot.investment_managers import build_fundamental_summary
+                        for h in mholdings:
+                            ticker = h.get("ticker", "")
+                            if not ticker:
+                                continue
+                            try:
+                                info = await self.data_router.get_stock_info(
+                                    ticker, h.get("name", ""),
+                                ) if hasattr(self, "data_router") else None
+                                financials = self.db.get_financials(ticker)
+                                consensus = self.db.get_consensus(ticker)
+                                supply = self.db.get_supply_demand(ticker, days=5)
+                                summary = build_fundamental_summary(
+                                    info, financials, consensus, supply,
+                                )
+                                if summary:
+                                    h["fundamental_summary"] = summary
+                            except Exception:
+                                logger.debug("Fundamental enrich %s failed", ticker, exc_info=True)
                     except ImportError:
                         pass
 
@@ -1055,6 +1081,21 @@ class SchedulerMixin:
             except Exception:
                 pass
 
+            # v9.0: ETF 자금흐름
+            etf_ctx = ""
+            try:
+                etf_data = self.db.get_etf_flow(days=1)
+                if etf_data:
+                    lev_cap = sum(d["market_cap"] for d in etf_data if d.get("etf_type") == "leverage")
+                    inv_cap = sum(d["market_cap"] for d in etf_data if d.get("etf_type") == "inverse")
+                    if lev_cap > 0 or inv_cap > 0:
+                        etf_ctx = (
+                            f"[ETF흐름] 레버리지={lev_cap/10000:.1f}조 "
+                            f"인버스={inv_cap/10000:.1f}조\n"
+                        )
+            except Exception:
+                pass
+
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
                 f"[시장 데이터]\n"
@@ -1068,7 +1109,8 @@ class SchedulerMixin:
                 f"{futures_ctx}"
                 f"{vol_ctx}"
                 f"{prog_ctx}"
-                f"{credit_ctx}\n"
+                f"{credit_ctx}"
+                f"{etf_ctx}\n"
                 f"{news_ctx}"
                 f"{special_ctx}"
                 f"{alert_ctx}"
@@ -1868,6 +1910,15 @@ class SchedulerMixin:
                 if _cred:
                     _c = _cred[0]
                     extra_lines.append(f"신용: {_c['credit']/10000:.1f}조({_c['credit_change']:+,.0f}억)")
+            except Exception:
+                pass
+            try:
+                _etf = self.db.get_etf_flow(days=1)
+                if _etf:
+                    _lev = sum(d["market_cap"] for d in _etf if d.get("etf_type") == "leverage")
+                    _inv = sum(d["market_cap"] for d in _etf if d.get("etf_type") == "inverse")
+                    if _lev > 0:
+                        extra_lines.append(f"레버ETF: {_lev/10000:.1f}조")
             except Exception:
                 pass
             extra_text = " | ".join(extra_lines)
@@ -2791,6 +2842,36 @@ class SchedulerMixin:
             logger.error("Credit balance collect failed: %s", e)
             self.db.upsert_job_run(
                 "credit_balance_collect", today_str, status="error", message=str(e),
+            )
+
+    async def job_etf_flow_collect(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """16:25 평일: ETF 자금흐름 수집 (네이버 금융 API)."""
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.signal.etf_flow import fetch_etf_flow
+
+            data = await asyncio.to_thread(fetch_etf_flow)
+            saved = 0
+            for item in data:
+                self.db.save_etf_flow({
+                    "date": today_str,
+                    "code": item.code,
+                    "name": item.name,
+                    "etf_type": item.etf_type,
+                    "price": item.price,
+                    "change_pct": item.change_pct,
+                    "nav": item.nav,
+                    "market_cap": item.market_cap,
+                    "volume": item.volume,
+                })
+                saved += 1
+
+            self.db.upsert_job_run("etf_flow_collect", today_str, status="success")
+            logger.info("ETF flow collected: %d records", saved)
+        except Exception as e:
+            logger.error("ETF flow collect failed: %s", e)
+            self.db.upsert_job_run(
+                "etf_flow_collect", today_str, status="error", message=str(e),
             )
 
     async def job_weekly_learning(self, context: ContextTypes.DEFAULT_TYPE) -> None:

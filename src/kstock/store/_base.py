@@ -1052,6 +1052,24 @@ CREATE TABLE IF NOT EXISTS credit_balance (
 
 CREATE INDEX IF NOT EXISTS idx_credit_balance_date ON credit_balance(date);
 
+-- v9.0: ETF 자금흐름 추적
+CREATE TABLE IF NOT EXISTS etf_flow (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    date       TEXT    NOT NULL,
+    code       TEXT    NOT NULL,
+    name       TEXT,
+    etf_type   TEXT,
+    price      REAL    DEFAULT 0,
+    change_pct REAL    DEFAULT 0,
+    nav        REAL    DEFAULT 0,
+    market_cap REAL    DEFAULT 0,
+    volume     INTEGER DEFAULT 0,
+    created_at TEXT    DEFAULT (datetime('now')),
+    UNIQUE(date, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_etf_flow_date ON etf_flow(date);
+
 -- 성능 인덱스: 자주 조회되는 테이블
 CREATE INDEX IF NOT EXISTS idx_holdings_status ON holdings(status);
 CREATE INDEX IF NOT EXISTS idx_holdings_ticker ON holdings(ticker);

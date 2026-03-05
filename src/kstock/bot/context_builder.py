@@ -507,6 +507,17 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
             f"예탁금: {deposit_tril:.1f}조"
         )
 
+    # [v9.0] ETF 자금흐름
+    etf_data = macro_snapshot.get("etf_flow")
+    if etf_data:
+        lev_cap = etf_data.get("leverage_total", 0)
+        inv_cap = etf_data.get("inverse_total", 0)
+        if lev_cap > 0 or inv_cap > 0:
+            lines.append(
+                f"ETF흐름: 레버리지={lev_cap/10000:.1f}조 "
+                f"인버스={inv_cap/10000:.1f}조"
+            )
+
     # [v9.0] 선물만기 경고
     expiry_warn = get_futures_expiry_warning()
     if expiry_warn:
@@ -747,6 +758,18 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                 cred_data = db.get_credit_balance(days=1)
                 if cred_data:
                     macro_dict["credit_balance"] = cred_data[0]
+            except Exception:
+                pass
+            # v9.0: ETF 자금흐름 데이터 추가
+            try:
+                etf_data = db.get_etf_flow(days=1)
+                if etf_data:
+                    lev_total = sum(d["market_cap"] for d in etf_data if d.get("etf_type") == "leverage")
+                    inv_total = sum(d["market_cap"] for d in etf_data if d.get("etf_type") == "inverse")
+                    macro_dict["etf_flow"] = {
+                        "leverage_total": lev_total,
+                        "inverse_total": inv_total,
+                    }
             except Exception:
                 pass
         except Exception as e:

@@ -843,3 +843,76 @@ class MarketMixin:
                 (days,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- etf_flow (v9.0) ------------------------------------------------------
+
+    def save_etf_flow(self, data: dict) -> None:
+        """ETF 흐름 데이터 저장 (UPSERT by date+code)."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO etf_flow
+                    (date, code, name, etf_type, price, change_pct, nav, market_cap, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(date, code) DO UPDATE SET
+                    name=excluded.name, etf_type=excluded.etf_type,
+                    price=excluded.price, change_pct=excluded.change_pct,
+                    nav=excluded.nav, market_cap=excluded.market_cap,
+                    volume=excluded.volume
+                """,
+                (
+                    data["date"], data["code"], data.get("name", ""),
+                    data.get("etf_type", ""), data.get("price", 0),
+                    data.get("change_pct", 0), data.get("nav", 0),
+                    data.get("market_cap", 0), data.get("volume", 0),
+                ),
+            )
+
+    def get_etf_flow(self, days: int = 5) -> list[dict]:
+        """최근 N일 ETF 흐름 데이터 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT date, code, name, etf_type, price, change_pct,
+                       nav, market_cap, volume
+                FROM etf_flow
+                ORDER BY date DESC, market_cap DESC
+                LIMIT ?
+                """,
+                (days * 10,),  # 추적 ETF 수 * 일수
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_etf_flow_by_date(self, date: str) -> list[dict]:
+        """특정 날짜의 ETF 흐름 데이터."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT date, code, name, etf_type, price, change_pct,
+                       nav, market_cap, volume
+                FROM etf_flow WHERE date = ?
+                ORDER BY market_cap DESC
+                """,
+                (date,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_etf_flow_previous(self) -> list[dict]:
+        """전일 ETF 흐름 데이터 (변화율 계산용)."""
+        with self._connect() as conn:
+            # 가장 최근 날짜 찾기
+            row = conn.execute(
+                "SELECT DISTINCT date FROM etf_flow ORDER BY date DESC LIMIT 1 OFFSET 1"
+            ).fetchone()
+            if not row:
+                return []
+            prev_date = row["date"]
+            rows = conn.execute(
+                """
+                SELECT date, code, name, etf_type, price, change_pct,
+                       nav, market_cap, volume
+                FROM etf_flow WHERE date = ?
+                """,
+                (prev_date,),
+            ).fetchall()
+        return [dict(r) for r in rows]
