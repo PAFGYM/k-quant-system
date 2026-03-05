@@ -101,7 +101,7 @@ class AdminExtrasMixin:
     ) -> None:
         """🛠 관리자 메뉴 버튼 — 인라인 버튼으로 관리 기능 제공."""
         await update.message.reply_text(
-            "\U0001f6e0 관리자 모드 v8.7\n\n"
+            "\U0001f6e0 관리자 모드 v9.1\n\n"
             "아래 버튼을 눌러주세요.",
             reply_markup=InlineKeyboardMarkup(_admin_buttons()),
         )
@@ -198,7 +198,7 @@ class AdminExtrasMixin:
             context.user_data.pop("admin_mode", None)
             context.user_data.pop("admin_faq_type", None)
             await query.edit_message_text(
-                "\U0001f6e0 관리자 모드 v8.7\n\n"
+                "\U0001f6e0 관리자 모드 v9.1\n\n"
                 "아래 버튼을 눌러주세요.",
                 reply_markup=InlineKeyboardMarkup(_admin_buttons()),
             )
@@ -422,7 +422,7 @@ class AdminExtrasMixin:
             await query.edit_message_text(
                 f"🔧 시스템 제어\n{'━' * 22}\n\n"
                 f"상태: {status_line}\n"
-                f"버전: v8.7",
+                f"버전: v9.1",
                 reply_markup=InlineKeyboardMarkup(sys_buttons),
             )
             return
@@ -574,7 +574,7 @@ class AdminExtrasMixin:
             ws_subs = len(self.ws.get_subscriptions())
 
             await query.edit_message_text(
-                f"\U0001f4ca 봇 상태 v8.7\n\n"
+                f"\U0001f4ca 봇 상태 v9.1\n\n"
                 f"\u2705 가동: {hours}시간 {mins}분\n"
                 f"\U0001f4b0 보유종목: {len(holdings)}개\n"
                 f"\U0001f916 AI 채팅: {chat_count}회/50\n"
@@ -1596,7 +1596,7 @@ class AdminExtrasMixin:
             ],
             [
                 InlineKeyboardButton("📰 뉴스", callback_data=f"fav:news:{ticker}"),
-                InlineKeyboardButton("📊 차트", callback_data=f"fav:chart:{ticker}"),
+                InlineKeyboardButton("📊 차트", callback_data=f"fav:chtm:{ticker}"),
             ],
             [
                 InlineKeyboardButton("🔄 분류", callback_data=f"fav:classify:{ticker}"),
@@ -1876,7 +1876,7 @@ class AdminExtrasMixin:
             nav_kb = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
-                    InlineKeyboardButton("📊 차트", callback_data=f"fav:chart:{ticker}"),
+                    InlineKeyboardButton("📊 차트", callback_data=f"fav:chtm:{ticker}"),
                 ],
                 [
                     InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
@@ -2035,17 +2035,47 @@ class AdminExtrasMixin:
                 )
             return
 
-        if action == "chart":
-            # 종목 기술적 분석 차트 이미지 생성 및 전송
+        if action == "chtm":
+            # v9.2: 차트 모드 선택 메뉴
+            ticker = parts[1] if len(parts) > 1 else ""
+            name = self._resolve_name(ticker, ticker)
+            buttons = [
+                [
+                    InlineKeyboardButton("📊 기본", callback_data=f"fav:ch0:{ticker}"),
+                    InlineKeyboardButton("📈 확장(MACD+수급)", callback_data=f"fav:ch1:{ticker}"),
+                ],
+                [
+                    InlineKeyboardButton("📅 주봉", callback_data=f"fav:ch2:{ticker}"),
+                    InlineKeyboardButton("🔀 일봉+주봉", callback_data=f"fav:ch3:{ticker}"),
+                ],
+                [
+                    InlineKeyboardButton("💰 밸류에이션", callback_data=f"fav:ch4:{ticker}"),
+                    InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
+                ],
+            ]
+            await safe_edit_or_reply(
+                query,
+                f"📊 {name} ({ticker}) 차트 선택\n\n"
+                f"기본: 캔들+BB+RSI\n"
+                f"확장: +MACD+수급+공매도+시그널선\n"
+                f"주봉: 주봉캔들+매집점수\n"
+                f"일봉+주봉: 멀티타임프레임\n"
+                f"밸류에이션: PER밴드+적정가",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        if action in ("chart", "ch0"):
+            # 기본 차트 (캔들+BB+RSI)
             ticker = parts[1] if len(parts) > 1 else ""
             name = self._resolve_name(ticker, ticker)
             nav_kb = InlineKeyboardMarkup([
                 [
+                    InlineKeyboardButton("📊 다른 차트", callback_data=f"fav:chtm:{ticker}"),
                     InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
-                    InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
                 ],
             ])
-            await safe_edit_or_reply(query, f"📊 {name} 차트 생성 중...")
+            await safe_edit_or_reply(query, f"📊 {name} 기본 차트 생성 중...")
             try:
                 from kstock.features.chart_gen import generate_stock_chart
                 chart_path = await generate_stock_chart(ticker, name)
@@ -2053,24 +2083,169 @@ class AdminExtrasMixin:
                     with open(chart_path, "rb") as f:
                         await query.message.reply_photo(
                             photo=f,
-                            caption=f"📊 {name} ({ticker}) 기술적 분석 차트",
+                            caption=f"📊 {name} ({ticker}) 기본 차트",
                         )
-                    # 차트 이미지 아래 네비게이션 버튼
-                    await query.message.reply_text(
-                        f"📊 {name} 차트 확인 완료",
-                        reply_markup=nav_kb,
-                    )
+                    await query.message.reply_text("📊 차트 완료", reply_markup=nav_kb)
                 else:
-                    await query.message.reply_text(
-                        f"📊 {name}: 차트 데이터를 가져올 수 없습니다.",
-                        reply_markup=nav_kb,
-                    )
+                    await query.message.reply_text(f"📊 {name}: 데이터 없음", reply_markup=nav_kb)
             except Exception:
-                logger.debug("_action_favorites chart generation failed for %s", ticker, exc_info=True)
-                await query.message.reply_text(
-                    f"📊 {name}: 차트 생성 실패",
-                    reply_markup=nav_kb,
+                logger.debug("chart ch0 failed for %s", ticker, exc_info=True)
+                await query.message.reply_text(f"📊 {name}: 차트 생성 실패", reply_markup=nav_kb)
+            return
+
+        if action == "ch1":
+            # 확장 차트 (MACD+수급+공매도+시그널선)
+            ticker = parts[1] if len(parts) > 1 else ""
+            name = self._resolve_name(ticker, ticker)
+            nav_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📊 다른 차트", callback_data=f"fav:chtm:{ticker}"),
+                    InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
+                ],
+            ])
+            await safe_edit_or_reply(query, f"📈 {name} 확장 차트 생성 중...")
+            try:
+                from kstock.features.chart_gen import generate_full_chart
+                supply = self.db.get_supply_demand(ticker, days=60)
+                short = self.db.get_short_selling(ticker, days=60) if hasattr(self.db, "get_short_selling") else None
+                # 보유종목이면 매수/손절/목표가 표시
+                bp, sp, t1, t2 = 0, 0, 0, 0
+                for h in self.db.get_active_holdings():
+                    if h.get("ticker") == ticker:
+                        bp = float(h.get("buy_price") or 0)
+                        sp = float(h.get("stop_price") or 0)
+                        t1 = float(h.get("target_1") or 0)
+                        t2 = float(h.get("target_2") or 0)
+                        break
+                chart_path = await generate_full_chart(
+                    ticker, name, days=60,
+                    supply_data=supply, short_data=short,
+                    buy_price=bp, stop_price=sp, target_1=t1, target_2=t2,
                 )
+                if chart_path:
+                    with open(chart_path, "rb") as f:
+                        await query.message.reply_photo(
+                            photo=f,
+                            caption=f"📈 {name} ({ticker}) 확장 차트 (MACD+수급+공매도)",
+                        )
+                    await query.message.reply_text("📈 확장 차트 완료", reply_markup=nav_kb)
+                else:
+                    await query.message.reply_text(f"📈 {name}: 데이터 없음", reply_markup=nav_kb)
+            except Exception:
+                logger.debug("chart ch1 failed for %s", ticker, exc_info=True)
+                await query.message.reply_text(f"📈 {name}: 확장 차트 실패", reply_markup=nav_kb)
+            return
+
+        if action == "ch2":
+            # 주봉 차트 + 매집 점수
+            ticker = parts[1] if len(parts) > 1 else ""
+            name = self._resolve_name(ticker, ticker)
+            nav_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📊 다른 차트", callback_data=f"fav:chtm:{ticker}"),
+                    InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
+                ],
+            ])
+            await safe_edit_or_reply(query, f"📅 {name} 주봉 차트 생성 중...")
+            try:
+                from kstock.features.chart_gen import generate_weekly_chart
+                acc_score = None
+                try:
+                    from kstock.features.weekly_pattern import analyze_weekly_accumulation
+                    from kstock.features.chart_gen import _fetch_ohlcv, _ensure_numeric
+                    raw = _fetch_ohlcv(ticker, 180)
+                    if not raw.empty:
+                        raw = _ensure_numeric(raw)
+                        supply = self.db.get_supply_demand(ticker, days=20)
+                        result = analyze_weekly_accumulation(raw, supply)
+                        acc_score = {
+                            "total": result.total,
+                            "pattern": result.pattern,
+                        }
+                except Exception:
+                    pass
+                chart_path = await generate_weekly_chart(ticker, name, accumulation_score=acc_score)
+                if chart_path:
+                    caption = f"📅 {name} ({ticker}) 주봉 차트"
+                    if acc_score:
+                        caption += f"\n매집점수: {acc_score['total']}/100"
+                        if acc_score.get("pattern"):
+                            caption += f" | {acc_score['pattern']}"
+                    with open(chart_path, "rb") as f:
+                        await query.message.reply_photo(photo=f, caption=caption)
+                    await query.message.reply_text("📅 주봉 차트 완료", reply_markup=nav_kb)
+                else:
+                    await query.message.reply_text(f"📅 {name}: 데이터 없음", reply_markup=nav_kb)
+            except Exception:
+                logger.debug("chart ch2 failed for %s", ticker, exc_info=True)
+                await query.message.reply_text(f"📅 {name}: 주봉 차트 실패", reply_markup=nav_kb)
+            return
+
+        if action == "ch3":
+            # 멀티타임프레임 (일봉+주봉)
+            ticker = parts[1] if len(parts) > 1 else ""
+            name = self._resolve_name(ticker, ticker)
+            nav_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📊 다른 차트", callback_data=f"fav:chtm:{ticker}"),
+                    InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
+                ],
+            ])
+            await safe_edit_or_reply(query, f"🔀 {name} 멀티타임프레임 차트 생성 중...")
+            try:
+                from kstock.features.chart_gen import generate_mtf_chart
+                chart_path = await generate_mtf_chart(ticker, name)
+                if chart_path:
+                    with open(chart_path, "rb") as f:
+                        await query.message.reply_photo(
+                            photo=f,
+                            caption=f"🔀 {name} ({ticker}) 일봉+주봉 멀티타임프레임",
+                        )
+                    await query.message.reply_text("🔀 MTF 차트 완료", reply_markup=nav_kb)
+                else:
+                    await query.message.reply_text(f"🔀 {name}: 데이터 없음", reply_markup=nav_kb)
+            except Exception:
+                logger.debug("chart ch3 failed for %s", ticker, exc_info=True)
+                await query.message.reply_text(f"🔀 {name}: MTF 차트 실패", reply_markup=nav_kb)
+            return
+
+        if action == "ch4":
+            # 밸류에이션 밴드
+            ticker = parts[1] if len(parts) > 1 else ""
+            name = self._resolve_name(ticker, ticker)
+            nav_kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📊 다른 차트", callback_data=f"fav:chtm:{ticker}"),
+                    InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{ticker}"),
+                ],
+            ])
+            await safe_edit_or_reply(query, f"💰 {name} 밸류에이션 밴드 생성 중...")
+            try:
+                from kstock.features.chart_gen import generate_valuation_band
+                per, sector_per, fair = 0, 0, 0
+                fin = self.db.get_financials(ticker)
+                if fin:
+                    per = float(fin.get("per", 0) or 0)
+                cons = self.db.get_consensus(ticker)
+                if cons:
+                    fair = float(cons.get("avg_target_price", 0) or 0)
+                chart_path = await generate_valuation_band(
+                    ticker, name, per=per, sector_per=sector_per, fair_price=fair,
+                )
+                if chart_path:
+                    caption = f"💰 {name} ({ticker}) 밸류에이션 밴드"
+                    if per > 0:
+                        caption += f"\nPER: {per:.1f}x"
+                    if fair > 0:
+                        caption += f" | 컨센서스 적정가: {fair:,.0f}원"
+                    with open(chart_path, "rb") as f:
+                        await query.message.reply_photo(photo=f, caption=caption)
+                    await query.message.reply_text("💰 밸류에이션 차트 완료", reply_markup=nav_kb)
+                else:
+                    await query.message.reply_text(f"💰 {name}: 데이터 없음", reply_markup=nav_kb)
+            except Exception:
+                logger.debug("chart ch4 failed for %s", ticker, exc_info=True)
+                await query.message.reply_text(f"💰 {name}: 밸류에이션 차트 실패", reply_markup=nav_kb)
             return
 
         if action == "news":
@@ -2549,7 +2724,7 @@ class AdminExtrasMixin:
                         await query.message.reply_document(
                             document=f,
                             filename="K-Quant_v8_Features.pdf",
-                            caption="📋 K-Quant System v8.7 기능 설명서 (11페이지)",
+                            caption="📋 K-Quant System v9.1 기능 설명서",
                         )
                 else:
                     await query.message.reply_text(

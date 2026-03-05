@@ -1,4 +1,4 @@
-"""Bot mixin modules for K-Quant v8.7."""
+"""Bot mixin modules for K-Quant v9.1."""
 
 from kstock.bot.mixins.core_handlers import CoreHandlersMixin  # noqa: F401
 from kstock.bot.mixins.menus_kis import MenusKisMixin  # noqa: F401

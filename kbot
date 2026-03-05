@@ -1,6 +1,6 @@
 #!/bin/bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# kbot — K-Quant 봇 통합 관리 CLI v8.7
+# kbot — K-Quant 봇 통합 관리 CLI v9.1
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
 # 프로세스:
@@ -44,7 +44,7 @@ cd "$SCRIPT_DIR"
 
 PID_FILE="$SCRIPT_DIR/bot.pid"
 LOG_FILE="/tmp/kstock_bot.log"
-VERSION="v8.7"
+VERSION="v9.1"
 
 # ── 색상 ─────────────────────────────────
 RED='\033[0;31m'

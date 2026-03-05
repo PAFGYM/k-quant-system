@@ -1,4 +1,4 @@
-"""AI chat handler for K-Quant v8.7 - Claude API integration.
+"""AI chat handler for K-Quant v9.1 - Claude API integration.
 
 Handles free-form user questions via the Anthropic Claude API.
 Maintains daily usage limits, conversation history via ChatMemory,

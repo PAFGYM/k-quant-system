@@ -1,4 +1,4 @@
-"""Telegram bot with multi-strategy system v8.7 — Multi-AI + Real-time + Security.
+"""Telegram bot with multi-strategy system v9.1 — Multi-AI + Real-time + Security.
 
 Modular architecture: KQuantBot is composed of 6 mixin classes.
 Each mixin handles a specific domain (core, menus, trading, scheduler, commands, admin).
@@ -35,12 +35,12 @@ class KQuantBot(
     ControlMixin,
     RemoteClaudeMixin,
 ):
-    """K-Quant v8.7 Telegram Bot — Multi-AI + Real-time + Modular + Control."""
+    """K-Quant v9.1 Telegram Bot — Multi-AI + Real-time + Modular + Control."""
     pass
 
 
 def main() -> None:
-    """Entry point: build and run the K-Quant v8.7 Telegram bot with auto-restart."""
+    """Entry point: build and run the K-Quant v9.1 Telegram bot with auto-restart."""
     load_dotenv(override=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -66,7 +66,7 @@ def main() -> None:
 
             app = bot.build_app()
             bot.schedule_jobs(app)
-            logger.info("K-Quant v8.7 bot starting (polling)...")
+            logger.info("K-Quant v9.1 bot starting (polling)...")
             app.run_polling(drop_pending_updates=True)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")

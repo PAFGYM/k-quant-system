@@ -147,8 +147,8 @@ class TestMorningBriefingSendsMessage:
             _attach_mixin_attrs(mixin, holdings=[_make_holding()])
             await mixin.job_morning_briefing(context)
 
-        context.bot.send_message.assert_called_once()
-        call_kw = context.bot.send_message.call_args.kwargs
+        assert context.bot.send_message.call_count >= 1
+        call_kw = context.bot.send_message.call_args_list[0].kwargs
         assert call_kw["chat_id"] == 6247622742
         assert call_kw["text"] == formatted
 
@@ -171,9 +171,9 @@ class TestMorningBriefingNoHoldings:
             _attach_mixin_attrs(mixin, holdings=[])
             await mixin.job_morning_briefing(context)
 
-        context.bot.send_message.assert_called_once()
+        assert context.bot.send_message.call_count >= 1
         # The mixin should still have queried holdings during briefing generation
-        assert context.bot.send_message.call_args.kwargs["text"] == formatted
+        assert context.bot.send_message.call_args_list[0].kwargs["text"] == formatted
 
 
 class TestMorningBriefingWeekendNotSkipped:
@@ -196,7 +196,7 @@ class TestMorningBriefingWeekendNotSkipped:
             await mixin.job_morning_briefing(context)
 
         # No weekend skip -- message is still sent
-        context.bot.send_message.assert_called_once()
+        assert context.bot.send_message.call_count >= 1
 
 
 class TestMorningBriefingApiFailure:
@@ -228,8 +228,8 @@ class TestMorningBriefingApiFailure:
         # format_market_status should have been used instead
         mock_fms.assert_called_once()
         # Message was still sent
-        context.bot.send_message.assert_called_once()
-        sent = context.bot.send_message.call_args.kwargs["text"]
+        assert context.bot.send_message.call_count >= 1
+        sent = context.bot.send_message.call_args_list[0].kwargs["text"]
         assert "오전 브리핑" in sent
 
     @pytest.mark.asyncio

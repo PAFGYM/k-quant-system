@@ -1,0 +1,50 @@
+#!/bin/bash
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# kbot-remote — 맥북에서 맥미니 봇 원격 관리
+#
+# 설치 (맥북에서):
+#   scp macmini:~/k-quant-system/scripts/kbot-remote ~/bin/kbot
+#   chmod +x ~/bin/kbot
+#
+# 사용:
+#   kbot status          상태 확인
+#   kbot restart         재시작
+#   kbot logs 30         로그 30줄
+#   kbot trigger morning_briefing
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# 맥미니 SSH 호스트 (로컬: macmini, 외부: macmini-ts)
+MACMINI_HOST="${KBOT_HOST:-macmini}"
+KBOT_DIR="~/k-quant-system"
+
+# Tailscale 자동 감지: 로컬 실패 시 Tailscale로 폴백
+_ssh() {
+    ssh -o ConnectTimeout=3 "$MACMINI_HOST" "$@" 2>/dev/null
+    if [ $? -ne 0 ] && [ "$MACMINI_HOST" = "macmini" ]; then
+        echo "로컬 연결 실패, Tailscale로 재시도..." >&2
+        MACMINI_HOST="macmini-ts"
+        ssh -o ConnectTimeout=5 "$MACMINI_HOST" "$@"
+    fi
+}
+
+if [ $# -eq 0 ]; then
+    _ssh "cd $KBOT_DIR && ./kbot help"
+    exit 0
+fi
+
+# 특수 명령: 실시간 로그
+if [ "$1" = "tail" ]; then
+    _ssh "tail -f /tmp/kstock_bot.log"
+    exit 0
+fi
+
+# 특수 명령: 파일 동기화 (맥미니 → 맥북)
+if [ "$1" = "sync" ]; then
+    echo "맥미니 → 맥북 동기화 (data + reports)..."
+    rsync -avz --progress "$MACMINI_HOST:$KBOT_DIR/data/" "${2:-./data/}"
+    rsync -avz --progress "$MACMINI_HOST:$KBOT_DIR/reports/" "${2:-./reports/}"
+    exit 0
+fi
+
+# 모든 명령을 맥미니에 전달
+_ssh "cd $KBOT_DIR && ./kbot $*"

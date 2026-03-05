@@ -96,7 +96,7 @@ class ControlServer:
             hours, rem = divmod(int(delta.total_seconds()), 3600)
             minutes, secs = divmod(rem, 60)
             uptime = f"{hours}h {minutes}m {secs}s"
-        return {"version": "v8.7", "uptime": uptime, "pid": os.getpid()}
+        return {"version": "v9.1", "uptime": uptime, "pid": os.getpid()}
 
     async def _cmd_status(self, **_kw) -> dict:
         import resource
