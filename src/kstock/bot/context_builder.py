@@ -25,6 +25,39 @@ logger = logging.getLogger(__name__)
 WEEKDAY_KR = ['월', '화', '수', '목', '금', '토', '일']
 USER_NAME = "주호님"
 
+
+def get_futures_expiry_warning() -> str:
+    """선물/옵션 만기일 경고 생성.
+
+    한국 선물옵션 동시만기: 매월 둘째 목요일
+    분기 만기(3,6,9,12월): 대형 만기 → 변동성 확대
+    """
+    now = datetime.now(KST)
+    year, month = now.year, now.month
+
+    # 이번 달 둘째 목요일 계산
+    from calendar import monthcalendar
+    cal = monthcalendar(year, month)
+    thursdays = [week[3] for week in cal if week[3] != 0]
+    if len(thursdays) >= 2:
+        expiry_day = thursdays[1]
+    else:
+        return ""
+
+    expiry_date = datetime(year, month, expiry_day, tzinfo=KST)
+    days_until = (expiry_date.date() - now.date()).days
+
+    if days_until < 0 or days_until > 5:
+        return ""
+
+    is_quarterly = month in (3, 6, 9, 12)
+    label = "분기 대형 만기" if is_quarterly else "선물옵션 동시만기"
+
+    if days_until == 0:
+        return f"⚠️ 오늘 {label}일! 변동성 확대 주의"
+    else:
+        return f"⚠️ {label}까지 {days_until}일 ({month}/{expiry_day} 목)"
+
 SYSTEM_PROMPT_TEMPLATE = '''너는 {user_name}의 전속 AI 수행비서 '퀀트봇'이다.
 
 [역할 1: 만능 수행비서]
@@ -405,6 +438,21 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
         label = "극도공포" if fg < 25 else "공포" if fg < 45 else "중립" if fg < 55 else "탐욕" if fg < 75 else "극도탐욕"
         lines.append(f"공포탐욕지수: {fg:.0f}점 ({label})")
 
+    # [v9.0] 미국 선물지수 (장 마감 후에도 방향성 파악 가능)
+    es = macro_snapshot.get("es_futures")
+    es_chg = macro_snapshot.get("es_futures_change_pct")
+    nq = macro_snapshot.get("nq_futures")
+    nq_chg = macro_snapshot.get("nq_futures_change_pct")
+
+    futures_lines = []
+    if es is not None and es > 0:
+        futures_lines.append(f"S&P500 선물(ES): {es:,.0f} ({es_chg:+.2f}%)")
+    if nq is not None and nq > 0:
+        futures_lines.append(f"나스닥100 선물(NQ): {nq:,.0f} ({nq_chg:+.2f}%)")
+    if futures_lines:
+        lines.append("--- 미국 선물 (실시간 방향성) ---")
+        lines.extend(futures_lines)
+
     # [v6.6] 미국 레버리지 ETF 시그널
     koru = macro_snapshot.get("koru_price")
     koru_chg = macro_snapshot.get("koru_change_pct")
@@ -436,6 +484,11 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
         else:
             spread_signal = "확대 (완화적)"
         lines.append(f"장단기 금리차(10Y-2Y): {spread:+.2f}%p ({spread_signal})")
+
+    # [v9.0] 선물만기 경고
+    expiry_warn = get_futures_expiry_warning()
+    if expiry_warn:
+        lines.append(expiry_warn)
 
     return "\n".join(lines) if lines else "시장 데이터 없음"
 
@@ -635,6 +688,11 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                 "soxl_change_pct": getattr(snap, "soxl_change_pct", 0),
                 "tqqq_price": getattr(snap, "tqqq_price", 0),
                 "tqqq_change_pct": getattr(snap, "tqqq_change_pct", 0),
+                # v9.0: 선물지수
+                "es_futures": getattr(snap, "es_futures", 0),
+                "es_futures_change_pct": getattr(snap, "es_futures_change_pct", 0),
+                "nq_futures": getattr(snap, "nq_futures", 0),
+                "nq_futures_change_pct": getattr(snap, "nq_futures_change_pct", 0),
             }
         except Exception as e:
             logger.warning("Failed to get macro for AI context: %s", e)

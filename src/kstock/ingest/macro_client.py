@@ -69,6 +69,12 @@ class MacroSnapshot:
     soxl_change_pct: float = 0.0
     tqqq_price: float = 0.0       # ProShares 3x NASDAQ-100
     tqqq_change_pct: float = 0.0
+    # v9.0: 선물지수 (장 마감 후에도 방향성 파악 가능)
+    es_futures: float = 0.0       # S&P500 E-mini 선물
+    es_futures_change_pct: float = 0.0
+    nq_futures: float = 0.0       # 나스닥100 E-mini 선물
+    nq_futures_change_pct: float = 0.0
+    us2y: float = 0.0             # 미국 2년물 금리
 
 
 def _snapshot_to_json(snap: MacroSnapshot) -> str:
@@ -253,6 +259,7 @@ class MacroClient:
             "^VIX", "^GSPC", "^IXIC", "KRW=X", "^TNX", "DX-Y.NYB",
             "BTC-USD", "GC=F", "^KS11", "^KQ11",
             "KORU", "SOXL", "TQQQ",  # v6.6: 미국 레버리지 ETF
+            "ES=F", "NQ=F",  # v9.0: 미국 선물지수
         ]
         data = yf.download(symbols, period="5d", group_by="ticker", progress=False)
 
@@ -334,6 +341,10 @@ class MacroClient:
         soxl_price, soxl_change = _etf_data("SOXL")
         tqqq_price, tqqq_change = _etf_data("TQQQ")
 
+        # v9.0: 미국 선물지수
+        es_price, es_change = _etf_data("ES=F")
+        nq_price, nq_change = _etf_data("NQ=F")
+
         regime = self._classify_regime(spx_change, vix, usdkrw_change)
 
         # Fear & Greed composite score (0=극도공포, 100=극도탐욕)
@@ -384,6 +395,11 @@ class MacroClient:
             soxl_change_pct=round(soxl_change, 2),
             tqqq_price=round(tqqq_price, 2),
             tqqq_change_pct=round(tqqq_change, 2),
+            # v9.0: 선물지수
+            es_futures=round(es_price, 2),
+            es_futures_change_pct=round(es_change, 2),
+            nq_futures=round(nq_price, 2),
+            nq_futures_change_pct=round(nq_change, 2),
         )
 
     @staticmethod

@@ -465,8 +465,21 @@ def format_market_status(
         "",
         f"{spx_arrow} S&P500: {macro.spx_change_pct:+.2f}%",
         f"{ndx_arrow} 나스닥: {macro.nasdaq_change_pct:+.2f}%",
-        f"{vix_arrow} VIX: {macro.vix:.1f} ({macro.vix_change_pct:+.1f}%) {vix_status}",
     ])
+
+    # v9.0: 선물지수 (장 마감 후에도 방향성 파악)
+    es = getattr(macro, "es_futures", 0)
+    nq = getattr(macro, "nq_futures", 0)
+    if es > 0:
+        es_chg = getattr(macro, "es_futures_change_pct", 0)
+        lines.append(f"{_trend_arrow(es_chg)} S&P선물: {es:,.0f} ({es_chg:+.2f}%)")
+    if nq > 0:
+        nq_chg = getattr(macro, "nq_futures_change_pct", 0)
+        lines.append(f"{_trend_arrow(nq_chg)} NQ선물: {nq:,.0f} ({nq_chg:+.2f}%)")
+
+    lines.append(
+        f"{vix_arrow} VIX: {macro.vix:.1f} ({macro.vix_change_pct:+.1f}%) {vix_status}",
+    )
 
     # v3.5: US10Y / DXY
     us10y_change = getattr(macro, "us10y_change_pct", 0)
@@ -503,6 +516,12 @@ def format_market_status(
         f"\U0001f3e2 기관: {inst_text}",
         f"\U0001f464 외인: {foreign_text}",
     ])
+
+    # v9.0: 선물만기 경고
+    from kstock.bot.context_builder import get_futures_expiry_warning
+    expiry_warn = get_futures_expiry_warning()
+    if expiry_warn:
+        lines.extend(["", expiry_warn])
 
     # FX strategy
     if fx_message:

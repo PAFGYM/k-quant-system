@@ -976,6 +976,23 @@ class SchedulerMixin:
                 acfg = self._get_alert_config()
                 alert_ctx = f"\n[⚠️ 현재 경계 모드: {acfg['label']}]\n"
 
+            # v9.0: 선물지수 + 만기 경고
+            futures_ctx = ""
+            es = getattr(macro, "es_futures", 0)
+            nq = getattr(macro, "nq_futures", 0)
+            if es > 0 or nq > 0:
+                parts = []
+                if es > 0:
+                    parts.append(f"S&P선물={es:,.0f}({getattr(macro, 'es_futures_change_pct', 0):+.2f}%)")
+                if nq > 0:
+                    parts.append(f"나스닥선물={nq:,.0f}({getattr(macro, 'nq_futures_change_pct', 0):+.2f}%)")
+                futures_ctx = ", ".join(parts) + "\n"
+
+            from kstock.bot.context_builder import get_futures_expiry_warning
+            expiry_warn = get_futures_expiry_warning()
+            if expiry_warn:
+                futures_ctx += f"{expiry_warn}\n"
+
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
                 f"[시장 데이터]\n"
@@ -985,7 +1002,8 @@ class SchedulerMixin:
                 f"환율={macro.usdkrw:,.0f}원({macro.usdkrw_change_pct:+.2f}%), "
                 f"BTC=${macro.btc_price:,.0f}({macro.btc_change_pct:+.1f}%), "
                 f"금=${macro.gold_price:,.0f}({macro.gold_change_pct:+.1f}%), "
-                f"레짐={macro.regime}, 모드={regime_mode.get('label', '')}\n\n"
+                f"레짐={macro.regime}, 모드={regime_mode.get('label', '')}\n"
+                f"{futures_ctx}\n"
                 f"{news_ctx}"
                 f"{special_ctx}"
                 f"{alert_ctx}"
@@ -2079,6 +2097,8 @@ class SchedulerMixin:
                 f"S&P500: {macro.spx_change_pct:+.2f}%\n"
                 f"나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
                 f"다우: {getattr(macro, 'dow_change_pct', 0):+.2f}%\n"
+                f"S&P선물(ES): {getattr(macro, 'es_futures', 0):,.0f} ({getattr(macro, 'es_futures_change_pct', 0):+.2f}%)\n"
+                f"나스닥선물(NQ): {getattr(macro, 'nq_futures', 0):,.0f} ({getattr(macro, 'nq_futures_change_pct', 0):+.2f}%)\n"
                 f"VIX: {macro.vix:.1f} ({macro.vix_change_pct:+.1f}%)\n"
                 f"USD/KRW: {macro.usdkrw:,.0f}원 ({macro.usdkrw_change_pct:+.1f}%)\n"
                 f"미국 10년물: {macro.us10y:.2f}%\n"
@@ -2148,12 +2168,24 @@ class SchedulerMixin:
             else:
                 spx_emoji = "📈" if macro.spx_change_pct > 0 else "📉"
                 ndq_emoji = "📈" if macro.nasdaq_change_pct > 0 else "📉"
+                # v9.0: 선물 라인
+                es_val = getattr(macro, 'es_futures', 0)
+                nq_val = getattr(macro, 'nq_futures', 0)
+                ft_line = ""
+                if es_val > 0 or nq_val > 0:
+                    ft_parts = []
+                    if es_val > 0:
+                        ft_parts.append(f"ES: {es_val:,.0f}({getattr(macro, 'es_futures_change_pct', 0):+.2f}%)")
+                    if nq_val > 0:
+                        ft_parts.append(f"NQ: {nq_val:,.0f}({getattr(macro, 'nq_futures_change_pct', 0):+.2f}%)")
+                    ft_line = f"📡 선물: {' / '.join(ft_parts)}\n"
                 msg = (
                     f"🇺🇸 미국 시장 프리마켓 브리핑\n"
                     f"{signal_header}\n"
                     f"{market_note}\n"
                     f"{spx_emoji} S&P500: {macro.spx_change_pct:+.2f}%\n"
                     f"{ndq_emoji} 나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
+                    f"{ft_line}"
                     f"💰 VIX: {macro.vix:.1f} ({macro.vix_change_pct:+.1f}%)\n"
                     f"💱 환율: {macro.usdkrw:,.0f}원 ({macro.usdkrw_change_pct:+.1f}%)\n"
                     f"📊 미국10년물: {macro.us10y:.2f}%\n"
@@ -2209,12 +2241,25 @@ class SchedulerMixin:
                 vix_dir = "급등" if vix_chg > 0 else "급락"
                 vix_alert = f"\n⚠️ VIX {vix_dir}: {macro.vix:.1f} ({vix_chg:+.1f}%)"
 
+            # v9.0: 선물지수 추가
+            futures_line = ""
+            es = getattr(macro, "es_futures", 0)
+            nq = getattr(macro, "nq_futures", 0)
+            if es > 0 or nq > 0:
+                parts = []
+                if es > 0:
+                    parts.append(f"S&P선물: {es:,.0f} ({getattr(macro, 'es_futures_change_pct', 0):+.2f}%)")
+                if nq > 0:
+                    parts.append(f"NQ선물: {nq:,.0f} ({getattr(macro, 'nq_futures_change_pct', 0):+.2f}%)")
+                futures_line = "\n".join(parts) + "\n"
+
             msg = (
                 f"📡 시장 신호 변경\n"
                 f"{'━' * 22}\n"
                 f"국내 시장 전망: {signal_emoji} {signal_label}\n\n"
                 f"S&P500: {macro.spx_change_pct:+.2f}%\n"
                 f"나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
+                f"{futures_line}"
                 f"VIX: {macro.vix:.1f} ({vix_chg:+.1f}%)\n"
                 f"환율: {macro.usdkrw:,.0f}원 ({macro.usdkrw_change_pct:+.1f}%)"
                 f"{vix_alert}\n\n"
@@ -4167,7 +4212,7 @@ class SchedulerMixin:
                     for d in data[:3]:
                         self.db.add_short_selling(
                             ticker=ticker,
-                            date_str=d["date"],
+                            date=d["date"],
                             short_volume=d["short_volume"],
                             total_volume=d["total_volume"],
                             short_ratio=d["short_ratio"],
@@ -4276,6 +4321,17 @@ class SchedulerMixin:
                 "기관", "개인", "순매수", "순매도",
             ]
 
+            import re as _re
+
+            def _news_dedup_key(url: str) -> str:
+                """article_id+office_id 기반 중복 키 (code= 파라미터 제거)."""
+                m_art = _re.search(r"article_id=([^&]+)", url)
+                m_off = _re.search(r"office_id=([^&]+)", url)
+                if m_art and m_off:
+                    return f"{m_art.group(1)}_{m_off.group(1)}"
+                # 폴백: URL 전체 (code= 파라미터 제거)
+                return _re.sub(r"[&?]code=[^&]*", "", url)
+
             alerts = []
             for ticker, name in list(ticker_names.items())[:15]:
                 try:
@@ -4283,7 +4339,10 @@ class SchedulerMixin:
                     for news in news_list:
                         url = news.get("url", "")
                         title = news.get("title", "")
-                        if not url or url in sent_news:
+                        if not url:
+                            continue
+                        dedup_key = _news_dedup_key(url)
+                        if dedup_key in sent_news:
                             continue
                         # 종목명이 제목에 포함된 뉴스만 (잘못된 매칭 방지)
                         name_clean = name.replace("우", "").replace("홀딩스", "")
@@ -4295,12 +4354,12 @@ class SchedulerMixin:
                         is_important = any(kw in title for kw in important_kw)
                         if is_important:
                             alerts.append(f"📰 {name}: {title}\n🔗 {url}")
-                            sent_news.add(url)
-                            # v6.2.1: DB에도 저장 (재시작 후 중복 방지)
+                            sent_news.add(dedup_key)
+                            # DB에도 저장 (재시작 후 중복 방지)
                             try:
                                 self.db.conn.execute(
                                     "INSERT OR IGNORE INTO sent_news_urls (url) VALUES (?)",
-                                    (url,),
+                                    (dedup_key,),
                                 )
                                 self.db.conn.commit()
                             except Exception:
@@ -4376,17 +4435,26 @@ class SchedulerMixin:
                 # 2. 긴급 뉴스 감지 → 텔레그램 알림
                 urgent = filter_urgent_news(items)
                 if urgent and self.chat_id:
-                    # 쿨다운: 같은 뉴스 30분 내 중복 알림 방지
-                    last_urgent = getattr(self, "_last_urgent_news_time", 0.0)
-                    now_mono = _time.monotonic()
-                    if now_mono - last_urgent >= 1800:
-                        alert_msg = format_urgent_alert(urgent)
+                    # 이미 전송한 긴급 뉴스 title 기반 중복 방지
+                    sent_urgent = getattr(self, "_sent_urgent_titles", set())
+                    if not hasattr(self, "_sent_urgent_titles"):
+                        self._sent_urgent_titles = sent_urgent
+                    new_urgent = [
+                        it for it in urgent
+                        if it.title[:30] not in sent_urgent
+                    ]
+                    if new_urgent:
+                        alert_msg = format_urgent_alert(new_urgent)
                         if alert_msg:
                             await context.bot.send_message(
                                 chat_id=self.chat_id, text=alert_msg,
                             )
-                            self._last_urgent_news_time = now_mono
-                            logger.info("Urgent news alert sent: %d items", len(urgent))
+                            for it in new_urgent:
+                                sent_urgent.add(it.title[:30])
+                            # 세트 과다 증가 방지
+                            if len(sent_urgent) > 200:
+                                self._sent_urgent_titles = set()
+                            logger.info("Urgent news alert sent: %d items", len(new_urgent))
 
                 # 2-1. 뉴스 키워드 기반 경계 모드 자동 에스컬레이션
                 await self._check_news_escalation(items)
