@@ -683,6 +683,65 @@ class TradingMixin:
             logger.debug("_action_manager_view shared context build failed", exc_info=True)
 
         current_alert = getattr(self, '_alert_mode', 'normal')
+
+        # scalp/swing: 차트 데이터 보강
+        if mgr_type in ("scalp", "swing"):
+            try:
+                from kstock.features.technical import compute_indicators
+                from kstock.bot.investment_managers import build_chart_summary
+                for h in type_holdings:
+                    ticker = h.get("ticker", "")
+                    if not ticker:
+                        continue
+                    try:
+                        market = "KOSPI"
+                        for s in self.all_tickers:
+                            if s["code"] == ticker:
+                                market = s.get("market", "KOSPI")
+                                break
+                        ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
+                        if ohlcv is not None and not ohlcv.empty and len(ohlcv) >= 20:
+                            tech = compute_indicators(ohlcv)
+                            cp = float(h.get("current_price") or 0)
+                            supply = self.db.get_supply_demand(ticker, days=5)
+                            h["chart_summary"] = build_chart_summary(
+                                tech, cp, supply,
+                                ohlcv=ohlcv, ticker=ticker,
+                                name=h.get("name", ""),
+                            )
+                    except Exception:
+                        logger.debug("Chart enrich %s failed", ticker, exc_info=True)
+            except ImportError:
+                pass
+
+        # position/long_term: 재무 데이터 보강
+        if mgr_type in ("position", "long_term"):
+            try:
+                from kstock.bot.investment_managers import build_fundamental_summary
+                for h in type_holdings:
+                    ticker = h.get("ticker", "")
+                    if not ticker:
+                        continue
+                    try:
+                        info = await self.data_router.get_stock_info(
+                            ticker, h.get("name", ""),
+                        ) if hasattr(self, "data_router") else None
+                        financials = self.db.get_financials(ticker)
+                        consensus = self.db.get_consensus(ticker)
+                        supply = self.db.get_supply_demand(ticker, days=5)
+                        cp = float(h.get("current_price") or 0)
+                        summary = build_fundamental_summary(
+                            info, financials, consensus, supply,
+                            current_price=cp, ticker=ticker,
+                            name=h.get("name", ""),
+                        )
+                        if summary:
+                            h["fundamental_summary"] = summary
+                    except Exception:
+                        logger.debug("Fundamental enrich %s failed", ticker, exc_info=True)
+            except ImportError:
+                pass
+
         report = await get_manager_analysis(
             mgr_type, type_holdings, market_text,
             shared_context=shared_context,
@@ -1791,6 +1850,47 @@ class TradingMixin:
                 continue
 
             rg_label = risk_grade["label"] if risk_grade else ""
+
+            # scalp/short: 차트 요약 생성
+            chart_summary = ""
+            if horizon in ("scalp", "short") and r.tech:
+                try:
+                    from kstock.bot.investment_managers import build_chart_summary
+                    sd = self.db.get_supply_demand(r.ticker, days=5)
+                    # OHLCV가 있으면 전달 (추가 시그널 계산용)
+                    r_ohlcv = getattr(r, "ohlcv", None)
+                    chart_summary = build_chart_summary(
+                        r.tech, price, sd,
+                        ohlcv=r_ohlcv, ticker=r.ticker, name=r.name,
+                    )
+                except Exception:
+                    pass
+
+            # mid/long: 재무 요약 생성
+            fundamental_summary = ""
+            if horizon in ("mid", "long"):
+                try:
+                    from kstock.bot.investment_managers import build_fundamental_summary
+                    info_data = getattr(r, "info", None)
+                    info_dict = None
+                    if info_data:
+                        info_dict = {
+                            "per": getattr(info_data, "per", 0) or 0,
+                            "pbr": getattr(info_data, "pbr", 0) or 0,
+                            "roe": getattr(info_data, "roe", 0) or 0,
+                            "dividend_yield": getattr(info_data, "dividend_yield", 0) or 0,
+                            "foreign_ratio": getattr(info_data, "foreign_ratio", 0) or 0,
+                        }
+                    financials = self.db.get_financials(r.ticker)
+                    consensus = self.db.get_consensus(r.ticker)
+                    supply = self.db.get_supply_demand(r.ticker, days=5)
+                    fundamental_summary = build_fundamental_summary(
+                        info_dict, financials, consensus, supply,
+                        current_price=price, ticker=r.ticker, name=r.name,
+                    )
+                except Exception:
+                    pass
+
             picks_data.append({
                 "name": r.name,
                 "ticker": r.ticker,
@@ -1817,6 +1917,8 @@ class TradingMixin:
                 "target_pct": target_pct,
                 "stop_pct": stop_pct,
                 "win_rate": win_rate,
+                "chart_summary": chart_summary,
+                "fundamental_summary": fundamental_summary,
             })
 
         if not picks_data:

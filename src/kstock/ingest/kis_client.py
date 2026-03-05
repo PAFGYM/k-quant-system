@@ -200,6 +200,27 @@ class KISClient:
             },
         )
 
+    def _fetch_short_selling_sync(self, ticker: str,
+                                   start_date: str, end_date: str) -> dict:
+        """Fetch daily short selling data from KIS API.
+
+        모의투자/실전 구분 없이 현재 토큰으로 조회합니다.
+        """
+        url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/daily-short-sale"
+        headers = self._auth_headers("FHPST04830000")
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": ticker,
+            "FID_INPUT_DATE_1": start_date,
+            "FID_INPUT_DATE_2": end_date,
+        }
+        with httpx.Client(timeout=15) as client:
+            resp = client.get(url, headers=headers, params=params)
+            if resp.status_code != 200:
+                logger.debug("Short selling API %d for %s", resp.status_code, ticker)
+                return {"rt_cd": "-1", "output2": []}
+            return resp.json()
+
     # ------------------------------------------------------------------
     # Public async methods
     # ------------------------------------------------------------------
@@ -293,6 +314,47 @@ class KISClient:
                 logger.warning("KIS stock info failed for %s: %s", ticker, e)
 
         return _generate_mock_stock_info(ticker, name)
+
+    async def get_short_selling(self, ticker: str, days: int = 20) -> list[dict]:
+        """Fetch daily short selling data.
+
+        Returns:
+            [{date, short_volume, total_volume, short_ratio,
+              short_balance, short_balance_ratio}, ...]
+        """
+        if await self._ensure_token():
+            try:
+                end_dt = datetime.now()
+                start_dt = end_dt - timedelta(days=days + 10)
+                data = await asyncio.to_thread(
+                    self._fetch_short_selling_sync,
+                    ticker,
+                    start_dt.strftime("%Y%m%d"),
+                    end_dt.strftime("%Y%m%d"),
+                )
+                results = []
+                for item in data.get("output2", []):
+                    date_raw = item.get("stck_bsop_date", "")
+                    if len(date_raw) != 8:
+                        continue
+                    date_str = f"{date_raw[:4]}-{date_raw[4:6]}-{date_raw[6:8]}"
+                    short_vol = int(item.get("ssts_cntg_qty", 0) or 0)
+                    total_vol = int(item.get("acml_vol", 0) or 0)
+                    short_ratio = float(item.get("ssts_vol_rlim", 0) or 0)
+                    results.append({
+                        "date": date_str,
+                        "short_volume": short_vol,
+                        "total_volume": total_vol,
+                        "short_ratio": round(short_ratio, 2),
+                        "short_balance": 0,
+                        "short_balance_ratio": 0.0,
+                    })
+                    if len(results) >= days:
+                        break
+                return results
+            except Exception as e:
+                logger.warning("KIS short selling API failed for %s: %s", ticker, e)
+        return []
 
     async def get_foreign_flow(self, ticker: str, days: int = 5) -> pd.DataFrame:
         """Fetch foreign investor flow data."""

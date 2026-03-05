@@ -319,161 +319,32 @@ def _to_float(text: str) -> float:
         return 0.0
 
 
-# ── 공매도 조회 (KRX data.krx.co.kr + KIS 폴백) ────────────────
+# ── 공매도 조회 (KIS OpenAPI) ────────────────────────────────────
 
-_KRX_LOADER = "https://data.krx.co.kr/comm/srt/srtLoader/index.cmd"
-_KRX_JSON = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
-_KRX_SHORT_BLD = "dbms/MDC_OUT/STAT/srt/MDCSTAT30001_OUT"
-_isin_cache: dict[str, str] = {}
+_kis_client_singleton = None
 
 
-def _get_isin(code: str) -> str:
-    """6자리 종목코드 → KR ISIN 변환 (pykrx 활용, 캐싱)."""
-    if code in _isin_cache:
-        return _isin_cache[code]
-    try:
-        from pykrx.website.krx.market import wrap as mw
-        isin = mw.get_stock_ticker_isin(code)
-        if isin:
-            _isin_cache[code] = isin
-            return isin
-    except Exception:
-        logger.debug("ISIN lookup failed for %s", code, exc_info=True)
-    return ""
-
-
-async def _fetch_short_from_krx(code: str, days: int) -> list[dict]:
-    """KRX data.krx.co.kr에서 공매도 일별추이 직접 조회."""
-    import json as _json
-    from datetime import datetime, timedelta
-
-    try:
-        import httpx
-    except ImportError:
-        return []
-
-    isin = _get_isin(code)
-    if not isin:
-        return []
-
-    end_dt = datetime.now()
-    start_dt = end_dt - timedelta(days=days + 15)
-    results: list[dict] = []
-
-    try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            # 세션 초기화
-            await client.get(
-                f"{_KRX_LOADER}?screenId=MDCSTAT300&isuCd={code}",
-                headers=_HEADERS,
-            )
-
-            # 공매도 거래 데이터 조회
-            resp = await client.post(
-                _KRX_JSON,
-                data={
-                    "bld": _KRX_SHORT_BLD,
-                    "locale": "ko_KR",
-                    "isuCd": isin,
-                    "strtDd": start_dt.strftime("%Y%m%d"),
-                    "endDd": end_dt.strftime("%Y%m%d"),
-                    "share": "1",
-                    "money": "1",
-                    "csvxls_isNo": "false",
-                },
-                headers={
-                    **_HEADERS,
-                    "Referer": f"{_KRX_LOADER}?screenId=MDCSTAT300&isuCd={code}",
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Accept": "application/json",
-                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                },
-            )
-            if resp.status_code != 200 or not resp.text.startswith("{"):
-                return []
-
-            data = _json.loads(resp.text)
-            items = data.get("OutBlock_1", [])
-
-            # 총 거래량 (네이버 siseJson)
-            vol_map: dict[str, int] = {}
-            try:
-                import ast
-                vr = await client.get(
-                    "https://api.finance.naver.com/siseJson.naver",
-                    params={
-                        "symbol": code,
-                        "requestType": "1",
-                        "startTime": start_dt.strftime("%Y%m%d"),
-                        "endTime": end_dt.strftime("%Y%m%d"),
-                        "timeframe": "day",
-                    },
-                    headers=_HEADERS,
-                )
-                if vr.status_code == 200:
-                    rows = ast.literal_eval(vr.text.strip())
-                    for row in rows[1:]:
-                        if len(row) >= 6:
-                            vol_map[str(row[0]).strip('"')] = int(row[5])
-            except Exception:
-                pass
-
-            for item in items:
-                trd_dd = item.get("TRD_DD", "")
-                if not trd_dd:
-                    continue
-                short_vol = int(
-                    item.get("CVSRTSELL_TRDVOL", "0").replace(",", "") or "0"
-                )
-                if short_vol == 0:
-                    continue
-
-                date_str = trd_dd.replace("/", "-")
-                date_compact = trd_dd.replace("/", "")
-                total_vol = vol_map.get(date_compact, 0)
-                short_ratio = (short_vol / total_vol * 100) if total_vol > 0 else 0.0
-
-                bal_str = item.get("STR_CONST_VAL1", "-")
-                short_balance = 0
-                if bal_str and bal_str != "-":
-                    short_balance = int(bal_str.replace(",", "") or "0")
-
-                results.append({
-                    "date": date_str,
-                    "short_volume": short_vol,
-                    "total_volume": total_vol,
-                    "short_ratio": round(short_ratio, 2),
-                    "short_balance": short_balance,
-                    "short_balance_ratio": 0.0,
-                })
-                if len(results) >= days:
-                    break
-
-    except Exception as e:
-        logger.debug("KRX short selling error for %s: %s", code, e)
-
-    return results
+def _get_kis_client():
+    """KISClient 싱글톤 반환 (토큰 재사용)."""
+    global _kis_client_singleton
+    if _kis_client_singleton is None:
+        from kstock.ingest.kis_client import KISClient
+        _kis_client_singleton = KISClient()
+    return _kis_client_singleton
 
 
 async def get_short_selling(code: str, days: int = 20) -> list[dict]:
-    """종목별 공매도 일별추이 조회 (KRX 직접 → KIS 폴백).
+    """KIS OpenAPI로 종목별 공매도 일별추이 조회.
 
     Returns:
         [{date, short_volume, total_volume, short_ratio,
           short_balance, short_balance_ratio}, ...]
     """
-    # 1차: KRX 직접 조회
-    results = await _fetch_short_from_krx(code, days)
-    if results:
-        return results
-
-    # 2차: KIS OpenAPI 폴백
     try:
-        from kstock.ingest.kis_client import KISClient
-        client = KISClient()
+        client = _get_kis_client()
         return await client.get_short_selling(code, days=days)
     except Exception as e:
-        logger.debug("Short selling fallback error for %s: %s", code, e)
+        logger.debug("Short selling error for %s: %s", code, e)
         return []
 
 

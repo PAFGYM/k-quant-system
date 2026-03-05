@@ -661,15 +661,16 @@ class TradingMixin:
     def add_trade_lesson(
         self, ticker: str, name: str, action: str,
         pnl_pct: float = 0, hold_days: int = 0, lesson: str = "",
+        manager: str = "",
     ) -> int:
         """매매 교훈 기록."""
         now = datetime.utcnow().isoformat()
         with self._connect() as conn:
             cursor = conn.execute(
                 "INSERT INTO trade_lessons "
-                "(ticker, name, action, pnl_pct, hold_days, lesson, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (ticker, name, action, pnl_pct, hold_days, lesson, now),
+                "(ticker, name, action, pnl_pct, hold_days, lesson, manager, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ticker, name, action, pnl_pct, hold_days, lesson, manager, now),
             )
             return cursor.lastrowid
 
@@ -681,6 +682,84 @@ class TradingMixin:
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_trade_lessons_by_manager(self, manager: str, limit: int = 10) -> list[dict]:
+        """특정 매니저의 매매 교훈 반환."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM trade_lessons WHERE manager=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (manager, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- 매니저 성과 추적 ---------------------------------------------------
+
+    def get_manager_performance(self, manager: str, days: int = 90) -> dict:
+        """매니저별 성과 통계 (trade_debrief + trades 기반)."""
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        result = {
+            "manager": manager,
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+            "avg_pnl": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "avg_hold_days": 0,
+            "best_trade": None,
+            "worst_trade": None,
+            "recent_trades": [],
+        }
+        with self._connect() as conn:
+            # trade_debrief (주요 소스)
+            rows = conn.execute(
+                "SELECT ticker, name, action, pnl_pct, hold_days "
+                "FROM trade_debrief WHERE manager=? AND created_at>=? "
+                "ORDER BY created_at DESC",
+                (manager, cutoff),
+            ).fetchall()
+
+            if not rows:
+                # 폴백: holdings 기반 (holding_type으로)
+                rows = conn.execute(
+                    "SELECT ticker, name, 'sell' as action, pnl_pct, "
+                    "CAST(julianday('now') - julianday(buy_date) AS INTEGER) as hold_days "
+                    "FROM holdings WHERE holding_type=? AND status='closed' "
+                    "AND updated_at>=? ORDER BY updated_at DESC",
+                    (manager, cutoff),
+                ).fetchall()
+
+        trades = [dict(r) for r in rows]
+        if not trades:
+            return result
+
+        result["total_trades"] = len(trades)
+        pnls = [t["pnl_pct"] or 0 for t in trades]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        hold_days_list = [t.get("hold_days", 0) or 0 for t in trades]
+
+        result["wins"] = len(wins)
+        result["losses"] = len(losses)
+        result["win_rate"] = len(wins) / len(trades) * 100 if trades else 0
+        result["avg_pnl"] = sum(pnls) / len(pnls) if pnls else 0
+        result["avg_win"] = sum(wins) / len(wins) if wins else 0
+        result["avg_loss"] = sum(losses) / len(losses) if losses else 0
+        result["avg_hold_days"] = sum(hold_days_list) // max(len(hold_days_list), 1)
+        result["best_trade"] = max(trades, key=lambda t: t.get("pnl_pct", 0) or 0)
+        result["worst_trade"] = min(trades, key=lambda t: t.get("pnl_pct", 0) or 0)
+        result["recent_trades"] = trades[:5]
+
+        return result
+
+    def get_all_managers_performance(self, days: int = 90) -> dict[str, dict]:
+        """4매니저 전체 성과 비교."""
+        return {
+            mgr: self.get_manager_performance(mgr, days)
+            for mgr in ("scalp", "swing", "position", "long_term")
+        }
 
     # -- trade_journal (v4.3) --------------------------------------------------
 

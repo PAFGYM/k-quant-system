@@ -1195,6 +1195,40 @@ class StoreBase:
                         conn.execute(sql)
                     except sqlite3.OperationalError:
                         pass
+            # Migrate: trades — manager, holding_type (매니저 성과 추적)
+            for col, sql in [
+                ("manager", "ALTER TABLE trades ADD COLUMN manager TEXT DEFAULT ''"),
+                ("holding_type", "ALTER TABLE trades ADD COLUMN holding_type TEXT DEFAULT ''"),
+            ]:
+                try:
+                    conn.execute(f"SELECT {col} FROM trades LIMIT 1")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass
+            # Migrate: recommendations — manager (매니저 추천 추적)
+            for col, sql in [
+                ("manager", "ALTER TABLE recommendations ADD COLUMN manager TEXT DEFAULT ''"),
+            ]:
+                try:
+                    conn.execute(f"SELECT {col} FROM recommendations LIMIT 1")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass
+            # Migrate: trade_lessons — manager (매니저별 교훈)
+            for col, sql in [
+                ("manager", "ALTER TABLE trade_lessons ADD COLUMN manager TEXT DEFAULT ''"),
+            ]:
+                try:
+                    conn.execute(f"SELECT {col} FROM trade_lessons LIMIT 1")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass
             # Migrate: consensus.ticker UNIQUE 인덱스 추가 (ON CONFLICT 지원)
             try:
                 conn.execute(

@@ -1,18 +1,38 @@
-# K-Quant v8.7 프로젝트 규칙 (CLAUDE.md)
+# K-Quant v9 프로젝트 규칙 (CLAUDE.md)
 
 ## 프로젝트 개요
 한국 주식 퀀트 트레이딩 텔레그램 봇 (주호님 전용)
-- 경로: /Users/juhodang/k-quant-system
+- 경로: /Users/botddol/k-quant-system
 - 언어: Python 3.9
 - PYTHONPATH=src 필수
-- 아키텍처 상세: .claude/docs/ARCHITECTURE.md
-- 교훈/히스토리: .claude/docs/LESSONS.md
 
-## 핵심 원칙 (보리스 체르니 워크플로우)
-1. **Plan First** — 3단계 이상 작업은 계획 먼저. "일단 해보자" 금지
-2. **Verify** — 수정 후 반드시: `PYTHONPATH=src python3 -m pytest tests/ -x -q` (2149 tests 전체 통과)
-3. **Self-Improve** — 피드백 → .claude/docs/LESSONS.md에 기록. 같은 실수 반복 금지
-4. **Minimal Impact** — 버그 수정 시 관련 코드만. 리팩터링은 별도 작업으로 제안
+## 4대 원칙 (Karpathy-Inspired)
+
+### 1. Think Before Coding
+- 가정하지 마라. 불확실하면 물어라
+- 여러 해석이 가능하면 선택지를 제시하라
+- 더 단순한 방법이 있으면 제안하라
+- 혼란스러우면 멈추고 무엇이 불분명한지 말하라
+
+### 2. Simplicity First
+- 요청받은 것만 구현. 추측성 기능 추가 금지
+- 1회용 코드에 추상화 금지
+- "유연성", "확장성"이 요청되지 않았으면 넣지 마라
+- 불가능한 시나리오에 대한 에러 처리 금지
+- 200줄이 50줄로 가능하면 50줄로 써라
+
+### 3. Surgical Changes
+- 요청과 무관한 코드, 주석, 포맷 수정 금지
+- 안 깨진 것을 리팩터하지 마라
+- 기존 스타일을 따라라 (내 방식이 더 나아도)
+- 관련 없는 죽은 코드 발견 시: 삭제하지 말고 언급만
+- 내 변경으로 생긴 미사용 import/변수만 정리
+
+### 4. Goal-Driven Execution
+- 성공 기준을 먼저 정의하고, 충족될 때까지 반복
+- "기능 추가" → 테스트 작성 → 통과시키기
+- "버그 수정" → 재현 테스트 → 통과시키기
+- 여러 단계면 각 단계별 검증 기준 명시
 
 ## 필수 규칙
 
@@ -34,18 +54,17 @@
 - yfinance: KOSPI→.KS, KOSDAQ→.KQ
 
 ### 봇 운영
-- PID: `pgrep -f "kstock.app"`
-- 재시작: `kill $(pgrep -f "kstock.app") && sleep 2 && PYTHONPATH=src nohup python3 -m kstock.app > bot.log 2>&1 &`
-- 로그: `tail -30 bot.log`
+- 재시작: `./kbot restart`
+- 로그: `tail -30 /tmp/kstock_bot.log`
 - CHAT_ID: 6247622742
 
-### 테스트
-- 모든 변경 후 반드시 실행, 2149 tests 전체 통과
-- 시스템 프롬프트 변경 시 tests/test_chat_handler.py 확인
+### 문법 검사
+- 수정 후: `python3 -c "import py_compile; py_compile.compile('파일경로', doraise=True)"`
 
 ## 금지 사항
 - 하드코딩된 API 키 금지
 - parse_mode=HTML 또는 Markdown 사용 금지
 - git push --force 금지
-- 테스트 미통과 상태에서 봇 재시작 금지
 - load_dotenv() 기본 호출 금지 (override=True 필수)
+- 요청 외 코드 정리/리팩터링 금지
+- docstring/주석/타입힌트를 변경하지 않은 코드에 추가 금지

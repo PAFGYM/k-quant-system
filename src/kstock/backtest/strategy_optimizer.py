@@ -425,7 +425,7 @@ def optimize_genetic(
             "turnover": best.turnover,
         },
         convergence_history=convergence,
-        elapsed_seconds=round(time.time() - t0, 2),
+        elapsed_seconds=max(time.time() - t0, 0.001),
     )
 
 
@@ -595,7 +595,7 @@ def optimize_bayesian(
             "turnover": best_ind.turnover,
         },
         convergence_history=convergence,
-        elapsed_seconds=round(time.time() - t0, 2),
+        elapsed_seconds=max(time.time() - t0, 0.001),
     )
 
 

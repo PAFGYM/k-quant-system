@@ -558,12 +558,12 @@ class CommandsMixin:
             lines: list[str] = []
 
             # Short selling analysis
+            price_data = self.db.get_supply_demand(ticker, days=20)
             short_signal = analyze_short_selling(short_data, ticker, name)
-            lines.append(format_short_alert(short_signal, short_data))
+            lines.append(format_short_alert(short_signal, short_data, price_data))
             lines.append("")
 
             # Short pattern detection
-            price_data = self.db.get_supply_demand(ticker, days=20)
             pattern_result = detect_all_patterns(
                 short_data, price_data, ticker=ticker, name=name,
             )
@@ -2054,13 +2054,12 @@ class CommandsMixin:
                 )
                 return
             margin_data = self.db.get_margin_balance(ticker, days=60)
+            price_data = self.db.get_supply_demand(ticker, days=20)
             lines: list[str] = []
 
             signal = analyze_short_selling(short_data, ticker, name)
-            lines.append(format_short_alert(signal, short_data))
+            lines.append(format_short_alert(signal, short_data, price_data))
             lines.append("")
-
-            price_data = self.db.get_supply_demand(ticker, days=20)
             pattern_result = detect_all_patterns(
                 short_data, price_data, ticker=ticker, name=name,
             )
