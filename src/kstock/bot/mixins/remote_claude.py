@@ -56,7 +56,7 @@ CLAUDE_MODE_MENU = ReplyKeyboardMarkup(
         ["📊 분석", "📈 시황"],
         ["💰 잔고", "⭐ 즐겨찾기"],
         ["💻 클로드", "🤖 에이전트"],
-        ["💬 AI질문", "📋 리포트"],
+        ["💬 AI비서", "📋 리포트"],
         ["⚙️ 더보기"],
     ],
     resize_keyboard=True,

@@ -2680,7 +2680,7 @@ class AdminExtrasMixin:
                 "balance": ("💰 잔고 체험", self.cmd_balance),
                 "favorites": ("⭐ 즐겨찾기 체험", self._menu_favorites),
                 "market": ("📈 시황 체험", self._menu_market_status),
-                "ai_chat": ("💬 AI질문 체험", self._menu_ai_chat),
+                "ai_chat": ("💬 AI비서 체험", self._menu_ai_chat),
                 "agents": ("🤖 에이전트 체험", self._menu_agent_chat),
                 "alerts": ("🔔 알림 스케줄", self._menu_notification_settings),
             }

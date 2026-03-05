@@ -870,7 +870,7 @@ class CoreHandlersMixin:
             "🖥 원격접속": self._menu_remote_access,
             "🤖 에이전트": self._menu_agent_chat,
             "📋 리포트": self._menu_reports,
-            "💬 AI질문": self._menu_ai_chat,
+            "💬 AI비서": self._menu_ai_chat,
             "⚙️ 더보기": self._menu_more,
             "🔙 메인으로": self._menu_back_to_main,
             # ── 더보기 서브메뉴 ──
@@ -921,7 +921,7 @@ class CoreHandlersMixin:
             _claude_safe_buttons = {
                 "💻 클로드", "🔙 대화 종료", "🤖 에이전트", "🖥 원격접속",
                 "📊 분석", "📈 시황", "💰 잔고", "⭐ 즐겨찾기",
-                "💬 AI질문", "📋 리포트", "⚙️ 더보기",
+                "💬 AI비서", "📋 리포트", "⚙️ 더보기",
                 "📖 온보딩", "📋 오늘의 할 일",
             }
             if text not in _claude_safe_buttons:
@@ -931,7 +931,7 @@ class CoreHandlersMixin:
             _tip_map = {
                 "📊 분석": "analysis", "📈 시황": "market",
                 "💰 잔고": "balance", "⭐ 즐겨찾기": "favorites",
-                "💬 AI질문": "ai_chat", "📋 리포트": "reports",
+                "💬 AI비서": "ai_chat", "📋 리포트": "reports",
                 "⚙️ 더보기": "more",
             }
             tip_key = _tip_map.get(text)

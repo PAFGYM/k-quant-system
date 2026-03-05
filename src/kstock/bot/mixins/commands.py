@@ -855,21 +855,25 @@ class CommandsMixin:
     async def _menu_ai_chat(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """AI 질문 모드 - 자주하는 질문 4개 버튼 + 직접 입력 안내."""
+        """AI 비서 모드 - 투자 + 범용 질문 버튼 + 직접 입력 안내."""
         from kstock.bot.bot_imports import make_feedback_row
         buttons = [
-            [InlineKeyboardButton("🎯 4매니저 동시추천", callback_data="quick_q:mgr4")],
             [InlineKeyboardButton("📊 오늘 시장 분석", callback_data="quick_q:market")],
             [InlineKeyboardButton("💼 내 포트폴리오 조언", callback_data="quick_q:portfolio")],
-            [InlineKeyboardButton("🔥 지금 매수할 종목", callback_data="quick_q:buy_pick")],
+            [InlineKeyboardButton("🎯 4매니저 동시추천", callback_data="quick_q:mgr4")],
             [InlineKeyboardButton("⚠️ 리스크 점검", callback_data="quick_q:risk")],
-            make_feedback_row("AI질문"),
+            make_feedback_row("AI비서"),
         ]
         msg = (
-            "🤖 Claude AI가 대기 중입니다\n\n"
-            "⬇️ 자주하는 질문을 바로 선택하거나,\n"
+            "🤖 AI 비서 대기 중\n\n"
+            "투자 분석부터 일상 질문까지\n"
+            "무엇이든 물어보세요.\n\n"
             "💬 채팅창에 직접 입력하세요.\n\n"
-            "예시: 에코프로 어떻게 보여? / 반도체 전망은?"
+            "예시:\n"
+            "  '에코프로 어떻게 보여?'\n"
+            "  '오늘 뉴스 요약해줘'\n"
+            "  '영어 이메일 써줘'\n"
+            "  '이번주 할 일 정리해줘'"
         )
         await update.message.reply_text(
             msg, reply_markup=InlineKeyboardMarkup(buttons),
@@ -1236,7 +1240,7 @@ class CommandsMixin:
             logger.error("Followup AI error: %s", e, exc_info=True)
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text="⚠️ AI 응답 중 오류가 발생했습니다.\n💡 잠시 후 같은 질문을 다시 시도하시거나, '💬 AI질문' 메뉴를 이용해주세요.",
+                text="⚠️ AI 응답 중 오류가 발생했습니다.\n💡 잠시 후 같은 질문을 다시 시도하시거나, '💬 AI비서' 메뉴를 이용해주세요.",
             )
 
     async def _action_followup_dynamic(self, query, context, payload: str) -> None:
@@ -1304,7 +1308,7 @@ class CommandsMixin:
             logger.error("Dynamic followup AI error: %s", e, exc_info=True)
             await context.bot.send_message(
                 chat_id=query.message.chat_id,
-                text="⚠️ AI 응답 중 오류가 발생했습니다.\n💡 잠시 후 같은 질문을 다시 시도하시거나, '💬 AI질문' 메뉴를 이용해주세요.",
+                text="⚠️ AI 응답 중 오류가 발생했습니다.\n💡 잠시 후 같은 질문을 다시 시도하시거나, '💬 AI비서' 메뉴를 이용해주세요.",
             )
 
     async def _handle_quick_question(
@@ -2030,7 +2034,7 @@ class CommandsMixin:
                         for d in fresh[:10]:
                             self.db.add_short_selling(
                                 ticker=ticker,
-                                date_str=d["date"],
+                                date=d["date"],
                                 short_volume=d["short_volume"],
                                 total_volume=d["total_volume"],
                                 short_ratio=d["short_ratio"],

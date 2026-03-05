@@ -258,7 +258,7 @@ MAIN_MENU = ReplyKeyboardMarkup(
         ["📊 분석", "📈 시황"],
         ["💰 잔고", "⭐ 즐겨찾기"],
         ["💻 클로드", "🤖 에이전트"],
-        ["💬 AI질문", "📋 리포트"],
+        ["💬 AI비서", "📋 리포트"],
         ["⚙️ 더보기"],
     ],
     resize_keyboard=True,
@@ -356,7 +356,7 @@ def get_reply_markup(context) -> ReplyKeyboardMarkup:
 
     v5.8: 봇 재시작 시 user_data가 초기화되어 claude_mode가 사라지는 문제 해결.
     주호님이 유일한 사용자이고 클로드 메뉴가 항상 필요하므로 기본값을 CLAUDE_MODE_MENU로 설정.
-    CLAUDE_MODE_MENU에 분석/시황/잔고/즐겨찾기/AI질문/리포트 모두 포함.
+    CLAUDE_MODE_MENU에 분석/시황/잔고/즐겨찾기/AI비서/리포트 모두 포함.
     """
     from kstock.bot.mixins.remote_claude import CLAUDE_MODE_MENU
     # claude_mode를 자동으로 항상 설정 (봇 재시작 후에도 유지)
