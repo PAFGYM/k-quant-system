@@ -1026,6 +1026,34 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("Morning briefing flow data failed", exc_info=True)
 
+            # v9.0: 주봉 매집 분석 (보유종목)
+            accum_ctx = ""
+            try:
+                from kstock.features.weekly_pattern import analyze_weekly_accumulation
+                accum_lines = []
+                for h in holdings[:5]:
+                    ticker = h.get("ticker", "")
+                    name = h.get("name", ticker)
+                    try:
+                        ohlcv = await self.yf_client.get_ohlcv(ticker, period="6mo")
+                        if ohlcv is not None and len(ohlcv) >= 40:
+                            sd = self.db.get_supply_demand(ticker, days=20)
+                            acc = analyze_weekly_accumulation(ohlcv, sd)
+                            if acc.total >= 40:
+                                grade = "매집확인" if acc.total >= 70 else "매집가능"
+                                accum_lines.append(
+                                    f"  {name}: {acc.total}점({grade}) "
+                                    f"{'|'.join(acc.signals[:2])}"
+                                )
+                                if acc.pattern:
+                                    accum_lines[-1] += f" [{acc.pattern}]"
+                    except Exception:
+                        pass
+                if accum_lines:
+                    accum_ctx = "\n[주봉 매집 분석]\n" + "\n".join(accum_lines) + "\n"
+            except Exception:
+                logger.debug("Morning briefing accumulation failed", exc_info=True)
+
             # v6.2.2 / v8.1: 경계 모드 컨텍스트 — 전시 상황 구체화
             alert_ctx = ""
             current_alert = getattr(self, '_alert_mode', 'normal')
@@ -1138,6 +1166,7 @@ class SchedulerMixin:
                 f"{alert_ctx}"
                 f"[보유종목]\n{holdings_text}\n"
                 f"{flow_ctx}"
+                f"{accum_ctx}"
                 f"아래 형식으로 작성해주세요:\n\n"
                 f"1) 시장 요약 (3줄 이내) — 글로벌 뉴스 + 수급 핵심\n"
                 f"2) 보유종목별 판단 — 각 종목마다:\n"
