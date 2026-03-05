@@ -523,6 +523,20 @@ def format_market_status(
     if expiry_warn:
         lines.extend(["", expiry_warn])
 
+    # v9.0: 변동성 레짐
+    kr_vol = getattr(macro, "korean_vol", 0)
+    vol_regime = getattr(macro, "vol_regime", "")
+    if vol_regime:
+        try:
+            from kstock.signal.volatility_regime import (
+                classify_volatility_regime,
+                format_volatility_regime,
+            )
+            vr = classify_volatility_regime(macro.vix, kr_vol)
+            lines.extend(["", format_volatility_regime(vr)])
+        except Exception:
+            pass
+
     # FX strategy
     if fx_message:
         lines.extend(["", fx_message])

@@ -490,6 +490,22 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
     if expiry_warn:
         lines.append(expiry_warn)
 
+    # [v9.0] 변동성 레짐
+    kr_vol = macro_snapshot.get("korean_vol")
+    vol_regime = macro_snapshot.get("vol_regime")
+    if vol_regime and vix is not None:
+        regime_labels = {
+            "low": "저변동 (공격적 포지션 가능, 돌파 전략 유효)",
+            "normal": "보통 (기본 전략, 분할 매수)",
+            "high": "고변동 (포지션 축소, 넓은 손절)",
+            "extreme": "극단 (신규 매수 중단, 역발상 탐색)",
+        }
+        kr_vol_str = f", 한국Vol={kr_vol:.1f}%" if kr_vol else ""
+        lines.append(
+            f"변동성 레짐: {regime_labels.get(vol_regime, vol_regime)}"
+            f" (VIX={vix:.1f}{kr_vol_str})"
+        )
+
     return "\n".join(lines) if lines else "시장 데이터 없음"
 
 
@@ -693,6 +709,9 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                 "es_futures_change_pct": getattr(snap, "es_futures_change_pct", 0),
                 "nq_futures": getattr(snap, "nq_futures", 0),
                 "nq_futures_change_pct": getattr(snap, "nq_futures_change_pct", 0),
+                # v9.0: 변동성 레짐
+                "korean_vol": getattr(snap, "korean_vol", 0),
+                "vol_regime": getattr(snap, "vol_regime", ""),
             }
         except Exception as e:
             logger.warning("Failed to get macro for AI context: %s", e)

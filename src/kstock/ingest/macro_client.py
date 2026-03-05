@@ -75,6 +75,9 @@ class MacroSnapshot:
     nq_futures: float = 0.0       # 나스닥100 E-mini 선물
     nq_futures_change_pct: float = 0.0
     us2y: float = 0.0             # 미국 2년물 금리
+    # v9.0: 한국 실현변동성 (VKOSPI 프록시)
+    korean_vol: float = 0.0       # 한국 실현변동성 (연환산 %)
+    vol_regime: str = ""          # 변동성 레짐: low/normal/high/extreme
 
 
 def _snapshot_to_json(snap: MacroSnapshot) -> str:
@@ -345,6 +348,25 @@ class MacroClient:
         es_price, es_change = _etf_data("ES=F")
         nq_price, nq_change = _etf_data("NQ=F")
 
+        # v9.0: 한국 실현변동성 (VKOSPI 프록시)
+        kr_vol = 0.0
+        vol_regime_str = ""
+        try:
+            from kstock.signal.volatility_regime import (
+                compute_korean_volatility,
+                classify_volatility_regime,
+            )
+            # KOSPI 종가 데이터가 이미 있으면 활용
+            if kospi_hist is not None and len(kospi_hist) >= 5:
+                kospi_closes = [float(v) for v in kospi_hist.values]
+                kr_vol = compute_korean_volatility(kospi_closes)
+            else:
+                kr_vol = compute_korean_volatility()
+            vol_result = classify_volatility_regime(vix, kr_vol)
+            vol_regime_str = vol_result.level
+        except Exception as e:
+            logger.debug("Korean vol computation in macro: %s", e)
+
         regime = self._classify_regime(spx_change, vix, usdkrw_change)
 
         # Fear & Greed composite score (0=극도공포, 100=극도탐욕)
@@ -400,6 +422,9 @@ class MacroClient:
             es_futures_change_pct=round(es_change, 2),
             nq_futures=round(nq_price, 2),
             nq_futures_change_pct=round(nq_change, 2),
+            # v9.0: 변동성 레짐
+            korean_vol=round(kr_vol, 2),
+            vol_regime=vol_regime_str,
         )
 
     @staticmethod

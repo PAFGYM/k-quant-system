@@ -993,6 +993,14 @@ class SchedulerMixin:
             if expiry_warn:
                 futures_ctx += f"{expiry_warn}\n"
 
+            # v9.0: 변동성 레짐
+            vol_ctx = ""
+            kr_vol = getattr(macro, "korean_vol", 0)
+            vol_regime = getattr(macro, "vol_regime", "")
+            if vol_regime:
+                regime_labels = {"low": "저변동", "normal": "보통", "high": "고변동", "extreme": "극단"}
+                vol_ctx = f"변동성레짐={regime_labels.get(vol_regime, vol_regime)}(한국Vol={kr_vol:.1f}%)\n"
+
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
                 f"[시장 데이터]\n"
@@ -1003,7 +1011,8 @@ class SchedulerMixin:
                 f"BTC=${macro.btc_price:,.0f}({macro.btc_change_pct:+.1f}%), "
                 f"금=${macro.gold_price:,.0f}({macro.gold_change_pct:+.1f}%), "
                 f"레짐={macro.regime}, 모드={regime_mode.get('label', '')}\n"
-                f"{futures_ctx}\n"
+                f"{futures_ctx}"
+                f"{vol_ctx}\n"
                 f"{news_ctx}"
                 f"{special_ctx}"
                 f"{alert_ctx}"
