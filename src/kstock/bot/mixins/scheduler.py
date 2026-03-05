@@ -612,6 +612,32 @@ class SchedulerMixin:
             for mtype, mholdings in by_type.items():
                 if mtype not in MANAGERS or not mholdings:
                     continue
+
+                # scalp/swing: 차트 데이터 보강
+                if mtype in ("scalp", "swing"):
+                    try:
+                        from kstock.features.technical import compute_indicators
+                        from kstock.bot.investment_managers import build_chart_summary
+                        for h in mholdings:
+                            ticker = h.get("ticker", "")
+                            if not ticker:
+                                continue
+                            try:
+                                market = "KOSPI"
+                                for s in self.all_tickers:
+                                    if s["code"] == ticker:
+                                        market = s.get("market", "KOSPI")
+                                        break
+                                ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
+                                if ohlcv is not None and not ohlcv.empty and len(ohlcv) >= 20:
+                                    tech = compute_indicators(ohlcv)
+                                    cp = float(h.get("current_price") or 0)
+                                    h["chart_summary"] = build_chart_summary(tech, cp)
+                            except Exception:
+                                logger.debug("Chart enrich %s failed", ticker, exc_info=True)
+                    except ImportError:
+                        pass
+
                 try:
                     report = await get_manager_analysis(
                         mtype, mholdings, market_text, alert_mode=current_alert,
@@ -1014,6 +1040,21 @@ class SchedulerMixin:
             except Exception:
                 pass
 
+            # v9.0: 신용잔고/예탁금
+            credit_ctx = ""
+            try:
+                credit_data = self.db.get_credit_balance(days=5)
+                if credit_data:
+                    c = credit_data[0]
+                    credit_tril = c["credit"] / 10000
+                    deposit_tril = c["deposit"] / 10000
+                    credit_ctx = (
+                        f"[신용잔고] {credit_tril:.1f}조({c['credit_change']:+,.0f}억) "
+                        f"예탁금={deposit_tril:.1f}조({c['deposit_change']:+,.0f}억)\n"
+                    )
+            except Exception:
+                pass
+
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
                 f"[시장 데이터]\n"
@@ -1026,7 +1067,8 @@ class SchedulerMixin:
                 f"레짐={macro.regime}, 모드={regime_mode.get('label', '')}\n"
                 f"{futures_ctx}"
                 f"{vol_ctx}"
-                f"{prog_ctx}\n"
+                f"{prog_ctx}"
+                f"{credit_ctx}\n"
                 f"{news_ctx}"
                 f"{special_ctx}"
                 f"{alert_ctx}"
@@ -1819,6 +1861,13 @@ class SchedulerMixin:
                 if _prog:
                     _p = _prog[0]
                     extra_lines.append(f"프로그램: {_p['total_net']:+,.0f}억")
+            except Exception:
+                pass
+            try:
+                _cred = self.db.get_credit_balance(days=1)
+                if _cred:
+                    _c = _cred[0]
+                    extra_lines.append(f"신용: {_c['credit']/10000:.1f}조({_c['credit_change']:+,.0f}억)")
             except Exception:
                 pass
             extra_text = " | ".join(extra_lines)
@@ -2716,6 +2765,32 @@ class SchedulerMixin:
             logger.error("Program trading collect failed: %s", e)
             self.db.upsert_job_run(
                 "program_trading_collect", today_str, status="error", message=str(e),
+            )
+
+    async def job_credit_balance_collect(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """16:20 평일: 신용잔고/고객예탁금 수집 (네이버 금융)."""
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.ingest.credit_balance import fetch_credit_balance
+
+            data = await asyncio.to_thread(fetch_credit_balance, 2)
+            saved = 0
+            for item in data:
+                self.db.save_credit_balance({
+                    "date": item.date,
+                    "deposit": item.deposit,
+                    "deposit_change": item.deposit_change,
+                    "credit": item.credit,
+                    "credit_change": item.credit_change,
+                })
+                saved += 1
+
+            self.db.upsert_job_run("credit_balance_collect", today_str, status="success")
+            logger.info("Credit balance collected: %d records", saved)
+        except Exception as e:
+            logger.error("Credit balance collect failed: %s", e)
+            self.db.upsert_job_run(
+                "credit_balance_collect", today_str, status="error", message=str(e),
             )
 
     async def job_weekly_learning(self, context: ContextTypes.DEFAULT_TYPE) -> None:

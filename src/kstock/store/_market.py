@@ -805,3 +805,41 @@ class MarketMixin:
                 (market, days),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- credit_balance (v9.0) ------------------------------------------------
+
+    def save_credit_balance(self, data: dict) -> None:
+        """신용잔고/고객예탁금 데이터 저장 (UPSERT by date)."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO credit_balance
+                    (date, deposit, deposit_change, credit, credit_change)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    deposit=excluded.deposit,
+                    deposit_change=excluded.deposit_change,
+                    credit=excluded.credit,
+                    credit_change=excluded.credit_change
+                """,
+                (
+                    data["date"],
+                    data.get("deposit", 0),
+                    data.get("deposit_change", 0),
+                    data.get("credit", 0),
+                    data.get("credit_change", 0),
+                ),
+            )
+
+    def get_credit_balance(self, days: int = 5) -> list[dict]:
+        """최근 N일 신용잔고/예탁금 데이터 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT date, deposit, deposit_change, credit, credit_change
+                FROM credit_balance
+                ORDER BY date DESC LIMIT ?
+                """,
+                (days,),
+            ).fetchall()
+        return [dict(r) for r in rows]

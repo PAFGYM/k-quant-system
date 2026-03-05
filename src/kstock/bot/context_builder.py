@@ -496,6 +496,17 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
             f"(차익 {arb_net:+,.0f} / 비차익 {non_arb_net:+,.0f})"
         )
 
+    # [v9.0] 신용잔고
+    credit_data = macro_snapshot.get("credit_balance")
+    if credit_data:
+        credit_tril = credit_data.get("credit", 0) / 10000
+        credit_chg = credit_data.get("credit_change", 0)
+        deposit_tril = credit_data.get("deposit", 0) / 10000
+        lines.append(
+            f"신용잔고: {credit_tril:.1f}조({credit_chg:+,.0f}억) "
+            f"예탁금: {deposit_tril:.1f}조"
+        )
+
     # [v9.0] 선물만기 경고
     expiry_warn = get_futures_expiry_warning()
     if expiry_warn:
@@ -729,6 +740,13 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                 prog_data = db.get_program_trading(days=1, market="KOSPI")
                 if prog_data:
                     macro_dict["program_trading"] = prog_data[0]
+            except Exception:
+                pass
+            # v9.0: 신용잔고 데이터 추가
+            try:
+                cred_data = db.get_credit_balance(days=1)
+                if cred_data:
+                    macro_dict["credit_balance"] = cred_data[0]
             except Exception:
                 pass
         except Exception as e:

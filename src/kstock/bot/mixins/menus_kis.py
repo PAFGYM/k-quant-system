@@ -537,6 +537,23 @@ class MenusKisMixin:
         except Exception:
             pass
 
+        # v9.0: 신용잔고/예탁금
+        try:
+            cred_data = self.db.get_credit_balance(days=5)
+            if cred_data:
+                from kstock.ingest.credit_balance import analyze_credit_balance, format_credit_balance, CreditBalanceData
+                cbd_list = [CreditBalanceData(
+                    date=d["date"],
+                    deposit=d["deposit"],
+                    deposit_change=d["deposit_change"],
+                    credit=d["credit"],
+                    credit_change=d["credit_change"],
+                ) for d in cred_data]
+                analysis = analyze_credit_balance(cbd_list)
+                msg += "\n\n" + format_credit_balance(analysis)
+        except Exception:
+            pass
+
         # v3.0: policy events
         policy_text = get_policy_summary()
         if policy_text:
