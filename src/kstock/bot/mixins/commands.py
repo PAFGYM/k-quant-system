@@ -1567,6 +1567,7 @@ class CommandsMixin:
 
             # 2. 매크로 컨텍스트 수집 (풍부한 버전)
             market_context = ""
+            snap = None
             try:
                 snap = await self.macro_client.get_snapshot()
                 from kstock.signal.strategies import get_regime_mode
@@ -1596,14 +1597,16 @@ class CommandsMixin:
             except Exception:
                 logger.debug("_action_4manager_picks shared context build failed", exc_info=True)
 
-            # 3. 4매니저 동시 AI 분석 (asyncio.gather) — 공유 컨텍스트 포함
+            # 3. 4매니저 동시 AI 분석 (asyncio.gather) — 공유 컨텍스트 + 레짐 가중치
             from kstock.bot.investment_managers import (
                 get_all_managers_picks, MANAGERS, MANAGER_HORIZON_MAP,
             )
             current_alert = getattr(self, '_alert_mode', 'normal')
+            _vix = getattr(snap, 'vix', 20.0) if snap else 20.0
             manager_analyses = await get_all_managers_picks(
                 picks_by_horizon, market_context, shared_context,
                 alert_mode=current_alert,
+                vix=_vix,
             )
 
             # 4. 결과 포맷
@@ -1624,6 +1627,17 @@ class CommandsMixin:
                 hz_picks = picks_by_horizon.get(hz, [])
                 if hz_picks:
                     top_picks_for_buttons[mgr_key] = hz_picks[0]
+
+            # #2 크로스매니저 컨센서스 감지
+            try:
+                from kstock.bot.investment_managers import detect_consensus, format_consensus
+                consensus = detect_consensus(picks_by_horizon)
+                if consensus:
+                    consensus_text = format_consensus(consensus)
+                    if consensus_text:
+                        lines.append(f"\n{consensus_text}")
+            except Exception:
+                pass
 
             result_text = "\n".join(lines)
 

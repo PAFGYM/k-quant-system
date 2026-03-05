@@ -671,9 +671,21 @@ class SchedulerMixin:
                     except ImportError:
                         pass
 
+                # 매니저 성과 + 교훈 주입
+                mgr_perf = None
+                mgr_lessons = None
+                try:
+                    mgr_perf = self.db.get_manager_performance(mtype, days=90)
+                    mgr_lessons = self.db.get_trade_lessons_by_manager(mtype, limit=5)
+                except Exception:
+                    pass
+
                 try:
                     report = await get_manager_analysis(
-                        mtype, mholdings, market_text, alert_mode=current_alert,
+                        mtype, mholdings, market_text,
+                        alert_mode=current_alert,
+                        performance=mgr_perf,
+                        manager_lessons=mgr_lessons,
                     )
                     if report:
                         await context.bot.send_message(
@@ -681,6 +693,17 @@ class SchedulerMixin:
                         )
                 except Exception as e:
                     logger.debug("Manager briefing %s error: %s", mtype, e)
+
+            # 포트폴리오 밸런스 조언
+            try:
+                from kstock.bot.investment_managers import analyze_portfolio_balance
+                balance_msg = analyze_portfolio_balance(by_type)
+                if balance_msg:
+                    await context.bot.send_message(
+                        chat_id=self.chat_id, text=balance_msg[:2000],
+                    )
+            except Exception:
+                pass
 
             logger.info("Manager briefings sent: %s", list(by_type.keys()))
         except Exception as e:
@@ -1308,12 +1331,67 @@ class SchedulerMixin:
 
             await self._check_holdings(context.bot)
 
+            # #3 매니저별 장중 실시간 알림
+            await self._check_manager_alerts(context.bot)
+
             # 장중 급등 종목 감지 + 장기 우량주 추천
             await self._check_surge_and_longterm(context.bot, results, macro)
 
             logger.info("Intraday monitor: %d stocks scanned", len(results))
         except Exception as e:
             logger.error("Intraday monitor error: %s", e, exc_info=True)
+
+    async def _check_manager_alerts(self, bot) -> None:
+        """#3 매니저별 장중 실시간 알림 (보유종목 기술적 조건 체크)."""
+        try:
+            from kstock.bot.investment_managers import check_manager_alert_conditions
+            from kstock.features.technical import compute_indicators
+
+            holdings = self.db.get_active_holdings()
+            for h in holdings:
+                mtype = h.get("holding_type", "auto")
+                if mtype == "auto" or mtype not in ("scalp", "swing", "position", "long_term"):
+                    continue
+                ticker = h.get("ticker", "")
+                if not ticker:
+                    continue
+                # 쿨다운: 동일 종목 매니저 알림 4시간 내 중복 방지
+                if self.db.has_recent_alert(ticker, f"mgr_{mtype}", hours=4):
+                    continue
+                try:
+                    market = "KOSPI"
+                    for s in self.all_tickers:
+                        if s["code"] == ticker:
+                            market = s.get("market", "KOSPI")
+                            break
+                    ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="1mo")
+                    if ohlcv is None or ohlcv.empty or len(ohlcv) < 20:
+                        continue
+                    tech = compute_indicators(ohlcv)
+                    cp = float(h.get("current_price") or 0)
+                    bp = float(h.get("buy_price") or 0)
+                    hold_days = 0
+                    if h.get("buy_date"):
+                        try:
+                            from datetime import datetime as _dt
+                            bd = _dt.fromisoformat(h["buy_date"].replace("Z", ""))
+                            hold_days = (_dt.utcnow() - bd).days
+                        except Exception:
+                            pass
+
+                    alerts = check_manager_alert_conditions(
+                        mtype, ticker, h.get("name", ""),
+                        tech, cp, bp, hold_days,
+                    )
+                    for alert_text in alerts[:2]:
+                        await bot.send_message(
+                            chat_id=self.chat_id, text=alert_text[:2000],
+                        )
+                        self.db.insert_alert(ticker, f"mgr_{mtype}", alert_text[:200])
+                except Exception:
+                    logger.debug("Manager alert check %s failed", ticker, exc_info=True)
+        except Exception:
+            logger.debug("_check_manager_alerts failed", exc_info=True)
 
     async def _check_surge_and_longterm(
         self, bot, results: list, macro: MacroSnapshot
@@ -3163,6 +3241,52 @@ class SchedulerMixin:
                 "weekly_report", _today(), status="error", message=str(e),
             )
 
+    async def job_manager_reflection(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """#6 매니저 주간 자기반성 보고서 — Sunday 19:30 KST."""
+        if not self.chat_id:
+            return
+        try:
+            import asyncio
+            from kstock.bot.investment_managers import (
+                generate_manager_reflection,
+                suggest_threshold_adjustment,
+                format_threshold_suggestions,
+                MANAGERS,
+            )
+
+            reflections = []
+            threshold_suggestions = {}
+
+            for mgr_key in MANAGERS:
+                perf = self.db.get_manager_performance(mgr_key, days=30)
+                lessons = self.db.get_trade_lessons_by_manager(mgr_key, limit=5)
+                reflection = await generate_manager_reflection(mgr_key, perf, lessons)
+                if reflection:
+                    reflections.append(reflection)
+
+                # #10 임계값 자동 조정 제안
+                sugg = suggest_threshold_adjustment(mgr_key, perf)
+                if sugg:
+                    threshold_suggestions[mgr_key] = sugg
+
+            for ref_text in reflections:
+                await context.bot.send_message(
+                    chat_id=self.chat_id, text=ref_text[:4000],
+                )
+
+            # 임계값 조정 제안
+            if threshold_suggestions:
+                sugg_text = format_threshold_suggestions(threshold_suggestions)
+                if sugg_text:
+                    await context.bot.send_message(
+                        chat_id=self.chat_id, text=sugg_text[:2000],
+                    )
+
+            self.db.upsert_job_run("manager_reflection", _today(), status="success")
+            logger.info("Manager reflection reports sent")
+        except Exception as e:
+            logger.error("Manager reflection error: %s", e, exc_info=True)
+
     def _save_user_preference(self, strat_stats: dict) -> None:
         """Save learned user preferences to YAML."""
         import yaml
@@ -4508,6 +4632,76 @@ class SchedulerMixin:
 
         except Exception as e:
             logger.error("Contrarian scan error: %s", e, exc_info=True)
+
+    # ── #7 매니저 능동 발굴 스캔 (평일 13:00) ──────────────────
+
+    async def job_manager_discovery_scan(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매니저별 발굴 기준으로 신규 종목 탐색 — 캐시된 스캔 결과 활용."""
+        if not self.chat_id:
+            return
+        now = datetime.now(KST)
+        if not is_kr_market_open(now.date()):
+            return
+
+        try:
+            from kstock.bot.investment_managers import (
+                scan_manager_domain, filter_discovery_candidates, MANAGERS,
+            )
+
+            # 캐시된 스캔 결과 사용 (아침 스캔에서 생성됨)
+            results = getattr(self, '_last_scan_results', None)
+            if not results:
+                logger.debug("Manager discovery: no cached scan results")
+                return
+
+            # 보유+관심종목 제외
+            holdings = self.db.get_active_holdings()
+            watchlist = self.db.get_watchlist()
+            exclude = {h["ticker"] for h in holdings}
+            exclude |= {w["ticker"] for w in watchlist}
+
+            # 시장 컨텍스트
+            market_text = ""
+            try:
+                macro = await self.macro_client.get_snapshot()
+                market_text = (
+                    f"VIX={macro.vix:.1f}, S&P={macro.spx_change_pct:+.2f}%, "
+                    f"나스닥={macro.nasdaq_change_pct:+.2f}%, "
+                    f"환율={macro.usdkrw:,.0f}원"
+                )
+            except Exception:
+                pass
+
+            current_alert = getattr(self, '_alert_mode', 'normal')
+            found = 0
+            for mgr_key in MANAGERS:
+                candidates = filter_discovery_candidates(
+                    results, mgr_key, exclude,
+                )
+                if not candidates:
+                    continue
+                try:
+                    report = await scan_manager_domain(
+                        mgr_key, candidates, market_text,
+                        alert_mode=current_alert,
+                    )
+                    if report and "매수 타이밍 종목 없음" not in report:
+                        header = "🔍 매니저 신규 발굴\n"
+                        await context.bot.send_message(
+                            chat_id=self.chat_id,
+                            text=(header + report)[:4000],
+                        )
+                        found += 1
+                except Exception as e:
+                    logger.debug("Discovery scan %s error: %s", mgr_key, e)
+
+            logger.info("Manager discovery scan: %d managers found picks", found)
+            self.db.upsert_job_run("manager_discovery", _today(), status="success")
+
+        except Exception as e:
+            logger.error("Manager discovery scan error: %s", e, exc_info=True)
 
     # == Core Logic ==========================================================
 

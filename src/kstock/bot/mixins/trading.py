@@ -742,10 +742,21 @@ class TradingMixin:
             except ImportError:
                 pass
 
+        # 매니저 성과 + 교훈 주입
+        mgr_perf = None
+        mgr_lessons = None
+        try:
+            mgr_perf = self.db.get_manager_performance(mgr_type, days=90)
+            mgr_lessons = self.db.get_trade_lessons_by_manager(mgr_type, limit=5)
+        except Exception:
+            pass
+
         report = await get_manager_analysis(
             mgr_type, type_holdings, market_text,
             shared_context=shared_context,
             alert_mode=current_alert,
+            performance=mgr_perf,
+            manager_lessons=mgr_lessons,
         )
 
         # 후속 액션 버튼
@@ -754,6 +765,9 @@ class TradingMixin:
         if target_ticker:
             followup_buttons.append([
                 InlineKeyboardButton("📊 멀티분석", callback_data=f"multi_run:{target_ticker}"),
+                InlineKeyboardButton("🎙️ 매니저토론", callback_data=f"mgr_debate:{target_ticker}"),
+            ])
+            followup_buttons.append([
                 InlineKeyboardButton("🔙 종목상세", callback_data=f"fav:stock:{target_ticker}"),
             ])
         followup_buttons.append([
@@ -762,6 +776,57 @@ class TradingMixin:
         ])
         markup = InlineKeyboardMarkup(followup_buttons)
         await query.message.reply_text(report[:4000], reply_markup=markup)
+
+    async def _action_manager_debate(
+        self, query, context, payload: str,
+    ) -> None:
+        """mgr_debate:{ticker} 콜백 — 4매니저 토론."""
+        ticker = payload.strip()
+        name = ticker
+        for s in self.all_tickers:
+            if s["code"] == ticker:
+                name = s["name"]
+                break
+
+        await query.edit_message_text(f"🎙️ {name} 매니저 토론 중...")
+
+        # 차트+재무 데이터 수집
+        stock_data = ""
+        try:
+            from kstock.features.technical import compute_indicators
+            from kstock.bot.investment_managers import build_chart_summary, build_fundamental_summary
+            market = "KOSPI"
+            for s in self.all_tickers:
+                if s["code"] == ticker:
+                    market = s.get("market", "KOSPI")
+                    break
+            ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
+            if ohlcv is not None and not ohlcv.empty and len(ohlcv) >= 20:
+                tech = compute_indicators(ohlcv)
+                price = float(ohlcv.iloc[-1].get("close", 0) or ohlcv.iloc[-1].get("Close", 0))
+                supply = self.db.get_supply_demand(ticker, days=5)
+                chart = build_chart_summary(tech, price, supply, ohlcv=ohlcv, ticker=ticker, name=name)
+                if chart:
+                    stock_data += f"[차트 데이터]\n{chart}\n\n"
+                info = await self.data_router.get_stock_info(ticker, name) if hasattr(self, "data_router") else None
+                financials = self.db.get_financials(ticker)
+                consensus = self.db.get_consensus(ticker)
+                fund = build_fundamental_summary(info, financials, consensus, supply, current_price=price, ticker=ticker, name=name)
+                if fund:
+                    stock_data += f"[재무 데이터]\n{fund}\n"
+        except Exception:
+            pass
+
+        market_text = ""
+        try:
+            macro = await self.macro_client.get_snapshot()
+            market_text = f"VIX={macro.vix:.1f}, 환율={macro.usdkrw:,.0f}원"
+        except Exception:
+            pass
+
+        from kstock.bot.investment_managers import manager_debate
+        result = await manager_debate(ticker, name, stock_data, market_text)
+        await query.message.reply_text(result[:4000])
 
     async def _action_bubble_check(
         self, query, context, payload: str,

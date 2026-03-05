@@ -748,12 +748,15 @@ async def get_manager_analysis(
     question: str = "",
     shared_context: dict | None = None,
     alert_mode: str = "normal",
+    performance: dict | None = None,
+    manager_lessons: list[dict] | None = None,
 ) -> str:
     """매니저 페르소나로 보유종목 분석 (Haiku 기반, 저비용).
 
     v7.0: shared_context를 통해 위기/뉴스/교훈/포트폴리오 등
     전체 시스템 컨텍스트를 공유받아 일관된 분석 수행.
     v8.1: alert_mode에 따른 전시/경계 맞춤 분석.
+    v9.0: performance/manager_lessons로 성과 피드백 + 매니저별 교훈 주입.
     """
     manager = MANAGERS.get(manager_key)
     if not manager:
@@ -816,10 +819,30 @@ async def get_manager_analysis(
         # 매니저별 데이터→액션 해석 규칙
         interpretation = _INTERPRETATION_RULES.get(manager_key, "")
 
+        # 성과 피드백 주입
+        perf_prompt = ""
+        if performance and performance.get("total_trades", 0) > 0:
+            perf_text = format_manager_performance(performance)
+            perf_prompt = f"\n[내 최근 매매 성과 — 반성하고 개선하라]\n{perf_text}\n"
+            wr = performance.get("win_rate", 50)
+            if wr < 40:
+                perf_prompt += "⚠️ 승률 저조. 더 보수적으로 판단하라.\n"
+            elif wr > 70:
+                perf_prompt += "성과 양호. 자신감 유지하되 과신 금지.\n"
+
+        # 매니저별 교훈 주입
+        lesson_prompt = ""
+        if manager_lessons:
+            lesson_prompt = "\n[과거 교훈 — 같은 실수 반복 금지]\n"
+            for lsn in manager_lessons[:5]:
+                lesson_prompt += f"- {lsn.get('name', '')}: {lsn.get('lesson', '')}\n"
+
         system_prompt = (
             f"너는 {manager['name']}의 투자 철학을 따르는 '{manager['title']}'이다.\n"
             f"{manager['persona']}\n"
             f"{interpretation}\n"
+            f"{perf_prompt}"
+            f"{lesson_prompt}"
             f"\n{shared_prompt}\n"
             f"{situation_directive}\n"
             f"\n[필수 규칙]\n"
@@ -967,6 +990,7 @@ async def _analyze_picks_for_manager(
     market_context: str = "",
     shared_context: dict | None = None,
     alert_mode: str = "normal",
+    regime_weight: float = 1.0,
 ) -> str:
     """단일 매니저가 자기 horizon 종목을 분석 (Haiku 기반).
 
@@ -978,6 +1002,13 @@ async def _analyze_picks_for_manager(
         if manager:
             return f"{manager['emoji']} {manager['name']}: 추천 종목 없음"
         return ""
+
+    # #5 레짐 가중치: 0.3 이하면 해당 매니저 추천 보류
+    if regime_weight <= 0.3:
+        return (
+            f"{manager['emoji']} {manager['name']}: "
+            f"현재 고변동성 구간 — 추천 보류 (가중치 {regime_weight:.1f})"
+        )
 
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
@@ -1053,6 +1084,19 @@ async def _analyze_picks_for_manager(
         user_prompt = ""
         if market_context:
             user_prompt += f"[시장 상황]\n{market_context}\n\n"
+        # #5 레짐 가중치 컨텍스트
+        if regime_weight < 1.0:
+            user_prompt += (
+                f"[레짐 가중치: {regime_weight:.1f}]\n"
+                f"현재 시장 변동성으로 인해 당신의 영향력이 축소됨.\n"
+                f"더 보수적으로 추천하고, 확신 높은 종목만 선별.\n\n"
+            )
+        elif regime_weight > 1.0:
+            user_prompt += (
+                f"[레짐 가중치: {regime_weight:.1f}]\n"
+                f"현재 시장이 당신의 전략에 유리한 환경.\n"
+                f"적극적으로 추천 가능.\n\n"
+            )
         user_prompt += (
             f"[{manager['emoji']} 후보 종목]\n{picks_text}\n"
             f"위 종목 중 가장 추천하는 1~2개를 선정하고,\n"
@@ -1111,18 +1155,21 @@ async def get_all_managers_picks(
     market_context: str = "",
     shared_context: dict | None = None,
     alert_mode: str = "normal",
+    vix: float = 20.0,
 ) -> dict[str, str]:
     """4매니저 동시 분석 (asyncio.gather). 각 매니저가 자기 horizon 종목 분석.
 
     v7.0: shared_context를 통해 위기/뉴스/교훈/포트폴리오 등
     전체 시스템 컨텍스트를 공유받아 일관된 추천 수행.
     v8.1: alert_mode에 따른 전시/경계 맞춤 추천.
+    v9.1: vix 기반 레짐 가중치 적용 (고변동성 시 단타 축소, 장기 확대).
 
     Args:
         picks_by_horizon: {"scalp": [picks], "short": [picks], "mid": [...], "long": [...]}
         market_context: 시장 상황 텍스트
         shared_context: 공유 컨텍스트 (위기/뉴스/교훈/포트폴리오 등)
         alert_mode: 시장 경계 수준 (normal/elevated/wartime)
+        vix: VIX 지수 (레짐 가중치 결정)
 
     Returns:
         {manager_key: analysis_text} — scalp/swing/position/long_term 키
@@ -1132,8 +1179,10 @@ async def get_all_managers_picks(
     tasks = {}
     for mgr_key, horizon in MANAGER_HORIZON_MAP.items():
         picks = picks_by_horizon.get(horizon, [])
+        weight = get_regime_weight(mgr_key, vix)
         tasks[mgr_key] = _analyze_picks_for_manager(
             mgr_key, picks, market_context, shared_context, alert_mode,
+            regime_weight=weight,
         )
 
     results = await asyncio.gather(*tasks.values(), return_exceptions=True)
@@ -1343,3 +1392,518 @@ async def scan_manager_domain(
     except Exception as e:
         logger.error("scan_manager_domain error %s: %s", manager_key, e)
     return ""
+
+
+# ── #1 매니저 성과 요약 텍스트 ──────────────────────────────
+
+def format_manager_performance(perf: dict) -> str:
+    """매니저 성과 dict → 프롬프트 주입용 텍스트."""
+    if not perf or perf.get("total_trades", 0) == 0:
+        return ""
+    lines = [
+        f"최근 {perf['total_trades']}건: "
+        f"승률 {perf['win_rate']:.0f}% "
+        f"({perf['wins']}승 {perf['losses']}패)",
+        f"평균수익 {perf['avg_pnl']:+.1f}%",
+    ]
+    if perf["avg_win"]:
+        lines.append(f"승리 평균 +{perf['avg_win']:.1f}% / 패배 평균 {perf['avg_loss']:.1f}%")
+    if perf.get("avg_hold_days"):
+        lines.append(f"평균 보유일 {perf['avg_hold_days']}일")
+    return "\n".join(lines)
+
+
+# ── #2 크로스매니저 컨센서스 ─────────────────────────────────
+
+def detect_consensus(picks_by_manager: dict[str, list[dict]]) -> list[dict]:
+    """4매니저 추천 결과에서 2명 이상 겹치는 종목 추출."""
+    ticker_managers: dict[str, list[str]] = {}
+    ticker_info: dict[str, dict] = {}
+
+    for mgr_key, picks in picks_by_manager.items():
+        for p in picks[:3]:
+            tk = p.get("ticker", "")
+            if not tk:
+                continue
+            ticker_managers.setdefault(tk, []).append(mgr_key)
+            ticker_info[tk] = p
+
+    consensus = []
+    for tk, managers in ticker_managers.items():
+        if len(managers) >= 2:
+            info = ticker_info[tk]
+            mgr_names = [MANAGERS[m]["name"] for m in managers if m in MANAGERS]
+            consensus.append({
+                "ticker": tk,
+                "name": info.get("name", ""),
+                "price": info.get("price", 0),
+                "managers": managers,
+                "manager_names": mgr_names,
+                "confidence": len(managers),
+            })
+
+    consensus.sort(key=lambda x: -x["confidence"])
+    return consensus
+
+
+def format_consensus(consensus_list: list[dict]) -> str:
+    """컨센서스 종목 → 텔레그램 메시지."""
+    if not consensus_list:
+        return ""
+    lines = ["🤝 매니저 합의 종목", "━" * 20]
+    for c in consensus_list:
+        mgr_text = " + ".join(c["manager_names"])
+        lines.append(
+            f"\n📌 {c['name']} ({c['ticker']})"
+            f"\n   {mgr_text} 동시 추천"
+            f"\n   신뢰도: {'⭐' * c['confidence']}"
+        )
+    return "\n".join(lines)
+
+
+# ── #5 레짐별 매니저 가중치 ──────────────────────────────────
+
+REGIME_WEIGHTS: dict[str, dict[str, float]] = {
+    "calm": {"scalp": 1.2, "swing": 1.1, "position": 1.0, "long_term": 0.8},
+    "normal": {"scalp": 1.0, "swing": 1.0, "position": 1.0, "long_term": 1.0},
+    "fear": {"scalp": 0.6, "swing": 0.8, "position": 1.1, "long_term": 1.3},
+    "panic": {"scalp": 0.3, "swing": 0.5, "position": 1.0, "long_term": 1.5},
+}
+
+
+def get_regime_weight(manager_key: str, vix: float = 20.0) -> float:
+    """VIX 기반 레짐에서 매니저의 가중치 반환."""
+    if vix >= 30:
+        regime = "panic"
+    elif vix >= 25:
+        regime = "fear"
+    elif vix >= 18:
+        regime = "normal"
+    else:
+        regime = "calm"
+    return REGIME_WEIGHTS.get(regime, {}).get(manager_key, 1.0)
+
+
+# ── #8 포트폴리오 밸런스 조언 ────────────────────────────────
+
+def analyze_portfolio_balance(holdings_by_type: dict[str, list]) -> str:
+    """매니저별 보유종목 비중 분석 + 리밸런싱 조언."""
+    total = sum(len(v) for v in holdings_by_type.values())
+    if total == 0:
+        return ""
+
+    lines = ["📊 포트폴리오 밸런스 분석", "━" * 20]
+    ideal = {"scalp": (10, 20), "swing": (20, 35), "position": (25, 40), "long_term": (20, 35)}
+    labels = {"scalp": "단타", "swing": "스윙", "position": "포지션", "long_term": "장기"}
+    warnings = []
+
+    for mtype in ("scalp", "swing", "position", "long_term"):
+        count = len(holdings_by_type.get(mtype, []))
+        pct = count / total * 100 if total > 0 else 0
+        lo, hi = ideal[mtype]
+        status = "적정" if lo <= pct <= hi else ("과다" if pct > hi else "부족")
+        lines.append(f"  {labels[mtype]}: {count}종목 ({pct:.0f}%) [{status}]")
+        if pct > hi + 15:
+            warnings.append(f"{labels[mtype]} 비중 과다 → 축소 검토")
+        elif pct < lo - 10 and total >= 5:
+            warnings.append(f"{labels[mtype]} 비중 부족 → 확대 검토")
+
+    if warnings:
+        lines.append("")
+        for w in warnings:
+            lines.append(f"⚠️ {w}")
+    else:
+        lines.append("\n✅ 밸런스 양호")
+
+    return "\n".join(lines)
+
+
+# ── #9 매니저 토론 (멀티 관점 분석) ─────────────────────────
+
+async def manager_debate(
+    ticker: str,
+    name: str,
+    stock_data: str = "",
+    market_context: str = "",
+) -> str:
+    """4매니저가 동일 종목에 대해 각자 관점으로 분석 (토론).
+
+    Returns:
+        4개 관점 + 합의/분쟁 요약 텍스트
+    """
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return "API 키 없음"
+
+    try:
+        import asyncio
+        import httpx
+
+        async def _get_opinion(mgr_key: str) -> str:
+            mgr = MANAGERS[mgr_key]
+            interpretation = _INTERPRETATION_RULES.get(mgr_key, "")
+            system = (
+                f"너는 {mgr['name']}이다. {mgr['title']}의 관점에서만 답하라.\n"
+                f"{mgr['persona']}\n"
+                f"{interpretation}\n"
+                f"호칭: 주호님. 볼드(**) 금지.\n"
+                f"제공된 데이터만 사용. 학습 데이터 가격 절대 금지.\n"
+                f"2~3줄로 핵심만. 매수/매도/관망 중 1개 액션 명시.\n"
+            )
+            user = (
+                f"종목: {name} ({ticker})\n"
+                f"{stock_data}\n"
+                f"시장: {market_context}\n\n"
+                f"이 종목에 대한 {mgr['name']}의 견해와 액션을 제시하세요."
+            )
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={
+                            "x-api-key": api_key,
+                            "anthropic-version": "2023-06-01",
+                            "content-type": "application/json",
+                        },
+                        json={
+                            "model": "claude-haiku-4-5-20251001",
+                            "max_tokens": 200,
+                            "system": system,
+                            "messages": [{"role": "user", "content": user}],
+                        },
+                    )
+                    if resp.status_code == 200:
+                        text = resp.json()["content"][0]["text"].strip().replace("**", "")
+                        return f"{mgr['emoji']} {mgr['name']}\n{text}"
+            except Exception:
+                pass
+            return f"{mgr['emoji']} {mgr['name']}: 의견 없음"
+
+        opinions = await asyncio.gather(
+            *[_get_opinion(k) for k in ("scalp", "swing", "position", "long_term")]
+        )
+
+        # 합의 판단
+        buy_count = sum(1 for o in opinions if any(w in o for w in ("매수", "진입", "추가매수")))
+        sell_count = sum(1 for o in opinions if any(w in o for w in ("매도", "손절", "청산")))
+
+        if buy_count >= 3:
+            verdict = "🟢 매수 합의 (3명 이상 동의)"
+        elif sell_count >= 3:
+            verdict = "🔴 매도 합의 (3명 이상 동의)"
+        elif buy_count >= 2:
+            verdict = "🟡 매수 우세 (2명 동의)"
+        elif sell_count >= 2:
+            verdict = "🟡 매도 우세 (2명 동의)"
+        else:
+            verdict = "⚪ 의견 분분 (합의 없음)"
+
+        header = f"🎙️ {name} ({ticker}) 매니저 토론\n{'━' * 20}\n"
+        body = "\n\n".join(opinions)
+        footer = f"\n\n{'━' * 20}\n📋 종합: {verdict}"
+
+        return header + body + footer
+
+    except Exception as e:
+        logger.error("manager_debate error: %s", e)
+        return f"토론 오류: {e}"
+
+
+# ── #6 매니저 자기반성 보고서 ─────────────────────────────────
+
+async def generate_manager_reflection(
+    manager_key: str,
+    performance: dict,
+    recent_lessons: list[dict] | None = None,
+) -> str:
+    """매니저가 자기 성과를 분석하고 전략 조정을 제안."""
+    mgr = MANAGERS.get(manager_key)
+    if not mgr:
+        return ""
+    if not performance or performance.get("total_trades", 0) == 0:
+        return f"{mgr['emoji']} {mgr['name']}: 최근 매매 이력 없음"
+
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return ""
+
+    perf_text = format_manager_performance(performance)
+    lessons_text = ""
+    if recent_lessons:
+        for lsn in recent_lessons[:5]:
+            lessons_text += f"- {lsn.get('name', '')}: {lsn.get('lesson', '')}\n"
+
+    try:
+        import httpx
+        system = (
+            f"너는 {mgr['name']}이다. 자신의 매매 성과를 냉정하게 돌아보라.\n"
+            f"{mgr['persona']}\n"
+            f"호칭: 주호님. 볼드(**) 금지.\n"
+            f"분석할 것: 1)성과 요약 2)잘한 점 3)개선할 점 4)다음 주 전략 조정\n"
+            f"간결하게 핵심만. 총 8줄 이내.\n"
+        )
+        user = f"[내 최근 성과]\n{perf_text}\n"
+        if lessons_text:
+            user += f"\n[과거 교훈]\n{lessons_text}\n"
+        user += "\n위 성과를 돌아보고 반성 + 다음 주 전략 조정을 제안해주세요."
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 400,
+                    "system": system,
+                    "messages": [{"role": "user", "content": user}],
+                },
+            )
+            if resp.status_code == 200:
+                text = resp.json()["content"][0]["text"].strip().replace("**", "")
+                header = f"{mgr['emoji']} {mgr['name']} 주간 반성\n{'━' * 20}\n\n"
+                return header + text
+    except Exception as e:
+        logger.error("manager_reflection error %s: %s", manager_key, e)
+    return ""
+
+
+# ── #10 매니저 임계값 자동 조정 ──────────────────────────────
+
+def suggest_threshold_adjustment(
+    manager_key: str,
+    performance: dict,
+) -> dict | None:
+    """성과 기반 매니저 임계값 조정 제안.
+
+    Returns:
+        {"stop_loss": new_val, "reason": "..."} or None
+    """
+    if not performance or performance.get("total_trades", 0) < 5:
+        return None
+
+    current = MANAGER_THRESHOLDS.get(manager_key, {})
+    win_rate = performance.get("win_rate", 50)
+    avg_loss = performance.get("avg_loss", 0)
+    avg_win = performance.get("avg_win", 0)
+
+    suggestions = {}
+
+    # 승률이 낮고 평균 손실이 손절 기준과 비슷 → 손절이 너무 타이트
+    stop = current.get("stop_loss", -5)
+    if win_rate < 40 and avg_loss and avg_loss > stop * 0.8:
+        new_stop = round(stop * 1.3, 1)  # 30% 완화
+        suggestions["stop_loss"] = new_stop
+        suggestions["reason"] = (
+            f"승률 {win_rate:.0f}%로 낮고 평균손실({avg_loss:.1f}%)이 "
+            f"손절({stop}%)에 근접 → {new_stop}%로 완화 제안"
+        )
+
+    # 승률이 높지만 평균 수익이 목표 대비 작음 → 익절이 너무 빠름
+    tp1 = current.get("take_profit_1", 10)
+    if win_rate > 60 and avg_win and avg_win < tp1 * 0.6:
+        new_tp = round(tp1 * 1.2, 1)
+        suggestions["take_profit_1"] = new_tp
+        suggestions["tp_reason"] = (
+            f"승률 {win_rate:.0f}% 양호하나 평균수익({avg_win:.1f}%)이 "
+            f"목표({tp1}%) 대비 낮음 → {new_tp}%로 상향 제안"
+        )
+
+    return suggestions if suggestions else None
+
+
+def format_threshold_suggestions(all_suggestions: dict[str, dict]) -> str:
+    """전 매니저 임계값 조정 제안 → 텍스트."""
+    if not all_suggestions:
+        return ""
+    lines = ["⚙️ 매니저 임계값 조정 제안", "━" * 20]
+    for mgr_key, sugg in all_suggestions.items():
+        mgr = MANAGERS.get(mgr_key, {})
+        emoji = mgr.get("emoji", "📌")
+        name = mgr.get("name", mgr_key)
+        lines.append(f"\n{emoji} {name}")
+        if "reason" in sugg:
+            lines.append(f"  손절: {sugg['reason']}")
+        if "tp_reason" in sugg:
+            lines.append(f"  익절: {sugg['tp_reason']}")
+    return "\n".join(lines)
+
+
+# ── #7 매니저 능동 발굴 기준 ──────────────────────────────────
+
+MANAGER_DISCOVERY_CRITERIA: dict[str, str] = {
+    "scalp": (
+        "거래량 20일평균 300%+ AND RSI 40~65 AND "
+        "당일등락 +2%이상 AND 시가총액 3000억+ 종목"
+    ),
+    "swing": (
+        "RSI <35 AND BB하단(0.2이하) AND "
+        "기관 3일+ 연속 순매수 AND 정배열 종목"
+    ),
+    "position": (
+        "PEG <1.0 AND ROE >15% AND "
+        "매출성장 >10% AND 부채비율 <100% 종목"
+    ),
+    "long_term": (
+        "ROE >15% AND 부채비율 <80% AND FCF 양(+) AND "
+        "PBR <1.5 AND 배당수익률 >2% 종목"
+    ),
+}
+
+
+def filter_discovery_candidates(
+    scan_results: list,
+    manager_key: str,
+    exclude_tickers: set[str] | None = None,
+) -> list[dict]:
+    """스캔 결과에서 매니저별 발굴 기준에 부합하는 종목 필터링.
+
+    Returns:
+        매니저용 dict 리스트 (scan_manager_domain 입력 형식)
+    """
+    if not scan_results:
+        return []
+    exclude = exclude_tickers or set()
+    candidates = []
+
+    for r in scan_results:
+        ticker = getattr(r, "ticker", "")
+        if ticker in exclude:
+            continue
+        tech = getattr(r, "indicators", None)
+        if tech is None:
+            continue
+        score = getattr(r, "score", None)
+        rsi = getattr(tech, "rsi", 50)
+        vol_ratio = getattr(tech, "volume_ratio", 1.0)
+        bb_pctb = getattr(tech, "bb_pctb", 0.5)
+        price = getattr(tech, "close", 0) or 0
+        day_change = getattr(r, "day_change_pct", 0.0) or 0.0
+
+        match = False
+        if manager_key == "scalp":
+            match = vol_ratio >= 3.0 and 40 <= rsi <= 65 and day_change >= 2.0
+        elif manager_key == "swing":
+            match = rsi < 35 and bb_pctb < 0.2
+        elif manager_key == "position":
+            # 기본 기술적 필터: 점수 높은 mid-term 후보
+            match = (
+                score is not None
+                and getattr(score, "composite", 0) >= 60
+                and rsi < 60
+            )
+        elif manager_key == "long_term":
+            match = (
+                score is not None
+                and getattr(score, "composite", 0) >= 55
+                and rsi < 55
+            )
+
+        if match:
+            candidates.append({
+                "ticker": ticker,
+                "name": getattr(r, "name", ""),
+                "price": price,
+                "day_change": day_change,
+                "rsi": rsi,
+                "vol_ratio": vol_ratio * 100,
+                "bb_pctb": bb_pctb,
+                "macd_cross": getattr(tech, "macd_signal_cross", 0),
+                "drop_from_high": 0,
+                "recovery_score": 0,
+            })
+
+    # 점수 높은 순 정렬 (vol_ratio for scalp, RSI for swing)
+    if manager_key == "scalp":
+        candidates.sort(key=lambda c: -c["vol_ratio"])
+    elif manager_key == "swing":
+        candidates.sort(key=lambda c: c["rsi"])
+    else:
+        candidates.sort(key=lambda c: -c.get("rsi", 50))
+
+    return candidates[:10]
+
+
+# ── #3 장중 매니저 알림 조건 체커 ─────────────────────────────
+
+def check_manager_alert_conditions(
+    manager_key: str,
+    ticker: str,
+    name: str,
+    tech,
+    current_price: float,
+    buy_price: float = 0,
+    holding_days: int = 0,
+) -> list[str]:
+    """보유종목이 매니저 매수/매도 조건 충족 시 알림 텍스트 리스트 반환."""
+    if tech is None:
+        return []
+
+    alerts = []
+    mgr = MANAGERS.get(manager_key, {})
+    emoji = mgr.get("emoji", "📌")
+    pnl = (current_price - buy_price) / buy_price * 100 if buy_price > 0 else 0
+    thresholds = MANAGER_THRESHOLDS.get(manager_key, {})
+
+    # 공통: 손절/익절 임계값
+    stop = thresholds.get("stop_loss", -5)
+    tp1 = thresholds.get("take_profit_1", 10)
+    tp2 = thresholds.get("take_profit_2", 20)
+
+    if pnl <= stop:
+        alerts.append(
+            f"{emoji} {name}: 손절선 도달 ({pnl:+.1f}% <= {stop}%)\n"
+            f"  즉시 손절 권고"
+        )
+    if pnl >= tp2:
+        alerts.append(
+            f"{emoji} {name}: 2차 목표 달성 ({pnl:+.1f}% >= {tp2}%)\n"
+            f"  전량 매도 검토"
+        )
+    elif pnl >= tp1:
+        alerts.append(
+            f"{emoji} {name}: 1차 목표 달성 ({pnl:+.1f}% >= {tp1}%)\n"
+            f"  일부 차익실현 검토"
+        )
+
+    # 매니저별 차트 기반 알림
+    if manager_key == "scalp":
+        if tech.volume_ratio >= 3.0 and tech.rsi < 65:
+            alerts.append(
+                f"{emoji} {name}: 거래량 {tech.volume_ratio*100:.0f}% 폭발\n"
+                f"  RSI {tech.rsi:.0f} — 모멘텀 추가매수 구간"
+            )
+        if tech.rsi > 70 and tech.volume_ratio < 0.8:
+            alerts.append(
+                f"{emoji} {name}: RSI {tech.rsi:.0f} 과매수 + 거래량 감소\n"
+                f"  차익실현 시점"
+            )
+        if holding_days >= 4 and pnl < 2:
+            alerts.append(
+                f"{emoji} {name}: 보유 {holding_days}일 (단타 기준 초과)\n"
+                f"  수익률 {pnl:+.1f}% → 청산 검토"
+            )
+
+    elif manager_key == "swing":
+        if tech.macd_signal_cross == 1 and tech.rsi < 50:
+            alerts.append(
+                f"{emoji} {name}: MACD 골든크로스 + RSI {tech.rsi:.0f}\n"
+                f"  반등 시작 — 추가매수 검토"
+            )
+        if getattr(tech, "rsi_divergence", 0) == -1:
+            alerts.append(
+                f"{emoji} {name}: RSI 약세 다이버전스 감지\n"
+                f"  하락 반전 주의 — 청산 준비"
+            )
+
+    elif manager_key in ("position", "long_term"):
+        if tech.rsi < 25 and getattr(tech, "bb_pctb", 0.5) < 0.1:
+            alerts.append(
+                f"{emoji} {name}: 극단 과매도 (RSI {tech.rsi:.0f})\n"
+                f"  장기 관점 추가매수 기회"
+            )
+
+    return alerts

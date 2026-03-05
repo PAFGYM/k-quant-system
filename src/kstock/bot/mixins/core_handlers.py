@@ -217,6 +217,13 @@ class CoreHandlersMixin:
             days=(6,),
             name="weekly_report",
         )
+        # v9.0: 매니저 주간 반성 (Sunday 19:30)
+        jq.run_daily(
+            self.job_manager_reflection,
+            time=dt_time(hour=19, minute=30, tzinfo=KST),
+            days=(6,),
+            name="manager_reflection",
+        )
         # Phase 8: macro cache warm-up (1분마다 백그라운드 갱신 — 정확도 향상)
         jq.run_repeating(
             self.job_macro_refresh,
@@ -373,6 +380,13 @@ class CoreHandlersMixin:
             time=dt_time(hour=14, minute=0, tzinfo=KST),
             days=(0, 1, 2, 3, 4),
             name="contrarian_scan",
+        )
+        # v9.1: 매니저 능동 발굴 스캔 (평일 13:00)
+        jq.run_daily(
+            self.job_manager_discovery_scan,
+            time=dt_time(hour=13, minute=0, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="manager_discovery",
         )
         # v5.5: 매일 저녁 7시 일일 평가 알림
         jq.run_daily(
@@ -1642,6 +1656,7 @@ class CoreHandlersMixin:
                 "weekly": self._action_weekly_submenu,
                 "sell_plans": self._action_sell_plans,
                 "multi_run": self._action_multi_run,
+                "mgr_debate": self._action_manager_debate,
                 "quick_q": self._handle_quick_question,
                 "add_ss": self._action_add_from_screenshot,
                 "add_txt": self._action_confirm_text_holding,
