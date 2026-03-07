@@ -1188,9 +1188,49 @@ class CoreHandlersMixin:
                     # 메뉴에 없는 텍스트 -> AI 질문으로 처리
                     await self._handle_ai_question(update, context, text)
 
+    # v9.3.1: 영문 티커 → 종목코드 매핑 (주요 종목)
+    _ENGLISH_TICKER_MAP: dict[str, tuple[str, str, str]] = {
+        # 영문티커: (종목코드, 종목명, 마켓)
+        "grt": ("900290", "GRT", "KOSPI"),
+        "samsung": ("005930", "삼성전자", "KOSPI"),
+        "hynix": ("000660", "SK하이닉스", "KOSPI"),
+        "hyundai": ("005380", "현대차", "KOSPI"),
+        "kia": ("000270", "기아", "KOSPI"),
+        "naver": ("035420", "NAVER", "KOSPI"),
+        "kakao": ("035720", "카카오", "KOSPI"),
+        "celltrion": ("068270", "셀트리온", "KOSPI"),
+        "posco": ("005490", "POSCO홀딩스", "KOSPI"),
+        "lgchem": ("051910", "LG화학", "KOSPI"),
+        "lgenergy": ("373220", "LG에너지솔루션", "KOSPI"),
+        "sdi": ("006400", "삼성SDI", "KOSPI"),
+        "hive": ("352820", "하이브", "KOSPI"),
+        "krafton": ("259960", "크래프톤", "KOSPI"),
+        "hlb": ("028300", "HLB", "KOSDAQ"),
+        "alteogen": ("196170", "알테오젠", "KOSDAQ"),
+        "ecopro": ("086520", "에코프로", "KOSDAQ"),
+        "ecobm": ("247540", "에코프로비엠", "KOSDAQ"),
+        "hanwha": ("012450", "한화에어로스페이스", "KOSPI"),
+        "hmm": ("011200", "HMM", "KOSPI"),
+        "doosan": ("034020", "두산에너빌리티", "KOSPI"),
+        "ncsoft": ("036570", "엔씨소프트", "KOSPI"),
+        "netmarble": ("251270", "넷마블", "KOSPI"),
+        "wemade": ("112040", "위메이드", "KOSDAQ"),
+        "pearl": ("263750", "펄어비스", "KOSPI"),
+        "sm": ("041510", "에스엠", "KOSDAQ"),
+        "yg": ("122870", "와이지엔터테인먼트", "KOSPI"),
+        "kb": ("105560", "KB금융", "KOSPI"),
+        "shinhan": ("055550", "신한지주", "KOSPI"),
+        "hana": ("086790", "하나금융지주", "KOSPI"),
+        "kt": ("030200", "KT", "KOSPI"),
+        "skt": ("017670", "SK텔레콤", "KOSPI"),
+        "soil": ("010950", "S-Oil", "KOSPI"),
+        "ktg": ("033780", "KT&G", "KOSPI"),
+    }
+
     def _detect_stock_query(self, text: str) -> dict | None:
         """자연어에서 종목명/티커를 감지합니다.
 
+        v9.3.1: 영문 티커(GRT, HLB 등) + KRX 코드 자동해석 지원.
         긴 이름 우선 매칭 (예: "삼성전자우"가 "삼성전자"보다 먼저).
         Returns:
             dict with 'code', 'name', 'market' if detected, else None.
@@ -1198,6 +1238,12 @@ class CoreHandlersMixin:
         import re
 
         clean = text.strip()
+        clean_lower = clean.lower()
+
+        # 0. 영문 티커 매칭 (GRT, HLB 등)
+        for eng_key, (code, name, market) in self._ENGLISH_TICKER_MAP.items():
+            if eng_key in clean_lower:
+                return {"code": code, "name": name, "market": market}
 
         # 1. 6자리 숫자 종목코드 감지
         code_match = re.search(r'(\d{6})', clean)
@@ -1210,6 +1256,7 @@ class CoreHandlersMixin:
             for h in holdings:
                 if h.get("ticker") == code:
                     return {"code": code, "name": h.get("name", code), "market": "KOSPI"}
+            # v9.3.1: 유니버스 밖 종목도 코드 기반으로 시도
             return {"code": code, "name": code, "market": "KOSPI"}
 
         # 2. 한글 종목명 매칭 (긴 이름 우선: "삼성전자우" > "삼성전자")
@@ -1239,6 +1286,18 @@ class CoreHandlersMixin:
         for word in words:
             for cand_name, cand_data in candidates:
                 if cand_name and word in cand_name and word != cand_name:
+                    return cand_data
+
+        # 4. 영문 2~10자 단어를 코드로 시도 (pykrx 등)
+        eng_words = re.findall(r'[A-Za-z]{2,10}', clean)
+        for w in eng_words:
+            w_upper = w.upper()
+            # 분석/명령어 키워드 제외
+            if w_upper in {"AI", "RSI", "MACD", "EMA", "ETF", "KIS", "API"}:
+                continue
+            # 유니버스에서 name에 영문이 포함된 종목 찾기
+            for cand_name, cand_data in candidates:
+                if w_upper in cand_name.upper():
                     return cand_data
 
         return None
