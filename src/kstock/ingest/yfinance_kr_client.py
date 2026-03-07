@@ -1,6 +1,7 @@
 """Real data client for Korean stocks via yfinance (.KS/.KQ suffixes).
 
 v4.0: 서킷 브레이커 + Naver Finance 폴백 적용.
+v4.1: KST 타임존 캐시 + 날짜 경계 무효화.
 """
 
 from __future__ import annotations
@@ -14,6 +15,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+from kstock.core.tz import KST
 
 if TYPE_CHECKING:
     pass
@@ -32,6 +35,16 @@ except Exception:
 _price_cache: dict[str, tuple[datetime, pd.DataFrame]] = {}
 _info_cache: dict[str, tuple[datetime, dict]] = {}
 _CACHE_TTL = timedelta(minutes=10)
+
+
+def _is_cache_stale_date(cached_time: datetime) -> bool:
+    """캐시 저장 시각이 오늘(KST) 이전 날짜이면 stale로 판단."""
+    now = datetime.now(KST)
+    ct = cached_time
+    if ct.tzinfo is None:
+        # naive datetime → KST로 간주
+        ct = ct.replace(tzinfo=KST)
+    return ct.astimezone(KST).date() < now.date()
 
 
 def _yf_ticker(code: str, market: str = "KOSPI") -> str:
@@ -68,12 +81,14 @@ class YFinanceKRClient:
     ) -> pd.DataFrame:
         """Fetch OHLCV data for a Korean stock."""
         symbol = _yf_ticker(code, market)
-        now = datetime.now()
+        now = datetime.now(KST)
 
-        # Check cache
+        # Check cache (v4.1: KST 타임존 + 날짜 경계 무효화)
         if symbol in _price_cache:
             cached_time, cached_df = _price_cache[symbol]
-            if now - cached_time < _CACHE_TTL and not cached_df.empty:
+            if (not _is_cache_stale_date(cached_time)
+                    and now - cached_time < _CACHE_TTL
+                    and not cached_df.empty):
                 return cached_df
 
         # v4.0: 서킷 브레이커 체크
@@ -119,11 +134,11 @@ class YFinanceKRClient:
     async def get_stock_info(self, code: str, name: str = "", market: str = "KOSPI") -> dict:
         """Fetch fundamental info from yfinance."""
         symbol = _yf_ticker(code, market)
-        now = datetime.now()
+        now = datetime.now(KST)
 
         if symbol in _info_cache:
             cached_time, cached_info = _info_cache[symbol]
-            if now - cached_time < _CACHE_TTL:
+            if not _is_cache_stale_date(cached_time) and now - cached_time < _CACHE_TTL:
                 return cached_info
 
         try:
@@ -237,7 +252,7 @@ class YFinanceKRClient:
             data = await asyncio.to_thread(
                 yf.download, symbols, period=period, group_by="ticker", progress=False
             )
-            now = datetime.now()
+            now = datetime.now(KST)
             for symbol in symbols:
                 try:
                     if len(symbols) == 1:
@@ -269,7 +284,7 @@ class YFinanceKRClient:
 def _generate_fallback_ohlcv(code: str, days: int = 120) -> pd.DataFrame:
     """Generate fallback mock OHLCV when yfinance fails."""
     rng = np.random.default_rng(seed=hash(code) % (2**31))
-    dates = pd.bdate_range(end=datetime.now(), periods=days)
+    dates = pd.bdate_range(end=datetime.now(KST), periods=days)
     base_price = 50000 + rng.integers(0, 100000)
     returns = rng.normal(0.0005, 0.02, size=days)
     prices = base_price * np.cumprod(1 + returns)

@@ -85,10 +85,19 @@ def main() -> None:
     from kstock.bot.bot import KQuantBot
 
     bot = KQuantBot()
+
+    # v9.3: 기존 holdings 임계값 마이그레이션 (holding_type별 재계산)
+    try:
+        migrated = bot.db.migrate_holding_thresholds()
+        if migrated:
+            logger.info("Holdings 임계값 마이그레이션: %d건 업데이트", migrated)
+    except Exception:
+        logger.debug("Holdings 임계값 마이그레이션 실패", exc_info=True)
+
     app = bot.build_app()
     bot.schedule_jobs(app)
 
-    logger.info("K-Quant System v9.1.0 started. Press Ctrl+C to stop.")
+    logger.info("K-Quant System v9.3.0 started. Press Ctrl+C to stop.")
     # 409 처리: run_polling 내부에서 deleteWebhook + 자동 재시도
     # bootstrap_retries=5: 시작 시 409 발생하면 최대 5회 재시도
     app.run_polling(

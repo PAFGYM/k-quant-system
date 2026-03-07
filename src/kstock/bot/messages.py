@@ -865,7 +865,7 @@ def format_trade_record(name: str, action: str, price: float, pnl_pct: float = 0
     elif action == "stop_loss":
         return f"{name} {_won(price)} 손절 기록 ({pnl_pct:+.1f}%) 다음 기회를 잡겠습니다"
     elif action == "hold_through_stop":
-        return "주의! 손절선을 넘었지만 보유합니다. -7% 도달 시 강제 알림 다시 갑니다"
+        return "⚠️ 손절선을 넘었지만 보유를 선택했습니다. 후속 조치를 확인하세요."
     return "기록 완료"
 
 

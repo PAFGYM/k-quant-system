@@ -18,6 +18,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from kstock.core.tz import KST
+
 logger = logging.getLogger(__name__)
 
 # ── 캐시 ──────────────────────────────────────────────────
@@ -52,7 +54,7 @@ class NaverFinanceClient:
         Returns:
             현재가 (원). 실패 시 0.0.
         """
-        now = datetime.now()
+        now = datetime.now(KST)
         if code in _naver_price_cache:
             cached_time, cached_price = _naver_price_cache[code]
             if now - cached_time < _CACHE_TTL and cached_price > 0:
@@ -80,7 +82,7 @@ class NaverFinanceClient:
 
         siseJson API: 일별 시세 JSON 제공.
         """
-        now = datetime.now()
+        now = datetime.now(KST)
         cache_key = f"{code}_{period_days}"
         if cache_key in _naver_ohlcv_cache:
             cached_time, cached_df = _naver_ohlcv_cache[cache_key]
@@ -121,7 +123,7 @@ class NaverFinanceClient:
 
         PER, PBR, 시가총액, 외국인 비율 등.
         """
-        now = datetime.now()
+        now = datetime.now(KST)
         if code in _naver_info_cache:
             cached_time, cached_info = _naver_info_cache[code]
             if now - cached_time < _CACHE_TTL:

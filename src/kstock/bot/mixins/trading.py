@@ -1365,15 +1365,162 @@ class TradingMixin:
             await query.edit_message_text("\u26a0\ufe0f 보유 종목을 찾을 수 없습니다.")
 
     async def _action_hold_through(self, query, context, ticker: str) -> None:
+        """v9.3: 버틸래요 → 후속 조치 메뉴 제공."""
         holding = self.db.get_holding_by_ticker(ticker)
         name = holding["name"] if holding else ticker
         price = holding.get("current_price", 0) if holding else 0
+        buy_price = holding.get("buy_price", 0) if holding else 0
+        pnl_pct = holding.get("pnl_pct", 0) if holding else 0
+        ht = (holding.get("holding_type") or "auto") if holding else "auto"
+
         self.db.add_trade(
             ticker=ticker, name=name, action="hold_through_stop",
-            action_price=price,
+            action_price=price, pnl_pct=pnl_pct,
         )
-        msg = format_trade_record(name, "hold_through_stop", price)
-        await query.edit_message_text(msg)
+
+        # 매니저별 임계값 표시
+        from kstock.store._portfolio import HOLDING_THRESHOLDS
+        th = HOLDING_THRESHOLDS.get(ht, HOLDING_THRESHOLDS["auto"])
+        ht_label = {"scalp": "스캘핑", "swing": "스윙", "position": "포지션",
+                    "long_term": "장기투자", "auto": "자동"}.get(ht, ht)
+
+        msg = (
+            f"⚠️ {name} 손절선 보유 유지\n"
+            f"{'━' * 20}\n"
+            f"📊 매수가: {buy_price:,.0f}원\n"
+            f"📉 현재가: {price:,.0f}원 ({pnl_pct:+.1f}%)\n"
+            f"🎯 투자전략: {ht_label}\n"
+            f"🔻 현재 손절선: {th['stop']*100:+.0f}%\n\n"
+            f"💡 후속 조치를 선택하세요:"
+        )
+        buttons = [
+            [
+                InlineKeyboardButton("🔻 손절가 조정", callback_data=f"newstop:{ticker}"),
+                InlineKeyboardButton("🎯 목표가 조정", callback_data=f"newtgt:{ticker}"),
+            ],
+            [
+                InlineKeyboardButton("📊 차트 보기", callback_data=f"fav:chtm:{ticker}"),
+                InlineKeyboardButton("🤖 AI 의견", callback_data=f"holdai:{ticker}"),
+            ],
+        ]
+        await safe_edit_or_reply(query, msg, InlineKeyboardMarkup(buttons))
+
+    async def _action_new_stop(self, query, context, ticker: str) -> None:
+        """새 손절가 선택 버튼 표시."""
+        holding = self.db.get_holding_by_ticker(ticker)
+        name = holding["name"] if holding else ticker
+        buy_price = holding.get("buy_price", 0) if holding else 0
+        msg = f"🔻 {name} 새 손절 기준 선택\n현재 매수가: {buy_price:,.0f}원"
+        buttons = [
+            [
+                InlineKeyboardButton(f"-7% ({round(buy_price*0.93):,})", callback_data=f"setstop:{ticker}:7"),
+                InlineKeyboardButton(f"-10% ({round(buy_price*0.90):,})", callback_data=f"setstop:{ticker}:10"),
+            ],
+            [
+                InlineKeyboardButton(f"-15% ({round(buy_price*0.85):,})", callback_data=f"setstop:{ticker}:15"),
+                InlineKeyboardButton(f"-20% ({round(buy_price*0.80):,})", callback_data=f"setstop:{ticker}:20"),
+            ],
+        ]
+        await safe_edit_or_reply(query, msg, InlineKeyboardMarkup(buttons))
+
+    async def _action_set_stop(self, query, context, payload: str) -> None:
+        """선택한 손절% 적용."""
+        parts = payload.split(":")
+        if len(parts) < 2:
+            await query.edit_message_text("⚠️ 잘못된 요청입니다.")
+            return
+        ticker, pct_str = parts[0], parts[1]
+        pct = int(pct_str)
+        holding = self.db.get_holding_by_ticker(ticker)
+        if not holding:
+            await query.edit_message_text("⚠️ 보유 종목을 찾을 수 없습니다.")
+            return
+        buy_price = holding["buy_price"]
+        new_stop = round(buy_price * (1 - pct / 100), 0)
+        self.db.update_holding(holding["id"], stop_price=new_stop)
+        await safe_edit_or_reply(
+            query,
+            f"✅ {holding['name']} 손절가 변경 완료\n"
+            f"📉 새 손절가: {new_stop:,.0f}원 (-{pct}%)\n"
+            f"📊 매수가: {buy_price:,.0f}원",
+        )
+
+    async def _action_new_target(self, query, context, ticker: str) -> None:
+        """새 목표가 선택 버튼 표시."""
+        holding = self.db.get_holding_by_ticker(ticker)
+        name = holding["name"] if holding else ticker
+        buy_price = holding.get("buy_price", 0) if holding else 0
+        msg = f"🎯 {name} 새 목표 수익률 선택\n현재 매수가: {buy_price:,.0f}원"
+        buttons = [
+            [
+                InlineKeyboardButton(f"+10% ({round(buy_price*1.10):,})", callback_data=f"settgt:{ticker}:10"),
+                InlineKeyboardButton(f"+20% ({round(buy_price*1.20):,})", callback_data=f"settgt:{ticker}:20"),
+            ],
+            [
+                InlineKeyboardButton(f"+30% ({round(buy_price*1.30):,})", callback_data=f"settgt:{ticker}:30"),
+                InlineKeyboardButton(f"+50% ({round(buy_price*1.50):,})", callback_data=f"settgt:{ticker}:50"),
+            ],
+        ]
+        await safe_edit_or_reply(query, msg, InlineKeyboardMarkup(buttons))
+
+    async def _action_set_target(self, query, context, payload: str) -> None:
+        """선택한 목표% 적용."""
+        parts = payload.split(":")
+        if len(parts) < 2:
+            await query.edit_message_text("⚠️ 잘못된 요청입니다.")
+            return
+        ticker, pct_str = parts[0], parts[1]
+        pct = int(pct_str)
+        holding = self.db.get_holding_by_ticker(ticker)
+        if not holding:
+            await query.edit_message_text("⚠️ 보유 종목을 찾을 수 없습니다.")
+            return
+        buy_price = holding["buy_price"]
+        new_t1 = round(buy_price * (1 + pct / 100), 0)
+        new_t2 = round(buy_price * (1 + pct * 2 / 100), 0)
+        self.db.update_holding(holding["id"], target_1=new_t1, target_2=new_t2)
+        await safe_edit_or_reply(
+            query,
+            f"✅ {holding['name']} 목표가 변경 완료\n"
+            f"🎯 1차 목표: {new_t1:,.0f}원 (+{pct}%)\n"
+            f"🎯 2차 목표: {new_t2:,.0f}원 (+{pct*2}%)\n"
+            f"📊 매수가: {buy_price:,.0f}원",
+        )
+
+    async def _action_hold_ai(self, query, context, ticker: str) -> None:
+        """AI 매니저 의견 요청."""
+        holding = self.db.get_holding_by_ticker(ticker)
+        if not holding:
+            await query.edit_message_text("⚠️ 보유 종목을 찾을 수 없습니다.")
+            return
+        name = holding["name"]
+        buy_price = holding["buy_price"]
+        current = holding.get("current_price", 0)
+        pnl = holding.get("pnl_pct", 0)
+        ht = holding.get("holding_type") or "auto"
+
+        question = (
+            f"{name}({ticker}) 보유 중. "
+            f"매수가 {buy_price:,.0f}원, 현재가 {current:,.0f}원, 수익률 {pnl:+.1f}%. "
+            f"투자전략: {ht}. "
+            f"손절선에 도달했지만 버티기로 했습니다. "
+            f"현재 시점에서 보유 유지 vs 손절 의견을 분석해주세요."
+        )
+        await query.edit_message_text(f"🤖 {name} AI 분석 요청 중...")
+        try:
+            await self._handle_ai_question(
+                query, context, question, is_callback=True,
+            )
+        except Exception:
+            # AI 질문 핸들러가 없으면 Claude 직접 호출
+            try:
+                from kstock.bot.chat_handler import handle_ai_question
+                answer = await handle_ai_question(
+                    question, self.anthropic_key, self.db,
+                )
+                await safe_edit_or_reply(query, f"🤖 AI 의견\n{'━' * 20}\n{answer[:3000]}")
+            except Exception as e:
+                await safe_edit_or_reply(query, f"⚠️ AI 분석 실패: {e}")
 
     async def _action_detail(self, query, context, ticker: str) -> None:
         result = self._find_cached_result(ticker)

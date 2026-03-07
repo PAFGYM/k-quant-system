@@ -967,16 +967,23 @@ class SchedulerMixin:
                     horizon = h.get("horizon", "swing")
                     qty = h.get("quantity", 0)
                     # v5.5: KIS→Naver→yfinance 순 실시간 가격 조회
+                    # v9.3: stale 가격 감지 — base_price=0으로 시도, 실패 시 DB fallback
                     current_price = 0
+                    price_stale = False
                     try:
-                        current_price = await self._get_price(ticker, base_price=buy_price)
+                        current_price = await self._get_price(ticker, base_price=0)
+                        if current_price <= 0:
+                            current_price = h.get("current_price", 0) or buy_price
+                            price_stale = True
                     except Exception:
                         logger.debug("job_morning_briefing get_price failed for %s", ticker, exc_info=True)
-                        current_price = h.get("current_price", 0)
+                        current_price = h.get("current_price", 0) or buy_price
+                        price_stale = True
                     pnl_pct = ((current_price - buy_price) / buy_price * 100) if buy_price > 0 and current_price > 0 else 0
+                    stale_mark = " ⚠️전일" if price_stale else ""
                     holdings_text += (
                         f"  {name}({ticker}): "
-                        f"매수가 {buy_price:,.0f}원, 현재가 {current_price:,.0f}원, "
+                        f"매수가 {buy_price:,.0f}원, 현재가 {current_price:,.0f}원{stale_mark}, "
                         f"수익률 {pnl_pct:+.1f}%, 수량 {qty}주, "
                         f"투자시계 {horizon}\n"
                     )

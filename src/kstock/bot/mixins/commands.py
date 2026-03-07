@@ -261,9 +261,12 @@ class CommandsMixin:
                 return price
         except Exception:
             logger.debug("_get_price yfinance failed for %s", ticker, exc_info=True)
-        # 4순위: base_price fallback
+        # 4순위: base_price fallback (stale 가능성 경고)
         if base_price > 0:
-            logger.debug("Price %s: fallback=%s", ticker, base_price)
+            logger.warning(
+                "Price %s: ALL sources failed, using stale fallback=%s",
+                ticker, base_price,
+            )
             return base_price
         return 0.0
 
@@ -409,8 +412,12 @@ class CommandsMixin:
                     pnl_pct=round((current - buy_price) / buy_price * 100, 2),
                 )
 
-                target_1 = h.get("target_1") or buy_price * 1.03
-                stop_price = h.get("stop_price") or buy_price * 0.95
+                # v9.3: holding_type 반영 임계값 (장기보유 종목 보호)
+                ht = h.get("holding_type") or h.get("horizon") or "auto"
+                from kstock.store._portfolio import HOLDING_THRESHOLDS
+                th = HOLDING_THRESHOLDS.get(ht, HOLDING_THRESHOLDS["auto"])
+                target_1 = h.get("target_1") or round(buy_price * (1 + th["t1"]), 0)
+                stop_price = h.get("stop_price") or round(buy_price * (1 + th["stop"]), 0)
 
                 if current >= target_1 and (h.get("sold_pct") or 0) < 50:
                     if not self.db.has_recent_alert(ticker, "sell", hours=4):

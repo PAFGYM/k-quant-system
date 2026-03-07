@@ -706,7 +706,40 @@ class CoreHandlersMixin:
             )
             return
 
-        await update.message.reply_text("\U0001f4f8 스크린샷 분석 중... 잠시만 기다려주세요.")
+        # v9.3: 캡션 있으면 AI비서 Vision 분석 (잔고 분석 대신)
+        caption = update.message.caption or ""
+        if caption.strip():
+            import base64 as _b64
+            try:
+                photo = update.message.photo[-1]
+                file = await context.bot.get_file(photo.file_id)
+                img_bytes = await file.download_as_bytearray()
+                img_b64 = _b64.b64encode(bytes(img_bytes)).decode()
+                await self._analyze_image_with_text(
+                    update, context, caption, img_b64=img_b64,
+                )
+            except Exception as e:
+                logger.error("AI비서 이미지 분석 실패: %s", e)
+                await update.message.reply_text(
+                    "⚠️ 이미지 분석에 실패했습니다. 다시 시도해주세요.",
+                    reply_markup=get_reply_markup(context),
+                )
+            return
+
+        # 캡션 없는 이미지 → 이미지 임시 저장 (2분 대기) 또는 잔고 분석
+        # 기존 잔고 분석은 유지하되, pending_image도 저장
+        import base64 as _b64
+        try:
+            photo_obj = update.message.photo[-1]
+            file = await context.bot.get_file(photo_obj.file_id)
+            img_bytes_raw = await file.download_as_bytearray()
+            img_b64 = _b64.b64encode(bytes(img_bytes_raw)).decode()
+            context.user_data["pending_image"] = img_b64
+            context.user_data["pending_image_ts"] = __import__("time").time()
+        except Exception:
+            pass
+
+        await update.message.reply_text("\U0001f4f8 스크린샷 분석 중... 잠시만 기다려주세요.\n💬 질문이 있으면 2분 내에 텍스트를 보내주세요.")
 
         try:
             photo = update.message.photo[-1]
@@ -1143,8 +1176,17 @@ class CoreHandlersMixin:
                         update, context, detected, text,
                     )
             else:
-                # 메뉴에 없는 텍스트 -> AI 질문으로 처리
-                await self._handle_ai_question(update, context, text)
+                # v9.3: 대기 중 이미지 있으면 이미지+텍스트 Vision 분석
+                import time as _time
+                pending_img = context.user_data.pop("pending_image", None)
+                pending_ts = context.user_data.pop("pending_image_ts", 0)
+                if pending_img and (_time.time() - pending_ts) < 120:
+                    await self._analyze_image_with_text(
+                        update, context, text, img_b64=pending_img,
+                    )
+                else:
+                    # 메뉴에 없는 텍스트 -> AI 질문으로 처리
+                    await self._handle_ai_question(update, context, text)
 
     def _detect_stock_query(self, text: str) -> dict | None:
         """자연어에서 종목명/티커를 감지합니다.
@@ -1636,6 +1678,11 @@ class CoreHandlersMixin:
                 "hold_profit": self._action_hold_profit,
                 "stop_loss": self._action_stop_loss,
                 "hold_through": self._action_hold_through,
+                "newstop": self._action_new_stop,
+                "setstop": self._action_set_stop,
+                "newtgt": self._action_new_target,
+                "settgt": self._action_set_target,
+                "holdai": self._action_hold_ai,
                 "sell_half": self._action_sell_profit,
                 "hold_more": self._action_hold_profit,
                 "detail": self._action_detail,

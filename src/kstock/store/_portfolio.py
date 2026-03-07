@@ -4,6 +4,27 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+# v9.3: 매니저별 보유종목 임계값 (holding_type 기반)
+HOLDING_THRESHOLDS: dict[str, dict[str, float]] = {
+    "scalp":     {"stop": -0.03, "t1": 0.05, "t2": 0.08},
+    "swing":     {"stop": -0.07, "t1": 0.10, "t2": 0.20},
+    "position":  {"stop": -0.12, "t1": 0.20, "t2": 0.40},
+    "long_term": {"stop": -0.20, "t1": 0.30, "t2": 0.80},
+    "auto":      {"stop": -0.05, "t1": 0.03, "t2": 0.07},
+}
+
+
+def _calc_thresholds(
+    buy_price: float, holding_type: str = "auto",
+) -> tuple[float, float, float]:
+    """매수가와 투자전략에 따른 (target_1, target_2, stop_price) 계산."""
+    th = HOLDING_THRESHOLDS.get(holding_type, HOLDING_THRESHOLDS["auto"])
+    return (
+        round(buy_price * (1 + th["t1"]), 0),
+        round(buy_price * (1 + th["t2"]), 0),
+        round(buy_price * (1 + th["stop"]), 0),
+    )
+
 
 class PortfolioMixin:
     """포트폴리오 + 보유종목 + 워치리스트 + 포트폴리오 스냅샷 + 리스크 Mixin."""
@@ -53,9 +74,7 @@ class PortfolioMixin:
         holding_type: str = "auto",
     ) -> int:
         now = datetime.utcnow().isoformat()
-        target_1 = round(buy_price * 1.03, 0)
-        target_2 = round(buy_price * 1.07, 0)
-        stop_price = round(buy_price * 0.95, 0)
+        target_1, target_2, stop_price = _calc_thresholds(buy_price, holding_type)
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -154,9 +173,10 @@ class PortfolioMixin:
                 )
             return existing["id"]
         else:
-            target_1 = round(buy_price * 1.03, 0) if buy_price else 0
-            target_2 = round(buy_price * 1.07, 0) if buy_price else 0
-            stop_price = round(buy_price * 0.95, 0) if buy_price else 0
+            if buy_price:
+                target_1, target_2, stop_price = _calc_thresholds(buy_price, holding_type)
+            else:
+                target_1 = target_2 = stop_price = 0
             with self._connect() as conn:
                 cursor = conn.execute(
                     """INSERT INTO holdings
@@ -186,8 +206,43 @@ class PortfolioMixin:
             )
 
     def update_holding_type(self, holding_id: int, holding_type: str) -> None:
-        """보유종목의 투자전략(holding_type)을 변경합니다."""
-        self.update_holding(holding_id, holding_type=holding_type)
+        """보유종목의 투자전략(holding_type)을 변경하고 임계값을 재계산합니다."""
+        holding = self.get_holding(holding_id)
+        if holding and holding.get("buy_price"):
+            t1, t2, stop = _calc_thresholds(holding["buy_price"], holding_type)
+            self.update_holding(
+                holding_id, holding_type=holding_type,
+                target_1=t1, target_2=t2, stop_price=stop,
+            )
+        else:
+            self.update_holding(holding_id, holding_type=holding_type)
+
+    def migrate_holding_thresholds(self) -> int:
+        """v9.3: 기존 active holdings의 임계값을 holding_type에 맞게 재계산.
+
+        auto가 아닌 holding_type을 가진 종목 중 stop_price가
+        구버전(-5%) 기준인 건을 매니저별 임계값으로 업데이트.
+        Returns: 업데이트된 건수.
+        """
+        updated = 0
+        holdings = self.get_active_holdings()
+        for h in holdings:
+            ht = h.get("holding_type") or "auto"
+            if ht == "auto":
+                continue
+            buy_price = h.get("buy_price", 0)
+            if buy_price <= 0:
+                continue
+            t1, t2, stop = _calc_thresholds(buy_price, ht)
+            # 현재 DB 값과 다르면 업데이트
+            if (h.get("stop_price") != stop
+                    or h.get("target_1") != t1
+                    or h.get("target_2") != t2):
+                self.update_holding(
+                    h["id"], target_1=t1, target_2=t2, stop_price=stop,
+                )
+                updated += 1
+        return updated
 
     # -- watchlist --------------------------------------------------------------
 

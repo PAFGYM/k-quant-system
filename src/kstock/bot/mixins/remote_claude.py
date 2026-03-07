@@ -268,11 +268,18 @@ class RemoteClaudeMixin:
         # 대기 중인 이미지가 있으면 이미지+텍스트 합쳐서 분석
         pending_img = context.user_data.pop("pending_image", None)
         pending_ts = context.user_data.pop("pending_image_ts", 0)
-        if pending_img and (time.time() - pending_ts) < self._IMG_WAIT_SECONDS:
-            await self._analyze_image_with_text(
-                update, context, text, img_b64=pending_img,
-            )
-            return
+        if pending_img:
+            if (time.time() - pending_ts) < self._IMG_WAIT_SECONDS:
+                await self._analyze_image_with_text(
+                    update, context, text, img_b64=pending_img,
+                )
+                return
+            else:
+                # v9.3: 이미지 만료 알림
+                await update.message.reply_text(
+                    "⏰ 이전 이미지가 만료되었습니다. 필요하면 다시 첨부해주세요.\n"
+                    "텍스트만으로 진행합니다.",
+                )
 
         # 모든 메시지를 Claude CLI로 실행
         await self._execute_claude_prompt(update, text, context=context)
@@ -355,8 +362,8 @@ class RemoteClaudeMixin:
 
     # ── 관리자 모드 이미지 처리 ──
 
-    # v6.2.1: 이미지 대기 시간 (초) — 이미지 전송 후 텍스트 입력 기다림
-    _IMG_WAIT_SECONDS = 30
+    # v9.3: 이미지 대기 시간 120초로 확대 (30초 → 2분)
+    _IMG_WAIT_SECONDS = 120
 
     async def _handle_claude_mode_image(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -364,7 +371,7 @@ class RemoteClaudeMixin:
         """클로드 모드 이미지 처리 — 캡션 있으면 즉시, 없으면 후속 텍스트 대기.
 
         v6.2.1: 이미지 먼저 보내고 텍스트를 나중에 보내는 워크플로 지원.
-        캡션이 없으면 이미지를 임시 저장하고 30초 동안 텍스트를 기다립니다.
+        v9.3: 대기 시간 30초 → 2분으로 확대, 만료 시 알림 추가.
         """
         if not self.anthropic_key:
             await update.message.reply_text(
@@ -390,8 +397,8 @@ class RemoteClaudeMixin:
                 context.user_data["pending_image_ts"] = time.time()
                 await update.message.reply_text(
                     "📸 이미지 받았습니다!\n"
-                    f"💬 30초 안에 질문/지시를 텍스트로 보내주세요.\n"
-                    f"(바로 분석하려면 '분석' 입력)",
+                    "💬 2분 안에 질문/지시를 텍스트로 보내주세요.\n"
+                    "(바로 분석하려면 '분석' 입력)",
                     reply_markup=CLAUDE_MODE_MENU,
                 )
             except Exception as e:
