@@ -238,10 +238,18 @@ class MarketMixin:
             with self._connect() as conn:
                 cursor = conn.execute(
                     """
-                    INSERT OR IGNORE INTO supply_demand
+                    INSERT INTO supply_demand
                         (ticker, date, foreign_net, institution_net, retail_net,
                          program_net, short_balance, short_ratio, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(ticker, date) DO UPDATE SET
+                        foreign_net = excluded.foreign_net,
+                        institution_net = excluded.institution_net,
+                        retail_net = excluded.retail_net,
+                        program_net = excluded.program_net,
+                        short_balance = excluded.short_balance,
+                        short_ratio = excluded.short_ratio,
+                        created_at = excluded.created_at
                     """,
                     (ticker, date, foreign_net, institution_net, retail_net,
                      program_net, short_balance, short_ratio, now),
@@ -250,6 +258,50 @@ class MarketMixin:
         except Exception:
             logger.warning("add_supply_demand failed: %s", ticker, exc_info=True)
             return None
+
+    def bulk_save_supply_demand(self, ticker: str, rows: list[dict]) -> int:
+        """투자자별 매매동향 일괄 저장.
+
+        Args:
+            ticker: 종목코드
+            rows: [{date, foreign_net, institution_net, ...}, ...]
+
+        Returns:
+            저장된 행 수
+        """
+        now = datetime.utcnow().isoformat()
+        saved = 0
+        try:
+            with self._connect() as conn:
+                for r in rows:
+                    conn.execute(
+                        """
+                        INSERT INTO supply_demand
+                            (ticker, date, foreign_net, institution_net, retail_net,
+                             program_net, short_balance, short_ratio, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(ticker, date) DO UPDATE SET
+                            foreign_net = excluded.foreign_net,
+                            institution_net = excluded.institution_net,
+                            retail_net = excluded.retail_net,
+                            created_at = excluded.created_at
+                        """,
+                        (
+                            ticker,
+                            r.get("date", ""),
+                            r.get("foreign_net", 0),
+                            r.get("institution_net", 0),
+                            r.get("retail_net", 0),
+                            r.get("program_net", 0),
+                            r.get("short_balance", 0),
+                            r.get("short_ratio", 0),
+                            now,
+                        ),
+                    )
+                    saved += 1
+        except Exception:
+            logger.warning("bulk_save_supply_demand failed: %s", ticker, exc_info=True)
+        return saved
 
     def get_supply_demand(self, ticker: str, days: int = 20) -> list[dict]:
         cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")

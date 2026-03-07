@@ -110,7 +110,7 @@ class CommandsMixin:
             else:
                 mtf_bonus = 0
 
-            # Mock flow data (parallel)
+            # Flow data: KIS API + Naver 수급 보강 (v9.3)
             foreign_flow, inst_flow = await asyncio.gather(
                 self.kis.get_foreign_flow(ticker),
                 self.kis.get_institution_flow(ticker),
@@ -123,6 +123,45 @@ class CommandsMixin:
                 (inst_flow["net_buy_volume"] > 0).sum()
                 - (inst_flow["net_buy_volume"] < 0).sum()
             )
+
+            # v9.3: Naver 투자자 매매동향으로 보강
+            supply_demand_bonus = 0
+            try:
+                from kstock.ingest.naver_finance import (
+                    get_investor_trading, analyze_investor_trend,
+                )
+                inv_data = await get_investor_trading(ticker, days=20)
+                if inv_data:
+                    inv_trend = analyze_investor_trend(inv_data)
+                    sd_score = inv_trend.get("score", 0)
+                    # 수급 보너스: -5 ~ +8
+                    if sd_score >= 4:
+                        supply_demand_bonus = 8
+                    elif sd_score >= 2:
+                        supply_demand_bonus = 5
+                    elif sd_score >= 0:
+                        supply_demand_bonus = 0
+                    elif sd_score >= -2:
+                        supply_demand_bonus = -3
+                    else:
+                        supply_demand_bonus = -5
+
+                    # Naver 연속매수일로 KIS 데이터 보정
+                    nv_f_days = inv_trend.get("consecutive_foreign_buy", 0)
+                    nv_i_days = inv_trend.get("consecutive_inst_buy", 0)
+                    if nv_f_days > abs(foreign_days):
+                        foreign_days = max(foreign_days, nv_f_days)
+                    if nv_i_days > abs(inst_days):
+                        inst_days = max(inst_days, nv_i_days)
+
+                    # DB 저장
+                    try:
+                        self.db.bulk_save_supply_demand(ticker, inv_data)
+                    except Exception:
+                        pass
+            except Exception:
+                logger.debug("Naver investor data failed for %s", ticker, exc_info=True)
+
             avg_value = float(
                 ohlcv["close"].astype(float).iloc[-5:].mean()
                 * ohlcv["volume"].astype(float).iloc[-5:].mean()
@@ -181,6 +220,7 @@ class CommandsMixin:
                 sentiment_bonus=sentiment_bonus,
                 leading_sector_bonus=leading_sector_bonus,
                 multi_agent_bonus=multi_agent_bonus,
+                factor_bonus=supply_demand_bonus,  # v9.3: 수급 보너스
             )
 
             # Multi-strategy evaluation
@@ -929,6 +969,44 @@ class CommandsMixin:
                         except Exception:
                             logger.debug("_handle_ai_question get_price failed for %s", code, exc_info=True)
                         if cur > 0:
+                            # v9.3: 수급 데이터 추가
+                            supply_text = ""
+                            sector_text = ""
+                            try:
+                                from kstock.ingest.naver_finance import (
+                                    get_investor_trading, analyze_investor_trend,
+                                    get_sector_rankings, analyze_sector_momentum,
+                                )
+                                inv_data = await get_investor_trading(code, days=20)
+                                if inv_data:
+                                    inv_analysis = analyze_investor_trend(inv_data)
+                                    supply_text = (
+                                        f"\n\n[수급 분석]\n"
+                                        f"{inv_analysis.get('summary', '')}\n"
+                                        f"수급 시그널: {inv_analysis.get('signal', '중립')}"
+                                    )
+                                    # DB에 저장
+                                    try:
+                                        self.db.bulk_save_supply_demand(code, inv_data)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                logger.debug("AI질문 수급 데이터 실패: %s", code, exc_info=True)
+
+                            try:
+                                from kstock.ingest.naver_finance import (
+                                    get_sector_rankings, analyze_sector_momentum,
+                                )
+                                sectors = await get_sector_rankings(limit=10)
+                                if sectors:
+                                    sec_analysis = analyze_sector_momentum(sectors)
+                                    sector_text = (
+                                        f"\n\n[섹터 동향]\n"
+                                        f"{sec_analysis.get('summary', '')}"
+                                    )
+                            except Exception:
+                                logger.debug("AI질문 섹터 데이터 실패", exc_info=True)
+
                             enriched = (
                                 f"{question}\n\n"
                                 f"[{name}({code}) 실시간 데이터]\n"
@@ -936,7 +1014,9 @@ class CommandsMixin:
                                 f"이동평균: 5일 {tech.ma5:,.0f}원, "
                                 f"20일 {tech.ma20:,.0f}원, "
                                 f"60일 {tech.ma60:,.0f}원\n"
-                                f"RSI: {tech.rsi:.1f}\n\n"
+                                f"RSI: {tech.rsi:.1f}"
+                                f"{supply_text}"
+                                f"{sector_text}\n\n"
                                 f"[절대 규칙] 위 실시간 데이터의 가격만 참고하라. "
                                 f"너의 학습 데이터에 있는 과거 주가를 절대 사용 금지."
                             )

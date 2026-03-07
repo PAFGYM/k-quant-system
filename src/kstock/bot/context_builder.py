@@ -802,6 +802,20 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
         except Exception as e:
             logger.warning("Failed to get realtime portfolio data: %s", e)
 
+    # v9.3: 섹터 동향 주입
+    try:
+        from kstock.ingest.naver_finance import (
+            get_sector_rankings, analyze_sector_momentum,
+        )
+        sectors = await get_sector_rankings(limit=10)
+        if sectors:
+            sec_analysis = analyze_sector_momentum(sectors)
+            sector_ctx = sec_analysis.get("summary", "")
+            if sector_ctx:
+                market = market + "\n\n[업종별 동향]\n" + sector_ctx
+    except Exception:
+        logger.debug("Sector context injection failed", exc_info=True)
+
     # portfolio에 실시간 데이터 추가
     if realtime_data:
         portfolio = portfolio + "\n\n[실시간 기술지표]\n" + realtime_data
@@ -820,6 +834,29 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
             portfolio = portfolio + "\n\n" + "\n".join(industry_lines)
     except Exception:
         pass
+
+    # v9.3: 보유종목별 수급 데이터 컨텍스트
+    try:
+        holdings = holdings if 'holdings' in dir() else db.get_active_holdings()
+        supply_lines = []
+        for h in (holdings or [])[:5]:
+            ticker = h.get("ticker", "")
+            sd = db.get_supply_demand(ticker, days=5)
+            if sd:
+                latest = sd[0]
+                f_net = latest.get("foreign_net", 0)
+                i_net = latest.get("institution_net", 0)
+                supply_lines.append(
+                    f"- {h.get('name', ticker)}: "
+                    f"외국인 {f_net:+,.0f} / 기관 {i_net:+,.0f}"
+                )
+        if supply_lines:
+            portfolio = (
+                portfolio + "\n\n[보유종목 수급현황]\n"
+                + "\n".join(supply_lines)
+            )
+    except Exception:
+        logger.debug("Supply demand context failed", exc_info=True)
 
     # v9.0: 한국형 리스크 팩터 → 시장 컨텍스트에 추가
     try:
