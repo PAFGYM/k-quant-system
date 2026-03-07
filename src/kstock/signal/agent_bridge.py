@@ -141,6 +141,50 @@ def get_all_agent_bonuses(
     return bonuses
 
 
+def get_youtube_mention_bonus(
+    db: Any,
+    ticker: str,
+    hours: int = 48,
+) -> int:
+    """v9.5: YouTube 방송에서 언급된 종목의 보너스 점수.
+
+    긍정 언급: +3~+5, 부정 언급: -2~-3, 중립: +1
+
+    Args:
+        db: SQLiteStore 인스턴스
+        ticker: 종목 코드 (또는 종목명)
+        hours: 조회 기간 (시간)
+
+    Returns:
+        보너스 점수 (-3 ~ +5)
+    """
+    try:
+        mentions = db.get_youtube_mentioned_tickers(hours=hours)
+        if not mentions:
+            return 0
+
+        for m in mentions:
+            m_ticker = m.get("ticker", "")
+            m_name = m.get("name", "")
+            if ticker in (m_ticker, m_name) or (m_ticker and m_ticker in ticker):
+                pos = m.get("positive", 0)
+                neg = m.get("negative", 0)
+                total = m.get("count", 1)
+
+                if pos > neg:
+                    # 긍정 언급: 여러 채널일수록 높은 보너스
+                    return min(5, 3 + (total - 1))
+                elif neg > pos:
+                    return max(-3, -2 - (total - 1))
+                else:
+                    return 1  # 중립 언급도 관심 = 소폭 보너스
+
+        return 0
+    except Exception as e:
+        logger.debug("YouTube mention bonus lookup failed for %s: %s", ticker, e)
+        return 0
+
+
 async def run_and_record_multi_agent(
     db: Any,
     ticker: str,

@@ -281,6 +281,12 @@ MORE_MENU = ReplyKeyboardMarkup(
 )
 
 
+def make_back_row(label: str = "🔙 뒤로") -> list:
+    """v9.5: 범용 뒤로가기 버튼 행 생성."""
+    from telegram import InlineKeyboardButton
+    return [InlineKeyboardButton(label, callback_data="back:0")]
+
+
 def make_feedback_row(menu_name: str) -> list:
     """👍👎 피드백 + ❌닫기 버튼 행 생성."""
     from telegram import InlineKeyboardButton
@@ -407,6 +413,8 @@ class ScanResult:
     confidence_score: float = 0.0
     confidence_stars: str = ""
     confidence_label: str = ""
+    price_target: object = None  # v9.4: PriceTarget from price_target.py
+    pattern_report: object = None  # v9.4: PatternReport from pattern_matcher.py
 
 
 

@@ -369,8 +369,16 @@ def format_news_for_context(items: list[NewsItem], max_items: int = 8) -> str:
     return "\n".join(lines) if lines else "글로벌 이슈 없음"
 
 
-def format_news_for_telegram(items: list[NewsItem], max_items: int = 10) -> str:
-    """텔레그램 알림용 뉴스 포맷 (v8.2: YouTube 내용 요약 포함)."""
+def format_news_for_telegram(
+    items: list[NewsItem], max_items: int = 10, db=None,
+) -> str:
+    """텔레그램 알림용 뉴스 포맷 (v9.5: YouTube 구조화 분석 표시).
+
+    Args:
+        items: NewsItem 리스트
+        max_items: 최대 표시 항목 수
+        db: SQLiteStore (있으면 youtube_intelligence에서 구조화 데이터 조회)
+    """
     if not items:
         return ""
 
@@ -391,16 +399,62 @@ def format_news_for_telegram(items: list[NewsItem], max_items: int = 10) -> str:
             if item.content_summary:
                 lines.append(f"  📝 {item.content_summary[:200]}")
 
+    # YouTube 구조화 인텔리전스 조회
+    yt_intel_map: dict = {}
+    if db:
+        try:
+            yt_intels = db.get_recent_youtube_intelligence(hours=6, limit=10)
+            for yi in yt_intels:
+                vid = yi.get("video_id", "")
+                if vid:
+                    yt_intel_map[vid] = yi
+        except Exception:
+            pass
+
     # YouTube 요약이 있는 항목 우선 표시
-    yt_summarized = [i for i in normal if i.content_summary]
+    yt_summarized = [i for i in normal if i.content_summary and i.video_id]
     yt_other = [i for i in normal if not i.content_summary and "🎬" in i.source]
     non_yt = [i for i in normal if "🎬" not in i.source]
 
     if yt_summarized:
-        lines.append("\n🎬 경제방송 요약")
+        lines.append("\n🎬 경제방송 분석")
         for item in yt_summarized[:5]:
-            lines.append(f"\n  [{item.source}] {item.title}")
-            lines.append(f"  📝 {item.content_summary}")
+            channel = item.source.replace("🎬", "").strip()
+            intel = yt_intel_map.get(item.video_id or "")
+
+            if intel and intel.get("full_summary"):
+                # v9.5: 구조화 인텔리전스 표시
+                lines.append(f"\n🎬 [{channel}] 경제방송 분석")
+                lines.append(f"{'━' * 22}")
+                lines.append(f"📋 {intel['full_summary'][:600]}")
+
+                # 언급 종목
+                tickers = intel.get("mentioned_tickers", [])
+                if isinstance(tickers, list) and tickers:
+                    ticker_parts = []
+                    for t in tickers[:6]:
+                        name = t.get("name", "")
+                        senti = t.get("sentiment", "")
+                        emoji = {"긍정": "🟢", "부정": "🔴", "중립": "⚪"}.get(senti, "⚪")
+                        ticker_parts.append(f"{name}{emoji}")
+                    lines.append(f"📊 언급 종목: {' '.join(ticker_parts)}")
+
+                # 시장 전망
+                outlook = intel.get("market_outlook", "")
+                if outlook:
+                    outlook_emoji = "📈" if "상승" in outlook or "긍정" in outlook else (
+                        "📉" if "하락" in outlook or "부정" in outlook else "➡️"
+                    )
+                    lines.append(f"🔍 시장 전망: {outlook_emoji} {outlook[:80]}")
+
+                # 투자 시사점
+                impl = intel.get("investment_implications", "")
+                if impl:
+                    lines.append(f"💡 {impl[:100]}")
+            else:
+                # 기존 방식 fallback
+                lines.append(f"\n  [{item.source}] {item.title}")
+                lines.append(f"  📝 {item.content_summary}")
 
     remaining = max_items - len(urgent[:5]) - len(yt_summarized[:5])
     rest = yt_other + non_yt
@@ -706,40 +760,56 @@ def fetch_transcript(video_id: str, max_chars: int = 8000) -> str:
         return ""
 
 
-async def summarize_transcript(
+async def summarize_transcript_structured(
     transcript: str,
     title: str,
     source: str,
-) -> str:
-    """AI로 자막 내용을 경제/투자 관점으로 요약.
+) -> dict:
+    """AI로 자막 내용을 구조화 추출 (v9.5).
 
-    비용: ~$0.002/호출 (Haiku, ~2000 토큰 입력)
+    비용: ~$0.003/호출 (Haiku, ~3000 토큰 입력 + 800 출력)
+
+    Returns:
+        dict with keys: full_summary, mentioned_tickers, mentioned_sectors,
+        market_outlook, key_numbers, investment_implications, raw_summary, confidence
     """
+    empty = {
+        "full_summary": "", "mentioned_tickers": [], "mentioned_sectors": [],
+        "market_outlook": "", "key_numbers": [], "investment_implications": "",
+        "raw_summary": "", "confidence": 0.0,
+    }
     if not transcript or len(transcript) < 50:
-        return ""
+        return empty
 
     import httpx
+    import json as _json
 
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
-        return ""
+        return empty
 
-    # 자막 텍스트를 3000자로 제한 (비용 절감)
-    text = transcript[:3000]
+    text = transcript[:5000]
 
     prompt = (
         f"다음은 [{source}]의 경제/투자 유튜브 영상 '{title}'의 자막입니다.\n\n"
         f"{text}\n\n"
-        "위 내용을 경제/투자 관점에서 3~5줄로 핵심 요약해줘.\n"
-        "규칙:\n"
-        "- 언급된 종목명, 수치, 전망을 빠짐없이 포함\n"
-        "- 시장에 미치는 영향(호재/악재)을 명시\n"
-        "- 불필요한 인사말/광고 내용 제외\n"
-        "- 한국어로, 간결하게"
+        "아래 JSON 형식으로 정확히 응답해줘. JSON만 출력하고 다른 텍스트는 넣지 마.\n"
+        '{\n'
+        '  "full_summary": "10-15줄 상세 요약 (시장 상황, 전문가 의견, 핵심 수치, 전망 포함. 불필요한 인사/광고 제외)",\n'
+        '  "mentioned_tickers": [\n'
+        '    {"name": "종목명", "ticker": "6자리코드(모르면 빈 문자열)", "sentiment": "positive/negative/neutral", "context": "왜 언급됐는지 1줄"}\n'
+        '  ],\n'
+        '  "mentioned_sectors": ["반도체", "2차전지"],\n'
+        '  "market_outlook": "bullish/bearish/neutral/mixed",\n'
+        '  "key_numbers": [\n'
+        '    {"label": "지표명", "value": "숫자값", "unit": "단위"}\n'
+        '  ],\n'
+        '  "investment_implications": "투자자가 오늘 취할 액션 2-3줄"\n'
+        '}\n'
     )
 
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
@@ -749,46 +819,107 @@ async def summarize_transcript(
                 },
                 json={
                     "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 400,
+                    "max_tokens": 800,
                     "temperature": 0.2,
                     "messages": [{"role": "user", "content": prompt}],
                 },
             )
             if resp.status_code != 200:
-                logger.debug("Summary API error %d", resp.status_code)
-                return ""
+                logger.debug("Structured summary API error %d", resp.status_code)
+                return empty
 
-            result = resp.json()["content"][0]["text"]
+            raw_text = resp.json()["content"][0]["text"].strip()
             # 토큰 추적
             try:
                 from kstock.core.token_tracker import track_usage_global
                 track_usage_global(
                     provider="anthropic",
                     model="claude-haiku-4-5-20251001",
-                    function_name="youtube_summary",
+                    function_name="youtube_summary_structured",
                     response=resp,
                 )
             except Exception:
                 pass
-            return result.strip()
+
+            # JSON 파싱 (코드블록 제거 후)
+            json_text = raw_text
+            if "```" in json_text:
+                import re
+                m = re.search(r"```(?:json)?\s*(.*?)```", json_text, re.DOTALL)
+                if m:
+                    json_text = m.group(1)
+            if json_text.startswith("{"):
+                try:
+                    data = _json.loads(json_text)
+                except _json.JSONDecodeError:
+                    # 부분 JSON 복구 시도
+                    data = {}
+            else:
+                data = {}
+
+            if not data:
+                # JSON 파싱 실패 → raw text를 단문 요약으로 사용
+                lines = raw_text.split("\n")
+                short = "\n".join(lines[:5])
+                return {**empty, "raw_summary": short, "full_summary": raw_text}
+
+            full_summary = data.get("full_summary", "")
+            # raw_summary: 3줄 버전 (backward compat)
+            summary_lines = full_summary.split("\n")
+            raw_summary = "\n".join(summary_lines[:3]) if summary_lines else full_summary[:200]
+
+            conf = 0.5
+            if data.get("mentioned_tickers"):
+                conf += 0.2
+            if data.get("mentioned_sectors"):
+                conf += 0.1
+            if data.get("key_numbers"):
+                conf += 0.1
+            if data.get("investment_implications"):
+                conf += 0.1
+
+            return {
+                "full_summary": full_summary,
+                "mentioned_tickers": data.get("mentioned_tickers", []),
+                "mentioned_sectors": data.get("mentioned_sectors", []),
+                "market_outlook": data.get("market_outlook", ""),
+                "key_numbers": data.get("key_numbers", []),
+                "investment_implications": data.get("investment_implications", ""),
+                "raw_summary": raw_summary,
+                "confidence": min(conf, 1.0),
+            }
 
     except Exception as e:
-        logger.debug("Summary generation failed: %s", e)
-        return ""
+        logger.debug("Structured summary generation failed: %s", e)
+        return empty
+
+
+async def summarize_transcript(
+    transcript: str,
+    title: str,
+    source: str,
+) -> str:
+    """AI로 자막 내용을 경제/투자 관점으로 요약 (backward compat wrapper).
+
+    v9.5: 내부적으로 구조화 추출 후 raw_summary 반환.
+    """
+    result = await summarize_transcript_structured(transcript, title, source)
+    return result.get("raw_summary", "") or result.get("full_summary", "")[:200]
 
 
 async def enrich_youtube_summaries(
     items: list[NewsItem],
     max_summaries: int = 5,
+    db=None,
 ) -> list[NewsItem]:
     """YouTube 영상 뉴스에 자막 기반 내용 요약을 추가.
 
-    RSS로 수집된 YouTube 항목 중 최신 max_summaries개에 대해
-    자막을 추출하고 AI 요약을 생성한다.
+    v9.5: 구조화 추출 후 DB에 인텔리전스 저장.
 
     Args:
         items: NewsItem 리스트 (YouTube video_id가 있는 항목)
         max_summaries: 요약할 최대 영상 수 (비용 제어)
+        db: SQLiteStore instance (있으면 youtube_intelligence 저장)
     """
     yt_items = [it for it in items if it.video_id]
     if not yt_items:
@@ -807,18 +938,41 @@ async def enrich_youtube_summaries(
         if not transcript:
             continue
 
-        # AI 요약
-        summary = await summarize_transcript(
-            transcript, item.title, item.source.replace("🎬", ""),
+        # v9.5: 구조화 추출
+        structured = await summarize_transcript_structured(
+            transcript, item.title, item.source.replace("\U0001f3ac", "").strip(),
         )
 
-        if summary:
-            item.content_summary = summary
+        raw_summary = structured.get("raw_summary", "")
+        full_summary = structured.get("full_summary", "")
+
+        if raw_summary or full_summary:
+            item.content_summary = raw_summary or full_summary[:200]
             count += 1
             logger.info(
-                "YouTube summary: [%s] %s (%d chars)",
-                item.source, item.title[:30], len(summary),
+                "YouTube summary: [%s] %s (%d chars, %d tickers)",
+                item.source, item.title[:30], len(full_summary),
+                len(structured.get("mentioned_tickers", [])),
             )
+
+            # DB에 인텔리전스 저장
+            if db:
+                try:
+                    db.save_youtube_intelligence({
+                        "video_id": item.video_id,
+                        "source": item.source,
+                        "title": item.title,
+                        "mentioned_tickers": structured.get("mentioned_tickers", []),
+                        "mentioned_sectors": structured.get("mentioned_sectors", []),
+                        "market_outlook": structured.get("market_outlook", ""),
+                        "key_numbers": structured.get("key_numbers", []),
+                        "investment_implications": structured.get("investment_implications", ""),
+                        "full_summary": full_summary,
+                        "raw_summary": raw_summary,
+                        "confidence": structured.get("confidence", 0.0),
+                    })
+                except Exception:
+                    logger.debug("YouTube intelligence DB save failed", exc_info=True)
 
     logger.info("Enriched %d/%d YouTube items with summaries", count, len(yt_items))
     return items

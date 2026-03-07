@@ -6,8 +6,17 @@ import re
 from kstock.bot.bot_imports import *  # noqa: F403
 
 
+_OHLCV_CACHE_TTL = 600  # v9.3.3: 스캔 OHLCV 캐시 10분
+
+
 class CommandsMixin:
     async def _scan_all_stocks(self) -> list:
+        import time as _t
+        # v9.3.3: 캐시가 10분 이상 경과했으면 초기화
+        if _t.monotonic() - getattr(self, '_ohlcv_cache_time', 0) > _OHLCV_CACHE_TTL:
+            self._ohlcv_cache.clear()
+            self._ohlcv_cache_time = _t.monotonic()
+
         macro = await self.macro_client.get_snapshot()
         await self._update_sector_strengths()
 
@@ -19,7 +28,7 @@ class CommandsMixin:
                 ohlcv = await self.yf_client.get_ohlcv(
                     stock["code"], stock.get("market", "KOSPI")
                 )
-                if ohlcv is not None and not ohlcv.empty:
+                if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
                     self._ohlcv_cache[stock["code"]] = ohlcv
                     close = ohlcv["close"].astype(float)
                     lookback_3m = min(60, len(close) - 1)
@@ -69,6 +78,20 @@ class CommandsMixin:
                     self.yf_client.get_ohlcv(ticker, market),
                     self.yf_client.get_stock_info(ticker, name, market),
                 )
+                # v9.3.2: yfinance OHLCV 실패 시 Naver OHLCV 직접 시도
+                if (ohlcv is None or ohlcv.empty):
+                    try:
+                        from kstock.ingest.naver_finance import NaverFinanceClient
+                        naver = NaverFinanceClient()
+                        ohlcv = await naver.get_ohlcv(ticker, period_days=120)
+                        if not ohlcv.empty:
+                            logger.info("Naver OHLCV 직접 폴백 성공: %s (%d행)", ticker, len(ohlcv))
+                    except Exception:
+                        logger.debug("Naver OHLCV 직접 폴백 실패: %s", ticker, exc_info=True)
+                # OHLCV 완전 실패 시 스킵 (가짜 데이터로 분석하지 않음)
+                if ohlcv is None or ohlcv.empty:
+                    logger.warning("OHLCV 완전 실패 — %s(%s) 분석 스킵", name, ticker)
+                    return None
                 self._ohlcv_cache[ticker] = ohlcv
             else:
                 yf_info = await self.yf_client.get_stock_info(ticker, name, market)
@@ -81,6 +104,9 @@ class CommandsMixin:
                     live_price = realtime
             except Exception:
                 logger.debug("_run_scan_for_stock get_price failed for %s", ticker, exc_info=True)
+            # v9.3.3: OHLCV의 마지막 종가를 최종 fallback으로 사용
+            if live_price <= 0 and "close" in ohlcv.columns and len(ohlcv) > 0:
+                live_price = float(ohlcv["close"].iloc[-1])
 
             info = StockInfo(
                 ticker=ticker, name=name, market=market,
@@ -115,14 +141,18 @@ class CommandsMixin:
                 self.kis.get_foreign_flow(ticker),
                 self.kis.get_institution_flow(ticker),
             )
-            foreign_days = int(
-                (foreign_flow["net_buy_volume"] > 0).sum()
-                - (foreign_flow["net_buy_volume"] < 0).sum()
-            )
-            inst_days = int(
-                (inst_flow["net_buy_volume"] > 0).sum()
-                - (inst_flow["net_buy_volume"] < 0).sum()
-            )
+            foreign_days = 0
+            inst_days = 0
+            if not foreign_flow.empty and "net_buy_volume" in foreign_flow.columns:
+                foreign_days = int(
+                    (foreign_flow["net_buy_volume"] > 0).sum()
+                    - (foreign_flow["net_buy_volume"] < 0).sum()
+                )
+            if not inst_flow.empty and "net_buy_volume" in inst_flow.columns:
+                inst_days = int(
+                    (inst_flow["net_buy_volume"] > 0).sum()
+                    - (inst_flow["net_buy_volume"] < 0).sum()
+                )
 
             # v9.3: Naver 투자자 매매동향으로 보강
             supply_demand_bonus = 0
@@ -212,6 +242,15 @@ class CommandsMixin:
             except Exception:
                 pass
 
+            # v9.5: YouTube 방송 언급 보너스
+            try:
+                from kstock.signal.agent_bridge import get_youtube_mention_bonus
+                yt_bonus = get_youtube_mention_bonus(self.db, ticker)
+                if yt_bonus:
+                    multi_agent_bonus += yt_bonus
+            except Exception:
+                pass
+
             score = compute_composite_score(
                 macro, flow, info, tech, self.scoring_config,
                 mtf_bonus=mtf_bonus, sector_adj=sector_adj,
@@ -242,6 +281,22 @@ class CommandsMixin:
                 is_leverage_etf=(ticker in LEVERAGE_ETFS),
             )
 
+            # v9.4: 패턴 매칭 + 가격 목표 계산
+            pt_result = None
+            pr_result = None
+            try:
+                from kstock.signal.price_target import PriceTargetEngine
+                pt_engine = PriceTargetEngine()
+                pt_result = pt_engine.calculate(ohlcv, info)
+            except Exception:
+                logger.debug("PriceTarget calc failed for %s", ticker, exc_info=True)
+            try:
+                from kstock.signal.pattern_matcher import PatternMatcher
+                pm = PatternMatcher()
+                pr_result = pm.find_similar_patterns(ohlcv)
+            except Exception:
+                logger.debug("PatternMatcher calc failed for %s", ticker, exc_info=True)
+
             return ScanResult(
                 ticker=ticker, name=name, score=score,
                 tech=tech, info=info, flow=flow,
@@ -250,6 +305,8 @@ class CommandsMixin:
                 confidence_score=conf_score,
                 confidence_stars=conf_stars,
                 confidence_label=conf_label,
+                price_target=pt_result,
+                pattern_report=pr_result,
             )
         except Exception as e:
             logger.error("Analysis failed %s: %s", ticker, e)
@@ -385,6 +442,8 @@ class CommandsMixin:
                 msg = format_buy_alert(
                     name, ticker, score, tech, result.info, result.flow, macro,
                     strategy_type=strat_type,
+                    price_target=result.price_target,
+                    pattern_report=result.pattern_report,
                 )
                 if self.kis_broker.connected:
                     buttons = [[
@@ -421,7 +480,10 @@ class CommandsMixin:
         elif score.signal == "WATCH":
             watch_trigger = tech.rsi <= 40 or tech.bb_pctb <= 0.35
             if watch_trigger and not self.db.has_recent_alert(ticker, "watch", hours=12):
-                msg = format_watch_alert(name, ticker, score, tech, result.info, strat_type)
+                msg = format_watch_alert(
+                    name, ticker, score, tech, result.info,
+                    strategy_type=strat_type, price_target=result.price_target,
+                )
                 buttons = [[
                     InlineKeyboardButton("\U0001f514 알림 받기", callback_data=f"watch_alert:{ticker}"),
                     InlineKeyboardButton("\u274c 관심없음", callback_data=f"nowatch:{ticker}"),
@@ -946,7 +1008,7 @@ class CommandsMixin:
             from kstock.bot.context_builder import build_full_context_with_macro
             from kstock.bot.chat_memory import ChatMemory
 
-            # 질문에 종목명이 있으면 실시간 가격을 주입
+            # v9.3.2: 종목 감지 시 모든 데이터 소스 병렬 수집 (부분 실패 허용)
             enriched = question
             stock = None
             try:
@@ -955,74 +1017,177 @@ class CommandsMixin:
                     code = stock.get("code", "")
                     name = stock.get("name", code)
                     market = stock.get("market", "KOSPI")
-                    ohlcv = await self.yf_client.get_ohlcv(code, market)
-                    if ohlcv is not None and not ohlcv.empty:
+
+                    # ── 1단계: 데이터 병렬 수집 (각각 독립, 실패 허용) ──
+                    import asyncio
+                    from kstock.ingest.naver_finance import (
+                        NaverFinanceClient,
+                        get_investor_trading, analyze_investor_trend,
+                        get_sector_rankings, analyze_sector_momentum,
+                    )
+                    naver = NaverFinanceClient()
+
+                    # 병렬 실행: yfinance OHLCV, Naver OHLCV, Naver 재무, 수급, 섹터
+                    yf_ohlcv_task = self.yf_client.get_ohlcv(code, market)
+                    nv_ohlcv_task = naver.get_ohlcv(code, period_days=120)
+                    nv_info_task = naver.get_stock_info(code, name)
+                    inv_task = get_investor_trading(code, days=20)
+                    sector_task = get_sector_rankings(limit=15)
+
+                    results = await asyncio.gather(
+                        yf_ohlcv_task, nv_ohlcv_task, nv_info_task,
+                        inv_task, sector_task,
+                        return_exceptions=True,
+                    )
+
+                    yf_ohlcv = results[0] if not isinstance(results[0], Exception) else pd.DataFrame()
+                    nv_ohlcv = results[1] if not isinstance(results[1], Exception) else pd.DataFrame()
+                    nv_info = results[2] if not isinstance(results[2], Exception) else {}
+                    inv_data = results[3] if not isinstance(results[3], Exception) else []
+                    sectors = results[4] if not isinstance(results[4], Exception) else []
+
+                    # ── 2단계: 최선의 OHLCV 선택 ──
+                    ohlcv = pd.DataFrame()
+                    ohlcv_source = "없음"
+                    if isinstance(yf_ohlcv, pd.DataFrame) and not yf_ohlcv.empty:
+                        ohlcv = yf_ohlcv
+                        ohlcv_source = "yfinance"
+                    elif isinstance(nv_ohlcv, pd.DataFrame) and not nv_ohlcv.empty:
+                        ohlcv = nv_ohlcv
+                        ohlcv_source = "네이버"
+
+                    # ── 3단계: 현재가 (다중 소스) ──
+                    cur = 0.0
+                    price_source = ""
+                    # OHLCV 종가
+                    if not ohlcv.empty:
+                        cur = float(ohlcv["close"].astype(float).iloc[-1])
+                        price_source = ohlcv_source
+                    # Naver 재무에서 현재가
+                    if cur <= 0 and isinstance(nv_info, dict) and nv_info.get("current_price", 0) > 0:
+                        cur = float(nv_info["current_price"])
+                        price_source = "네이버시세"
+                    # 수급 데이터에서 종가
+                    if cur <= 0 and inv_data and inv_data[0].get("close", 0) > 0:
+                        cur = float(inv_data[0]["close"])
+                        price_source = "수급데이터"
+                    # KIS/Naver 실시간가
+                    try:
+                        live = await self._get_price(code, base_price=cur)
+                        if live > 0:
+                            cur = live
+                            price_source = "실시간"
+                    except Exception:
+                        pass
+
+                    # ── 4단계: 기술적 분석 (OHLCV 있을 때만) ──
+                    tech_text = ""
+                    if not ohlcv.empty and len(ohlcv) >= 20:
                         from kstock.core.technical import compute_indicators
                         tech = compute_indicators(ohlcv)
-                        # v5.3: KIS→Naver→yfinance 순 실시간 현재가
+                        tech_text = (
+                            f"\n이동평균: 5일 {tech.ma5:,.0f}원, "
+                            f"20일 {tech.ma20:,.0f}원, "
+                            f"60일 {tech.ma60:,.0f}원\n"
+                            f"RSI: {tech.rsi:.1f} | MACD: {tech.macd:.0f}\n"
+                            f"볼린저: 상단 {tech.bb_upper:,.0f} / 하단 {tech.bb_lower:,.0f}"
+                        )
+                        # 추가 분석 데이터
                         close = ohlcv["close"].astype(float)
-                        cur = float(close.iloc[-1])
-                        try:
-                            live = await self._get_price(code, base_price=cur)
-                            if live > 0:
-                                cur = live
-                        except Exception:
-                            logger.debug("_handle_ai_question get_price failed for %s", code, exc_info=True)
-                        if cur > 0:
-                            # v9.3: 수급 데이터 추가
-                            supply_text = ""
-                            sector_text = ""
-                            try:
-                                from kstock.ingest.naver_finance import (
-                                    get_investor_trading, analyze_investor_trend,
-                                    get_sector_rankings, analyze_sector_momentum,
-                                )
-                                inv_data = await get_investor_trading(code, days=20)
-                                if inv_data:
-                                    inv_analysis = analyze_investor_trend(inv_data)
-                                    supply_text = (
-                                        f"\n\n[수급 분석]\n"
-                                        f"{inv_analysis.get('summary', '')}\n"
-                                        f"수급 시그널: {inv_analysis.get('signal', '중립')}"
-                                    )
-                                    # DB에 저장
-                                    try:
-                                        self.db.bulk_save_supply_demand(code, inv_data)
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                logger.debug("AI질문 수급 데이터 실패: %s", code, exc_info=True)
-
-                            try:
-                                from kstock.ingest.naver_finance import (
-                                    get_sector_rankings, analyze_sector_momentum,
-                                )
-                                sectors = await get_sector_rankings(limit=10)
-                                if sectors:
-                                    sec_analysis = analyze_sector_momentum(sectors)
-                                    sector_text = (
-                                        f"\n\n[섹터 동향]\n"
-                                        f"{sec_analysis.get('summary', '')}"
-                                    )
-                            except Exception:
-                                logger.debug("AI질문 섹터 데이터 실패", exc_info=True)
-
-                            enriched = (
-                                f"{question}\n\n"
-                                f"[{name}({code}) 실시간 데이터]\n"
-                                f"현재가: {cur:,.0f}원\n"
-                                f"이동평균: 5일 {tech.ma5:,.0f}원, "
-                                f"20일 {tech.ma20:,.0f}원, "
-                                f"60일 {tech.ma60:,.0f}원\n"
-                                f"RSI: {tech.rsi:.1f}"
-                                f"{supply_text}"
-                                f"{sector_text}\n\n"
-                                f"[절대 규칙] 위 실시간 데이터의 가격만 참고하라. "
-                                f"너의 학습 데이터에 있는 과거 주가를 절대 사용 금지."
+                        vol = ohlcv["volume"].astype(float)
+                        if len(close) >= 5:
+                            ret_1w = (float(close.iloc[-1]) / float(close.iloc[-5]) - 1) * 100
+                            vol_avg_5 = float(vol.iloc[-5:].mean())
+                            vol_avg_20 = float(vol.iloc[-20:].mean()) if len(vol) >= 20 else vol_avg_5
+                            vol_ratio = vol_avg_5 / vol_avg_20 if vol_avg_20 > 0 else 1.0
+                            trade_val = float(close.iloc[-5:].mean() * vol.iloc[-5:].mean())
+                            tech_text += (
+                                f"\n1주 수익률: {ret_1w:+.1f}%"
+                                f" | 거래량비: {vol_ratio:.1f}x"
+                                f" | 5일 거래대금: {trade_val/1e8:,.0f}억원"
                             )
-                            logger.info("AI질문 가격 주입: %s 현재가 %s원", name, f"{cur:,.0f}")
+                        if len(close) >= 20:
+                            ret_1m = (float(close.iloc[-1]) / float(close.iloc[-20]) - 1) * 100
+                            tech_text += f" | 1개월: {ret_1m:+.1f}%"
+                        if len(close) >= 60:
+                            ret_3m = (float(close.iloc[-1]) / float(close.iloc[-60]) - 1) * 100
+                            tech_text += f" | 3개월: {ret_3m:+.1f}%"
+
+                    # ── 5단계: 재무 데이터 ──
+                    fin_text = ""
+                    if isinstance(nv_info, dict):
+                        parts = []
+                        if nv_info.get("per", 0) > 0:
+                            parts.append(f"PER {nv_info['per']:.1f}")
+                        if nv_info.get("pbr", 0) > 0:
+                            parts.append(f"PBR {nv_info['pbr']:.2f}")
+                        if nv_info.get("roe", 0) > 0:
+                            parts.append(f"ROE {nv_info['roe']:.1f}%")
+                        if nv_info.get("market_cap", 0) > 0:
+                            parts.append(f"시총 {nv_info['market_cap']/1e8:,.0f}억원")
+                        if nv_info.get("foreign_ratio", 0) > 0:
+                            parts.append(f"외국인비율 {nv_info['foreign_ratio']:.1f}%")
+                        if nv_info.get("52w_high", 0) > 0:
+                            parts.append(f"52주고가 {nv_info['52w_high']:,.0f}원")
+                        if nv_info.get("52w_low", 0) > 0:
+                            parts.append(f"52주저가 {nv_info['52w_low']:,.0f}원")
+                        if parts:
+                            fin_text = f"\n\n[재무/기본정보]\n" + " | ".join(parts)
+
+                    # ── 6단계: 수급 분석 ──
+                    supply_text = ""
+                    if inv_data:
+                        inv_analysis = analyze_investor_trend(inv_data)
+                        supply_text = (
+                            f"\n\n[수급 분석 (최근 20일)]\n"
+                            f"{inv_analysis.get('summary', '')}\n"
+                            f"수급 시그널: {inv_analysis.get('signal', '중립')}"
+                        )
+                        # DB 저장
+                        try:
+                            self.db.bulk_save_supply_demand(code, inv_data)
+                        except Exception:
+                            pass
+
+                    # ── 7단계: 섹터 분석 ──
+                    sector_text = ""
+                    if sectors:
+                        sec_analysis = analyze_sector_momentum(sectors)
+                        sector_text = (
+                            f"\n\n[섹터 동향]\n"
+                            f"{sec_analysis.get('summary', '')}"
+                        )
+
+                    # ── 8단계: 데이터 품질 표시 + enriched 조립 ──
+                    data_parts = []
+                    if cur > 0:
+                        data_parts.append(f"현재가: {cur:,.0f}원 (소스: {price_source})")
+                    if tech_text:
+                        data_parts.append(f"[기술적 분석 — {ohlcv_source} {len(ohlcv)}일]{tech_text}")
+                    elif ohlcv_source == "없음":
+                        data_parts.append("⚠️ 차트(OHLCV) 데이터 조회 불가 — 기술적 지표 없이 가용 데이터로 분석")
+
+                    if data_parts or fin_text or supply_text or sector_text:
+                        enriched = (
+                            f"{question}\n\n"
+                            f"[{name}({code}) 데이터]\n"
+                            + "\n".join(data_parts)
+                            + fin_text
+                            + supply_text
+                            + sector_text
+                            + "\n\n[절대 규칙] 위 데이터의 가격만 참고하라. "
+                            "너의 학습 데이터에 있는 과거 주가를 절대 사용 금지. "
+                            "데이터가 부족한 항목은 '데이터 없음'이라고 명시하고, "
+                            "있는 데이터만으로 최선의 분석을 제공하라."
+                        )
+                        logger.info("AI질문 데이터 주입: %s 현재가=%s원 OHLCV=%s 수급=%s건 재무=%s",
+                                    name, f"{cur:,.0f}" if cur > 0 else "없음",
+                                    ohlcv_source, len(inv_data),
+                                    "있음" if fin_text else "없음")
+                    else:
+                        logger.warning("AI질문: %s 데이터 완전 실패 — 모든 소스 응답 없음", name)
             except Exception as e:
-                logger.warning("AI질문 가격 주입 실패: %s", e)
+                logger.warning("AI질문 데이터 수집 실패: %s", e, exc_info=True)
 
             chat_mem = ChatMemory(self.db)
             ctx = await build_full_context_with_macro(
@@ -1505,13 +1670,14 @@ class CommandsMixin:
                     try:
                         frgn = await self.kis.get_foreign_flow(ticker, days=5)
                         inst = await self.kis.get_institution_flow(ticker, days=5)
-                        f_net = int(frgn["net_buy_volume"].sum()) if len(frgn) > 0 else 0
-                        i_net = int(inst["net_buy_volume"].sum()) if len(inst) > 0 else 0
-                        flow_lines.append(
-                            f"- {hname}: 외인 {f_net:+,}주 / 기관 {i_net:+,}주 (5일 누적)"
-                        )
+                        f_net = int(frgn["net_buy_volume"].sum()) if not frgn.empty and "net_buy_volume" in frgn.columns else 0
+                        i_net = int(inst["net_buy_volume"].sum()) if not inst.empty and "net_buy_volume" in inst.columns else 0
+                        if f_net != 0 or i_net != 0:
+                            flow_lines.append(
+                                f"- {hname}: 외인 {f_net:+,}주 / 기관 {i_net:+,}주 (5일 누적)"
+                            )
                     except Exception:
-                        pass
+                        logger.debug("flow fetch failed for %s", ticker)
                 if flow_lines:
                     portfolio_block += "\n\n[외인/기관 수급 5일]\n" + "\n".join(flow_lines)
 
@@ -1726,6 +1892,31 @@ class CommandsMixin:
             except Exception:
                 pass
 
+            # v9.5: 통합 합의 섹션 (AI토론 + YouTube + 매니저 크로스 참조)
+            try:
+                from kstock.bot.unified_state import build_unified_state
+                unified = await build_unified_state(self.db, macro_client=self.macro_client)
+                if unified.consensus_tickers:
+                    lines.append(f"\n🤝 시스템 종합 합의")
+                    lines.append(f"{'━' * 20}")
+                    for ct in unified.consensus_tickers[:5]:
+                        lines.append(
+                            f"- {ct['name']}: {ct['verdict']} "
+                            f"[{ct['sources']}]"
+                        )
+                if unified.youtube_insights:
+                    yt_outlook = []
+                    for yi in unified.youtube_insights[:2]:
+                        src = yi.get("source", "").replace("🎬", "").strip()
+                        outlook = yi.get("market_outlook", "")
+                        if outlook:
+                            yt_outlook.append(f"🎬 {src}: {outlook[:50]}")
+                    if yt_outlook:
+                        lines.append(f"\n📺 방송 전망")
+                        lines.extend(yt_outlook)
+            except Exception:
+                logger.debug("Unified consensus in 4manager failed", exc_info=True)
+
             result_text = "\n".join(lines)
 
             # 5. 액션 버튼 구성
@@ -1805,7 +1996,7 @@ class CommandsMixin:
             from datetime import datetime
             now = datetime.now(KST)
             cache_age = (now - self._scan_cache_time).total_seconds() if hasattr(self, '_scan_cache_time') and self._scan_cache_time else 9999
-            if cache_age < 600 and hasattr(self, '_last_scan_results') and self._last_scan_results:
+            if cache_age < _OHLCV_CACHE_TTL and hasattr(self, '_last_scan_results') and self._last_scan_results:
                 results = self._last_scan_results
             else:
                 results = await self._scan_all_stocks()
@@ -2530,6 +2721,41 @@ class CommandsMixin:
             else:
                 report = create_empty_report(ticker, name, price)
 
+            # v9.4: 패턴/가격목표 텍스트 주입
+            try:
+                ohlcv = self._ohlcv_cache.get(ticker)
+                if ohlcv is not None and not ohlcv.empty:
+                    from kstock.signal.pattern_matcher import PatternMatcher
+                    pm = PatternMatcher()
+                    pr = pm.find_similar_patterns(ohlcv)
+                    if pr and pr.match_count > 0:
+                        report.pattern_text = (
+                            f"유사패턴 {pr.match_count}건: "
+                            f"20일후 평균 {pr.avg_return_20d:+.1f}% "
+                            f"(상승 {pr.positive_pct:.0f}%)"
+                        )
+                    from kstock.signal.price_target import PriceTargetEngine
+                    from kstock.ingest.kis_client import StockInfo
+                    pt_info = StockInfo(
+                        ticker=ticker, name=name, market="KOSPI",
+                        current_price=price,
+                        per=stock_data.get("per", 0),
+                    )
+                    pt_engine = PriceTargetEngine()
+                    pt = pt_engine.calculate(ohlcv, pt_info)
+                    if pt:
+                        parts = []
+                        if pt.resistance_1 > 0:
+                            parts.append(f"저항 {pt.resistance_1:,.0f}원")
+                        if pt.support_1 > 0:
+                            parts.append(f"지지 {pt.support_1:,.0f}원")
+                        if pt.risk_reward_ratio > 0:
+                            parts.append(f"RR {pt.risk_reward_ratio:.1f}배")
+                        if parts:
+                            report.price_target_text = " | ".join(parts)
+            except Exception:
+                logger.debug("멀티분석 패턴/가격목표 주입 실패: %s", ticker, exc_info=True)
+
             msg = format_multi_agent_report_v2(report)
             self.db.add_multi_agent_result(
                 ticker=ticker, name=name,
@@ -2758,6 +2984,41 @@ class CommandsMixin:
                 )
             else:
                 report = create_empty_report(ticker, name, price)
+
+            # v9.4: 패턴/가격목표 텍스트 주입
+            try:
+                ohlcv = self._ohlcv_cache.get(ticker)
+                if ohlcv is not None and not ohlcv.empty:
+                    from kstock.signal.pattern_matcher import PatternMatcher
+                    pm = PatternMatcher()
+                    pr = pm.find_similar_patterns(ohlcv)
+                    if pr and pr.match_count > 0:
+                        report.pattern_text = (
+                            f"유사패턴 {pr.match_count}건: "
+                            f"20일후 평균 {pr.avg_return_20d:+.1f}% "
+                            f"(상승 {pr.positive_pct:.0f}%)"
+                        )
+                    from kstock.signal.price_target import PriceTargetEngine
+                    from kstock.ingest.kis_client import StockInfo
+                    pt_info = StockInfo(
+                        ticker=ticker, name=name, market="KOSPI",
+                        current_price=price,
+                        per=stock_data.get("per", 0),
+                    )
+                    pt_engine = PriceTargetEngine()
+                    pt = pt_engine.calculate(ohlcv, pt_info)
+                    if pt:
+                        parts = []
+                        if pt.resistance_1 > 0:
+                            parts.append(f"저항 {pt.resistance_1:,.0f}원")
+                        if pt.support_1 > 0:
+                            parts.append(f"지지 {pt.support_1:,.0f}원")
+                        if pt.risk_reward_ratio > 0:
+                            parts.append(f"RR {pt.risk_reward_ratio:.1f}배")
+                        if parts:
+                            report.price_target_text = " | ".join(parts)
+            except Exception:
+                logger.debug("멀티분석 패턴/가격목표 주입 실패: %s", ticker, exc_info=True)
 
             msg = format_multi_agent_report_v2(report)
             self.db.add_multi_agent_result(

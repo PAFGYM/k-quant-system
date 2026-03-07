@@ -5,7 +5,7 @@ diagnosis_learning:
   preferred_solution_types: []
   solution_effectiveness_rate: 0
   solution_execution_rate: 0
-last_updated: '2026-02-27'
+last_updated: '2026-03-06'
 strategy_weights:
   A: 15
   B: 10
@@ -17,4 +17,4 @@ strategy_weights:
   cash: 15
 user_behavior:
   execution_rate: 0
-  stop_compliance: 100
+  stop_compliance: 0.0

@@ -74,6 +74,15 @@ class TradingMixin:
             await query.edit_message_text("\u26a0\ufe0f 종목 정보를 찾을 수 없습니다.")
             return
         price = result.info.current_price
+        if not price or price <= 0:
+            # v9.3.3: price=0 방지 — 실시간 가격 재시도
+            try:
+                price = await self._get_price(ticker, 0)
+            except Exception:
+                pass
+        if not price or price <= 0:
+            await query.edit_message_text("⚠️ 현재가를 가져올 수 없습니다. 잠시 후 다시 시도해주세요.")
+            return
         holding_id = self.db.add_holding(ticker, result.name, price)
         # Record trade
         rec = self.db.get_active_recommendations()
@@ -181,7 +190,7 @@ class TradingMixin:
                     response=response,
                 )
             except Exception:
-                pass
+                logger.debug("Token tracking failed", exc_info=True)
             analysis = response.content[0].text.strip().replace("**", "")
 
             # DB에 분석 저장
@@ -625,7 +634,7 @@ class TradingMixin:
                 try:
                     cur = await self._get_price(target_ticker, 0)
                 except Exception:
-                    pass
+                    logger.debug("Price fetch failed for %s", target_ticker, exc_info=True)
                 type_holdings = [{
                     "ticker": target_ticker,
                     "name": name,
@@ -749,7 +758,7 @@ class TradingMixin:
             mgr_perf = self.db.get_manager_performance(mgr_type, days=90)
             mgr_lessons = self.db.get_trade_lessons_by_manager(mgr_type, limit=5)
         except Exception:
-            pass
+            logger.debug("Manager perf/lessons fetch failed for %s", mgr_type, exc_info=True)
 
         report = await get_manager_analysis(
             mgr_type, type_holdings, market_text,
@@ -780,7 +789,7 @@ class TradingMixin:
     async def _action_manager_debate(
         self, query, context, payload: str,
     ) -> None:
-        """mgr_debate:{ticker} 콜백 — 4매니저 토론."""
+        """mgr_debate:{ticker} 콜백 — 3라운드 AI 토론 (v9.4)."""
         ticker = payload.strip()
         name = ticker
         for s in self.all_tickers:
@@ -788,10 +797,13 @@ class TradingMixin:
                 name = s["name"]
                 break
 
-        await query.edit_message_text(f"🎙️ {name} 매니저 토론 중...")
+        await query.edit_message_text(f"🎙️ {name} 3라운드 토론 중... (약 15초)")
 
         # 차트+재무 데이터 수집
         stock_data = ""
+        ohlcv = None
+        live_price = 0
+        info = None
         try:
             from kstock.features.technical import compute_indicators
             from kstock.bot.investment_managers import build_chart_summary, build_fundamental_summary
@@ -803,30 +815,155 @@ class TradingMixin:
             ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
             if ohlcv is not None and not ohlcv.empty and len(ohlcv) >= 20:
                 tech = compute_indicators(ohlcv)
-                price = float(ohlcv.iloc[-1].get("close", 0) or ohlcv.iloc[-1].get("Close", 0))
+                live_price = float(ohlcv.iloc[-1].get("close", 0) or ohlcv.iloc[-1].get("Close", 0))
                 supply = self.db.get_supply_demand(ticker, days=5)
-                chart = build_chart_summary(tech, price, supply, ohlcv=ohlcv, ticker=ticker, name=name)
+                chart = build_chart_summary(tech, live_price, supply, ohlcv=ohlcv, ticker=ticker, name=name)
                 if chart:
                     stock_data += f"[차트 데이터]\n{chart}\n\n"
                 info = await self.data_router.get_stock_info(ticker, name) if hasattr(self, "data_router") else None
                 financials = self.db.get_financials(ticker)
                 consensus = self.db.get_consensus(ticker)
-                fund = build_fundamental_summary(info, financials, consensus, supply, current_price=price, ticker=ticker, name=name)
+                fund = build_fundamental_summary(info, financials, consensus, supply, current_price=live_price, ticker=ticker, name=name)
                 if fund:
                     stock_data += f"[재무 데이터]\n{fund}\n"
         except Exception:
-            pass
+            logger.debug("Manager debate data fetch failed for %s", ticker, exc_info=True)
 
         market_text = ""
         try:
             macro = await self.macro_client.get_snapshot()
             market_text = f"VIX={macro.vix:.1f}, 환율={macro.usdkrw:,.0f}원"
         except Exception:
-            pass
+            logger.debug("Manager debate macro fetch failed", exc_info=True)
 
-        from kstock.bot.investment_managers import manager_debate
-        result = await manager_debate(ticker, name, stock_data, market_text)
-        await query.message.reply_text(result[:4000])
+        # v9.4: 패턴 매칭 + 가격 목표
+        pattern_summary = ""
+        price_target_text = ""
+        try:
+            from kstock.signal.pattern_matcher import PatternMatcher, format_pattern_for_debate
+            from kstock.signal.price_target import PriceTargetEngine, format_price_target_for_debate
+
+            if ohlcv is not None and not ohlcv.empty and len(ohlcv) >= 40:
+                pm = PatternMatcher()
+                pr = pm.find_similar_patterns(ohlcv)
+                pattern_summary = format_pattern_for_debate(pr)
+
+            if ohlcv is not None and not ohlcv.empty:
+                pte = PriceTargetEngine()
+                pt = pte.calculate_targets(
+                    ohlcv=ohlcv,
+                    current_price=live_price,
+                    stock_info=info if isinstance(info, dict) else {},
+                )
+                price_target_text = format_price_target_for_debate(pt)
+        except Exception:
+            logger.debug("Pattern/price target failed for %s", ticker, exc_info=True)
+
+        # 3라운드 토론 실행
+        from kstock.bot.investment_managers import manager_debate_full
+        from kstock.bot.debate_engine import format_debate_telegram
+
+        debate_result = await manager_debate_full(
+            ticker, name, stock_data, market_text,
+            pattern_summary, price_target_text,
+        )
+
+        if debate_result and not debate_result.error:
+            # DB 저장
+            try:
+                self.db.save_debate_result(debate_result)
+            except Exception:
+                logger.debug("Debate save failed for %s", ticker, exc_info=True)
+
+            text = format_debate_telegram(debate_result)
+
+            # 패턴 + 가격 목표 추가
+            extras = []
+            if pattern_summary:
+                extras.append(f"\n📊 {pattern_summary}")
+            if price_target_text:
+                extras.append(f"\n📈 {price_target_text}")
+            if extras:
+                text += "\n" + "\n".join(extras)
+
+            # 후속 액션 버튼
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🎙️ 재토론", callback_data=f"mgr_debate:{ticker}"),
+                    InlineKeyboardButton("📜 토론 이력", callback_data=f"debhist:{ticker}"),
+                ],
+                [
+                    InlineKeyboardButton("📊 차트", callback_data=f"fav:chtm:{ticker}"),
+                    InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+                ],
+            ])
+            await query.message.reply_text(text[:4000], reply_markup=kb)
+        else:
+            error_msg = debate_result.error if debate_result else "토론 실패"
+            await query.message.reply_text(f"⚠️ 토론 오류: {error_msg}")
+
+    async def _action_debate_history(
+        self, query, context, payload: str,
+    ) -> None:
+        """debhist:{ticker} — 토론 이력 조회."""
+        ticker = payload.strip()
+        name = ticker
+        for s in self.all_tickers:
+            if s["code"] == ticker:
+                name = s["name"]
+                break
+
+        history = self.db.get_debate_history(ticker, days=30)
+        if not history:
+            await query.edit_message_text(f"📜 {name} 토론 이력 없음")
+            return
+
+        _AE = {"매수": "🟢", "매도": "🔴", "관망": "🟡", "홀딩": "🔵"}
+        lines = [f"📜 {name} ({ticker}) 최근 토론 이력\n{'━' * 20}\n"]
+
+        for h in history[:10]:
+            ae = _AE.get(h.get("verdict", ""), "⚪")
+            dt = h.get("created_at", "")[:16]
+            conf = h.get("confidence", 0)
+            cl = h.get("consensus_level", "")
+            pt = h.get("price_target", 0)
+            lines.append(
+                f"{dt} {ae} {h.get('verdict', '?')} "
+                f"({cl}, {conf:.0%})"
+                f"{f' 목표:{pt:,.0f}' if pt else ''}"
+            )
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🎙️ 새 토론", callback_data=f"mgr_debate:{ticker}"),
+                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+            ],
+        ])
+        await query.edit_message_text("\n".join(lines), reply_markup=kb)
+
+    async def _action_ai_accuracy(
+        self, query, context, payload: str,
+    ) -> None:
+        """aistat — AI 예측 정확도 통계."""
+        stats = self.db.get_prediction_accuracy(days=30)
+        if stats.get("total", 0) == 0:
+            await query.edit_message_text("📊 AI 예측 데이터 없음 (최소 5일 후 집계)")
+            return
+
+        text = (
+            f"📊 AI 토론 예측 정확도 (최근 30일)\n"
+            f"{'━' * 20}\n\n"
+            f"평가 건수: {stats['total']}건\n"
+            f"정확도: {stats['accuracy_pct']:.1f}%\n"
+        )
+
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+        ])
+        await query.edit_message_text(text, reply_markup=kb)
 
     async def _action_bubble_check(
         self, query, context, payload: str,
@@ -1530,12 +1667,21 @@ class TradingMixin:
                 await query.edit_message_text("\u26a0\ufe0f 종목 정보를 가져올 수 없습니다.")
                 return
         macro = await self.macro_client.get_snapshot()
+        # v9.4: debate 데이터 조회
+        debate_data = None
+        try:
+            debate_data = self.db.get_latest_debate(ticker)
+        except Exception:
+            pass
         msg = format_stock_detail(
             result.name, result.ticker, result.score,
             result.tech, result.info, result.flow, macro,
             strategy_type=result.strategy_type,
             confidence_stars=result.confidence_stars,
             confidence_label=result.confidence_label,
+            price_target=result.price_target,
+            pattern_report=result.pattern_report,
+            debate=debate_data,
         )
         name = result.name
         # 즐겨찾기 여부 확인
@@ -1546,12 +1692,14 @@ class TradingMixin:
             if is_fav
             else InlineKeyboardButton("⭐ 즐겨찾기 등록", callback_data=f"fav:add:{ticker}:{name[:10]}")
         )
+        from kstock.bot.bot_imports import make_back_row
         buttons = [
             [
                 InlineKeyboardButton("\uc0c0\uc5b4\uc694 \u2705", callback_data=f"buy:{ticker}"),
                 InlineKeyboardButton("\uc548 \uc0b4\ub798\uc694 \u274c", callback_data=f"skip:{ticker}"),
             ],
             [fav_btn],
+            make_back_row(),
         ]
         try:
             await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
@@ -1995,12 +2143,13 @@ class TradingMixin:
                 "💡 현금 비중 35% 권장"
             )
 
-        # 전체 종목 스캔 (5분 캐시)
+        # 전체 종목 스캔 (v9.3.3: 10분 캐시로 통일)
+        _SCAN_CACHE_TTL = 600
         now = datetime.now(KST)
         if (
             hasattr(self, '_scan_cache_time')
             and self._scan_cache_time
-            and (now - self._scan_cache_time).total_seconds() < 300
+            and (now - self._scan_cache_time).total_seconds() < _SCAN_CACHE_TTL
             and getattr(self, '_last_scan_results', None)
         ):
             results = self._last_scan_results
@@ -2076,7 +2225,7 @@ class TradingMixin:
                         ohlcv=r_ohlcv, ticker=r.ticker, name=r.name,
                     )
                 except Exception:
-                    pass
+                    logger.debug("Chart summary build failed for %s", r.ticker, exc_info=True)
 
             # mid/long: 재무 요약 생성
             fundamental_summary = ""
@@ -2101,7 +2250,7 @@ class TradingMixin:
                         current_price=price, ticker=r.ticker, name=r.name,
                     )
                 except Exception:
-                    pass
+                    logger.debug("Fundamental summary build failed for %s", r.ticker, exc_info=True)
 
             picks_data.append({
                 "name": r.name,
@@ -2373,7 +2522,7 @@ class TradingMixin:
                         response=response,
                     )
                 except Exception:
-                    pass
+                    logger.debug("Strategist token tracking failed", exc_info=True)
                 from kstock.bot.chat_handler import _sanitize_response
                 analysis_text = _sanitize_response(response.content[0].text)
             except Exception as e:
@@ -2562,7 +2711,7 @@ class TradingMixin:
                         manager=item.get("manager", ""),
                     )
                 except Exception:
-                    pass
+                    logger.debug("Signal performance save failed for %s", item["ticker"], exc_info=True)
             except Exception as e:
                 logger.error(
                     "Failed to register holding %s: %s",
@@ -2989,11 +3138,10 @@ class TradingMixin:
             hold_days = 0
             if holding and holding.get("buy_date"):
                 try:
-                    from datetime import datetime
                     buy_dt = datetime.strptime(holding["buy_date"][:10], "%Y-%m-%d")
-                    hold_days = max(0, (datetime.utcnow() - buy_dt).days)
+                    hold_days = max(0, (datetime.now(KST).replace(tzinfo=None) - buy_dt).days)
                 except Exception:
-                    pass
+                    logger.debug("hold_days calc failed", exc_info=True)
 
             # 시장 레짐
             market_regime = ""
@@ -3009,7 +3157,7 @@ class TradingMixin:
                     else:
                         market_regime = "calm"
             except Exception:
-                pass
+                logger.debug("Auto debrief macro fetch failed", exc_info=True)
 
             result = await auto_debrief_trade(
                 db=self.db,

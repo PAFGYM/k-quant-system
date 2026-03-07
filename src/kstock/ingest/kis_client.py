@@ -24,6 +24,8 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
+from kstock.core.tz import KST
+
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
@@ -78,14 +80,14 @@ class KISClient:
         if not self._is_configured:
             return False
 
-        if self._access_token and datetime.now() < self._token_expires:
+        if self._access_token and datetime.now(KST) < self._token_expires:
             return True
 
         try:
             token_data = await asyncio.to_thread(self._fetch_token_sync)
             self._access_token = token_data["access_token"]
             expires_in = int(token_data.get("expires_in", 86400))
-            self._token_expires = datetime.now() + timedelta(seconds=expires_in - 60)
+            self._token_expires = datetime.now(KST) + timedelta(seconds=expires_in - 60)
             logger.info("KIS access token refreshed (expires in %ds)", expires_in)
             return True
         except Exception as e:
@@ -288,7 +290,8 @@ class KISClient:
             except Exception as e:
                 logger.warning("KIS OHLCV API failed for %s: %s", ticker, e)
 
-        return _generate_mock_ohlcv(ticker, days)
+        logger.warning("KIS OHLCV: all sources failed for %s, returning empty", ticker)
+        return pd.DataFrame()
 
     async def get_stock_info(self, ticker: str, name: str = "") -> StockInfo:
         """Fetch stock fundamental info."""
@@ -313,7 +316,12 @@ class KISClient:
             except Exception as e:
                 logger.warning("KIS stock info failed for %s: %s", ticker, e)
 
-        return _generate_mock_stock_info(ticker, name)
+        logger.warning("KIS stock info: all sources failed for %s, returning empty", ticker)
+        return StockInfo(
+            ticker=ticker, name=name or ticker, market="KOSPI",
+            market_cap=0, per=0, roe=0, debt_ratio=0,
+            consensus_target=0, current_price=0,
+        )
 
     async def get_short_selling(self, ticker: str, days: int = 20) -> list[dict]:
         """Fetch daily short selling data.
@@ -324,7 +332,7 @@ class KISClient:
         """
         if await self._ensure_token():
             try:
-                end_dt = datetime.now()
+                end_dt = datetime.now(KST)
                 start_dt = end_dt - timedelta(days=days + 10)
                 data = await asyncio.to_thread(
                     self._fetch_short_selling_sync,
@@ -369,8 +377,8 @@ class KISClient:
             except Exception as e:
                 logger.warning("KIS foreign flow failed for %s: %s", ticker, e)
 
-        logger.warning("Using mock foreign flow data for %s", ticker)
-        return _generate_mock_foreign_flow(ticker, days)
+        logger.warning("KIS foreign flow: all sources failed for %s, returning empty", ticker)
+        return pd.DataFrame(columns=["date", "net_buy_volume", "net_buy_amount"])
 
     async def get_institution_flow(self, ticker: str, days: int = 5) -> pd.DataFrame:
         """Fetch institutional investor flow data."""
@@ -385,8 +393,8 @@ class KISClient:
             except Exception as e:
                 logger.warning("KIS inst flow failed for %s: %s", ticker, e)
 
-        logger.warning("Using mock institution flow data for %s", ticker)
-        return _generate_mock_institution_flow(ticker, days)
+        logger.warning("KIS inst flow: all sources failed for %s, returning empty", ticker)
+        return pd.DataFrame(columns=["date", "net_buy_volume", "net_buy_amount"])
 
     async def get_balance(self) -> dict | None:
         """Fetch account balance."""
@@ -475,78 +483,9 @@ class KISClient:
                 continue
 
         if not rows:
-            return _generate_mock_foreign_flow("fallback", max_rows)
+            return pd.DataFrame(columns=["date", "net_buy_volume", "net_buy_amount"])
 
         df = pd.DataFrame(rows)
         df = df.sort_values("date").reset_index(drop=True)
         return df
 
-
-# ------------------------------------------------------------------
-# Mock fallbacks (used when KIS API is not configured or fails)
-# ------------------------------------------------------------------
-
-def _generate_mock_ohlcv(ticker: str, days: int) -> pd.DataFrame:
-    """Generate realistic mock OHLCV data."""
-    rng = np.random.default_rng(seed=hash(ticker) % (2**31))
-    dates = pd.bdate_range(end=datetime.now(), periods=days)
-
-    base_price = 50000 + rng.integers(0, 100000)
-    returns = rng.normal(0.0005, 0.02, size=days)
-    prices = base_price * np.cumprod(1 + returns)
-
-    df = pd.DataFrame(
-        {
-            "date": dates,
-            "open": prices * (1 + rng.uniform(-0.01, 0.01, days)),
-            "high": prices * (1 + rng.uniform(0.005, 0.03, days)),
-            "low": prices * (1 - rng.uniform(0.005, 0.03, days)),
-            "close": prices,
-            "volume": rng.integers(100_000, 5_000_000, size=days),
-        }
-    )
-    df["date"] = df["date"].dt.strftime("%Y-%m-%d")
-    return df.round(0).astype({"volume": int})
-
-
-def _generate_mock_stock_info(ticker: str, name: str) -> StockInfo:
-    """Generate mock fundamental data."""
-    rng = np.random.default_rng(seed=hash(ticker) % (2**31))
-    current_price = 50000 + rng.integers(0, 100000)
-    return StockInfo(
-        ticker=ticker,
-        name=name or ticker,
-        market="KOSPI",
-        market_cap=float(rng.integers(1_000_000_000_000, 500_000_000_000_000)),
-        per=float(rng.uniform(5, 30)),
-        roe=float(rng.uniform(3, 25)),
-        debt_ratio=float(rng.uniform(20, 250)),
-        consensus_target=float(current_price * rng.uniform(0.9, 1.3)),
-        current_price=float(current_price),
-    )
-
-
-def _generate_mock_foreign_flow(ticker: str, days: int) -> pd.DataFrame:
-    """Generate mock foreign investor flow."""
-    rng = np.random.default_rng(seed=hash(ticker + "foreign") % (2**31))
-    dates = pd.bdate_range(end=datetime.now(), periods=days)
-    return pd.DataFrame(
-        {
-            "date": dates.strftime("%Y-%m-%d"),
-            "net_buy_volume": rng.integers(-500_000, 500_000, size=days),
-            "net_buy_amount": rng.integers(-50_000_000_000, 50_000_000_000, size=days),
-        }
-    )
-
-
-def _generate_mock_institution_flow(ticker: str, days: int) -> pd.DataFrame:
-    """Generate mock institutional investor flow."""
-    rng = np.random.default_rng(seed=hash(ticker + "inst") % (2**31))
-    dates = pd.bdate_range(end=datetime.now(), periods=days)
-    return pd.DataFrame(
-        {
-            "date": dates.strftime("%Y-%m-%d"),
-            "net_buy_volume": rng.integers(-300_000, 300_000, size=days),
-            "net_buy_amount": rng.integers(-30_000_000_000, 30_000_000_000, size=days),
-        }
-    )

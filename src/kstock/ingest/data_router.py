@@ -151,11 +151,14 @@ class DataRouter:
         """Get portfolio from best available source."""
         # 1. KIS API
         if self.kis_connected:
-            balance = self.kis.get_balance()
-            if balance:
-                balance["_pit_source"] = "kis_realtime"
-                self._last_source_used = "kis_realtime"
-                return balance
+            try:
+                balance = self.kis.get_balance()
+                if balance:
+                    balance["_pit_source"] = "kis_realtime"
+                    self._last_source_used = "kis_realtime"
+                    return balance
+            except Exception:
+                logger.warning("KIS get_balance failed", exc_info=True)
 
         # 2. SQLite (screenshot/button records)
         if self.db:

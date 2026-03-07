@@ -186,6 +186,8 @@ class MultiAgentReport:
     action: str = ""
     risk_note: str = ""
     created_at: str = ""
+    pattern_text: str = ""  # v9.4: 패턴 분석 요약
+    price_target_text: str = ""  # v9.4: 가격 목표 요약
 
 
 # ---------------------------------------------------------------------------
@@ -837,6 +839,18 @@ def format_multi_agent_report_v2(report: MultiAgentReport) -> str:
                     if stripped:
                         lines.append(f"  {stripped}")
             lines.append(f"  판단: {sent.signal} {sent.score}점")
+            lines.append("")
+
+        # v9.4: 패턴 분석 + 가격 목표 섹션
+        if report.pattern_text or report.price_target_text:
+            lines.append("\u2500" * 25)
+        if report.pattern_text:
+            lines.append(f"\U0001f4ca 과거 패턴 분석")
+            lines.append(f"  {report.pattern_text}")
+            lines.append("")
+        if report.price_target_text:
+            lines.append(f"\U0001f4c8 가격 목표 (실시간)")
+            lines.append(f"  {report.price_target_text}")
             lines.append("")
 
         # 종합 판단

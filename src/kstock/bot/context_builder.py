@@ -124,15 +124,32 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 → 장기 보유종목(삼성전자, SK하이닉스 등)은 전환기에 오히려 수혜
 → "거짓 평화" 함정 주의: 협상 결렬 시 재급등 가능하므로 현금 비중 유지
 
-[분석 프레임워크]
-종목 질문 시 반드시 4가지 분석:
-- 기술적: RSI, MACD, 이동평균선(5/20/60/120일), 볼린저밴드, 거래량
-- 펀더멘털: PER, PBR, ROE, 매출성장률, 영업이익률, 부채비율
-- 수급: 외인/기관 순매수, 공매도 잔고, 프로그램 매매
-- 지정학적: 전시/위기 수혜/피해 여부, 방산/에너지/식량/인프라 연관성
-- 서사 vs 숫자 괴리: 뉴스/테마 노출 빈도 vs 실제 매출/이익 변화 비교
-  → 과대평가 신호: 뉴스 많은데 실적 변화 없음
-  → 과소평가 신호: 뉴스 없는데 실적 조용히 개선 중
+[분석 프레임워크 — 반드시 5가지 관점 모두 포함]
+종목 질문 시 반드시 아래 5가지를 모두 분석하라. 하나라도 빠지면 불완전한 답변이다.
+
+1. 기술적 분석 (차트):
+   RSI(30이하 과매도/70이상 과매수), MACD(골든/데드크로스),
+   이동평균선 정배열/역배열(5/20/60/120일), 볼린저밴드 위치,
+   거래량 변화(서지 여부), 주봉·월봉 추세(단기가 아닌 중장기 방향)
+
+2. 수급 분석 (가장 중요 — 외국인/기관이 시장을 움직인다):
+   외국인 순매수/매도 추세(5일/20일), 기관 순매수/매도,
+   연속 매수일수, 외국인+기관 동시매수 여부,
+   외국인 보유비율 수준, 수급 시그널(강한매수/매수/중립/매도/강한매도)
+   → 수급 데이터가 제공되면 반드시 구체적 수치를 인용하여 분석하라.
+
+3. 재무/밸류에이션:
+   PER(업종 대비 고/저평가), PBR, ROE, 부채비율,
+   시가총액 규모, 배당수익률, 52주 고저 대비 현재 위치
+
+4. 섹터/산업 분석:
+   해당 종목의 속한 섹터 강세/약세 여부,
+   업종 등락률 순위, 섹터 내 상대적 위치,
+   관련 산업 트렌드(반도체 사이클, 2차전지 수요, 방산 특수 등)
+
+5. 지정학적·매크로:
+   전시/위기 수혜/피해 여부, 환율 영향, 금리 영향,
+   서사 vs 숫자 괴리(뉴스 노출 vs 실적 변화)
 
 시장 질문 시:
 - 글로벌 매크로 환경 (미국 금리, 달러, 유가, 반도체 사이클)
@@ -229,6 +246,12 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 [매매 교훈]
 {trade_lessons}
 
+[4명의 매니저 투자 의견 — 참고 자료]
+{manager_stances}
+
+[멀티에이전트 분석 점수]
+{multi_agent_scores}
+
 [종목 분석 시 필수 포인트 태깅]
 보유 종목처럼 실시간 데이터가 있는 경우:
 🟡 관심: 아직 매수 타이밍 아님, 조건 제시
@@ -320,6 +343,8 @@ def build_system_prompt(context: dict) -> str:
         financial_summary=context.get("financials", "재무 데이터 없음"),
         trade_lessons=context.get("trade_lessons", "매매 교훈 없음"),
         crisis_context=context.get("crisis_context", "현재 특별 위기 상황 없음"),
+        manager_stances=context.get("manager_stances", "매니저 의견 없음"),
+        multi_agent_scores=context.get("multi_agent_scores", "멀티에이전트 분석 없음"),
     )
 
 
@@ -858,6 +883,34 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
     except Exception:
         logger.debug("Supply demand context failed", exc_info=True)
 
+    # v9.4: AI 토론 합의 컨텍스트 추가
+    try:
+        holdings_for_debate = db.get_active_holdings()
+        debate_lines = []
+        for h in (holdings_for_debate or [])[:10]:
+            ticker = h.get("ticker", "")
+            d = db.get_latest_debate(ticker)
+            if d:
+                v = d.get("verdict", "")
+                cons = d.get("consensus_level", "")
+                conf = d.get("confidence", 0)
+                pt = d.get("price_target", 0)
+                args = d.get("key_arguments", [])
+                arg_text = args[0] if args else ""
+                line = f"- {h.get('name', ticker)}: {v}({cons} {conf:.0f}%)"
+                if pt and pt > 0:
+                    line += f", 목표 {pt:,.0f}원"
+                if arg_text:
+                    line += f", 핵심: {arg_text[:40]}"
+                debate_lines.append(line)
+        if debate_lines:
+            portfolio = (
+                portfolio + "\n\n[AI 토론 합의]\n"
+                + "\n".join(debate_lines)
+            )
+    except Exception:
+        logger.debug("AI debate context injection failed", exc_info=True)
+
     # v9.0: 한국형 리스크 팩터 → 시장 컨텍스트에 추가
     try:
         from kstock.signal.korea_risk import assess_korea_risk, format_korea_risk
@@ -912,6 +965,46 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
     except Exception:
         logger.debug("Korea risk assessment for context failed", exc_info=True)
 
+    # v9.5: 매니저 stance + 멀티에이전트 + 통합 상태 주입
+    manager_stances_text = ""
+    try:
+        stances = db.get_recent_manager_stances(hours=24)
+        if stances:
+            manager_names = {
+                "scalp": "리버모어(단타)", "swing": "오닐(스윙)",
+                "position": "린치(중기)", "long_term": "버핏(장기)",
+            }
+            s_lines = ["[매니저 투자 의견]"]
+            for key in ("scalp", "swing", "position", "long_term"):
+                s = stances.get(key, "")
+                if s:
+                    s_lines.append(f"- {manager_names.get(key, key)}: {s[:80]}")
+            if len(s_lines) > 1:
+                manager_stances_text = "\n".join(s_lines)
+    except Exception:
+        logger.debug("Manager stances context failed", exc_info=True)
+
+    multi_agent_text = ""
+    try:
+        holdings_ma = db.get_active_holdings()
+        if holdings_ma:
+            ma_lines = ["[멀티에이전트 분석]"]
+            for h in holdings_ma[:10]:
+                ticker = h.get("ticker", "")
+                results = db.get_multi_agent_results(ticker=ticker, limit=1)
+                if results:
+                    r = results[0]
+                    cs = r.get("combined_score", 0)
+                    v = r.get("verdict", "")
+                    ma_lines.append(
+                        f"- {h.get('name', ticker)}: "
+                        f"점수 {cs}/215, {v}"
+                    )
+            if len(ma_lines) > 1:
+                multi_agent_text = "\n".join(ma_lines)
+    except Exception:
+        logger.debug("Multi-agent context failed", exc_info=True)
+
     return {
         "portfolio": portfolio,
         "market": market,
@@ -924,6 +1017,8 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
         "trade_lessons": trade_lessons_text,
         "global_news": global_news_text,
         "crisis_context": crisis_context,
+        "manager_stances": manager_stances_text,
+        "multi_agent_scores": multi_agent_text,
     }
 
 
@@ -1009,24 +1104,51 @@ def _get_trade_lessons_context(db) -> str:
 
 
 def _get_global_news_context(db) -> str:
-    """v6.0: 글로벌 뉴스 컨텍스트 (DB에서 최근 뉴스 조회)."""
+    """v6.0: 글로벌 뉴스 컨텍스트 (DB에서 최근 뉴스 조회).
+
+    v9.5: YouTube 인텔리전스 포함.
+    """
+    lines = []
     try:
         news = db.get_recent_global_news(limit=8, hours=12)
-        if not news:
-            return "최근 수집된 글로벌 이슈 없음"
-        lines = []
-        for item in news:
-            urgency = "🚨" if item.get("is_urgent") else "📰"
-            impact = item.get("impact_score", 0)
-            impact_tag = f" [영향:{impact}/10]" if impact > 0 else ""
-            lines.append(
-                f"{urgency} [{item.get('source', '')}] "
-                f"{item.get('title', '')}{impact_tag}"
-            )
-        return "\n".join(lines)
+        if news:
+            for item in news:
+                urgency = "🚨" if item.get("is_urgent") else "📰"
+                impact = item.get("impact_score", 0)
+                impact_tag = f" [영향:{impact}/10]" if impact > 0 else ""
+                lines.append(
+                    f"{urgency} [{item.get('source', '')}] "
+                    f"{item.get('title', '')}{impact_tag}"
+                )
     except Exception as e:
         logger.warning("Failed to get global news context: %s", e)
-        return "글로벌 뉴스 조회 실패"
+
+    # v9.5: YouTube 방송 인사이트 추가
+    try:
+        yt_intel = db.get_recent_youtube_intelligence(hours=12, limit=5)
+        if yt_intel:
+            lines.append("\n[YouTube 방송 인사이트]")
+            for yi in yt_intel:
+                src = yi.get("source", "").replace("🎬", "").strip()
+                summary = yi.get("full_summary", "")[:200]
+                outlook = yi.get("market_outlook", "")
+                tickers = yi.get("mentioned_tickers", [])
+                lines.append(f"🎬 [{src}] {summary}")
+                if outlook:
+                    lines.append(f"   전망: {outlook}")
+                if isinstance(tickers, list) and tickers:
+                    ticker_str = ", ".join(
+                        f"{t.get('name', '')}({t.get('sentiment', '')})"
+                        for t in tickers[:5]
+                    )
+                    lines.append(f"   언급종목: {ticker_str}")
+                impl = yi.get("investment_implications", "")
+                if impl:
+                    lines.append(f"   시사점: {impl[:100]}")
+    except Exception:
+        logger.debug("YouTube intelligence context failed", exc_info=True)
+
+    return "\n".join(lines) if lines else "최근 수집된 글로벌 이슈 없음"
 
 
 async def build_manager_shared_context(db, macro_client=None) -> dict:
@@ -1101,6 +1223,34 @@ async def build_manager_shared_context(db, macro_client=None) -> dict:
     except Exception:
         pass
 
+    # v9.5: YouTube 인텔리전스 → 매니저 공유 컨텍스트
+    youtube_intel = ""
+    try:
+        yt_data = db.get_recent_youtube_intelligence(hours=24, limit=5)
+        if yt_data:
+            yt_lines = ["[YouTube 방송 인사이트]"]
+            for yi in yt_data:
+                src = yi.get("source", "").replace("🎬", "").strip()
+                outlook = yi.get("market_outlook", "")
+                tickers = yi.get("mentioned_tickers", [])
+                impl = yi.get("investment_implications", "")
+                parts = [f"🎬 {src}"]
+                if outlook:
+                    parts.append(f"전망: {outlook}")
+                if isinstance(tickers, list) and tickers:
+                    parts.append(
+                        "종목: " + ", ".join(
+                            f"{t.get('name', '')}({t.get('sentiment', '')})"
+                            for t in tickers[:4]
+                        )
+                    )
+                if impl:
+                    parts.append(f"시사점: {impl[:80]}")
+                yt_lines.append(" | ".join(parts))
+            youtube_intel = "\n".join(yt_lines)
+    except Exception:
+        logger.debug("YouTube intelligence for manager context failed", exc_info=True)
+
     return {
         "investor_style": investor_style,
         "trade_lessons": trade_lessons,
@@ -1109,6 +1259,7 @@ async def build_manager_shared_context(db, macro_client=None) -> dict:
         "crisis_context": crisis_ctx,
         "portfolio_summary": portfolio_summary,
         "post_war_rotation": post_war,
+        "youtube_intelligence": youtube_intel,
     }
 
 

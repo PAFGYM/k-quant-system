@@ -97,7 +97,8 @@ def main() -> None:
     app = bot.build_app()
     bot.schedule_jobs(app)
 
-    logger.info("K-Quant System v9.3.0 started. Press Ctrl+C to stop.")
+    from kstock import __version__
+    logger.info("K-Quant System v%s started. Press Ctrl+C to stop.", __version__)
     # 409 처리: run_polling 내부에서 deleteWebhook + 자동 재시도
     # bootstrap_retries=5: 시작 시 409 발생하면 최대 5회 재시도
     app.run_polling(

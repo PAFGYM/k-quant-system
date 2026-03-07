@@ -169,7 +169,8 @@ class YFinanceKRClient:
             logger.warning("yfinance info failed for %s: %s", symbol, e)
             if symbol in _info_cache:
                 return _info_cache[symbol][1]
-            return _generate_fallback_info(code, name, market)
+            # v9.3.2: Naver Finance에서 실제 재무정보 폴백
+            return await self._naver_fallback_info(code, name, market)
 
     @staticmethod
     def _fetch_info_sync(symbol: str) -> dict:
@@ -222,8 +223,32 @@ class YFinanceKRClient:
             logger.debug("_naver_fallback_price: Naver price fallback failed", exc_info=True)
             return 0.0
 
+    async def _naver_fallback_info(self, code: str, name: str, market: str) -> dict:
+        """Naver Finance에서 실제 재무정보 폴백 (PER/PBR/ROE/시총 등)."""
+        try:
+            from kstock.ingest.naver_finance import NaverFinanceClient
+            naver = NaverFinanceClient()
+            info = await naver.get_stock_info(code, name)
+            if info.get("current_price", 0) > 0 or info.get("per", 0) > 0:
+                info["market"] = market
+                logger.info("Naver info fallback OK for %s: price=%s PER=%s",
+                            code, info.get("current_price"), info.get("per"))
+                return info
+        except Exception:
+            logger.debug("_naver_fallback_info: Naver info fallback failed for %s", code, exc_info=True)
+        # 최후: 빈 정보 (가짜 데이터 생성 안 함)
+        logger.warning("Info 완전 실패 %s: yfinance+Naver 모두 재무정보 없음", code)
+        return {
+            "ticker": code, "name": name or code, "market": market,
+            "current_price": 0, "market_cap": 0, "per": 0, "pbr": 0,
+            "roe": 0, "debt_ratio": 0, "dividend_yield": 0,
+            "consensus_target": 0, "52w_high": 0, "52w_low": 0,
+            "beta": 1.0, "sector": "", "industry": "",
+            "_data_source": "none",
+        }
+
     async def _naver_fallback_ohlcv(self, code: str) -> pd.DataFrame:
-        """Naver Finance OHLCV 폴백."""
+        """Naver Finance OHLCV 폴백. 실패 시 빈 DataFrame 반환 (가짜 데이터 생성 안 함)."""
         try:
             from kstock.ingest.naver_finance import NaverFinanceClient
             naver = NaverFinanceClient()
@@ -232,7 +257,8 @@ class YFinanceKRClient:
                 return df
         except Exception:
             logger.debug("_naver_fallback_ohlcv: Naver OHLCV fallback failed for %s", code, exc_info=True)
-        return _generate_fallback_ohlcv(code)
+        logger.warning("OHLCV 완전 실패 %s: yfinance+Naver 모두 데이터 없음 (가짜 데이터 미생성)", code)
+        return pd.DataFrame()
 
     async def batch_download(
         self, codes: list[dict], period: str = "6mo"
@@ -281,43 +307,5 @@ class YFinanceKRClient:
         return result
 
 
-def _generate_fallback_ohlcv(code: str, days: int = 120) -> pd.DataFrame:
-    """Generate fallback mock OHLCV when yfinance fails."""
-    rng = np.random.default_rng(seed=hash(code) % (2**31))
-    dates = pd.bdate_range(end=datetime.now(KST), periods=days)
-    base_price = 50000 + rng.integers(0, 100000)
-    returns = rng.normal(0.0005, 0.02, size=days)
-    prices = base_price * np.cumprod(1 + returns)
-    df = pd.DataFrame({
-        "date": dates.strftime("%Y-%m-%d"),
-        "open": prices * (1 + rng.uniform(-0.01, 0.01, days)),
-        "high": prices * (1 + rng.uniform(0.005, 0.03, days)),
-        "low": prices * (1 - rng.uniform(0.005, 0.03, days)),
-        "close": prices,
-        "volume": rng.integers(100_000, 5_000_000, size=days),
-    })
-    return df.round(0).astype({"volume": int})
 
-
-def _generate_fallback_info(code: str, name: str, market: str) -> dict:
-    """Generate fallback mock info when yfinance fails."""
-    rng = np.random.default_rng(seed=hash(code) % (2**31))
-    price = 50000 + rng.integers(0, 100000)
-    return {
-        "ticker": code,
-        "name": name or code,
-        "market": market,
-        "current_price": float(price),
-        "market_cap": float(rng.integers(1_000_000_000_000, 500_000_000_000_000)),
-        "per": float(rng.uniform(5, 30)),
-        "pbr": float(rng.uniform(0.5, 5)),
-        "roe": float(rng.uniform(3, 25)),
-        "debt_ratio": float(rng.uniform(20, 250)),
-        "dividend_yield": float(rng.uniform(0, 5)),
-        "consensus_target": float(price * rng.uniform(0.9, 1.3)),
-        "52w_high": float(price * 1.3),
-        "52w_low": float(price * 0.7),
-        "beta": 1.0,
-        "sector": "",
-        "industry": "",
-    }
+# v9.3.3: Mock data generators removed — all fallbacks use real Naver Finance data.

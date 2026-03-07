@@ -1085,6 +1085,79 @@ CREATE INDEX IF NOT EXISTS idx_event_log_created ON event_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_ticker ON alerts(ticker);
 CREATE INDEX IF NOT EXISTS idx_reports_ticker ON reports(ticker);
 CREATE INDEX IF NOT EXISTS idx_reports_date ON reports(date);
+
+-- v9.4: AI 토론 결과 저장
+CREATE TABLE IF NOT EXISTS ai_debates (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker          TEXT NOT NULL,
+    name            TEXT,
+    verdict         TEXT,
+    confidence      REAL DEFAULT 0,
+    consensus_level TEXT,
+    price_target    REAL DEFAULT 0,
+    stop_loss       REAL DEFAULT 0,
+    key_arguments   TEXT,
+    dissenting_view TEXT,
+    round1_data     TEXT,
+    round2_data     TEXT,
+    pattern_summary TEXT,
+    api_calls       INTEGER DEFAULT 0,
+    created_at      TEXT DEFAULT (datetime('now')),
+    UNIQUE(ticker, created_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_debates_ticker ON ai_debates(ticker);
+CREATE INDEX IF NOT EXISTS idx_debates_created ON ai_debates(created_at);
+
+-- v9.4: 예측 정확도 추적
+CREATE TABLE IF NOT EXISTS debate_accuracy (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    debate_id         INTEGER REFERENCES ai_debates(id),
+    ticker            TEXT NOT NULL,
+    predicted_verdict TEXT,
+    predicted_target  REAL,
+    actual_price_5d   REAL,
+    actual_price_10d  REAL,
+    actual_price_20d  REAL,
+    accuracy_score    REAL,
+    evaluated_at      TEXT,
+    created_at        TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_accuracy_debate ON debate_accuracy(debate_id);
+CREATE INDEX IF NOT EXISTS idx_accuracy_ticker ON debate_accuracy(ticker);
+
+-- v9.5: YouTube 인텔리전스 (구조화 분석 결과)
+CREATE TABLE IF NOT EXISTS youtube_intelligence (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id                 TEXT    NOT NULL UNIQUE,
+    source                   TEXT    DEFAULT '',
+    title                    TEXT    DEFAULT '',
+    mentioned_tickers        TEXT    DEFAULT '[]',
+    mentioned_sectors        TEXT    DEFAULT '[]',
+    market_outlook           TEXT    DEFAULT '',
+    key_numbers              TEXT    DEFAULT '[]',
+    investment_implications  TEXT    DEFAULT '',
+    full_summary             TEXT    DEFAULT '',
+    raw_summary              TEXT    DEFAULT '',
+    confidence               REAL    DEFAULT 0.0,
+    created_at               TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_yt_intel_created ON youtube_intelligence(created_at);
+CREATE INDEX IF NOT EXISTS idx_yt_intel_video ON youtube_intelligence(video_id);
+
+-- v9.5: 매니저 분석 stance 캐시 (통합 컨텍스트용)
+CREATE TABLE IF NOT EXISTS manager_stances (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    manager_key TEXT    NOT NULL,
+    stance      TEXT    DEFAULT '',
+    holdings_summary TEXT DEFAULT '',
+    created_at  TEXT    NOT NULL,
+    UNIQUE(manager_key, created_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stances_created ON manager_stances(created_at);
 """
 
 

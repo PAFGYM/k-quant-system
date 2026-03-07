@@ -416,11 +416,22 @@ class MenusKisMixin:
         self._last_scan_results = results
         self._scan_cache_time = datetime.now(KST)
 
-        reco_data = [
-            (i, r.name, r.ticker, r.score.composite, r.score.signal,
-             r.strategy_type, r.info.current_price)
-            for i, r in enumerate(results[:10], 1)
-        ]
+        # v9.4: debate 뱃지 추가
+        reco_data = []
+        for i, r in enumerate(results[:10], 1):
+            debate_badge = ""
+            try:
+                d = self.db.get_latest_debate(r.ticker)
+                if d:
+                    v = d.get("verdict", "")
+                    conf = d.get("confidence", 0)
+                    debate_badge = f"{v}{conf:.0f}%"
+            except Exception:
+                pass
+            reco_data.append((
+                i, r.name, r.ticker, r.score.composite, r.score.signal,
+                r.strategy_type, r.info.current_price, "", debate_badge,
+            ))
         msg = format_recommendations(reco_data)
 
         buttons = [
@@ -648,7 +659,7 @@ class MenusKisMixin:
                 h["current_price"] = cur
             except Exception:
                 logger.debug("_menu_portfolio_detail price update failed for %s", h.get("ticker"), exc_info=True)
-        msg = format_portfolio(holdings)
+        msg = format_portfolio(holdings, db=self.db)
 
         # Correlation warnings
         if len(holdings) >= 2:
@@ -1155,9 +1166,9 @@ class MenusKisMixin:
                     inst = await self.kis.get_institution_flow(ticker, days=3)
                     f_net = 0
                     i_net = 0
-                    if foreign is not None and len(foreign) > 0:
+                    if foreign is not None and not foreign.empty and "net_buy_volume" in foreign.columns:
                         f_net = int(foreign["net_buy_volume"].sum())
-                    if inst is not None and len(inst) > 0:
+                    if inst is not None and not inst.empty and "net_buy_volume" in inst.columns:
                         i_net = int(inst["net_buy_volume"].sum())
 
                     f_emoji = "🔵" if f_net > 0 else "🔴" if f_net < 0 else "⚪"

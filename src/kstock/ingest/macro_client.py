@@ -19,6 +19,8 @@ import numpy as np
 import yfinance as yf
 from dotenv import load_dotenv
 
+from kstock.core.tz import KST
+
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
 
@@ -96,7 +98,11 @@ def _json_to_snapshot(json_str: str) -> MacroSnapshot:
     for k in ("fetched_at",):
         if d.get(k) and isinstance(d[k], str):
             try:
-                d[k] = datetime.fromisoformat(d[k])
+                dt = datetime.fromisoformat(d[k])
+                # v9.3.3: naive datetime → KST aware로 변환
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=KST)
+                d[k] = dt
             except (ValueError, TypeError):
                 d[k] = None
     # 알 수 없는 키 제거 (구버전 호환)
@@ -135,7 +141,7 @@ class MacroClient:
         2단계: SQLite 캐시 (1ms)
         3단계: yfinance API (백그라운드 갱신, 기다리지 않음)
         """
-        now = datetime.now()
+        now = datetime.now(KST)
 
         # ── 1단계: 메모리 캐시 ──
         if (
@@ -165,7 +171,7 @@ class MacroClient:
         # ── 3단계: 첫 실행 → 동기 fetch (어쩔 수 없이 대기) ──
         try:
             snapshot = await asyncio.to_thread(self._fetch_live_snapshot)
-            now = datetime.now()
+            now = datetime.now(KST)
             snapshot.fetched_at = now
             snapshot.is_cached = False
             self._cached_snapshot = snapshot
@@ -174,17 +180,18 @@ class MacroClient:
             await self._save_to_sqlite(snapshot)
             return snapshot
         except Exception as e:
-            logger.warning("Live macro fetch failed (%s), using mock", e)
+            logger.warning("Live macro fetch failed (%s), using fallback defaults", e)
             mock = self._generate_mock_snapshot()
-            mock.fetched_at = datetime.now()
+            mock.fetched_at = datetime.now(KST)
             mock.is_cached = False
+            mock._data_source = "mock_fallback"  # v9.3.3: 데이터 소스 추적
             return mock
 
     async def refresh_now(self) -> MacroSnapshot | None:
         """강제 갱신 (스케줄러용). 캐시 TTL 무시하고 즉시 새 데이터 가져옴."""
         try:
             snapshot = await asyncio.to_thread(self._fetch_live_snapshot)
-            now = datetime.now()
+            now = datetime.now(KST)
             snapshot.fetched_at = now
             snapshot.is_cached = False
             self._cached_snapshot = snapshot
@@ -212,7 +219,7 @@ class MacroClient:
         async with self._bg_refresh_lock:
             try:
                 snapshot = await asyncio.to_thread(self._fetch_live_snapshot)
-                now = datetime.now()
+                now = datetime.now(KST)
                 snapshot.fetched_at = now
                 snapshot.is_cached = False
                 self._cached_snapshot = snapshot
@@ -245,7 +252,7 @@ class MacroClient:
 
             # SQLite 캐시도 TTL 체크 (너무 오래된 건 사용 안 함 - 30분)
             if snapshot.fetched_at:
-                age = datetime.now() - snapshot.fetched_at
+                age = datetime.now(KST) - snapshot.fetched_at
                 if age > timedelta(minutes=30):
                     logger.debug("SQLite macro cache too old (%s), skipping", age)
                     return None
@@ -483,7 +490,7 @@ class MacroClient:
             dxy_change_pct=round(float(rng.normal(0, 0.5)), 2),
             fear_greed_score=fg_score,
             fear_greed_label=fg_label,
-            fetched_at=datetime.now(),
+            fetched_at=datetime.now(KST),
             is_cached=False,
         )
 

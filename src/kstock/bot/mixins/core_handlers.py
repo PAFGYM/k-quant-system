@@ -37,7 +37,8 @@ class CoreHandlersMixin:
         self._last_scan_results: list = []
         self._scan_cache_time: datetime | None = None
         self._sector_strengths: list = []
-        self._ohlcv_cache: dict = {}
+        self._ohlcv_cache: dict = {}      # {ticker: DataFrame}
+        self._ohlcv_cache_time: float = 0  # v9.3.3: 캐시 생성 시각 (monotonic)
         # v3.0: KIS broker + data router
         self.kis_broker = KisBroker()
         self.data_router = DataRouter(
@@ -443,6 +444,34 @@ class CoreHandlersMixin:
             time=dt_time(hour=23, minute=55, tzinfo=KST),
             name="daily_system_score",
         )
+        # v9.4: AI 토론 자동 실행 (평일 09:30, 14:00)
+        jq.run_daily(
+            self.job_auto_debate,
+            time=dt_time(hour=9, minute=30, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="auto_debate_morning",
+        )
+        jq.run_daily(
+            self.job_auto_debate,
+            time=dt_time(hour=14, minute=0, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="auto_debate_afternoon",
+        )
+        # v9.4: 예측 정확도 추적 (평일 16:10)
+        jq.run_daily(
+            self.job_track_predictions,
+            time=dt_time(hour=16, minute=10, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="track_predictions",
+        )
+        # v9.4: 주간 AI 성적표 (일요일 10:00)
+        jq.run_daily(
+            self.job_weekly_ai_report,
+            time=dt_time(hour=10, minute=0, tzinfo=KST),
+            days=(6,),
+            name="weekly_ai_report",
+        )
+
         # v8.7: ControlServer 시작 (Unix socket CLI 제어)
         try:
             from kstock.bot.control_server import ControlServer
@@ -468,7 +497,9 @@ class CoreHandlersMixin:
             "surge_threshold(%.1f%%), "
             "alert_mode(%s), "
             "signal_eval(weekday 16:20), learning_report(Sat 11:00), "
-            "daily_system_score(23:55), control_server(unix_socket) KST",
+            "daily_system_score(23:55), "
+            "ai_debate(weekday 09:30/14:00), track_predictions(weekday 16:10), "
+            "weekly_ai_report(Sun 10:00), control_server(unix_socket) KST",
             _risk_iv, _news_iv, _global_iv, _us_iv,
             self._SURGE_THRESHOLD_PCT,
             self._alert_mode,
@@ -1164,12 +1195,36 @@ class CoreHandlersMixin:
             detected = self._detect_stock_query(text)
             if detected:
                 stock_name = detected.get("name", "")
+                ticker = detected.get("code", "")
                 remaining = text.replace(stock_name, "").strip()
                 # [v3.5.1] 종목명만 입력하면 바로 분석 실행 (슬래시 명령 불필요)
-                # 종목명만 딱 입력한 경우 (remaining이 거의 없음) = 바로 분석
+                # v9.5: 종목명만 입력 시 동적 액션 제안 버튼 제공
                 if len(remaining) <= 3:
-                    await self._handle_stock_analysis(
-                        update, context, detected, f"{stock_name} 분석",
+                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                    short_name = stock_name[:10]
+                    buttons = [
+                        [InlineKeyboardButton(
+                            f"📊 {short_name} 분석",
+                            callback_data=f"detail:{ticker}",
+                        )],
+                        [InlineKeyboardButton(
+                            f"🎙 {short_name} AI토론",
+                            callback_data=f"debate:{ticker}",
+                        )],
+                    ]
+                    # 즐겨찾기 버튼
+                    fav_cb = f"fav:add:{ticker}:{short_name[:8]}"
+                    if len(fav_cb) <= 64:
+                        buttons.append([InlineKeyboardButton(
+                            f"⭐ 즐겨찾기 등록",
+                            callback_data=fav_cb,
+                        )])
+                    buttons.append([InlineKeyboardButton(
+                        "❌ 닫기", callback_data="dismiss:0",
+                    )])
+                    await update.message.reply_text(
+                        f"📌 {stock_name} — 원하시는 기능을 선택하세요.",
+                        reply_markup=InlineKeyboardMarkup(buttons),
                     )
                 else:
                     await self._handle_stock_analysis(
@@ -1552,63 +1607,174 @@ class CoreHandlersMixin:
     async def _handle_stock_analysis(
         self, update: Update, context, stock: dict, original_text: str
     ) -> None:
-        """자연어로 감지된 종목에 대해 AI 분석을 수행합니다."""
+        """v9.3.2: 종목 분석 — 8단계 병렬 데이터 수집 + 수급/섹터/재무 완전 지원.
+
+        yfinance 실패해도 Naver에서 OHLCV, 재무, 수급, 섹터 데이터 전부 가져옴.
+        """
+        import asyncio as _aio
+        import pandas as pd
+
         code = stock.get("code", "")
         name = stock.get("name", code)
+        market = stock.get("market", "KOSPI")
 
         placeholder = await update.message.reply_text(
-            f"\U0001f50d {name}({code}) 분석 중..."
+            f"\U0001f50d {name}({code}) 종합 분석 중... (가격·기술·수급·섹터·재무)"
         )
 
         try:
-            market = stock.get("market", "KOSPI")
-            tech_data = ""
-            price_data = ""
-            fund_data = ""
+            from kstock.ingest.naver_finance import (
+                NaverFinanceClient,
+                get_investor_trading, analyze_investor_trend,
+                get_sector_rankings, analyze_sector_momentum,
+            )
+            naver = NaverFinanceClient()
+
+            # ── 1단계: 데이터 병렬 수집 (각각 독립, 실패 허용) ──
+            results = await _aio.gather(
+                self.yf_client.get_ohlcv(code, market),
+                naver.get_ohlcv(code, period_days=120),
+                self.yf_client.get_stock_info(code, name, market),
+                naver.get_stock_info(code, name),
+                get_investor_trading(code, days=20),
+                get_sector_rankings(limit=15),
+                return_exceptions=True,
+            )
+
+            yf_ohlcv = results[0] if not isinstance(results[0], Exception) else pd.DataFrame()
+            nv_ohlcv = results[1] if not isinstance(results[1], Exception) else pd.DataFrame()
+            yf_info = results[2] if not isinstance(results[2], Exception) else {}
+            nv_info = results[3] if not isinstance(results[3], Exception) else {}
+            inv_data = results[4] if not isinstance(results[4], Exception) else []
+            sectors = results[5] if not isinstance(results[5], Exception) else []
+
+            # ── 2단계: 최선의 OHLCV 선택 ──
+            ohlcv = pd.DataFrame()
+            ohlcv_source = ""
+            if isinstance(yf_ohlcv, pd.DataFrame) and not yf_ohlcv.empty:
+                ohlcv = yf_ohlcv
+                ohlcv_source = "yfinance"
+            elif isinstance(nv_ohlcv, pd.DataFrame) and not nv_ohlcv.empty:
+                ohlcv = nv_ohlcv
+                ohlcv_source = "네이버"
+
+            # ── 3단계: 최선의 재무정보 (yfinance + Naver 합산) ──
+            fin_info = {}
+            if isinstance(yf_info, dict) and yf_info.get("per", 0) > 0:
+                fin_info = yf_info
+            if isinstance(nv_info, dict):
+                for k in ("per", "pbr", "roe", "market_cap", "foreign_ratio",
+                          "52w_high", "52w_low", "dividend_yield", "current_price"):
+                    if nv_info.get(k, 0) and not fin_info.get(k, 0):
+                        fin_info[k] = nv_info[k]
+
+            # ── 4단계: 현재가 (다중 소스) ──
             cur_price = 0.0
-
+            if not ohlcv.empty:
+                cur_price = float(ohlcv["close"].astype(float).iloc[-1])
+            if cur_price <= 0 and fin_info.get("current_price", 0) > 0:
+                cur_price = float(fin_info["current_price"])
+            if cur_price <= 0 and inv_data and inv_data[0].get("close", 0) > 0:
+                cur_price = float(inv_data[0]["close"])
             try:
-                ohlcv = await self.yf_client.get_ohlcv(code, market)
-                if ohlcv is not None and not ohlcv.empty:
-                    tech = compute_indicators(ohlcv)
-                    close = ohlcv["close"].astype(float)
-                    volume = ohlcv["volume"].astype(float)
-                    cur_price = float(close.iloc[-1])
-                    prev_price = float(close.iloc[-2]) if len(close) >= 2 else cur_price
-                    change_pct = ((cur_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
-                    avg_vol = float(volume.tail(20).mean())
-                    cur_vol = float(volume.iloc[-1])
-
-                    price_data = (
-                        f"현재가: {cur_price:,.0f}원 ({change_pct:+.1f}%)\n"
-                        f"거래량: {cur_vol:,.0f}주 (20일평균 대비 {cur_vol/avg_vol:.1f}배)"
-                    )
-                    tech_data = (
-                        f"RSI: {tech.rsi:.1f}\n"
-                        f"MACD: {tech.macd:.2f} (시그널: {tech.macd_signal:.2f})\n"
-                        f"볼린저밴드 위치: {tech.bb_position:.2f}\n"
-                        f"이동평균선: 5일 {tech.ma5:,.0f}원, 20일 {tech.ma20:,.0f}원, "
-                        f"60일 {tech.ma60:,.0f}원, 120일 {tech.ma120:,.0f}원"
-                    )
+                live = await self._get_price(code, base_price=cur_price)
+                if live > 0:
+                    cur_price = live
             except Exception:
-                logger.debug("_handle_stock_analysis tech data fetch failed for %s", code, exc_info=True)
-                tech_data = "기술적 데이터 조회 실패"
+                pass
 
+            # ── 5단계: 기술적 분석 ──
+            tech_data = ""
+            if not ohlcv.empty and len(ohlcv) >= 20:
+                tech = compute_indicators(ohlcv)
+                close = ohlcv["close"].astype(float)
+                volume = ohlcv["volume"].astype(float)
+                prev_price = float(close.iloc[-2]) if len(close) >= 2 else cur_price
+                change_pct = ((cur_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
+                avg_vol = float(volume.tail(20).mean())
+                cur_vol = float(volume.iloc[-1])
+                vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
+                trade_val_5d = float(close.iloc[-5:].mean() * volume.iloc[-5:].mean())
+
+                tech_data = (
+                    f"RSI: {tech.rsi:.1f}\n"
+                    f"MACD: {tech.macd:.2f} (시그널: {tech.macd_signal:.2f})\n"
+                    f"볼린저밴드 위치: {tech.bb_position:.2f}\n"
+                    f"이동평균선: 5일 {tech.ma5:,.0f}원, 20일 {tech.ma20:,.0f}원, "
+                    f"60일 {tech.ma60:,.0f}원, 120일 {tech.ma120:,.0f}원\n"
+                    f"거래량: {cur_vol:,.0f}주 (20일평균 대비 {vol_ratio:.1f}배)\n"
+                    f"5일 평균 거래대금: {trade_val_5d/1e8:,.0f}억원"
+                )
+                # 수익률
+                if len(close) >= 5:
+                    ret_1w = (float(close.iloc[-1]) / float(close.iloc[-5]) - 1) * 100
+                    tech_data += f"\n1주 수익률: {ret_1w:+.1f}%"
+                if len(close) >= 20:
+                    ret_1m = (float(close.iloc[-1]) / float(close.iloc[-20]) - 1) * 100
+                    tech_data += f" | 1개월: {ret_1m:+.1f}%"
+                if len(close) >= 60:
+                    ret_3m = (float(close.iloc[-1]) / float(close.iloc[-60]) - 1) * 100
+                    tech_data += f" | 3개월: {ret_3m:+.1f}%"
+            elif not ohlcv.empty:
+                tech_data = f"OHLCV {len(ohlcv)}일 (기술지표 산출 최소 20일 필요)"
+            else:
+                tech_data = "⚠️ 차트(OHLCV) 데이터 조회 불가"
+
+            # ── 6단계: 재무정보 텍스트 ──
+            fund_data = ""
+            parts = []
+            if fin_info.get("per", 0) > 0:
+                parts.append(f"PER: {fin_info['per']:.1f}")
+            if fin_info.get("pbr", 0) > 0:
+                parts.append(f"PBR: {fin_info['pbr']:.2f}")
+            if fin_info.get("roe", 0):
+                parts.append(f"ROE: {fin_info['roe']:.1f}%")
+            if fin_info.get("market_cap", 0) > 0:
+                parts.append(f"시총: {fin_info['market_cap']/1e8:,.0f}억원")
+            if fin_info.get("foreign_ratio", 0) > 0:
+                parts.append(f"외국인비율: {fin_info['foreign_ratio']:.1f}%")
+            if fin_info.get("dividend_yield", 0) > 0:
+                parts.append(f"배당수익률: {fin_info['dividend_yield']:.1f}%")
+            if fin_info.get("52w_high", 0) > 0:
+                parts.append(f"52주 고가: {fin_info['52w_high']:,.0f}원")
+            if fin_info.get("52w_low", 0) > 0:
+                parts.append(f"52주 저가: {fin_info['52w_low']:,.0f}원")
+            # DB 재무 보완
             try:
-                fin = self.db.get_financials(code)
-                if fin:
-                    fund_data = (
-                        f"PER: {fin.get('per', 0):.1f} "
-                        f"(섹터평균: {fin.get('sector_per', 15):.1f})\n"
-                        f"PBR: {fin.get('pbr', 0):.2f}, "
-                        f"ROE: {fin.get('roe', 0):.1f}%\n"
-                        f"부채비율: {fin.get('debt_ratio', 0):.0f}%"
-                    )
+                db_fin = self.db.get_financials(code)
+                if db_fin:
+                    if not fin_info.get("roe") and db_fin.get("roe"):
+                        parts.append(f"ROE: {db_fin['roe']:.1f}% (DB)")
+                    if db_fin.get("debt_ratio"):
+                        parts.append(f"부채비율: {db_fin['debt_ratio']:.0f}%")
             except Exception:
-                logger.debug("_handle_stock_analysis financials fetch failed for %s", code, exc_info=True)
-                fund_data = "재무 데이터 없음"
+                pass
+            fund_data = "\n".join(parts) if parts else "재무 데이터 미확보"
 
-            # v8.2: 현재 시장 상황 반영형 매매 레벨
+            # ── 7단계: 수급 분석 ──
+            supply_data = ""
+            if inv_data:
+                inv_analysis = analyze_investor_trend(inv_data)
+                supply_data = (
+                    f"수급 시그널: {inv_analysis.get('signal', '중립')}\n"
+                    f"{inv_analysis.get('summary', '')}"
+                )
+                try:
+                    self.db.bulk_save_supply_demand(code, inv_data)
+                except Exception:
+                    pass
+            else:
+                supply_data = "수급 데이터 미확보"
+
+            # ── 8단계: 섹터 분석 ──
+            sector_data = ""
+            if sectors:
+                sec_analysis = analyze_sector_momentum(sectors)
+                sector_data = sec_analysis.get("summary", "")
+            else:
+                sector_data = "섹터 데이터 미확보"
+
+            # ── 9단계: 시장 상황 + 매매 레벨 ──
             trade_levels = ""
             situation_ctx = ""
             alert_mode = getattr(self, '_alert_mode', 'normal')
@@ -1636,45 +1802,43 @@ class CoreHandlersMixin:
 
             if cur_price > 0:
                 if alert_mode == "wartime":
-                    # 전시: 보수적 레벨 (손절 -5%, 목표 낮춤)
                     trade_levels = (
                         f"[전시 매매 레벨 - 현재가 {cur_price:,.0f}원 기준]\n"
-                        f"🔴 전시 손절: {cur_price * 0.95:,.0f}원 (현재가 -5%)\n"
-                        f"관망 유지: 추가 하락 가능성 열어둘 것\n"
-                        f"반등 시 목표: {cur_price * 1.05:,.0f}원 (+5%)\n"
-                        f"분할 매수 1차: {cur_price * 0.90:,.0f}원 (-10%) — 확신 시만\n"
-                        f"분할 매수 2차: {cur_price * 0.85:,.0f}원 (-15%) — 패닉 매수\n"
+                        f"🔴 전시 손절: {cur_price * 0.95:,.0f}원 (-5%)\n"
+                        f"관망 유지 | 반등 목표: {cur_price * 1.05:,.0f}원 (+5%)\n"
+                        f"분할매수 1차: {cur_price * 0.90:,.0f}원 (-10%) | 2차: {cur_price * 0.85:,.0f}원 (-15%)\n"
                     )
                 elif alert_mode == "elevated":
                     trade_levels = (
                         f"[긴장 매매 레벨 - 현재가 {cur_price:,.0f}원 기준]\n"
-                        f"손절 기준: {cur_price * 0.94:,.0f}원 (현재가 -6%)\n"
-                        f"관심 매수: {cur_price * 0.93:,.0f}원 (현재가 -7%)\n"
-                        f"단기 목표: {cur_price * 1.07:,.0f}원 (현재가 +7%)\n"
-                        f"중기 목표: {cur_price * 1.15:,.0f}원 (현재가 +15%)\n"
+                        f"손절: {cur_price * 0.94:,.0f}원 (-6%) | 관심매수: {cur_price * 0.93:,.0f}원 (-7%)\n"
+                        f"단기 목표: {cur_price * 1.07:,.0f}원 (+7%) | 중기: {cur_price * 1.15:,.0f}원 (+15%)\n"
                     )
                 else:
                     trade_levels = (
                         f"[매매 참고 레벨 - 현재가 {cur_price:,.0f}원 기준]\n"
-                        f"적극 매수: {cur_price * 0.90:,.0f}원 (현재가 -10%)\n"
-                        f"관심 매수: {cur_price * 0.95:,.0f}원 (현재가 -5%)\n"
-                        f"단기 목표: {cur_price * 1.10:,.0f}원 (현재가 +10%)\n"
-                        f"중기 목표: {cur_price * 1.20:,.0f}원 (현재가 +20%)\n"
-                        f"손절 기준: {cur_price * 0.93:,.0f}원 (현재가 -7%)\n"
+                        f"적극매수: {cur_price * 0.90:,.0f}원 (-10%) | 관심매수: {cur_price * 0.95:,.0f}원 (-5%)\n"
+                        f"단기 목표: {cur_price * 1.10:,.0f}원 (+10%) | 중기: {cur_price * 1.20:,.0f}원 (+20%)\n"
+                        f"손절 기준: {cur_price * 0.93:,.0f}원 (-7%)\n"
                     )
 
+            # ── 10단계: enriched 질문 조립 ──
+            price_line = f"현재가: {cur_price:,.0f}원" if cur_price > 0 else "현재가 미확보"
             enriched_question = (
-                f"{name}({code}) 종목 분석 요청.\n"
+                f"{name}({code}) 종목 종합 분석 요청.\n"
                 f"사용자 질문: {original_text}\n\n"
                 f"{situation_ctx}"
-                f"[실시간 가격]\n{price_data}\n\n"
-                f"[기술적 지표]\n{tech_data}\n\n"
+                f"[실시간 가격]\n{price_line}\n\n"
+                f"[기술적 지표 — {ohlcv_source or '없음'} {len(ohlcv)}일]\n{tech_data}\n\n"
                 f"[펀더멘털]\n{fund_data}\n\n"
+                f"[수급 분석 (최근 20일)]\n{supply_data}\n\n"
+                f"[섹터/업종 동향]\n{sector_data}\n\n"
                 f"{trade_levels}\n"
-                f"[절대 규칙] 위 [실시간 가격]과 [매매 참고 레벨]의 숫자만 사용하라. "
-                f"너의 학습 데이터에 있는 과거 주가를 절대 사용 금지. "
-                f"매수/매도 포인트 가격은 반드시 위 [매매 참고 레벨]에서 선택하라. "
-                f"현재 시장 상황을 반드시 반영하여 분석하라."
+                f"[분석 지시] 반드시 기술적·수급·재무·섹터 4가지 관점으로 분석하라. "
+                f"수급이 좋으면 외국인/기관 동향을 구체적으로 언급하라. "
+                f"섹터 강세/약세와 해당 종목의 위치를 설명하라. "
+                f"매수/매도 포인트는 위 [매매 참고 레벨]에서 선택하라.\n"
+                f"[절대 규칙] 위 데이터의 가격만 사용. 학습 데이터의 과거 주가 사용 금지."
             )
 
             from kstock.bot.chat_handler import handle_ai_question
@@ -1824,6 +1988,11 @@ class CoreHandlersMixin:
                 "mgr_scan": self._action_manager_scan,
                 # v8.7: 시스템 컨트롤
                 "ctrl": self._handle_control_callback,
+                # v9.4: AI 토론
+                "debhist": self._action_debate_history,
+                "aistat": self._action_ai_accuracy,
+                # v9.5: 뒤로가기
+                "back": self._action_back,
             }
             handler = dispatch.get(action)
             if handler:
@@ -1941,19 +2110,73 @@ class CoreHandlersMixin:
 
     # == Dismiss (generic close button) =======================================
 
+    # == v9.5: 네비게이션 스택 ====================================================
+
+    def _push_nav(self, context, callback_data: str, text: str = ""):
+        """현재 화면을 네비게이션 스택에 저장."""
+        stack = context.user_data.setdefault("nav_stack", [])
+        stack.append({
+            "callback_data": callback_data,
+            "text": text[:100] if text else "",
+        })
+        # 스택 과다 증가 방지
+        if len(stack) > 10:
+            stack.pop(0)
+
+    def _pop_nav(self, context) -> dict | None:
+        """네비게이션 스택에서 이전 화면 정보 꺼내기."""
+        stack = context.user_data.get("nav_stack", [])
+        return stack.pop() if stack else None
+
+    async def _action_back(self, query, context, payload: str) -> None:
+        """v9.5: 뒤로가기 — 이전 화면으로 복귀."""
+        prev = self._pop_nav(context)
+        if prev and prev.get("callback_data"):
+            cb = prev["callback_data"]
+            action, _, p = cb.partition(":")
+            # dispatch 테이블에서 핸들러 찾기
+            dispatch = {
+                "detail": self._action_detail,
+                "quick_q": self._action_quick_query,
+                "trade": self._action_trade,
+                "menu": self._action_menu_dispatch,
+                "mgr": self._action_manager_view,
+            }
+            handler = dispatch.get(action)
+            if handler:
+                try:
+                    await handler(query, context, p)
+                    return
+                except Exception:
+                    logger.debug("_action_back handler %s failed", action, exc_info=True)
+        # fallback: 닫기
+        await self._action_dismiss(query, context, "0")
+
     async def _action_dismiss(self, query, context, payload: str) -> None:
-        """범용 닫기 버튼 — 메뉴를 닫고 상태 정리 + Reply Keyboard 복구."""
+        """범용 닫기 버튼 — 메뉴를 닫고 상태 정리 + Reply Keyboard 복구.
+
+        v9.5: nav_stack에 이전 화면이 있으면 뒤로가기 버튼 제공.
+        """
         # 진행 중인 상태 클리어
         for key in ("admin_mode", "admin_faq_type", "agent_mode", "agent_type"):
             context.user_data.pop(key, None)
         try:
-            await query.edit_message_text("✅ 메뉴를 닫았습니다.")
-            # Reply Keyboard 복구 (InlineKeyboard 닫은 후 하단 메뉴 보이게)
-            await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text="📱 메뉴를 사용하세요.",
-                reply_markup=get_reply_markup(context),
-            )
+            nav_stack = context.user_data.get("nav_stack", [])
+            if nav_stack:
+                # 이전 화면이 있으면 뒤로가기 버튼 제공
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 이전 화면", callback_data="back:0")],
+                ])
+                await query.edit_message_text("✅ 메뉴를 닫았습니다.", reply_markup=kb)
+            else:
+                await query.edit_message_text("✅ 메뉴를 닫았습니다.")
+                # Reply Keyboard 복구 (InlineKeyboard 닫은 후 하단 메뉴 보이게)
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="📱 메뉴를 사용하세요.",
+                    reply_markup=get_reply_markup(context),
+                )
         except Exception:
             logger.debug("_action_dismiss edit/send failed", exc_info=True)
 

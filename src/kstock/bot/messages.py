@@ -154,11 +154,10 @@ def format_welcome() -> str:
 def format_buy_alert(
     name: str, ticker: str, score, tech, info, flow, macro,
     rank_pct: float = 5.0, strategy_type: str = "A",
+    price_target=None, pattern_report=None,
 ) -> str:
+    """종목 매수 알림 양식. price_target/pattern_report는 v9.4 엔진 결과."""
     price = info.current_price
-    target_1 = round(price * 1.03, 0)
-    target_2 = round(price * 1.07, 0)
-    stop = round(price * 0.95, 0)
     entry_2 = round(price * 0.97, 0)
 
     reasons = generate_buy_reasons(tech, info, flow, macro)
@@ -166,20 +165,69 @@ def format_buy_alert(
     stars, label = _confidence_stars(score.composite)
     tag = _strategy_tag(strategy_type)
 
-    return (
-        f"\u2550" * 22 + "\n"
-        f"{USER_NAME}, 지금 {name} 사세요 \U0001f4b0 {tag}\n"
-        f"\u2550" * 22 + "\n\n"
-        f"{reason_lines}\n\n"
-        f"{_won(price)}에 총 자금의 10% 매수\n"
-        f"추가 하락 시 {_won(entry_2)}에 10% 더 매수\n\n"
-        f"\U0001f4c8 수익 목표\n"
-        f"\u2022 +3% {_won(target_1)} -> 절반 매도\n"
-        f"\u2022 +7% {_won(target_2)} -> 30% 매도\n"
-        f"\u2022 나머지: 고점-3% 트레일링\n\n"
-        f"\U0001f6d1 손절: {_won(stop)} (-5%) 오면 전량 매도\n\n"
-        f"확신도  {stars} ({label})"
-    )
+    lines = [
+        "\u2550" * 22,
+        f"{USER_NAME}, 지금 {name} 사세요 \U0001f4b0 {tag}",
+        "\u2550" * 22,
+        "",
+        reason_lines,
+        "",
+        f"{_won(price)}에 총 자금의 10% 매수",
+        f"추가 하락 시 {_won(entry_2)}에 10% 더 매수",
+    ]
+
+    # 가격 목표: PriceTarget 있으면 동적, 없으면 기존 +3%/+7%
+    if price_target:
+        pt = price_target
+        lines.append("")
+        lines.append("\U0001f4c8 가격 목표 (실시간 계산)")
+        if pt.resistance_1 > 0:
+            r1_pct = (pt.resistance_1 - price) / price * 100
+            lines.append(f"\u2022 1차 저항: {_won(pt.resistance_1)} ({r1_pct:+.1f}%) \u2192 절반 매도")
+        if pt.resistance_2 > 0:
+            r2_pct = (pt.resistance_2 - price) / price * 100
+            lines.append(f"\u2022 2차 저항: {_won(pt.resistance_2)} ({r2_pct:+.1f}%) \u2192 30% 매도")
+        if getattr(pt, "fair_value_per", 0) > 0:
+            lines.append(f"\u2022 PER 적정가: {_won(pt.fair_value_per)}")
+        lines.append(f"\u2022 나머지: 고점-3% 트레일링")
+
+        lines.append("")
+        lines.append("\U0001f6e1 리스크")
+        if pt.support_1 > 0:
+            s1_pct = (pt.support_1 - price) / price * 100
+            lines.append(f"\u2022 1차 지지: {_won(pt.support_1)} ({s1_pct:+.1f}%)")
+        stop_price = pt.support_2 if pt.support_2 > 0 else round(price * 0.95, 0)
+        stop_pct = (stop_price - price) / price * 100
+        lines.append(f"\u2022 손절: {_won(stop_price)} ({stop_pct:+.1f}%) \u2192 전량 매도")
+        if pt.risk_reward_ratio > 0:
+            lines.append(f"\u2022 위험보상비: {pt.risk_reward_ratio:.1f}배")
+    else:
+        target_1 = round(price * 1.03, 0)
+        target_2 = round(price * 1.07, 0)
+        stop = round(price * 0.95, 0)
+        lines.append("")
+        lines.append("\U0001f4c8 수익 목표")
+        lines.append(f"\u2022 +3% {_won(target_1)} \u2192 절반 매도")
+        lines.append(f"\u2022 +7% {_won(target_2)} \u2192 30% 매도")
+        lines.append(f"\u2022 나머지: 고점-3% 트레일링")
+        lines.append("")
+        lines.append(f"\U0001f6d1 손절: {_won(stop)} (-5%) 오면 전량 매도")
+
+    # 패턴 매칭 결과
+    if pattern_report and getattr(pattern_report, "match_count", 0) > 0:
+        pr = pattern_report
+        lines.append("")
+        lines.append("\U0001f4ca 과거 패턴")
+        lines.append(
+            f"유사패턴 {pr.match_count}건: "
+            f"20일후 평균 {pr.avg_return_20d:+.1f}% "
+            f"(상승 {pr.positive_pct:.0f}%)"
+        )
+
+    lines.append("")
+    lines.append(f"확신도  {stars} ({label})")
+
+    return "\n".join(lines)
 
 
 def format_momentum_alert(
@@ -235,15 +283,24 @@ def format_breakout_alert(name: str, ticker: str, tech, info) -> str:
     )
 
 
-def format_watch_alert(name: str, ticker: str, score, tech, info, strategy_type: str = "A") -> str:
+def format_watch_alert(
+    name: str, ticker: str, score, tech, info,
+    strategy_type: str = "A", price_target=None,
+) -> str:
+    """관심 종목 알림 양식. price_target 있으면 지지선 기반 매수 조건 추가."""
     price = info.current_price
-    target_price = round(price * 0.97, 0)
     tag = _strategy_tag(strategy_type)
 
     conditions = []
     if tech.rsi > 30:
         conditions.append(f"RSI 30 이하 진입 시 (현재: {tech.rsi:.1f})")
-    conditions.append(f"{_won(target_price)} 이하 도달 시")
+
+    # 지지선 기반 매수 조건 (PriceTarget 있으면 활용)
+    if price_target and price_target.support_1 > 0:
+        conditions.append(f"{_won(price_target.support_1)} 지지선 근접 시")
+    else:
+        target_price = round(price * 0.97, 0)
+        conditions.append(f"{_won(target_price)} 이하 도달 시")
     conditions.append("외인 매도 전환(순매수) 시")
     cond_lines = "\n".join(f"\u2022 {c}" for c in conditions)
 
@@ -256,16 +313,35 @@ def format_watch_alert(name: str, ticker: str, score, tech, info, strategy_type:
         reasons.append("매수 조건 근접 중")
     reason_lines = "\n".join(f"\u2022 {r}" for r in reasons)
 
-    return (
-        f"\u2550" * 22 + "\n"
-        f"\U0001f7e1 {USER_NAME}, {name} 주시하세요 {tag}\n"
-        f"\u2550" * 22 + "\n"
-        f"\U0001f4ca 점수: {score.composite:.1f}/100\n\n"
-        f"아직 매수 타이밍은 아닙니다\n"
-        f"{reason_lines}\n\n"
-        f"\U0001f3af 이 조건 되면 매수 알림 보내드릴게요:\n"
-        f"{cond_lines}"
-    )
+    lines = [
+        "\u2550" * 22,
+        f"\U0001f7e1 {USER_NAME}, {name} 주시하세요 {tag}",
+        "\u2550" * 22,
+        f"\U0001f4ca 점수: {score.composite:.1f}/100",
+        "",
+        "아직 매수 타이밍은 아닙니다",
+        reason_lines,
+    ]
+
+    # 가격 목표 요약 (있으면)
+    if price_target:
+        pt = price_target
+        target_parts = []
+        if pt.resistance_1 > 0:
+            r1_pct = (pt.resistance_1 - price) / price * 100
+            target_parts.append(f"저항 {_won(pt.resistance_1)}({r1_pct:+.1f}%)")
+        if pt.support_1 > 0:
+            s1_pct = (pt.support_1 - price) / price * 100
+            target_parts.append(f"지지 {_won(pt.support_1)}({s1_pct:+.1f}%)")
+        if target_parts:
+            lines.append("")
+            lines.append(f"\U0001f4c8 {' | '.join(target_parts)}")
+
+    lines.append("")
+    lines.append("\U0001f3af 이 조건 되면 매수 알림 보내드릴게요:")
+    lines.append(cond_lines)
+
+    return "\n".join(lines)
 
 
 def format_sell_alert_profit(
@@ -338,9 +414,12 @@ def format_recommendations(results: list) -> str:
     medals = {1: "\U0001f947", 2: "\U0001f948", 3: "\U0001f949"}
 
     for item in results:
-        # v6.5: 8번째 항목으로 reliability_grade 지원
+        # v6.5: 8번째 항목으로 reliability_grade, v9.4: 9번째 debate_summary 지원
         reliability_grade = ""
-        if len(item) >= 8:
+        debate_summary = ""
+        if len(item) >= 9:
+            rank, name, ticker, score_val, signal, strat, price, reliability_grade, debate_summary = item[:9]
+        elif len(item) >= 8:
             rank, name, ticker, score_val, signal, strat, price, reliability_grade = item[:8]
         elif len(item) >= 7:
             rank, name, ticker, score_val, signal, strat, price = item[:7]
@@ -359,7 +438,11 @@ def format_recommendations(results: list) -> str:
         if reliability_grade:
             grade_emoji = {"A": "🟢", "B": "🔵", "C": "🟡", "D": "🔴"}.get(reliability_grade, "")
             grade_badge = f" {grade_emoji}{reliability_grade}"
-        line = f"{medal} {name}{price_str} {score_val:.1f}점 {tag}{grade_badge}"
+        # v9.4: AI 토론 결과 뱃지
+        debate_badge = ""
+        if debate_summary:
+            debate_badge = f" \U0001f399{debate_summary}"
+        line = f"{medal} {name}{price_str} {score_val:.1f}점 {tag}{grade_badge}{debate_badge}"
         if signal == "BUY":
             buy_items.append(line)
         elif signal == "WATCH":
@@ -386,8 +469,89 @@ def format_stock_detail(
     name, ticker, score, tech, info, flow, macro,
     rank_pct=5.0, strategy_type="A",
     confidence_stars="", confidence_label="",
+    price_target=None, pattern_report=None, debate=None,
 ):
-    return format_buy_alert(name, ticker, score, tech, info, flow, macro, rank_pct, strategy_type)
+    """종목 상세보기 — 가격목표, 패턴, AI 토론, 이동평균 정보 포함."""
+    price = info.current_price
+    stars, label = _confidence_stars(score.composite)
+    tag = _strategy_tag(strategy_type)
+
+    reasons = generate_buy_reasons(tech, info, flow, macro)
+    reason_lines = "\n".join(f"\u2022 {r}" for r in reasons)
+
+    lines = [
+        "\u2550" * 22,
+        f"\U0001f4cb {name} 종목 상세 {tag}",
+        "\u2550" * 22,
+        f"현재가: {_won(price)} | 점수: {score.composite:.1f}/100",
+        "",
+        reason_lines,
+    ]
+
+    # 이동평균 위치
+    sma_parts = []
+    if hasattr(tech, "ema_20") and tech.ema_20 > 0:
+        pos = "위" if price > tech.ema_20 else "아래"
+        sma_parts.append(f"20일선 {pos}")
+    if hasattr(tech, "ema_50") and tech.ema_50 > 0:
+        pos = "위" if price > tech.ema_50 else "아래"
+        sma_parts.append(f"50일선 {pos}")
+    if sma_parts:
+        lines.append("")
+        lines.append(f"\U0001f4c9 이평선: {' / '.join(sma_parts)}")
+
+    # 가격 목표
+    if price_target:
+        pt = price_target
+        lines.append("")
+        lines.append("\U0001f4c8 가격 목표")
+        if pt.resistance_1 > 0:
+            r1_pct = (pt.resistance_1 - price) / price * 100
+            lines.append(f"\u2022 1차 저항: {_won(pt.resistance_1)} ({r1_pct:+.1f}%)")
+        if pt.resistance_2 > 0:
+            r2_pct = (pt.resistance_2 - price) / price * 100
+            lines.append(f"\u2022 2차 저항: {_won(pt.resistance_2)} ({r2_pct:+.1f}%)")
+        if pt.support_1 > 0:
+            s1_pct = (pt.support_1 - price) / price * 100
+            lines.append(f"\u2022 1차 지지: {_won(pt.support_1)} ({s1_pct:+.1f}%)")
+        if getattr(pt, "fair_value_per", 0) > 0:
+            lines.append(f"\u2022 PER 적정가: {_won(pt.fair_value_per)}")
+        if pt.risk_reward_ratio > 0:
+            lines.append(f"\u2022 위험보상비: {pt.risk_reward_ratio:.1f}배")
+
+    # 패턴 매칭
+    if pattern_report and getattr(pattern_report, "match_count", 0) > 0:
+        pr = pattern_report
+        lines.append("")
+        lines.append("\U0001f4ca 과거 패턴")
+        lines.append(
+            f"유사패턴 {pr.match_count}건: "
+            f"5일후 {pr.avg_return_5d:+.1f}% / "
+            f"20일후 {pr.avg_return_20d:+.1f}% "
+            f"(상승 {pr.positive_pct:.0f}%)"
+        )
+
+    # AI 토론 verdict
+    if debate:
+        _v_emoji = {
+            "STRONG_BUY": "\U0001f7e2\U0001f7e2", "BUY": "\U0001f7e2",
+            "HOLD": "\U0001f7e1", "SELL": "\U0001f534",
+            "STRONG_SELL": "\U0001f534\U0001f534",
+        }
+        v = debate.get("verdict", "")
+        conf = debate.get("confidence", 0)
+        cons = debate.get("consensus_level", "")
+        ve = _v_emoji.get(v, "\u2753")
+        diss = debate.get("dissenting_view", "")
+        lines.append("")
+        lines.append(f"\U0001f399 AI 토론: {ve}{v} ({cons} {conf:.0f}%)")
+        if diss:
+            lines.append(f"  반대의견: {diss[:60]}")
+
+    lines.append("")
+    lines.append(f"확신도  {stars} ({label})")
+
+    return "\n".join(lines)
 
 
 def _trend_arrow(change_pct: float) -> str:
@@ -569,7 +733,8 @@ def format_market_status(
     return "\n".join(lines)
 
 
-def format_portfolio(holdings: list) -> str:
+def format_portfolio(holdings: list, db=None) -> str:
+    """포트폴리오 표시. db가 있으면 AI 토론 verdict를 함께 표시."""
     if not holdings:
         return (
             f"\U0001f4bc {USER_NAME}의 포트폴리오\n\n"
@@ -580,6 +745,14 @@ def format_portfolio(holdings: list) -> str:
     lines = [f"\U0001f4bc {USER_NAME}의 포트폴리오\n"]
     total_pnl = 0.0
     count = 0
+
+    _verdict_emoji = {
+        "STRONG_BUY": "\U0001f7e2\U0001f7e2",
+        "BUY": "\U0001f7e2",
+        "HOLD": "\U0001f7e1",
+        "SELL": "\U0001f534",
+        "STRONG_SELL": "\U0001f534\U0001f534",
+    }
 
     for h in holdings:
         buy_price = h["buy_price"]
@@ -594,14 +767,34 @@ def format_portfolio(holdings: list) -> str:
 
         lines.append(
             f"{h['name']}: {pnl_pct:+.1f}% {emoji} "
-            f"{_won(buy_price)}->{_won(current)}"
+            f"{_won(buy_price)}\u2192{_won(current)}"
         )
+
+        # AI 토론 verdict 표시
+        debate = None
+        if db:
+            try:
+                debate = db.get_latest_debate(h.get("ticker", ""))
+            except Exception:
+                pass
+        if debate:
+            v = debate.get("verdict", "")
+            conf = debate.get("confidence", 0)
+            cons = debate.get("consensus_level", "")
+            v_emoji = _verdict_emoji.get(v, "\u2753")
+            pt = debate.get("price_target", 0)
+            line = f"  \U0001f399{v_emoji}{v}({cons} {conf:.0f}%)"
+            if pt and current > 0:
+                upside = (pt - current) / current * 100
+                line += f" | 목표 {_won(pt)} ({upside:+.1f}%)"
+            lines.append(line)
+
         if pnl_pct >= 3:
-            lines.append("  -> 1차 익절 구간 (50% 매도 권장)")
+            lines.append("  \u2192 1차 익절 구간 (50% 매도 권장)")
         elif pnl_pct < 0:
-            lines.append(f"  -> 보유 유지 (손절까지 {stop_pct:+.1f}% 여유)")
+            lines.append(f"  \u2192 보유 유지 (손절까지 {stop_pct:+.1f}% 여유)")
         else:
-            lines.append("  -> 보유 유지")
+            lines.append("  \u2192 보유 유지")
         lines.append("")
 
     avg_pnl = total_pnl / count if count > 0 else 0

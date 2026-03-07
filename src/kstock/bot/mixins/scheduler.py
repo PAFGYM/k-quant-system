@@ -569,6 +569,16 @@ class SchedulerMixin:
 
             await context.bot.send_message(chat_id=self.chat_id, text=msg)
 
+            # v9.5: 통합 상태 헤더 발송 (매니저 브리핑 전 전체 상황 요약)
+            try:
+                from kstock.bot.unified_state import build_unified_state, format_unified_header
+                unified = await build_unified_state(self.db, macro_client=self.macro_client)
+                header = format_unified_header(unified)
+                if header and len(header) > 20:
+                    await context.bot.send_message(chat_id=self.chat_id, text=header)
+            except Exception:
+                logger.debug("Unified state header failed", exc_info=True)
+
             # v3.9: 매니저별 보유종목 분석 (holding_type별 그룹핑)
             await self._send_manager_briefings(context, macro)
 
@@ -585,7 +595,10 @@ class SchedulerMixin:
             self.db.upsert_job_run("morning_briefing", _today(), status="error", message=str(e))
 
     async def _send_manager_briefings(self, context, macro) -> None:
-        """매니저별 보유종목 분석 메시지 발송 (보유종목 있는 매니저만)."""
+        """매니저별 보유종목 분석 메시지 발송 (보유종목 있는 매니저만).
+
+        v9.5: shared_context로 YouTube 인텔리전스 + 매니저 크로스 컨텍스트 주입.
+        """
         try:
             from collections import defaultdict
             from kstock.bot.investment_managers import get_manager_analysis, MANAGERS
@@ -593,6 +606,44 @@ class SchedulerMixin:
             holdings = self.db.get_active_holdings()
             if not holdings:
                 return
+
+            # v9.5: 공유 컨텍스트 구축 (YouTube 인텔 + 뉴스 + 교훈 등)
+            shared_ctx = None
+            try:
+                from kstock.bot.context_builder import build_manager_shared_context
+                shared_ctx = await build_manager_shared_context(
+                    self.db, macro_client=self.macro_client,
+                )
+            except Exception:
+                logger.debug("Shared context build failed", exc_info=True)
+
+            # v9.4: AI 토론 합의 요약 먼저 발송
+            try:
+                recent_debates = self.db.get_all_recent_debates(hours=24)
+                if recent_debates:
+                    _v_emoji = {
+                        "STRONG_BUY": "\U0001f7e2\U0001f7e2", "BUY": "\U0001f7e2",
+                        "HOLD": "\U0001f7e1", "SELL": "\U0001f534",
+                        "STRONG_SELL": "\U0001f534\U0001f534",
+                    }
+                    debate_lines = ["\U0001f399 AI 토론 합의 요약", "\u2501" * 20]
+                    for d in recent_debates[:10]:
+                        v = d.get("verdict", "")
+                        ve = _v_emoji.get(v, "\u2753")
+                        cons = d.get("consensus_level", "")
+                        conf = d.get("confidence", 0)
+                        dname = d.get("name", d.get("ticker", ""))
+                        pt = d.get("price_target", 0)
+                        line = f"{dname}: {ve}{v} ({cons} {conf:.0f}%)"
+                        if pt and pt > 0:
+                            line += f" 목표 {pt:,.0f}원"
+                        debate_lines.append(line)
+                    await context.bot.send_message(
+                        chat_id=self.chat_id,
+                        text="\n".join(debate_lines),
+                    )
+            except Exception:
+                logger.debug("AI debate summary in briefing failed", exc_info=True)
 
             # holding_type별 그룹핑
             by_type = defaultdict(list)
@@ -683,6 +734,7 @@ class SchedulerMixin:
                 try:
                     report = await get_manager_analysis(
                         mtype, mholdings, market_text,
+                        shared_context=shared_ctx,
                         alert_mode=current_alert,
                         performance=mgr_perf,
                         manager_lessons=mgr_lessons,
@@ -691,6 +743,18 @@ class SchedulerMixin:
                         await context.bot.send_message(
                             chat_id=self.chat_id, text=report[:4000],
                         )
+                        # v9.5: 매니저 stance를 DB에 저장 (통합 상태용)
+                        try:
+                            stance_line = report.split("\n")[0][:120] if report else ""
+                            # 첫 줄이 구분선이면 두 번째 줄 사용
+                            for line in report.split("\n"):
+                                line = line.strip()
+                                if line and "━" not in line and len(line) > 5:
+                                    stance_line = line[:120]
+                                    break
+                            self.db.save_manager_stance(mtype, stance_line)
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.debug("Manager briefing %s error: %s", mtype, e)
 
@@ -1007,6 +1071,30 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("job_morning_briefing global news fetch failed", exc_info=True)
 
+            # v9.5: YouTube 인텔리전스 컨텍스트
+            yt_intel_ctx = ""
+            try:
+                yt_intel = self.db.get_recent_youtube_intelligence(hours=12, limit=5)
+                if yt_intel:
+                    yt_lines = []
+                    for yi in yt_intel:
+                        src = yi.get("source", "")
+                        summary = yi.get("full_summary", "")[:200]
+                        outlook = yi.get("market_outlook", "")
+                        tickers = yi.get("mentioned_tickers", [])
+                        ticker_str = ", ".join(
+                            f"{t.get('name', '')}({t.get('sentiment', '')})"
+                            for t in (tickers[:5] if isinstance(tickers, list) else [])
+                        )
+                        yt_lines.append(f"  [{src}] {summary}")
+                        if outlook:
+                            yt_lines.append(f"    전망: {outlook}")
+                        if ticker_str:
+                            yt_lines.append(f"    언급종목: {ticker_str}")
+                    yt_intel_ctx = "\n[🎬 YouTube 방송 인사이트]\n" + "\n".join(yt_lines) + "\n"
+            except Exception:
+                logger.debug("YouTube intelligence context failed", exc_info=True)
+
             # v6.2.1: 운영자 특별 지시사항 (DB에서 로드, 없으면 빈 문자열)
             special_ctx = ""
             try:
@@ -1027,8 +1115,8 @@ class SchedulerMixin:
                         try:
                             frgn = await self.kis.get_foreign_flow(ticker, days=3)
                             inst = await self.kis.get_institution_flow(ticker, days=3)
-                            f_net = int(frgn["net_buy_volume"].sum()) if len(frgn) > 0 else 0
-                            i_net = int(inst["net_buy_volume"].sum()) if len(inst) > 0 else 0
+                            f_net = int(frgn["net_buy_volume"].sum()) if not frgn.empty and "net_buy_volume" in frgn.columns else 0
+                            i_net = int(inst["net_buy_volume"].sum()) if not inst.empty and "net_buy_volume" in inst.columns else 0
                             f_e = "🔵" if f_net > 0 else "🔴"
                             i_e = "🟢" if i_net > 0 else "🔴"
                             flow_lines.append(
@@ -1260,6 +1348,7 @@ class SchedulerMixin:
                 f"{etf_ctx}"
                 f"{korea_risk_ctx}\n"
                 f"{news_ctx}"
+                f"{yt_intel_ctx}"
                 f"{special_ctx}"
                 f"{alert_ctx}"
                 f"[보유종목]\n{holdings_text}\n"
@@ -1579,11 +1668,23 @@ class SchedulerMixin:
             except Exception as e:
                 logger.warning("EOD market analysis failed: %s", e)
 
-            # 2. 추천 종목
-            reco_data = [
-                (i, r.name, r.ticker, r.score.composite, r.score.signal, r.strategy_type)
-                for i, r in enumerate(results[:10], 1)
-            ]
+            # 2. 추천 종목 (v9.4: debate 뱃지 추가)
+            reco_data = []
+            for i, r in enumerate(results[:10], 1):
+                debate_badge = ""
+                try:
+                    d = self.db.get_latest_debate(r.ticker)
+                    if d:
+                        v = d.get("verdict", "")
+                        conf = d.get("confidence", 0)
+                        debate_badge = f"{v}{conf:.0f}%"
+                except Exception:
+                    pass
+                reco_data.append((
+                    i, r.name, r.ticker, r.score.composite, r.score.signal,
+                    r.strategy_type, r.info.current_price if hasattr(r.info, 'current_price') else 0,
+                    "", debate_badge,
+                ))
             msg = "\U0001f4ca 장 마감 리포트\n\n" + format_recommendations(reco_data)
             buttons = [
                 [InlineKeyboardButton(
@@ -2991,21 +3092,16 @@ class SchedulerMixin:
                     frgn = await self.kis.get_foreign_flow(ticker, days=1)
                     inst = await self.kis.get_institution_flow(ticker, days=1)
 
-                    # mock 데이터인지 확인 (실제 데이터만 저장)
+                    # v9.3.3: 빈 DataFrame 방어 (KIS 미설정 시 빈 DF 반환)
                     frgn_net = 0
                     inst_net = 0
-                    is_mock = False
 
-                    if not frgn.empty:
-                        frgn_net = int(frgn.iloc[0].get("net_buy", 0))
-                    if not inst.empty:
-                        inst_net = int(inst.iloc[0].get("net_buy", 0))
+                    if not frgn.empty and "net_buy_volume" in frgn.columns:
+                        frgn_net = int(frgn.iloc[0]["net_buy_volume"])
+                    if not inst.empty and "net_buy_volume" in inst.columns:
+                        inst_net = int(inst.iloc[0]["net_buy_volume"])
 
-                    # mock 데이터 판별: 실수로 mock이 저장되지 않도록 체크
-                    if hasattr(frgn, "attrs") and frgn.attrs.get("mock"):
-                        is_mock = True
-
-                    if not is_mock and (frgn_net != 0 or inst_net != 0):
+                    if frgn_net != 0 or inst_net != 0:
                         self.db.add_supply_demand(
                             ticker=ticker,
                             date_str=today_str,
@@ -4996,7 +5092,7 @@ class SchedulerMixin:
 
                 # 1-2. YouTube 영상 자막 기반 내용 요약 (v8.2)
                 try:
-                    items = await enrich_youtube_summaries(items, max_summaries=5)
+                    items = await enrich_youtube_summaries(items, max_summaries=5, db=self.db)
                 except Exception as e:
                     logger.debug("YouTube summary enrichment failed: %s", e)
 
@@ -5252,3 +5348,280 @@ class SchedulerMixin:
                 "daily_system_score", _today(),
                 status="error", message=str(e)[:200],
             )
+
+    # ══════════════════════════════════════════════════════════════
+    # v9.4: AI 토론 자동 실행 + 예측 추적
+    # ══════════════════════════════════════════════════════════════
+
+    async def job_auto_debate(self, context) -> None:
+        """v9.4: 보유종목 + 관심종목 자동 AI 토론 (09:30/14:00).
+
+        3라운드 구조화 토론 → DB 저장 → verdict 변화 시 알림.
+        """
+        from kstock.core.market_calendar import is_kr_market_open
+
+        if not is_kr_market_open():
+            return
+
+        try:
+            from kstock.bot.debate_engine import DebateEngine, format_debate_short
+            from kstock.signal.pattern_matcher import PatternMatcher, format_pattern_for_debate
+            from kstock.signal.price_target import PriceTargetEngine, format_price_target_for_debate
+
+            # 토론 대상: 보유종목 + 관심종목 (최대 10개)
+            targets = []
+            holdings = self.db.get_active_holdings()
+            for h in (holdings or []):
+                ticker = h.get("ticker", "")
+                name = h.get("name", "") or ticker
+                if ticker and ticker not in [t[0] for t in targets]:
+                    targets.append((ticker, name))
+
+            watchlist = self.db.get_watchlist() if hasattr(self.db, "get_watchlist") else []
+            for w in (watchlist or []):
+                ticker = w.get("ticker", "")
+                name = w.get("name", "") or ticker
+                if ticker and ticker not in [t[0] for t in targets]:
+                    targets.append((ticker, name))
+
+            targets = targets[:10]  # 비용 제한
+
+            if not targets:
+                logger.info("job_auto_debate: no targets")
+                return
+
+            engine = DebateEngine()
+            pm = PatternMatcher()
+            pte = PriceTargetEngine()
+            debated = 0
+
+            for ticker, name in targets:
+                try:
+                    # 데이터 수집
+                    stock_data = ""
+                    market_context = ""
+                    pattern_summary = ""
+                    price_target_text = ""
+
+                    # OHLCV
+                    ohlcv = None
+                    if hasattr(self, "data_router"):
+                        ohlcv = await self.data_router.get_ohlcv(ticker)
+                    elif hasattr(self, "yf_client") and self.yf_client:
+                        ohlcv = await self.yf_client.get_ohlcv(ticker)
+
+                    # 현재가
+                    live_price = 0
+                    if hasattr(self, "data_router"):
+                        live_price = await self.data_router.get_price(ticker)
+                    if live_price <= 0 and ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
+                        live_price = float(ohlcv["close"].iloc[-1])
+
+                    # 기본 정보
+                    info = {}
+                    if hasattr(self, "data_router"):
+                        info = await self.data_router.get_stock_info(ticker, name)
+
+                    # stock_data 구성
+                    if live_price > 0:
+                        stock_data = f"현재가: {live_price:,.0f}원"
+                    if info:
+                        per = info.get("per", 0) or info.get("PER", 0)
+                        pbr = info.get("pbr", 0) or info.get("PBR", 0)
+                        roe = info.get("roe", 0) or info.get("ROE", 0)
+                        if per:
+                            stock_data += f", PER: {per:.1f}"
+                        if pbr:
+                            stock_data += f", PBR: {pbr:.2f}"
+                        if roe:
+                            stock_data += f", ROE: {roe:.1f}%"
+
+                    # 패턴 매칭
+                    if ohlcv is not None and not ohlcv.empty and len(ohlcv) >= 40:
+                        pr = pm.find_similar_patterns(ohlcv)
+                        pattern_summary = format_pattern_for_debate(pr)
+
+                    # 가격 목표
+                    if ohlcv is not None and not ohlcv.empty:
+                        pt = pte.calculate_targets(
+                            ohlcv=ohlcv,
+                            current_price=live_price,
+                            stock_info=info,
+                        )
+                        price_target_text = format_price_target_for_debate(pt)
+
+                    # 토론 실행
+                    result = await engine.run_debate(
+                        ticker=ticker,
+                        name=name,
+                        stock_data=stock_data,
+                        market_context=market_context,
+                        pattern_summary=pattern_summary,
+                        price_target_data=price_target_text,
+                    )
+
+                    if result and not result.error:
+                        # DB 저장
+                        self.db.save_debate_result(result)
+                        debated += 1
+
+                        # 이전 토론과 비교 → verdict 변화 알림
+                        prev = self.db.get_latest_debate(ticker)
+                        # prev가 방금 저장한 것이므로 history에서 2번째를 봐야 함
+                        history = self.db.get_debate_history(ticker, days=7)
+                        if len(history) >= 2:
+                            prev_verdict = history[1].get("verdict", "")
+                            if prev_verdict and prev_verdict != result.final_verdict:
+                                await self._notify_verdict_change(
+                                    ticker, name, prev_verdict, result,
+                                )
+
+                except Exception as e:
+                    logger.warning(
+                        "job_auto_debate: error for %s: %s", ticker, e,
+                        exc_info=True,
+                    )
+
+            self.db.upsert_job_run(
+                "auto_debate", _today(),
+                status="success",
+                message=f"debated={debated}/{len(targets)}",
+            )
+            logger.info("job_auto_debate: completed %d/%d", debated, len(targets))
+
+        except Exception as e:
+            logger.error("job_auto_debate failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "auto_debate", _today(),
+                status="error", message=str(e)[:200],
+            )
+
+    async def _notify_verdict_change(
+        self, ticker: str, name: str, prev_verdict: str, result,
+    ) -> None:
+        """verdict 변화 알림 전송."""
+        try:
+            _ACTION_EMOJI = {"매수": "🟢", "매도": "🔴", "관망": "🟡", "홀딩": "🔵"}
+            prev_e = _ACTION_EMOJI.get(prev_verdict, "⚪")
+            curr_e = _ACTION_EMOJI.get(result.final_verdict, "⚪")
+
+            text = (
+                f"🔄 AI 토론 결과 변화!\n\n"
+                f"{name} ({ticker})\n"
+                f"이전: {prev_e} {prev_verdict}\n"
+                f"현재: {curr_e} {result.final_verdict} "
+                f"({result.consensus_level}, 확신 {result.confidence:.0%})\n"
+            )
+            if result.key_arguments:
+                text += f"\n변화 사유: {result.key_arguments[0]}"
+
+            admin_id = getattr(self, "admin_chat_id", None) or getattr(self, "ADMIN_CHAT_ID", None)
+            if admin_id:
+                await self._application.bot.send_message(
+                    chat_id=admin_id, text=text,
+                )
+        except Exception as e:
+            logger.warning("_notify_verdict_change error: %s", e, exc_info=True)
+
+    async def job_track_predictions(self, context) -> None:
+        """v9.4: 과거 토론 예측 정확도 추적 (16:10).
+
+        5일 전 토론의 예측을 실제 가격과 비교.
+        """
+        try:
+            unevaluated = self.db.get_unevaluated_debates(min_age_days=5)
+            if not unevaluated:
+                return
+
+            evaluated = 0
+            for debate in unevaluated:
+                ticker = debate["ticker"]
+                try:
+                    # 현재가 가져오기
+                    current_price = 0
+                    if hasattr(self, "data_router"):
+                        current_price = await self.data_router.get_price(ticker)
+
+                    if current_price <= 0:
+                        continue
+
+                    predicted_target = debate.get("price_target", 0)
+                    predicted_verdict = debate.get("verdict", "")
+
+                    # 정확도 점수 계산
+                    # verdict 방향 정확도: 매수→상승, 매도→하락이면 정확
+                    accuracy = 0.0
+                    if predicted_target > 0:
+                        # 목표가 대비 실제 이동 방향
+                        target_direction = predicted_target - current_price
+                        if (predicted_verdict == "매수" and current_price > predicted_target * 0.95) or \
+                           (predicted_verdict == "매도" and current_price < predicted_target * 1.05):
+                            accuracy = 0.8
+                        elif predicted_verdict in ("관망", "홀딩"):
+                            accuracy = 0.5
+                        else:
+                            accuracy = 0.3
+
+                    self.db.save_debate_accuracy(
+                        debate_id=debate["id"],
+                        ticker=ticker,
+                        predicted_verdict=predicted_verdict,
+                        predicted_target=predicted_target,
+                        actual_price_5d=current_price,
+                        accuracy_score=accuracy,
+                    )
+                    evaluated += 1
+
+                except Exception as e:
+                    logger.debug("track_predictions: error for %s: %s", ticker, e)
+
+            if evaluated > 0:
+                self.db.upsert_job_run(
+                    "track_predictions", _today(),
+                    status="success",
+                    message=f"evaluated={evaluated}",
+                )
+                logger.info("job_track_predictions: evaluated %d debates", evaluated)
+
+        except Exception as e:
+            logger.error("job_track_predictions failed: %s", e, exc_info=True)
+
+    async def job_weekly_ai_report(self, context) -> None:
+        """v9.4: 주간 AI 예측 정확도 리포트 (일요일 10:00)."""
+        try:
+            stats = self.db.get_prediction_accuracy(days=7)
+            if stats.get("total", 0) == 0:
+                return
+
+            text = (
+                f"📊 주간 AI 토론 성적표\n"
+                f"{'━' * 20}\n\n"
+                f"평가 건수: {stats['total']}건\n"
+                f"정확도: {stats['accuracy_pct']:.1f}%\n"
+            )
+
+            # 최근 토론 요약
+            recent = self.db.get_all_recent_debates(hours=168)  # 7일
+            if recent:
+                buy_count = sum(1 for d in recent if d.get("verdict") == "매수")
+                sell_count = sum(1 for d in recent if d.get("verdict") == "매도")
+                hold_count = len(recent) - buy_count - sell_count
+                text += (
+                    f"\n토론 결과 분포:\n"
+                    f"  매수: {buy_count}건\n"
+                    f"  매도: {sell_count}건\n"
+                    f"  관망/홀딩: {hold_count}건\n"
+                )
+
+            admin_id = getattr(self, "admin_chat_id", None) or getattr(self, "ADMIN_CHAT_ID", None)
+            if admin_id:
+                await context.bot.send_message(chat_id=admin_id, text=text)
+
+            self.db.upsert_job_run(
+                "weekly_ai_report", _today(),
+                status="success",
+                message=f"accuracy={stats['accuracy_pct']:.1f}%",
+            )
+
+        except Exception as e:
+            logger.error("job_weekly_ai_report failed: %s", e, exc_info=True)

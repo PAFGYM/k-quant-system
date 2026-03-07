@@ -657,6 +657,11 @@ def _build_shared_context_prompt(shared_context: dict | None) -> str:
     if portfolio:
         sections.append(f"[전체 포트폴리오 현황]\n{portfolio[:300]}")
 
+    # v9.5: YouTube 방송 인사이트
+    yt_intel = shared_context.get("youtube_intelligence", "")
+    if yt_intel:
+        sections.append(f"{yt_intel[:300]}")
+
     return "\n\n".join(sections)
 
 
@@ -1518,95 +1523,73 @@ def analyze_portfolio_balance(holdings_by_type: dict[str, list]) -> str:
     return "\n".join(lines)
 
 
-# ── #9 매니저 토론 (멀티 관점 분석) ─────────────────────────
+# ── #9 매니저 토론 (3라운드 구조화 토론, v9.4) ──────────────
 
 async def manager_debate(
     ticker: str,
     name: str,
     stock_data: str = "",
     market_context: str = "",
+    pattern_summary: str = "",
+    price_target_data: str = "",
 ) -> str:
-    """4매니저가 동일 종목에 대해 각자 관점으로 분석 (토론).
+    """4매니저 3라운드 구조화 토론.
+
+    v9.4: DebateEngine을 사용한 3라운드 토론.
+    - Round 1: 독립 분석
+    - Round 2: 상호 반론
+    - Round 3: Sonnet 종합 판결
 
     Returns:
-        4개 관점 + 합의/분쟁 요약 텍스트
+        토론 결과 포맷팅된 텍스트
     """
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return "API 키 없음"
-
     try:
-        import asyncio
-        import httpx
+        from kstock.bot.debate_engine import DebateEngine, format_debate_telegram
 
-        async def _get_opinion(mgr_key: str) -> str:
-            mgr = MANAGERS[mgr_key]
-            interpretation = _INTERPRETATION_RULES.get(mgr_key, "")
-            system = (
-                f"너는 {mgr['name']}이다. {mgr['title']}의 관점에서만 답하라.\n"
-                f"{mgr['persona']}\n"
-                f"{interpretation}\n"
-                f"호칭: 주호님. 볼드(**) 금지.\n"
-                f"제공된 데이터만 사용. 학습 데이터 가격 절대 금지.\n"
-                f"2~3줄로 핵심만. 매수/매도/관망 중 1개 액션 명시.\n"
-            )
-            user = (
-                f"종목: {name} ({ticker})\n"
-                f"{stock_data}\n"
-                f"시장: {market_context}\n\n"
-                f"이 종목에 대한 {mgr['name']}의 견해와 액션을 제시하세요."
-            )
-            try:
-                async with httpx.AsyncClient(timeout=15) as client:
-                    resp = await client.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={
-                            "x-api-key": api_key,
-                            "anthropic-version": "2023-06-01",
-                            "content-type": "application/json",
-                        },
-                        json={
-                            "model": "claude-haiku-4-5-20251001",
-                            "max_tokens": 200,
-                            "system": system,
-                            "messages": [{"role": "user", "content": user}],
-                        },
-                    )
-                    if resp.status_code == 200:
-                        text = resp.json()["content"][0]["text"].strip().replace("**", "")
-                        return f"{mgr['emoji']} {mgr['name']}\n{text}"
-            except Exception:
-                pass
-            return f"{mgr['emoji']} {mgr['name']}: 의견 없음"
-
-        opinions = await asyncio.gather(
-            *[_get_opinion(k) for k in ("scalp", "swing", "position", "long_term")]
+        engine = DebateEngine()
+        result = await engine.run_debate(
+            ticker=ticker,
+            name=name,
+            stock_data=stock_data,
+            market_context=market_context,
+            pattern_summary=pattern_summary,
+            price_target_data=price_target_data,
         )
-
-        # 합의 판단
-        buy_count = sum(1 for o in opinions if any(w in o for w in ("매수", "진입", "추가매수")))
-        sell_count = sum(1 for o in opinions if any(w in o for w in ("매도", "손절", "청산")))
-
-        if buy_count >= 3:
-            verdict = "🟢 매수 합의 (3명 이상 동의)"
-        elif sell_count >= 3:
-            verdict = "🔴 매도 합의 (3명 이상 동의)"
-        elif buy_count >= 2:
-            verdict = "🟡 매수 우세 (2명 동의)"
-        elif sell_count >= 2:
-            verdict = "🟡 매도 우세 (2명 동의)"
-        else:
-            verdict = "⚪ 의견 분분 (합의 없음)"
-
-        header = f"🎙️ {name} ({ticker}) 매니저 토론\n{'━' * 20}\n"
-        body = "\n\n".join(opinions)
-        footer = f"\n\n{'━' * 20}\n📋 종합: {verdict}"
-
-        return header + body + footer
+        return format_debate_telegram(result)
 
     except Exception as e:
-        logger.error("manager_debate error: %s", e)
+        logger.error("manager_debate error: %s", e, exc_info=True)
         return f"토론 오류: {e}"
+
+
+async def manager_debate_full(
+    ticker: str,
+    name: str,
+    stock_data: str = "",
+    market_context: str = "",
+    pattern_summary: str = "",
+    price_target_data: str = "",
+):
+    """3라운드 토론 실행 + DebateResult 반환 (DB 저장용).
+
+    Returns:
+        DebateResult 객체 (format_debate_telegram으로 텍스트 변환 가능)
+    """
+    try:
+        from kstock.bot.debate_engine import DebateEngine
+
+        engine = DebateEngine()
+        return await engine.run_debate(
+            ticker=ticker,
+            name=name,
+            stock_data=stock_data,
+            market_context=market_context,
+            pattern_summary=pattern_summary,
+            price_target_data=price_target_data,
+        )
+    except Exception as e:
+        logger.error("manager_debate_full error: %s", e, exc_info=True)
+        return None
 
 
 # ── #6 매니저 자기반성 보고서 ─────────────────────────────────

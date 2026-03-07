@@ -1796,7 +1796,7 @@ class AdminExtrasMixin:
                         if s["code"] == ticker:
                             market = s.get("market", "KRX")
                             break
-                    ohlcv = self.yf_client.get_ohlcv(ticker, market, period="3mo")
+                    ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
                     if ohlcv is not None and len(ohlcv) > 5:
                         from kstock.features.technical import compute_indicators
                         tech = compute_indicators(ohlcv)

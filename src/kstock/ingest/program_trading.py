@@ -15,6 +15,8 @@ from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup
 
+from kstock.core.tz import KST
+
 logger = logging.getLogger(__name__)
 
 _HEADERS = {
@@ -58,7 +60,7 @@ def fetch_program_trading(
         ProgramTradingData 리스트 (최신 → 과거 순).
     """
     if date is None:
-        date = datetime.now().strftime("%Y%m%d")
+        date = datetime.now(KST).strftime("%Y%m%d")
 
     sosok = "" if market.upper() == "KOSPI" else "02"
     results: list[ProgramTradingData] = []

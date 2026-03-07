@@ -693,6 +693,158 @@ class MarketMixin:
             )
         return cursor.rowcount
 
+    # -- youtube_intelligence (v9.5) -------------------------------------------
+
+    def save_youtube_intelligence(self, data: dict) -> bool:
+        """YouTube 인텔리전스 저장 (video_id 기반 upsert)."""
+        import json as _json
+        video_id = data.get("video_id", "")
+        if not video_id:
+            return False
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._connect() as conn:
+                conn.execute(
+                    """INSERT OR REPLACE INTO youtube_intelligence
+                    (video_id, source, title, mentioned_tickers, mentioned_sectors,
+                     market_outlook, key_numbers, investment_implications,
+                     full_summary, raw_summary, confidence, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        video_id,
+                        data.get("source", ""),
+                        data.get("title", ""),
+                        _json.dumps(data.get("mentioned_tickers", []), ensure_ascii=False),
+                        _json.dumps(data.get("mentioned_sectors", []), ensure_ascii=False),
+                        data.get("market_outlook", ""),
+                        _json.dumps(data.get("key_numbers", []), ensure_ascii=False),
+                        data.get("investment_implications", ""),
+                        data.get("full_summary", ""),
+                        data.get("raw_summary", ""),
+                        data.get("confidence", 0.0),
+                        now,
+                    ),
+                )
+            return True
+        except Exception as e:
+            logger.error("save_youtube_intelligence error: %s", e)
+            return False
+
+    def get_recent_youtube_intelligence(
+        self, hours: int = 24, limit: int = 10,
+    ) -> list[dict]:
+        """최근 YouTube 인텔리전스 조회 (JSON 파싱 포함)."""
+        import json as _json
+        cutoff = (
+            datetime.now() - timedelta(hours=hours)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """SELECT * FROM youtube_intelligence
+                    WHERE created_at >= ?
+                    ORDER BY created_at DESC LIMIT ?""",
+                    (cutoff, limit),
+                ).fetchall()
+            results = []
+            for row in rows:
+                d = dict(row)
+                for key in ("mentioned_tickers", "mentioned_sectors", "key_numbers"):
+                    try:
+                        d[key] = _json.loads(d.get(key) or "[]")
+                    except Exception:
+                        d[key] = []
+                results.append(d)
+            return results
+        except Exception as e:
+            logger.error("get_recent_youtube_intelligence error: %s", e)
+            return []
+
+    def get_youtube_mentioned_tickers(self, hours: int = 48) -> list[dict]:
+        """YouTube에서 언급된 종목 집계 (센티먼트 포함)."""
+        import json as _json
+        cutoff = (
+            datetime.now() - timedelta(hours=hours)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """SELECT mentioned_tickers, source FROM youtube_intelligence
+                    WHERE created_at >= ?""",
+                    (cutoff,),
+                ).fetchall()
+            # 종목별 센티먼트 집계
+            ticker_map: dict = {}
+            for row in rows:
+                tickers = _json.loads(row["mentioned_tickers"] or "[]")
+                source = row["source"]
+                for t in tickers:
+                    name = t.get("name", "")
+                    if not name:
+                        continue
+                    if name not in ticker_map:
+                        ticker_map[name] = {
+                            "name": name,
+                            "ticker": t.get("ticker", ""),
+                            "mentions": 0,
+                            "positive": 0,
+                            "negative": 0,
+                            "neutral": 0,
+                            "sources": [],
+                        }
+                    ticker_map[name]["mentions"] += 1
+                    sent = t.get("sentiment", "neutral")
+                    ticker_map[name][sent] = ticker_map[name].get(sent, 0) + 1
+                    if source not in ticker_map[name]["sources"]:
+                        ticker_map[name]["sources"].append(source)
+            result = sorted(ticker_map.values(), key=lambda x: x["mentions"], reverse=True)
+            return result
+        except Exception as e:
+            logger.error("get_youtube_mentioned_tickers error: %s", e)
+            return []
+
+    def save_manager_stance(
+        self, manager_key: str, stance: str, holdings_summary: str = "",
+    ) -> None:
+        """매니저 분석 stance 저장 (통합 컨텍스트용)."""
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._connect() as conn:
+                conn.execute(
+                    """INSERT OR REPLACE INTO manager_stances
+                    (manager_key, stance, holdings_summary, created_at)
+                    VALUES (?, ?, ?, ?)""",
+                    (manager_key, stance, holdings_summary, now),
+                )
+        except Exception as e:
+            logger.error("save_manager_stance error: %s", e)
+
+    def get_recent_manager_stances(self, hours: int = 24) -> dict[str, str]:
+        """최근 매니저 stance 조회. {manager_key: stance}."""
+        cutoff = (
+            datetime.now() - timedelta(hours=hours)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """SELECT manager_key, stance FROM manager_stances
+                    WHERE created_at >= ?
+                    ORDER BY created_at DESC""",
+                    (cutoff,),
+                ).fetchall()
+            stances = {}
+            for row in rows:
+                key = row["manager_key"]
+                if key not in stances:  # 가장 최근 것만
+                    stances[key] = row["stance"]
+            return stances
+        except Exception as e:
+            logger.error("get_recent_manager_stances error: %s", e)
+            return {}
+
     # -- surge_stocks ----------------------------------------------------------
 
     def add_surge_stock(

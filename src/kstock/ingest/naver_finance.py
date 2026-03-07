@@ -245,7 +245,10 @@ def _parse_sise_json(text: str) -> pd.DataFrame:
 
 
 def _parse_main_page(html: str) -> dict:
-    """네이버 종목 메인 페이지에서 재무정보 추출."""
+    """네이버 종목 메인 페이지에서 재무정보 추출.
+
+    v9.3.2: per_table 파싱 강화 (외국주 포함 모든 종목 지원).
+    """
     result: dict[str, Any] = {}
     try:
         from bs4 import BeautifulSoup
@@ -258,47 +261,96 @@ def _parse_main_page(html: str) -> dict:
             if blind:
                 result["current_price"] = _to_float(blind.get_text(strip=True))
 
-        # 시세 테이블에서 PER, PBR 등 추출
-        table = soup.find("table", {"summary": re.compile("시세|투자정보")})
-        if not table:
-            # 대안: per_table 클래스
-            table = soup.find("table", class_="per_table")
+        # ── PER/PBR/EPS/BPS: per_table 클래스 우선, 그 다음 시세 테이블 ──
+        per_table = soup.find("table", class_="per_table")
+        if per_table:
+            per_text = " ".join(per_table.get_text(separator=" ").split())
+            # PER 값: 첫 번째 "X.XX 배" (추정PER 전)
+            m = re.search(r"PER.*?(\d+\.?\d*)\s*배", per_text)
+            if m:
+                result["per"] = float(m.group(1))
+            # PBR 값: PBR 섹션 내 "계산합니다." 이후 첫 번째 소수점 숫자
+            m = re.search(r"PBR.*?계산합니다\.\s*(\d+\.?\d*)", per_text)
+            if m:
+                result["pbr"] = float(m.group(1))
+            elif "PBR" in per_text:
+                # 대안: PBR 이후 섹션에서 첫 소수점 숫자 (100 미만)
+                pbr_section = per_text.split("PBR")[-1][:200]
+                candidates = re.findall(r"(\d+\.\d+)", pbr_section)
+                for c in candidates:
+                    v = float(c)
+                    if 0 < v < 100:  # PBR은 보통 100 미만
+                        result["pbr"] = v
+                        break
+            # EPS 값
+            m = re.search(r"EPS.*?(\d[\d,]*)\s*원", per_text)
+            if m:
+                result["eps"] = _to_float(m.group(1))
+            # BPS 값
+            bps_section = per_text.split("BPS")[-1][:200] if "BPS" in per_text else ""
+            m = re.search(r"(\d[\d,]*)\s*원", bps_section)
+            if m:
+                result["bps"] = _to_float(m.group(1))
 
-        if table:
-            text = table.get_text(separator="|")
-            # PER
-            m = re.search(r"PER[|\s]*([0-9,.]+)", text)
-            if m:
-                result["per"] = _to_float(m.group(1))
-            # PBR
-            m = re.search(r"PBR[|\s]*([0-9,.]+)", text)
-            if m:
-                result["pbr"] = _to_float(m.group(1))
-            # ROE
-            m = re.search(r"ROE[|\s]*([0-9,.]+)", text)
-            if m:
-                result["roe"] = _to_float(m.group(1))
+        # 시세 테이블 (per_table에서 못 잡은 경우 보완)
+        if not result.get("per"):
+            table = soup.find("table", {"summary": re.compile("시세|투자정보")})
+            if table:
+                text = table.get_text(separator="|")
+                m = re.search(r"PER[|\s]*([0-9,.]+)", text)
+                if m:
+                    result["per"] = _to_float(m.group(1))
+                if not result.get("pbr"):
+                    m = re.search(r"PBR[|\s]*([0-9,.]+)", text)
+                    if m:
+                        result["pbr"] = _to_float(m.group(1))
 
-        # 시가총액 (tab_con1)
+        # v9.3.2: 전체 텍스트에서 공백/파이프 정리 후 검색
+        full_text = soup.get_text(separator=" ")
+        full_clean = " ".join(full_text.split())
+
+        # ROE: "ROE(지배주주) 7.93" 패턴
+        m = re.search(r"ROE.*?(\d+\.?\d*)\s", full_clean)
+        if m and 0 < float(m.group(1)) < 200:
+            result["roe"] = float(m.group(1))
+
+        # ── 시가총액: tab_con1 우선 (가장 정확) ──
         tab_con = soup.find(id="tab_con1")
         if tab_con:
-            text = tab_con.get_text(separator="|")
-            m = re.search(r"시가총액[|\s]*([\d,]+)\s*억원", text)
+            tc = " ".join(tab_con.get_text().split())
+            m = re.search(r"시가총액\s*([\d,]+)\s*억", tc)
             if m:
                 cap_uk = _to_float(m.group(1))
                 result["market_cap"] = cap_uk * 100_000_000
+        # 전체 페이지 폴백: "시가총액(억) 5,449"
+        if not result.get("market_cap"):
+            m = re.search(r"시가총액.*?([\d,]+)\s*억", full_clean)
+            if m:
+                cap_uk = _to_float(m.group(1))
+                if cap_uk > 0:
+                    result["market_cap"] = cap_uk * 100_000_000
 
-        # 52주 최고/최저
-        full_text = soup.get_text(separator="|")
-        m = re.search(r"52주.*?최고[|\s]*([\d,]+)", full_text)
+        # ── 배당수익률 ──
+        m = re.search(r"배당수익률.*?([0-9,.]+)\s*%", full_clean)
+        if m:
+            result["dividend_yield"] = float(m.group(1))
+
+        # ── 52주 최고/최저: "52주최고 l 최저 6,750 l 2,495" ──
+        m = re.search(r"52주.*?최고.*?최저.*?([\d,]+).*?([\d,]+)", full_clean)
         if m:
             result["52w_high"] = _to_float(m.group(1))
-        m = re.search(r"52주.*?최저[|\s]*([\d,]+)", full_text)
-        if m:
-            result["52w_low"] = _to_float(m.group(1))
+            result["52w_low"] = _to_float(m.group(2))
+        else:
+            # 개별 검색
+            m = re.search(r"52주최고.*?([\d,]+)", full_clean)
+            if m:
+                result["52w_high"] = _to_float(m.group(1))
+            m = re.search(r"52주최저.*?([\d,]+)", full_clean)
+            if m:
+                result["52w_low"] = _to_float(m.group(1))
 
-        # 외국인 비율
-        m = re.search(r"외국인.*?([0-9.]+)\s*%", full_text)
+        # ── 외국인 비율: "외국인비율(%) 78.65" ──
+        m = re.search(r"외국인비율.*?([0-9.]+)", full_clean)
         if m:
             result["foreign_ratio"] = float(m.group(1))
 
