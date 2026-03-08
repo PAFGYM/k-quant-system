@@ -569,6 +569,12 @@ class SchedulerMixin:
 
             await context.bot.send_message(chat_id=self.chat_id, text=msg)
 
+            # v9.5.1: 브리핑을 DB에 저장 (AI 채팅이 참조할 수 있도록)
+            try:
+                self.db.save_briefing("morning", msg[:4000])
+            except Exception:
+                logger.debug("Failed to save morning briefing to DB", exc_info=True)
+
             # v9.5: 통합 상태 헤더 발송 (매니저 브리핑 전 전체 상황 요약)
             try:
                 from kstock.bot.unified_state import build_unified_state, format_unified_header
@@ -1362,7 +1368,7 @@ class SchedulerMixin:
                 f"   - 투자시계(단기/스윙/중기/장기)에 맞는 판단\n"
                 f"   - 판단: 보유유지/추가매수/일부익절/전량매도/손절 중 택1\n"
                 f"   - 구체적 이유 1줄 (수급 근거 포함)\n"
-                f"   - 목표가, 손절가 제시\n"
+                f"   (가격 추측 금지 — 지지선/목표가/손절가 등 구체적 가격은 제공된 데이터만 사용)\n"
                 f"3) 외인/기관 수급 종합 (수급 데이터가 있으면 반드시 분석)\n"
                 f"4) 오늘 주목할 이벤트/섹터 (2줄)\n\n"
                 f"투자시계별 기준:\n"
@@ -1371,7 +1377,12 @@ class SchedulerMixin:
                 f"- 중기(mid): 1~3개월, 수익 15~30% 목표\n"
                 f"- 장기(long): 3개월+, 수익 30~100% 목표\n\n"
                 f"볼드(**) 사용 금지. 이모지로 가독성 확보.\n"
-                f"존댓말 사용 (주호님). 한 문장 최대 25자."
+                f"존댓말 사용 (주호님). 한 문장 최대 25자.\n\n"
+                f"[가격 환각 금지 — 최중요]\n"
+                f"지지선, 저항선, 목표가, 손절가 등 구체적 가격을 절대 만들어내지 마라.\n"
+                f"위 보유종목의 매수가/현재가/수익률만 인용 가능.\n"
+                f"'XX,000원 지지선', 'XX만원 목표' 같은 추측 가격 제시 시 사용자에게 금전적 피해 발생.\n"
+                f"기술적 가격이 필요하면 '차트에서 지지/저항 확인 필요'로 대체."
             )
             result = await self.ai.analyze(
                 "morning_briefing", prompt, max_tokens=1200,
@@ -2611,7 +2622,6 @@ class SchedulerMixin:
                 f"5. 오늘 주호님 참고 포인트\n"
                 f"   - 장 시작 전 확인할 지표/이벤트\n"
                 f"   - 보유종목 관련 섹터 영향 (매도 지시 금지, 정보만 제공)\n"
-                f"   - 주시할 가격대/지지선 (참고용)\n"
             )
 
             us_premarket_system = (
@@ -2624,10 +2634,15 @@ class SchedulerMixin:
                 "'잘 버티고 계세요', '장기 관점에서 문제없습니다' 식으로 안심.\n"
                 "3. 공포 유발 표현 금지: '긴급', '심각', '무조건', '1초도 망설이지 마세요', "
                 "'알람 맞춰두세요', '날리면 안 됩니다'.\n"
-                "4. 분석만 하라. 행동 지시가 아닌 정보 전달.\n\n"
+                "4. 분석만 하라. 행동 지시가 아닌 정보 전달.\n"
+                "5. [가격 환각 금지 — 최중요] "
+                "구체적 가격(지지선, 저항선, 목표가, 손절가)을 절대 만들어내지 마라. "
+                "프롬프트에 제공된 매수가/현재가/수익률 외에는 가격 언급 금지. "
+                "'120,000원 지지선', '60,000원 목표' 같은 추측 가격 절대 금지. "
+                "기술적 가격 분석이 필요하면 '차트 확인 필요'로 대체하라.\n\n"
                 "[형식 규칙]\n"
                 "볼드(**) 사용 금지. 이모지로 구분. "
-                "구체적 수치 필수. 추상적 표현 금지. "
+                "구체적 수치는 제공된 데이터만 사용. "
                 "한국 시장 영향에 초점."
             )
 
@@ -2678,6 +2693,13 @@ class SchedulerMixin:
                 )
 
             await context.bot.send_message(chat_id=self.chat_id, text=msg)
+
+            # v9.5.1: 브리핑을 DB에 저장 (AI 채팅이 참조할 수 있도록)
+            try:
+                self.db.save_briefing("premarket", msg[:4000])
+            except Exception:
+                logger.debug("Failed to save premarket briefing to DB", exc_info=True)
+
             self.db.upsert_job_run(
                 "us_premarket_briefing", _today(), status="success",
             )

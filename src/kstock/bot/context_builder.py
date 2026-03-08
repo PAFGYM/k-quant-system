@@ -246,6 +246,9 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 [매매 교훈]
 {trade_lessons}
 
+[오늘의 브리핑 — 내가 이미 주호님에게 보낸 분석]
+{recent_briefing}
+
 [4명의 매니저 투자 의견 — 참고 자료]
 {manager_stances}
 
@@ -343,6 +346,7 @@ def build_system_prompt(context: dict) -> str:
         financial_summary=context.get("financials", "재무 데이터 없음"),
         trade_lessons=context.get("trade_lessons", "매매 교훈 없음"),
         crisis_context=context.get("crisis_context", "현재 특별 위기 상황 없음"),
+        recent_briefing=context.get("recent_briefing", "오늘 아직 브리핑 없음"),
         manager_stances=context.get("manager_stances", "매니저 의견 없음"),
         multi_agent_scores=context.get("multi_agent_scores", "멀티에이전트 분석 없음"),
     )
@@ -1005,6 +1009,24 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
     except Exception:
         logger.debug("Multi-agent context failed", exc_info=True)
 
+    # v9.5.1: 최근 브리핑 (AI 채팅이 자기가 보낸 내용을 알 수 있도록)
+    recent_briefing_text = ""
+    try:
+        briefings = db.get_recent_briefings(hours=18, limit=2)
+        if briefings:
+            b_lines = []
+            for b in briefings:
+                b_type = b.get("briefing_type", "")
+                b_time = b.get("created_at", "")[:16]
+                content = b.get("content", "")[:1500]
+                label = {"premarket": "🇺🇸 프리마켓", "morning": "☀️ 모닝"}.get(
+                    b_type, b_type
+                )
+                b_lines.append(f"[{label} {b_time}]\n{content}")
+            recent_briefing_text = "\n\n".join(b_lines)
+    except Exception:
+        logger.debug("Recent briefing context failed", exc_info=True)
+
     return {
         "portfolio": portfolio,
         "market": market,
@@ -1017,6 +1039,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
         "trade_lessons": trade_lessons_text,
         "global_news": global_news_text,
         "crisis_context": crisis_context,
+        "recent_briefing": recent_briefing_text,
         "manager_stances": manager_stances_text,
         "multi_agent_scores": multi_agent_text,
     }

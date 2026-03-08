@@ -853,6 +853,54 @@ class MarketMixin:
             logger.error("get_recent_manager_stances error: %s", e)
             return {}
 
+    # -- briefings (v9.5.1) ---------------------------------------------------
+
+    def save_briefing(self, briefing_type: str, content: str) -> bool:
+        """브리핑 텍스트 저장 (AI 채팅에서 참조할 수 있도록).
+
+        Args:
+            briefing_type: "morning" | "premarket" | "manager" 등
+            content: 브리핑 전문 텍스트
+        """
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._connect() as conn:
+                conn.execute(
+                    """INSERT INTO briefings (briefing_type, content, created_at)
+                    VALUES (?, ?, ?)""",
+                    (briefing_type, content[:4000], now),
+                )
+            return True
+        except Exception as e:
+            logger.error("save_briefing error: %s", e)
+            return False
+
+    def get_recent_briefings(
+        self, hours: int = 24, limit: int = 3,
+    ) -> list[dict]:
+        """최근 브리핑 조회.
+
+        Returns:
+            [{"briefing_type": str, "content": str, "created_at": str}]
+        """
+        cutoff = (
+            datetime.now() - timedelta(hours=hours)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """SELECT briefing_type, content, created_at
+                    FROM briefings
+                    WHERE created_at >= ?
+                    ORDER BY created_at DESC LIMIT ?""",
+                    (cutoff, limit),
+                ).fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error("get_recent_briefings error: %s", e)
+            return []
+
     # -- surge_stocks ----------------------------------------------------------
 
     def add_surge_stock(

@@ -1158,6 +1158,17 @@ CREATE TABLE IF NOT EXISTS manager_stances (
 );
 
 CREATE INDEX IF NOT EXISTS idx_stances_created ON manager_stances(created_at);
+
+-- v9.5.1: 브리핑 저장 (AI 채팅이 참조할 수 있도록)
+CREATE TABLE IF NOT EXISTS briefings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    briefing_type TEXT NOT NULL,
+    content     TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_briefings_type ON briefings(briefing_type);
+CREATE INDEX IF NOT EXISTS idx_briefings_created ON briefings(created_at);
 """
 
 

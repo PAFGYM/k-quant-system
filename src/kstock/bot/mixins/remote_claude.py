@@ -414,6 +414,7 @@ class RemoteClaudeMixin:
     ) -> None:
         """이미지 + 텍스트를 합쳐서 Claude Vision API로 분석.
 
+        v9.5.1: 시스템 프롬프트에 포트폴리오/시장/브리핑 컨텍스트 포함.
         img_b64가 None이면 update.message.photo에서 추출.
         """
         placeholder = await update.message.reply_text(
@@ -430,7 +431,10 @@ class RemoteClaudeMixin:
                 img_bytes = await file.download_as_bytearray()
                 img_b64 = base64.b64encode(bytes(img_bytes)).decode()
 
-            async with httpx.AsyncClient(timeout=30) as client:
+            # v9.5.1: 시스템 프롬프트 구축 (포트폴리오/브리핑 컨텍스트 포함)
+            system_text = await self._build_image_system_prompt()
+
+            async with httpx.AsyncClient(timeout=45) as client:
                 resp = await client.post(
                     "https://api.anthropic.com/v1/messages",
                     headers={
@@ -441,6 +445,7 @@ class RemoteClaudeMixin:
                     json={
                         "model": "claude-sonnet-4-5-20250929",
                         "max_tokens": 2000,
+                        "system": system_text,
                         "messages": [{
                             "role": "user",
                             "content": [
@@ -457,7 +462,10 @@ class RemoteClaudeMixin:
                                     "text": (
                                         f"주호님의 이미지 분석 요청입니다.\n\n"
                                         f"질문/요청: {prompt}\n\n"
-                                        f"이미지가 주식 차트/데이터라면 투자 관점에서 분석해주세요.\n"
+                                        f"이미지가 주식 차트/데이터/봇 스크린샷이라면 "
+                                        f"보유종목과 최근 브리핑을 참고하여 투자 관점에서 분석해주세요.\n"
+                                        f"K-Quant 봇이 보낸 메시지 스크린샷이면 "
+                                        f"해당 내용을 이미 알고 있는 시스템 컨텍스트와 연결하여 답변해주세요.\n"
                                         f"코드나 에러 스크린샷이면 원인 분석 + 해결책을 제시해주세요.\n"
                                         f"볼드(**) 사용 금지. 이모지로 가독성 확보."
                                     ),
@@ -496,6 +504,80 @@ class RemoteClaudeMixin:
                 "⚠️ 이미지 분석에 실패했어요. 다른 이미지로 시도해주세요.",
                 reply_markup=CLAUDE_MODE_MENU,
             )
+
+    async def _build_image_system_prompt(self) -> str:
+        """v9.5.1: 이미지 분석용 시스템 프롬프트 (보유종목 + 브리핑 컨텍스트).
+
+        일반 채팅과 동일한 수준의 컨텍스트를 제공하여
+        봇 스크린샷/차트 분석 시 자기 데이터를 참조할 수 있게 함.
+        """
+        parts = [
+            "너는 주호님의 전속 AI 수행비서 '퀀트봇'이다.\n"
+            "주호님의 이미지/스크린샷을 분석하는 역할이다.\n"
+            "아래 보유종목과 최근 브리핑을 참고하여 답변하라.\n\n"
+            "[가격 규칙]\n"
+            "구체적 가격(지지선, 저항선, 목표가)은 아래 데이터에 있을 때만 인용.\n"
+            "추측 가격 절대 금지. 데이터가 없으면 '차트 확인 필요'로 대체.\n\n"
+            "[형식 규칙]\n"
+            "볼드(**) 사용 금지. 이모지로 가독성 확보.\n"
+            "한국어 존댓말. 핵심부터."
+        ]
+
+        # 보유종목
+        try:
+            holdings = self.db.get_active_holdings()
+            if holdings:
+                h_lines = ["[보유종목]"]
+                for h in holdings[:10]:
+                    name = h.get("name", "")
+                    ticker = h.get("ticker", "")
+                    buy_price = h.get("buy_price", 0)
+                    current_price = h.get("current_price", 0)
+                    pnl_pct = h.get("pnl_pct", 0)
+                    h_lines.append(
+                        f"- {name}({ticker}): "
+                        f"매수가 {buy_price:,.0f}원, "
+                        f"현재가 {current_price:,.0f}원, "
+                        f"수익률 {pnl_pct:+.1f}%"
+                    )
+                parts.append("\n".join(h_lines))
+        except Exception:
+            pass
+
+        # 최근 브리핑
+        try:
+            briefings = self.db.get_recent_briefings(hours=18, limit=2)
+            if briefings:
+                for b in briefings:
+                    b_type = b.get("briefing_type", "")
+                    b_time = b.get("created_at", "")[:16]
+                    content = b.get("content", "")[:1200]
+                    label = {"premarket": "🇺🇸 프리마켓", "morning": "☀️ 모닝"}.get(
+                        b_type, b_type
+                    )
+                    parts.append(f"[{label} 브리핑 {b_time}]\n{content}")
+        except Exception:
+            pass
+
+        # 매니저 의견
+        try:
+            stances = self.db.get_recent_manager_stances(hours=24)
+            if stances:
+                manager_names = {
+                    "scalp": "리버모어", "swing": "오닐",
+                    "position": "린치", "long_term": "버핏",
+                }
+                s_lines = ["[매니저 의견]"]
+                for key in ("scalp", "swing", "position", "long_term"):
+                    s = stances.get(key, "")
+                    if s:
+                        s_lines.append(f"- {manager_names.get(key, key)}: {s[:60]}")
+                if len(s_lines) > 1:
+                    parts.append("\n".join(s_lines))
+        except Exception:
+            pass
+
+        return "\n\n".join(parts)
 
     # ── 오류 자동 감지 → Claude Code 수정 요청 ──
 
