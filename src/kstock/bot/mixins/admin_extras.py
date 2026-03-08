@@ -1472,13 +1472,16 @@ class AdminExtrasMixin:
         buttons.append(row1)
         buttons.append(row2)
 
-        # 매수 추천 + 매니저 + 새로고침
+        # 매수 추천 + 매니저 + AI토론
         action_row = [
             InlineKeyboardButton(
                 "📈 매수추천", callback_data="fav:buy_scan",
             ),
             InlineKeyboardButton(
                 "👨‍💼 매니저", callback_data="fav:managers",
+            ),
+            InlineKeyboardButton(
+                "🎙️ AI토론", callback_data="menu:debate",
             ),
         ]
         buttons.append(action_row)
@@ -1671,6 +1674,7 @@ class AdminExtrasMixin:
                 InlineKeyboardButton("🤖 분석", callback_data=f"mgr:{horizon or 'swing'}:{ticker}"),
             ],
             [
+                InlineKeyboardButton("🎙️ 토론", callback_data=f"debate:{ticker}"),
                 InlineKeyboardButton("📰 뉴스", callback_data=f"fav:news:{ticker}"),
                 InlineKeyboardButton("📊 차트", callback_data=f"fav:chtm:{ticker}"),
             ],

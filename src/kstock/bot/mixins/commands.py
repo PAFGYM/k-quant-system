@@ -1935,8 +1935,7 @@ class CommandsMixin:
             from kstock.bot.bot_imports import make_feedback_row
             buttons = []
 
-            # 각 매니저 1순위 종목 "담기" 버튼
-            add_row = []
+            # 각 매니저 1순위 종목 "담기" + "토론" 버튼
             for mgr_key, pick in top_picks_for_buttons.items():
                 mgr = MANAGERS.get(mgr_key, {})
                 emoji = mgr.get("emoji", "📌")
@@ -1944,18 +1943,17 @@ class CommandsMixin:
                 ticker = pick.get("ticker", "")
                 name = pick.get("name", "")[:5]
                 cb = f"bp:add:{ticker}:{hz}"
-                if len(cb) <= 64:
-                    add_row.append(
+                if len(cb) <= 64 and ticker:
+                    buttons.append([
                         InlineKeyboardButton(
                             f"{emoji}{name} 담기",
                             callback_data=cb,
-                        )
-                    )
-                if len(add_row) == 2:
-                    buttons.append(add_row)
-                    add_row = []
-            if add_row:
-                buttons.append(add_row)
+                        ),
+                        InlineKeyboardButton(
+                            f"🎙️ 토론",
+                            callback_data=f"debate:{ticker}",
+                        ),
+                    ])
 
             # 후속 질문 버튼
             followup_buttons = self._build_followup_buttons("4매니저추천", None)
@@ -2074,11 +2072,15 @@ class CommandsMixin:
             answer, followup_buttons = self._parse_followup_buttons(answer)
             if not followup_buttons:
                 followup_buttons = self._build_followup_buttons("매수 추천", None)
-            # v6.0: 매수 시작 버튼 추가
+            # v6.0: 매수 시작 + AI토론 버튼
             followup_buttons.append([
                 InlineKeyboardButton(
                     "🛒 이 종목들로 매수 시작",
                     callback_data="bp:start",
+                ),
+                InlineKeyboardButton(
+                    "🎙️ AI토론",
+                    callback_data="menu:debate",
                 ),
             ])
             markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None

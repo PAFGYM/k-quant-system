@@ -1446,6 +1446,10 @@ class TradingMixin:
                         callback_data=f"mgr:{ht}:{ticker}",
                     ),
                     InlineKeyboardButton(
+                        f"🎙️ 토론",
+                        callback_data=f"debate:{ticker}",
+                    ),
+                    InlineKeyboardButton(
                         f"❌ 삭제",
                         callback_data=f"bal:remove:{ticker}",
                     ),

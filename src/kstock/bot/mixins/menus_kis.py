@@ -639,6 +639,9 @@ class MenusKisMixin:
             buttons = [
                 [InlineKeyboardButton(
                     "\U0001f4cb 매도 계획 보기", callback_data="sell_plans",
+                ),
+                InlineKeyboardButton(
+                    "🎙️ AI토론", callback_data="menu:debate",
                 )],
                 make_feedback_row("시황"),
             ]
