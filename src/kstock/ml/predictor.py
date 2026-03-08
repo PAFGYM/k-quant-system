@@ -1114,3 +1114,115 @@ def format_ml_prediction(result: PredictionResult) -> str:
         lines.append(f"  주요 근거: {reasons}")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# v10.1 Phase D: Triple Barrier Labeling
+# ---------------------------------------------------------------------------
+
+# 멀티 타겟 정의 — 단기/중기/텐배거
+MULTI_TARGETS = {
+    "short": {"window": 5, "threshold": 0.03, "label": "5일 +3%"},
+    "medium": {"window": 29, "barrier": 0.09, "label": "29일 TB ±9%"},
+    "tenbagger": {"window": 60, "threshold": 0.30, "label": "60일 +30%"},
+}
+
+
+def triple_barrier_label(
+    close_prices: np.ndarray | list[float],
+    entry_idx: int,
+    window: int = 29,
+    profit_barrier: float = 0.09,
+    loss_barrier: float = 0.09,
+) -> int:
+    """Triple Barrier 라벨링 (한국 시장 최적 — arXiv 2504.02249).
+
+    3개의 장벽:
+    - 상한 장벽: entry price * (1 + profit_barrier) 도달 → 1 (Take Profit)
+    - 하한 장벽: entry price * (1 - loss_barrier) 도달 → 0 (Stop Loss)
+    - 시간 장벽: window 일 내 미도달 → 최종 수익률 방향으로 판정
+
+    Args:
+        close_prices: 종가 배열 (entry_idx 이후 충분한 데이터 필요).
+        entry_idx: 진입 시점 인덱스.
+        window: 시간 장벽 (거래일 수). 한국 시장 최적: 29일.
+        profit_barrier: 상한 장벽 (%). 한국 시장 최적: 9%.
+        loss_barrier: 하한 장벽 (%).
+
+    Returns:
+        1: Take Profit (상한 먼저 도달 또는 시간 만료 시 양수 수익)
+        0: Stop Loss (하한 먼저 도달 또는 시간 만료 시 음수 수익)
+    """
+    prices = np.asarray(close_prices, dtype=np.float64)
+
+    if entry_idx >= len(prices) - 1:
+        return 0
+
+    entry_price = prices[entry_idx]
+    if entry_price <= 0:
+        return 0
+
+    upper = entry_price * (1.0 + profit_barrier)
+    lower = entry_price * (1.0 - loss_barrier)
+
+    end_idx = min(entry_idx + window + 1, len(prices))
+
+    for i in range(entry_idx + 1, end_idx):
+        p = prices[i]
+        # 상한 먼저 도달 → Take Profit
+        if p >= upper:
+            return 1
+        # 하한 먼저 도달 → Stop Loss
+        if p <= lower:
+            return 0
+
+    # 시간 장벽 (window 만료) → 최종 방향으로 판정
+    final_price = prices[end_idx - 1]
+    final_return = (final_price - entry_price) / entry_price
+
+    return 1 if final_return > 0 else 0
+
+
+def compute_multi_target_labels(
+    close_prices: np.ndarray | list[float],
+    entry_idx: int,
+) -> dict[str, int | None]:
+    """멀티 타겟 라벨 계산 (단기/중기/텐배거).
+
+    Args:
+        close_prices: 종가 배열.
+        entry_idx: 진입 시점 인덱스.
+
+    Returns:
+        {"short": 0|1, "medium": 0|1, "tenbagger": 0|1} 또는 데이터 부족 시 None.
+    """
+    prices = np.asarray(close_prices, dtype=np.float64)
+    labels: dict[str, int | None] = {}
+
+    for target_name, cfg in MULTI_TARGETS.items():
+        window = cfg["window"]
+
+        if entry_idx + window >= len(prices):
+            labels[target_name] = None
+            continue
+
+        if "barrier" in cfg:
+            # Triple Barrier 방식 (medium)
+            labels[target_name] = triple_barrier_label(
+                prices, entry_idx,
+                window=window,
+                profit_barrier=cfg["barrier"],
+                loss_barrier=cfg["barrier"],
+            )
+        else:
+            # 단순 수익률 비교 (short, tenbagger)
+            threshold = cfg["threshold"]
+            entry_price = prices[entry_idx]
+            if entry_price <= 0:
+                labels[target_name] = None
+                continue
+            future_price = prices[entry_idx + window]
+            ret = (future_price - entry_price) / entry_price
+            labels[target_name] = 1 if ret > threshold else 0
+
+    return labels

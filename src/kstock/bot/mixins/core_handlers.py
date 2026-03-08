@@ -346,6 +346,13 @@ class CoreHandlersMixin:
             days=(0, 1, 2, 3, 4),
             name="anomaly_scan",
         )
+        # v10.1: ML 일일 점진 학습 (매일 22:00)
+        jq.run_daily(
+            self.job_ml_daily_update,
+            time=dt_time(hour=22, minute=0, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="ml_daily_update",
+        )
         # v6.2.2: 경계 모드에 따른 초기 인터벌 설정
         _acfg = self._get_alert_config() if hasattr(self, '_get_alert_config') else {}
         _risk_iv = _acfg.get("risk_interval", 120)

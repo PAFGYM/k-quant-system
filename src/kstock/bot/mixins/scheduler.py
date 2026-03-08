@@ -4028,6 +4028,41 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("job_anomaly_scan upsert_job_run also failed", exc_info=True)
 
+    async def job_ml_daily_update(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """v10.1: 매일 22:00 ML 점진 학습 (EWC + LightGBM incremental).
+
+        D-5 확정 데이터로 기존 모델에 점진적으로 새 지식 추가.
+        전체 재학습(일요일)과 별도로, 매일 시장 변화를 빠르게 반영.
+        """
+        try:
+            from kstock.ml.auto_trainer import AutoTrainer
+
+            trainer = AutoTrainer(db=self.db, yf_client=self.yf_client)
+            result = await trainer.daily_incremental_update()
+
+            if self.chat_id and result.message:
+                await context.bot.send_message(
+                    chat_id=self.chat_id, text=result.message,
+                )
+
+            self.db.upsert_job_run(
+                "ml_daily_update", _today(),
+                status="success" if result.success else "skip",
+            )
+            logger.info(
+                "ML daily update %s: %d samples",
+                "OK" if result.success else "skip", result.samples,
+            )
+
+        except Exception as e:
+            logger.error("ML daily update job error: %s", e, exc_info=True)
+            try:
+                self.db.upsert_job_run("ml_daily_update", _today(), status="error")
+            except Exception:
+                logger.debug("job_ml_daily_update upsert_job_run also failed", exc_info=True)
+
     async def job_risk_monitor(
         self, context: ContextTypes.DEFAULT_TYPE,
     ) -> None:

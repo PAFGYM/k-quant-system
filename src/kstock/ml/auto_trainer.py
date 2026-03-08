@@ -593,6 +593,17 @@ class AutoTrainer:
                         continue
 
                     features["target"] = 1 if actual_return > 3.0 else 0
+
+                    # v10.1: Triple Barrier 라벨 (medium target)
+                    tb_label = self._calc_triple_barrier_label(ticker, date_str)
+                    if tb_label is not None:
+                        features["target_medium"] = tb_label
+
+                    # v10.1: 텐배거 라벨 (60일 +30%)
+                    tb60_return = self._calc_actual_return(ticker, date_str, days=60)
+                    if tb60_return is not None:
+                        features["target_tenbagger"] = 1 if tb60_return > 30.0 else 0
+
                     training_data.append(features)
 
             logger.info("Feature store training data: %d samples from %d dates", len(training_data), len(dates))
@@ -641,6 +652,139 @@ class AutoTrainer:
                 pass
 
             return None
+        except Exception:
+            return None
+
+    async def daily_incremental_update(self) -> AutoTrainResult:
+        """매일 22:00 실행 — D-5 확정 데이터로 점진 학습.
+
+        v10.1 Phase C: EWC + LightGBM init_model 기반 점진 업데이트.
+
+        1. D-5 피처 + 실제 수익률 수집 (FeatureStore + OHLCV)
+        2. LightGBM: init_model로 새 트리 10개 추가
+        3. LSTM: EWC 정규화 + 5 에폭 미세조정
+        4. 드리프트 감지 → 필요 시 전체 재훈련 트리거
+        """
+        start_time = time.time()
+
+        try:
+            # 1. 최근 확정 데이터 수집 (D-5 ~ D-8 범위)
+            fs_data = self._collect_from_feature_store()
+            if not fs_data or len(fs_data) < 10:
+                return AutoTrainResult(
+                    success=False, trigger="daily_incremental",
+                    samples=len(fs_data) if fs_data else 0,
+                    message=f"점진 학습 데이터 부족: {len(fs_data) if fs_data else 0}개 (<10)",
+                )
+
+            from kstock.ml.predictor import build_training_data
+            X, y = build_training_data(fs_data)
+            if len(X) < 10:
+                return AutoTrainResult(
+                    success=False, trigger="daily_incremental",
+                    message="Feature matrix 부족",
+                )
+
+            messages = []
+
+            # 2. LightGBM 점진 업데이트
+            try:
+                from kstock.ml.ewc_trainer import incremental_lgb_update
+                lgb_result = incremental_lgb_update(
+                    new_X=X, new_y=y,
+                    n_new_trees=10, learning_rate=0.02,
+                )
+                if lgb_result.success:
+                    messages.append(lgb_result.message)
+            except Exception as e:
+                logger.debug("LGB incremental update skipped: %s", e)
+
+            # 3. LSTM EWC 점진 업데이트
+            try:
+                from kstock.ml.lstm_predictor import (
+                    load_lstm_model, save_lstm_model, build_sequences,
+                )
+                from kstock.ml.ewc_trainer import EWCTrainer
+
+                lstm_model, scaler_mean, scaler_std = load_lstm_model()
+                if lstm_model is not None:
+                    X_seq, y_seq = build_sequences(X, y)
+                    if len(X_seq) >= 5:
+                        ewc = EWCTrainer(lstm_model, fisher_multiplier=400)
+                        # Fisher 계산 (기존 데이터의 일부 사용)
+                        ewc.compute_fisher(X_seq, y_seq, n_samples=min(100, len(X_seq)))
+                        # 점진 업데이트
+                        lstm_result = ewc.incremental_update(
+                            X_seq, y_seq, epochs=5, lr=0.0005,
+                            scaler_mean=scaler_mean, scaler_std=scaler_std,
+                        )
+                        if lstm_result.success:
+                            save_lstm_model(lstm_model, scaler_mean, scaler_std)
+                            messages.append(lstm_result.message)
+            except Exception as e:
+                logger.debug("LSTM EWC update skipped: %s", e)
+
+            # 4. 드리프트 체크 → 전체 재훈련 필요 여부
+            drift = self.should_retrain()
+            drift_msg = ""
+            if drift.retrain_recommended:
+                drift_msg = f"\n⚠️ 드리프트 감지: {drift.reason} (일요일 전체 재학습 예정)"
+
+            duration = time.time() - start_time
+
+            message = (
+                f"🔄 일일 점진 학습 완료\n"
+                f"  샘플: {len(X)}개\n"
+                f"  " + "\n  ".join(messages) if messages else "  업데이트 없음"
+            )
+            message += f"\n  소요: {duration:.1f}초{drift_msg}"
+
+            logger.info(message)
+
+            return AutoTrainResult(
+                success=True,
+                trigger="daily_incremental",
+                samples=len(X),
+                duration_sec=round(duration, 1),
+                message=message,
+            )
+
+        except Exception as e:
+            duration = time.time() - start_time
+            logger.error("Daily incremental update failed: %s", e, exc_info=True)
+            return AutoTrainResult(
+                success=False,
+                trigger="daily_incremental",
+                duration_sec=round(duration, 1),
+                message=f"❌ 점진 학습 실패: {e}",
+            )
+
+    def _calc_triple_barrier_label(
+        self, ticker: str, base_date: str,
+    ) -> int | None:
+        """Triple Barrier 라벨 계산 (29일/±9%).
+
+        pykrx에서 base_date 이후 30+일 종가를 가져와 라벨링.
+        """
+        try:
+            from pykrx import stock as pykrx_stock
+            from kstock.ml.predictor import triple_barrier_label
+            from datetime import datetime
+
+            base_dt = datetime.strptime(base_date, "%Y-%m-%d")
+            end_dt = base_dt + timedelta(days=50)  # 29 거래일 + 여유
+
+            df = pykrx_stock.get_market_ohlcv(
+                base_dt.strftime("%Y%m%d"),
+                end_dt.strftime("%Y%m%d"),
+                ticker,
+            )
+            if df is None or len(df) < 30:
+                return None
+
+            closes = df["종가"].values.astype(float)
+            return triple_barrier_label(closes, 0, window=29, profit_barrier=0.09, loss_barrier=0.09)
+
         except Exception:
             return None
 
