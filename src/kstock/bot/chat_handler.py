@@ -230,12 +230,12 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
         )
         # 1) 질문에 현재가가 있으면 그 기준으로 범위 밖 가격 교체
         answer = validate_prices_against_context(answer, question)
-        # 2) 비보유 종목 가격 교체
-        if not verified_names:
-            # verified_names가 없는 경우에만 비보유 종목 가격 제거
-            holdings = db.get_active_holdings()
-            known_names = {h.get("name", "") for h in holdings if h.get("name")}
-            answer = strip_unverified_prices(answer, known_names)
+        # 2) 비보유 종목 가격 교체 — v9.5.2: 항상 실행 (verified 포함)
+        holdings = db.get_active_holdings()
+        known_names = {h.get("name", "") for h in holdings if h.get("name")}
+        if verified_names:
+            known_names |= verified_names
+        answer = strip_unverified_prices(answer, known_names)
         # 3) [v6.1.3] 시장 지수 환각 검증 — 코스피/코스닥 값 교체
         market_str = context.get("market", "")
         actual_indices = {}
