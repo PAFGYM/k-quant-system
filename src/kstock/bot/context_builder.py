@@ -792,14 +792,14 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                 if prog_data:
                     macro_dict["program_trading"] = prog_data[0]
             except Exception:
-                pass
+                logger.debug("program_trading context failed", exc_info=True)
             # v9.0: 신용잔고 데이터 추가
             try:
                 cred_data = db.get_credit_balance(days=1)
                 if cred_data:
                     macro_dict["credit_balance"] = cred_data[0]
             except Exception:
-                pass
+                logger.debug("credit_balance context failed", exc_info=True)
             # v9.0: ETF 자금흐름 데이터 추가
             try:
                 etf_data = db.get_etf_flow(days=1)
@@ -811,7 +811,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                         "inverse_total": inv_total,
                     }
             except Exception:
-                pass
+                logger.debug("etf_flow context failed", exc_info=True)
         except Exception as e:
             logger.warning("Failed to get macro for AI context: %s", e)
 
@@ -832,7 +832,29 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
         loop.run_in_executor(None, _get_trade_lessons_context, db),
         loop.run_in_executor(None, _get_global_news_context, db),
         loop.run_in_executor(None, _get_crisis_context, macro_dict),
+        return_exceptions=True,
     )
+    # v9.6.3: 개별 컨텍스트 실패 시 빈 문자열
+    _ctx_names = ["portfolio", "market", "recommendations", "policies", "reports",
+                  "financials", "investor_style", "portfolio_solutions",
+                  "trade_lessons_text", "global_news_text", "crisis_context"]
+    _ctx_results = [portfolio, market, recommendations, policies, reports, financials,
+                    investor_style, portfolio_solutions, trade_lessons_text,
+                    global_news_text, crisis_context]
+    for _i, (_name, _val) in enumerate(zip(_ctx_names, _ctx_results)):
+        if isinstance(_val, Exception):
+            logger.warning("Context %s failed: %s", _name, _val)
+    portfolio = "" if isinstance(portfolio, Exception) else portfolio
+    market = "" if isinstance(market, Exception) else market
+    recommendations = "" if isinstance(recommendations, Exception) else recommendations
+    policies = "" if isinstance(policies, Exception) else policies
+    reports = "" if isinstance(reports, Exception) else reports
+    financials = "" if isinstance(financials, Exception) else financials
+    investor_style = "" if isinstance(investor_style, Exception) else investor_style
+    portfolio_solutions = "" if isinstance(portfolio_solutions, Exception) else portfolio_solutions
+    trade_lessons_text = "" if isinstance(trade_lessons_text, Exception) else trade_lessons_text
+    global_news_text = "" if isinstance(global_news_text, Exception) else global_news_text
+    crisis_context = "" if isinstance(crisis_context, Exception) else crisis_context
 
     # 실시간 주가 데이터 주입 (yf_client가 있으면)
     realtime_data = ""
@@ -1280,7 +1302,7 @@ async def build_manager_shared_context(db, macro_client=None) -> dict:
                 "kospi_change_pct": getattr(snap, "kospi_change_pct", 0),
             }
         except Exception:
-            pass
+            logger.debug("manager_shared_context macro failed", exc_info=True)
 
     # 병렬로 각 섹션 수집
     investor_style, trade_lessons, global_news, policies, crisis_ctx = await asyncio.gather(
@@ -1289,7 +1311,14 @@ async def build_manager_shared_context(db, macro_client=None) -> dict:
         loop.run_in_executor(None, _get_global_news_context, db),
         loop.run_in_executor(None, get_policy_context, None),
         loop.run_in_executor(None, _get_crisis_context, macro_dict),
+        return_exceptions=True,
     )
+    # v9.6.3: 실패 시 빈 문자열
+    investor_style = "" if isinstance(investor_style, Exception) else investor_style
+    trade_lessons = "" if isinstance(trade_lessons, Exception) else trade_lessons
+    global_news = "" if isinstance(global_news, Exception) else global_news
+    policies = "" if isinstance(policies, Exception) else policies
+    crisis_ctx = "" if isinstance(crisis_ctx, Exception) else crisis_ctx
 
     # 포트폴리오 전체 요약 (모든 보유종목)
     portfolio_summary = ""

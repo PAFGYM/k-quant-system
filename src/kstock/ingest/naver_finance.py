@@ -19,8 +19,12 @@ import numpy as np
 import pandas as pd
 
 from kstock.core.tz import KST
+from kstock.core.circuit_breaker import get_breaker
 
 logger = logging.getLogger(__name__)
+
+# v9.6.3: 서킷 브레이커 — 연속 5회 실패 시 120초 차단
+_naver_breaker = get_breaker("naver", failure_threshold=5, recovery_timeout=120)
 
 # ── 캐시 ──────────────────────────────────────────────────
 _naver_price_cache: dict[str, tuple[datetime, float]] = {}
@@ -60,6 +64,11 @@ class NaverFinanceClient:
             if now - cached_time < _CACHE_TTL and cached_price > 0:
                 return cached_price
 
+        # v9.6.3: 서킷 브레이커 체크
+        if not _naver_breaker.can_execute():
+            cached = _naver_price_cache.get(code)
+            return cached[1] if cached else 0.0
+
         try:
             import httpx
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -69,8 +78,10 @@ class NaverFinanceClient:
                 price = _parse_current_price(resp.text)
                 if price > 0:
                     _naver_price_cache[code] = (now, price)
+                    _naver_breaker.record_success()
                     return price
         except Exception as e:
+            _naver_breaker.record_failure()
             logger.debug("Naver price fetch failed for %s: %s", code, e)
 
         return 0.0

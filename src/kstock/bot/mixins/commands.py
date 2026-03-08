@@ -77,7 +77,15 @@ class CommandsMixin:
                 ohlcv, yf_info = await asyncio.gather(
                     self.yf_client.get_ohlcv(ticker, market),
                     self.yf_client.get_stock_info(ticker, name, market),
+                    return_exceptions=True,
                 )
+                # v9.6.3: 개별 실패 처리
+                if isinstance(ohlcv, Exception):
+                    logger.debug("OHLCV fetch failed: %s", ohlcv)
+                    ohlcv = None
+                if isinstance(yf_info, Exception):
+                    logger.debug("yf_info fetch failed: %s", yf_info)
+                    yf_info = {}
                 # v9.3.2: yfinance OHLCV 실패 시 Naver OHLCV 직접 시도
                 if (ohlcv is None or ohlcv.empty):
                     try:
@@ -140,7 +148,15 @@ class CommandsMixin:
             foreign_flow, inst_flow = await asyncio.gather(
                 self.kis.get_foreign_flow(ticker),
                 self.kis.get_institution_flow(ticker),
+                return_exceptions=True,
             )
+            # v9.6.3: 수급 데이터 실패 시 빈 DataFrame
+            if isinstance(foreign_flow, Exception):
+                logger.debug("foreign_flow failed: %s", foreign_flow)
+                foreign_flow = pd.DataFrame()
+            if isinstance(inst_flow, Exception):
+                logger.debug("inst_flow failed: %s", inst_flow)
+                inst_flow = pd.DataFrame()
             foreign_days = 0
             inst_days = 0
             if not foreign_flow.empty and "net_buy_volume" in foreign_flow.columns:
@@ -189,7 +205,7 @@ class CommandsMixin:
                     try:
                         self.db.bulk_save_supply_demand(ticker, inv_data)
                     except Exception:
-                        pass
+                        logger.debug("bulk_save_supply_demand failed for %s", ticker, exc_info=True)
             except Exception:
                 logger.debug("Naver investor data failed for %s", ticker, exc_info=True)
 
@@ -241,7 +257,7 @@ class CommandsMixin:
                 from kstock.signal.agent_bridge import get_multi_agent_bonus
                 multi_agent_bonus = get_multi_agent_bonus(self.db, ticker)
             except Exception:
-                pass
+                logger.debug("multi_agent_bonus failed for %s", ticker, exc_info=True)
 
             # v9.5: YouTube 방송 언급 보너스
             try:
@@ -250,7 +266,7 @@ class CommandsMixin:
                 if yt_bonus:
                     multi_agent_bonus += yt_bonus
             except Exception:
-                pass
+                logger.debug("youtube_mention_bonus failed for %s", ticker, exc_info=True)
 
             # v9.5.3: 글로벌 이벤트 기반 점수 조정
             event_bonus = 0
@@ -260,7 +276,7 @@ class CommandsMixin:
                     self.db, ticker, sector=sector,
                 )
             except Exception:
-                pass
+                logger.debug("event_bonus failed for %s", ticker, exc_info=True)
 
             score = compute_composite_score(
                 macro, flow, info, tech, self.scoring_config,
@@ -1824,10 +1840,17 @@ class CommandsMixin:
                 hz: self._get_horizon_picks_data(hz, default_budget)
                 for hz in ("scalp", "short", "mid", "long")
             }
-            horizon_results = await asyncio.gather(*horizon_tasks.values())
+            horizon_results = await asyncio.gather(
+                *horizon_tasks.values(), return_exceptions=True,
+            )
 
             picks_by_horizon = {}
-            for hz, (picks, _err) in zip(horizon_tasks.keys(), horizon_results):
+            for hz, result in zip(horizon_tasks.keys(), horizon_results):
+                if isinstance(result, Exception):
+                    logger.warning("horizon %s failed: %s", hz, result)
+                    picks, _err = [], str(result)
+                else:
+                    picks, _err = result
                 picks_by_horizon[hz] = picks
 
             # 2. 매크로 컨텍스트 수집 (풍부한 버전)

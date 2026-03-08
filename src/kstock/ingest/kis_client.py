@@ -133,13 +133,27 @@ class KISClient:
     # ------------------------------------------------------------------
 
     def _api_get_sync(self, path: str, tr_id: str, params: dict) -> dict:
-        """Generic synchronous GET request to KIS API."""
+        """Generic synchronous GET request to KIS API (v9.6.3: 재시도)."""
+        import time as _time
         url = f"{self.base_url}{path}"
         headers = self._auth_headers(tr_id)
-        with httpx.Client(timeout=15) as client:
-            resp = client.get(url, headers=headers, params=params)
-            resp.raise_for_status()
-            return resp.json()
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                with httpx.Client(timeout=15) as client:
+                    resp = client.get(url, headers=headers, params=params)
+                    if resp.status_code >= 500 or resp.status_code == 429:
+                        if attempt < max_retries - 1:
+                            _time.sleep(1.5 * (attempt + 1))
+                            continue
+                    resp.raise_for_status()
+                    return resp.json()
+            except (httpx.TimeoutException, httpx.ConnectError):
+                if attempt < max_retries - 1:
+                    _time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
+        return {}
 
     def _fetch_current_price_sync(self, ticker: str) -> dict:
         """Fetch current stock price from KIS API."""

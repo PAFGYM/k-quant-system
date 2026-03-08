@@ -167,35 +167,55 @@ async def _call_ai(
     max_tokens: int = 300,
     api_key: str = "",
 ) -> str:
-    """Anthropic API 단일 호출."""
+    """Anthropic API 호출 (v9.6.3: 지수 백오프 재시도)."""
     if not api_key:
         api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         return '{"error": "API 키 없음"}'
 
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "system": system,
-                    "messages": [{"role": "user", "content": user}],
-                },
-            )
-            if resp.status_code == 200:
-                return resp.json()["content"][0]["text"].strip()
-            logger.warning("AI call failed: status=%d body=%s", resp.status_code, resp.text[:200])
-            return '{"error": "API 호출 실패"}'
-    except Exception as e:
-        logger.warning("AI call exception: %s", e)
-        return f'{{"error": "{e}"}}'
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=25) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "max_tokens": max_tokens,
+                        "system": system,
+                        "messages": [{"role": "user", "content": user}],
+                    },
+                )
+                if resp.status_code == 200:
+                    return resp.json()["content"][0]["text"].strip()
+                # 5xx/429 → 재시도, 4xx → 즉시 실패
+                if resp.status_code >= 500 or resp.status_code == 429:
+                    if attempt < max_retries - 1:
+                        delay = 1.5 * (attempt + 1)
+                        logger.info("AI call retry %d/%d (status=%d), wait %.1fs",
+                                    attempt + 1, max_retries, resp.status_code, delay)
+                        await asyncio.sleep(delay)
+                        continue
+                logger.warning("AI call failed: status=%d body=%s", resp.status_code, resp.text[:200])
+                return '{"error": "API 호출 실패"}'
+        except (httpx.TimeoutException, httpx.ConnectError) as e:
+            if attempt < max_retries - 1:
+                delay = 1.5 * (attempt + 1)
+                logger.info("AI call retry %d/%d (%s), wait %.1fs",
+                            attempt + 1, max_retries, type(e).__name__, delay)
+                await asyncio.sleep(delay)
+                continue
+            logger.warning("AI call exception after retries: %s", e)
+            return f'{{"error": "{e}"}}'
+        except Exception as e:
+            logger.warning("AI call exception: %s", e)
+            return f'{{"error": "{e}"}}'
+    return '{"error": "max retries exceeded"}'
 
 
 def _parse_json(text: str) -> dict:
@@ -365,9 +385,25 @@ class DebateEngine:
             )
 
         opinions = await asyncio.gather(
-            *[_get_opinion(k) for k in ("scalp", "swing", "position", "long_term")]
+            *[_get_opinion(k) for k in ("scalp", "swing", "position", "long_term")],
+            return_exceptions=True,
         )
-        return list(opinions)
+        # v9.6.3: Exception 발생한 매니저는 기본 관망 의견으로 대체
+        safe_opinions = []
+        for i, op in enumerate(opinions):
+            if isinstance(op, Exception):
+                mgr_key = ("scalp", "swing", "position", "long_term")[i]
+                mgr = _MANAGER_SUMMARY[mgr_key]
+                logger.warning("R1 %s failed: %s", mgr["name"], op)
+                safe_opinions.append(Opinion(
+                    manager_key=mgr_key, manager_name=mgr["name"],
+                    emoji=mgr["emoji"], action="관망", confidence=0.3,
+                    reasoning="분석 실패 — 관망 기본값",
+                    price_target=0, stop_loss=0,
+                ))
+            else:
+                safe_opinions.append(op)
+        return safe_opinions
 
     async def _round2_rebuttal(
         self, round1: list[Opinion], context: str,
@@ -417,9 +453,18 @@ class DebateEngine:
             )
 
         opinions = await asyncio.gather(
-            *[_rebuttal(op) for op in round1]
+            *[_rebuttal(op) for op in round1],
+            return_exceptions=True,
         )
-        return list(opinions)
+        # v9.6.3: R2 실패 시 R1 의견 유지
+        safe_opinions = []
+        for op_r1, op_r2 in zip(round1, opinions):
+            if isinstance(op_r2, Exception):
+                logger.warning("R2 %s failed: %s", op_r1.manager_name, op_r2)
+                safe_opinions.append(op_r1)
+            else:
+                safe_opinions.append(op_r2)
+        return safe_opinions
 
     async def _round3_synthesis(
         self, round1: list[Opinion], round2: list[Opinion], context: str,

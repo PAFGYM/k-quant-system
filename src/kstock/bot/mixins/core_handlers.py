@@ -130,7 +130,7 @@ class CoreHandlersMixin:
         ])
 
     async def _post_shutdown(self, app: Application) -> None:
-        """Graceful shutdown: WebSocket + ControlServer 정리."""
+        """Graceful shutdown: WebSocket + ControlServer + ThreadPool 정리."""
         try:
             await self.ws.disconnect()
         except Exception as e:
@@ -140,6 +140,14 @@ class CoreHandlersMixin:
                 await self._control_server.stop()
         except Exception as e:
             logger.warning("ControlServer shutdown error: %s", e)
+        # v9.6.3: DB ThreadPoolExecutor 정리
+        try:
+            from kstock.store._base import StoreBase
+            if StoreBase._thread_pool:
+                StoreBase._thread_pool.shutdown(wait=False)
+                logger.info("DB ThreadPool shutdown complete")
+        except Exception as e:
+            logger.warning("ThreadPool shutdown error: %s", e)
 
     def schedule_jobs(self, app: Application) -> None:
         jq = app.job_queue
@@ -1989,6 +1997,17 @@ class CoreHandlersMixin:
         data = query.data or ""
         try:
             action, _, payload = data.partition(":")
+
+            # v9.6.3: 티커 기반 콜백 입력 검증
+            _TICKER_ACTIONS = {"debate", "mgr_debate", "detail", "kis_buy", "kis_sell"}
+            if action in _TICKER_ACTIONS and payload:
+                from kstock.core.resilience import validate_ticker
+                _ticker_part = payload.split(":")[0] if ":" in payload else payload
+                if not validate_ticker(_ticker_part):
+                    logger.warning("Invalid ticker in callback: action=%s payload=%s", action, payload)
+                    await query.message.reply_text("⚠️ 잘못된 종목 코드입니다.")
+                    return
+
             dispatch = self._get_callback_dispatch()
             handler = dispatch.get(action)
             if handler:

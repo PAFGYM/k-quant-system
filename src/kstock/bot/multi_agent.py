@@ -741,7 +741,18 @@ async def run_multi_agent_analysis(
         _call_agent("technical"),
         _call_agent("fundamental"),
         _call_agent("sentiment"),
+        return_exceptions=True,
     )
+    # v9.6.3: 개별 에이전트 실패 시 기본값
+    for _key, _res in [("technical", tech_result), ("fundamental", fund_result), ("sentiment", sent_result)]:
+        if isinstance(_res, Exception):
+            logger.warning("Agent %s failed: %s", _key, _res)
+    if isinstance(tech_result, Exception):
+        tech_result = AgentResult(agent_key="technical", agent_name="기술적 분석", score=50, signal="중립", summary="분석 실패")
+    if isinstance(fund_result, Exception):
+        fund_result = AgentResult(agent_key="fundamental", agent_name="기본적 분석", score=50, signal="중립", summary="분석 실패")
+    if isinstance(sent_result, Exception):
+        sent_result = AgentResult(agent_key="sentiment", agent_name="센티먼트", score=50, signal="중립", summary="분석 실패")
 
     results = {
         "technical": tech_result,
