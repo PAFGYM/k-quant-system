@@ -762,6 +762,23 @@ class SchedulerMixin:
                         manager_lessons=mgr_lessons,
                     )
                     if report:
+                        # v9.6.0: 정확도 배지 프리픽스
+                        try:
+                            with self.db._connect() as _sc_conn:
+                                _sc_row = _sc_conn.execute(
+                                    "SELECT hit_rate, avg_return_5d, weight_adj "
+                                    "FROM manager_scorecard WHERE manager_key=? "
+                                    "ORDER BY calculated_at DESC LIMIT 1",
+                                    (mtype,),
+                                ).fetchone()
+                            if _sc_row and _sc_row["hit_rate"] > 0:
+                                _hr = _sc_row["hit_rate"]
+                                _ar = _sc_row["avg_return_5d"] * 100
+                                _badge_e = "🟢" if _hr >= 60 else ("🟡" if _hr >= 45 else "🔴")
+                                _badge = f"{_badge_e} 적중률 {_hr:.0f}% | 5일 평균 {_ar:+.1f}%"
+                                report = report.replace("\n", f"\n{_badge}\n", 1)
+                        except Exception:
+                            pass
                         _mgr_btns = InlineKeyboardMarkup([
                             [
                                 InlineKeyboardButton("👍", callback_data=f"fb:like:매니저_{mtype}"),
@@ -1714,10 +1731,11 @@ class SchedulerMixin:
                         debate_badge = f"{v}{conf:.0f}%"
                 except Exception:
                     pass
+                _atr = getattr(r.tech, "atr_pct", 0.0) if r.tech else 0.0
                 reco_data.append((
                     i, r.name, r.ticker, r.score.composite, r.score.signal,
                     r.strategy_type, r.info.current_price if hasattr(r.info, 'current_price') else 0,
-                    "", debate_badge,
+                    "", debate_badge, _atr,
                 ))
             msg = "\U0001f4ca 장 마감 리포트\n\n" + format_recommendations(reco_data)
             buttons = [

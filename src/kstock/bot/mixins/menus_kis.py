@@ -428,9 +428,10 @@ class MenusKisMixin:
                     debate_badge = f"{v}{conf:.0f}%"
             except Exception:
                 pass
+            _atr = getattr(r.tech, "atr_pct", 0.0) if r.tech else 0.0
             reco_data.append((
                 i, r.name, r.ticker, r.score.composite, r.score.signal,
-                r.strategy_type, r.info.current_price, "", debate_badge,
+                r.strategy_type, r.info.current_price, "", debate_badge, _atr,
             ))
         msg = format_recommendations(reco_data)
 

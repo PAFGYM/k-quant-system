@@ -84,6 +84,13 @@ class TradingMixin:
             await query.edit_message_text("⚠️ 현재가를 가져올 수 없습니다. 잠시 후 다시 시도해주세요.")
             return
         holding_id = self.db.add_holding(ticker, result.name, price)
+        # v9.6.0: ATR 저장
+        try:
+            _entry_atr = getattr(result.tech, "atr_pct", 0.0) if result.tech else 0.0
+            if _entry_atr > 0:
+                self.db.update_holding(holding_id, atr_at_entry=_entry_atr)
+        except Exception:
+            pass
         # Record trade
         rec = self.db.get_active_recommendations()
         rec_id = None
@@ -97,7 +104,13 @@ class TradingMixin:
             recommended_price=price, action_price=price,
             quantity_pct=10, recommendation_id=rec_id,
         )
-        msg = format_trade_record(result.name, "buy", price)
+        # v9.6.0: ATR + 확신도 정보 전달
+        _atr = getattr(result.tech, "atr_pct", 0.0) if result.tech else 0.0
+        _cscore = result.score.composite if result.score else 0.0
+        msg = format_trade_record(
+            result.name, "buy", price,
+            atr_pct=_atr, composite_score=_cscore,
+        )
         await query.edit_message_text(msg)
 
         # v6.2: 신호 성과 추적 기록

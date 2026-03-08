@@ -414,10 +414,14 @@ def format_recommendations(results: list) -> str:
     medals = {1: "\U0001f947", 2: "\U0001f948", 3: "\U0001f949"}
 
     for item in results:
-        # v6.5: 8번째 항목으로 reliability_grade, v9.4: 9번째 debate_summary 지원
+        # v6.5: 8번째 항목으로 reliability_grade, v9.4: 9번째 debate_summary
+        # v9.6.0: 10번째 atr_pct 지원
         reliability_grade = ""
         debate_summary = ""
-        if len(item) >= 9:
+        atr_pct = 0.0
+        if len(item) >= 10:
+            rank, name, ticker, score_val, signal, strat, price, reliability_grade, debate_summary, atr_pct = item[:10]
+        elif len(item) >= 9:
             rank, name, ticker, score_val, signal, strat, price, reliability_grade, debate_summary = item[:9]
         elif len(item) >= 8:
             rank, name, ticker, score_val, signal, strat, price, reliability_grade = item[:8]
@@ -443,6 +447,18 @@ def format_recommendations(results: list) -> str:
         if debate_summary:
             debate_badge = f" \U0001f399{debate_summary}"
         line = f"{medal} {name}{price_str} {score_val:.1f}점 {tag}{grade_badge}{debate_badge}"
+        # v9.6.0: 매수 추천 종목에 ATR 손절/목표 한 줄 표시
+        if signal == "BUY" and atr_pct and atr_pct > 0 and price and price > 0:
+            try:
+                from kstock.core.position_sizer import compute_atr_stops
+                stops = compute_atr_stops(float(atr_pct), "swing", float(price))
+                line += (
+                    f"\n   🔴{_won(stops['stop_price'])}"
+                    f" → 🟡{_won(stops['target_1_price'])}"
+                    f" → 🟠{_won(stops['target_2_price'])}"
+                )
+            except Exception:
+                pass
         if signal == "BUY":
             buy_items.append(line)
         elif signal == "WATCH":
@@ -487,6 +503,26 @@ def format_stock_detail(
         "",
         reason_lines,
     ]
+
+    # v9.6.0: ATR 기반 동적 손절/익절 안내
+    _atr = getattr(tech, "atr_pct", 0.0) if tech else 0.0
+    if _atr > 0 and price and price > 0:
+        try:
+            from kstock.core.position_sizer import compute_atr_stops
+            stops = compute_atr_stops(_atr, "swing", price)
+            lines.append("")
+            lines.append(f"📊 ATR {_atr:.1f}% 기준 가이드")
+            lines.append(
+                f"  🔴 손절: {_won(stops['stop_price'])} ({stops['stop_pct']*100:+.1f}%)"
+            )
+            lines.append(
+                f"  🟡 1차 목표: {_won(stops['target_1_price'])} ({stops['target_1_pct']*100:+.1f}%)"
+            )
+            lines.append(
+                f"  🟠 2차 목표: {_won(stops['target_2_price'])} ({stops['target_2_pct']*100:+.1f}%)"
+            )
+        except Exception:
+            pass
 
     # 이동평균 위치
     sma_parts = []
@@ -1045,10 +1081,56 @@ def format_alerts_summary(alerts: list) -> str:
     return "\n".join(lines)
 
 
-def format_trade_record(name: str, action: str, price: float, pnl_pct: float = 0) -> str:
-    """Format trade record confirmation message."""
+def format_trade_record(
+    name: str, action: str, price: float, pnl_pct: float = 0,
+    atr_pct: float = 0.0, holding_type: str = "swing",
+    composite_score: float = 0.0,
+) -> str:
+    """Format trade record confirmation message.
+
+    v9.6.0: ATR 기반 손절/익절 + 확신도 + 분할매수 안내 추가.
+    """
     if action == "buy":
-        return f"{name} {_won(price)} 매수 기록했습니다 \U0001f44d 익절/손절 알림 켜졌어요"
+        base = f"{name} {_won(price)} 매수 기록했습니다 \U0001f44d"
+        extras = []
+        # v9.6.0: ATR 기반 동적 손절/익절
+        if atr_pct > 0:
+            try:
+                from kstock.core.position_sizer import compute_atr_stops, plan_split_entry
+                stops = compute_atr_stops(atr_pct, holding_type, price)
+                extras.append(
+                    f"\n📊 ATR {atr_pct:.1f}% 기반 자동 설정\n"
+                    f"   🔴 손절: {_won(stops['stop_price'])} ({stops['stop_pct']*100:+.1f}%)\n"
+                    f"   🟡 1차 목표: {_won(stops['target_1_price'])} ({stops['target_1_pct']*100:+.1f}%)\n"
+                    f"   🟠 2차 목표: {_won(stops['target_2_price'])} ({stops['target_2_pct']*100:+.1f}%)"
+                )
+                # 분할매수 안내 (스캘핑 제외)
+                if holding_type not in ("scalp",):
+                    split = plan_split_entry(
+                        ticker="", name=name, current_price=price,
+                        atr_pct=atr_pct, total_shares=100,
+                        holding_type=holding_type,
+                    )
+                    if len(split.entries) > 1:
+                        extras.append(
+                            f"\n📐 분할매수 추천\n"
+                            f"   1차: 50% 즉시 ({_won(price)})\n"
+                            f"   2차: 30% 눌림 ({_won(split.entries[1]['price'])})\n"
+                            f"   3차: 20% 돌파확인 ({_won(split.entries[2]['price'])})"
+                        )
+            except Exception:
+                pass
+        # 확신도 표시
+        if composite_score >= 130:
+            extras.append("\n🔥 확신도: ★★★★★ 매우 높음")
+        elif composite_score >= 110:
+            extras.append("\n⭐ 확신도: ★★★★ 높음")
+        elif composite_score >= 90:
+            extras.append("\n✨ 확신도: ★★★ 보통")
+
+        if extras:
+            return base + "".join(extras)
+        return base + " 익절/손절 알림 켜졌어요"
     elif action == "sell":
         return f"{name} {_won(price)} 매도 기록 ({pnl_pct:+.1f}%) \U0001f3af"
     elif action == "skip":
