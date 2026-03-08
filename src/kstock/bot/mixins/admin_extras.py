@@ -2698,7 +2698,7 @@ class AdminExtrasMixin:
             [InlineKeyboardButton("🐛 오류 신고", callback_data="agent:bug")],
             [InlineKeyboardButton("💡 기능 요청", callback_data="agent:feature")],
             [InlineKeyboardButton("❓ 질문하기", callback_data="agent:question")],
-            [InlineKeyboardButton("📋 v8 기능 설명서", callback_data="agent:v8doc")],
+            [InlineKeyboardButton("📋 v9.6 기능 설명서", callback_data="agent:v8doc")],
             [InlineKeyboardButton("🔙 나가기", callback_data="agent:exit")],
         ]
         await update.message.reply_text(
@@ -2738,21 +2738,19 @@ class AdminExtrasMixin:
                 "예: '모멘텀 전략이 뭔가요?', '자동매매는 언제 되나요?'"
             )
         elif payload == "v8doc":
-            # v8.7: 버전 설명서 PDF 생성 및 전송
-            await safe_edit_or_reply(query, "📋 v8 기능 설명서 PDF 생성 중...")
+            # v9.6: 버전 설명서 PDF 생성 및 전송
+            await safe_edit_or_reply(query, "📋 v9.6 기능 설명서 PDF 생성 중...")
             try:
                 import subprocess as _sp
-                # __file__ = src/kstock/bot/mixins/admin_extras.py → 4단계 상위 = 프로젝트 루트
                 _here = os.path.abspath(__file__)
                 proj = os.path.dirname(os.path.dirname(os.path.dirname(
                     os.path.dirname(os.path.dirname(_here)))))
-                script = os.path.join(proj, "scripts", "gen_v8_doc.py")
-                # 폴백: 환경변수 또는 하드코딩
+                script = os.path.join(proj, "scripts", "gen_v96_doc.py")
                 if not os.path.exists(script):
                     proj = os.environ.get("PROJECT_DIR", "/Users/botddol/k-quant-system")
-                    script = os.path.join(proj, "scripts", "gen_v8_doc.py")
+                    script = os.path.join(proj, "scripts", "gen_v96_doc.py")
                 if not os.path.exists(script):
-                    await query.message.reply_text("⚠️ gen_v8_doc.py 스크립트를 찾을 수 없습니다.")
+                    await query.message.reply_text("⚠️ gen_v96_doc.py 스크립트를 찾을 수 없습니다.")
                     return
                 import sys as _sys
                 result = _sp.run(
@@ -2760,22 +2758,21 @@ class AdminExtrasMixin:
                     capture_output=True, text=True, timeout=30,
                     cwd=proj, env={**os.environ, "PYTHONPATH": os.path.join(proj, "src")},
                 )
-                # PDF 파일 찾기
                 from datetime import datetime as _dt
-                pdf_name = f"K-Quant_v8_Features_{_dt.now().strftime('%Y%m%d')}.pdf"
+                pdf_name = f"K-Quant_v96_Features_{_dt.now().strftime('%Y%m%d')}.pdf"
                 pdf_path = os.path.join(proj, "reports", pdf_name)
                 if os.path.exists(pdf_path):
                     with open(pdf_path, "rb") as f:
                         await query.message.reply_document(
                             document=f,
-                            filename="K-Quant_v8_Features.pdf",
-                            caption="📋 K-Quant System v9.1 기능 설명서",
+                            filename="K-Quant_v96_Features.pdf",
+                            caption="📋 K-Quant System v9.6 기능 설명서",
                         )
                 else:
                     await query.message.reply_text(
                         f"⚠️ PDF 생성 실패\n{result.stderr[:500] if result.stderr else '알 수 없는 오류'}")
             except Exception as e:
-                logger.error("v8doc generation failed: %s", e, exc_info=True)
+                logger.error("v96doc generation failed: %s", e, exc_info=True)
                 await query.message.reply_text(f"⚠️ 설명서 생성 실패: {e}")
             return
         elif payload == "exit":
