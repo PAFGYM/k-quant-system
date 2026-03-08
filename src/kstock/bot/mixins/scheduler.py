@@ -5320,6 +5320,28 @@ class SchedulerMixin:
             except Exception as e:
                 logger.debug("Learning engine update: %s", e)
 
+            # v9.5.4: 매일 보유 섹터 딥다이브 자동 갱신
+            try:
+                from kstock.bot.sector_intelligence import (
+                    detect_user_focus_sectors,
+                    generate_sector_deep_dive,
+                )
+                import anthropic as _anthropic
+                _ai_client = _anthropic.Anthropic()
+                focus_sectors = detect_user_focus_sectors(self.db)
+                for sk in focus_sectors[:2]:  # 상위 2개 섹터만
+                    try:
+                        result = await generate_sector_deep_dive(
+                            self.db, sk, anthropic_client=_ai_client,
+                            include_peers=True,
+                        )
+                        if result.get("report") and not result.get("cached"):
+                            logger.info("sector deep-dive generated: %s", sk)
+                    except Exception as e2:
+                        logger.debug("sector deep-dive %s failed: %s", sk, e2)
+            except Exception as e:
+                logger.debug("Sector deep-dive update: %s", e)
+
             self.db.upsert_job_run(
                 "signal_evaluation", _today(), status="success",
                 message=f"evaluated={evaluated}, sources={len(weights)}{mgr_msg}",

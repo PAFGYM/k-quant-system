@@ -1984,6 +1984,9 @@ class CoreHandlersMixin:
             "aistat": self._action_ai_accuracy,
             # v9.5: 뒤로가기
             "back": self._action_back,
+            # v9.5.4: 섹터 딥다이브 + 비주얼 브리핑
+            "sdive": self._action_sector_dive,
+            "vchart": self._action_visual_chart,
         }
 
     async def handle_callback(
@@ -2152,6 +2155,196 @@ class CoreHandlersMixin:
                     logger.debug("_action_back handler %s failed", action, exc_info=True)
         # fallback: 닫기
         await self._action_dismiss(query, context, "0")
+
+    # == v9.5.4: 비주얼 차트 ===================================================
+
+    async def _action_visual_chart(self, query, context, payload: str) -> None:
+        """비주얼 브리핑 — 차트 이미지 생성/전송."""
+        try:
+            from kstock.bot.visual_briefing import (
+                generate_portfolio_chart,
+                generate_manager_scorecard_chart,
+                generate_sector_momentum_chart,
+                generate_pnl_trend_chart,
+                generate_visual_briefing,
+            )
+        except ImportError:
+            await safe_edit_or_reply(query, "❌ 비주얼 브리핑 모듈 로드 실패")
+            return
+
+        chat_id = query.message.chat_id
+
+        if payload == "menu" or not payload:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            buttons = [
+                [InlineKeyboardButton("📊 포트폴리오 현황", callback_data="vchart:portfolio")],
+                [InlineKeyboardButton("📈 수익 추이", callback_data="vchart:pnl")],
+                [InlineKeyboardButton("🔄 섹터 분석", callback_data="vchart:sector")],
+                [InlineKeyboardButton("🎯 매니저 성적", callback_data="vchart:manager")],
+                [InlineKeyboardButton("📋 전체 브리핑", callback_data="vchart:all")],
+                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+            ]
+            await safe_edit_or_reply(
+                query,
+                "📊 비주얼 브리핑\n━" + "━" * 24 + "\n"
+                "차트 유형을 선택하세요:",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        await safe_edit_or_reply(query, "📊 차트 생성 중... ⏳")
+
+        img_data = None
+        caption = ""
+
+        if payload == "portfolio":
+            img_data = generate_portfolio_chart(self.db)
+            caption = "📊 포트폴리오 현황"
+        elif payload == "pnl":
+            img_data = generate_pnl_trend_chart(self.db)
+            caption = "📈 수익 추이"
+        elif payload == "sector":
+            img_data = generate_sector_momentum_chart(self.db)
+            caption = "🔄 섹터 모멘텀"
+        elif payload == "manager":
+            img_data = generate_manager_scorecard_chart(self.db)
+            caption = "🎯 매니저 성적표"
+        elif payload == "all":
+            charts = await generate_visual_briefing(self.db)
+            if charts:
+                for cap, img in charts:
+                    try:
+                        import io
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=io.BytesIO(img),
+                            caption=cap,
+                        )
+                    except Exception as e:
+                        logger.debug("send_photo failed: %s", e)
+                await safe_edit_or_reply(query, f"✅ {len(charts)}개 차트 전송 완료")
+            else:
+                await safe_edit_or_reply(query, "❌ 생성 가능한 차트가 없습니다.")
+            return
+
+        if img_data:
+            try:
+                import io
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=io.BytesIO(img_data),
+                    caption=caption,
+                )
+                await safe_edit_or_reply(query, f"✅ {caption} 차트 전송 완료")
+            except Exception as e:
+                logger.error("send_photo failed: %s", e)
+                await safe_edit_or_reply(query, f"❌ 차트 전송 실패: {e}")
+        else:
+            await safe_edit_or_reply(query, "❌ 데이터 부족으로 차트를 생성할 수 없습니다.")
+
+    # == v9.5.4: 섹터 딥다이브 ================================================
+
+    async def _action_sector_dive(self, query, context, payload: str) -> None:
+        """섹터 딥다이브 인텔리전스 — 애널리스트급 심층 분석."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        try:
+            from kstock.bot.sector_intelligence import (
+                SECTOR_DEEP_DIVE_CONFIG,
+                generate_sector_deep_dive,
+                format_deep_dive_telegram,
+                detect_user_focus_sectors,
+            )
+        except ImportError:
+            await safe_edit_or_reply(query, "❌ 섹터 인텔리전스 모듈 로드 실패")
+            return
+
+        if payload == "menu" or not payload:
+            # 섹터 선택 메뉴
+            focus_sectors = detect_user_focus_sectors(self.db)
+            buttons = []
+            for key, cfg in SECTOR_DEEP_DIVE_CONFIG.items():
+                label = f"{cfg['emoji']} {cfg['label']}"
+                if key in focus_sectors:
+                    label += " 💼"
+                buttons.append(
+                    [InlineKeyboardButton(label, callback_data=f"sdive:{key}")]
+                )
+            buttons.append(
+                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")]
+            )
+            await safe_edit_or_reply(
+                query,
+                "🔬 섹터 딥다이브 인텔리전스\n"
+                "━" * 25 + "\n"
+                "분석할 섹터를 선택하세요.\n"
+                "💼 표시 = 현재 보유 섹터",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        # 특정 섹터 딥다이브 실행
+        sector_key = payload
+        config = SECTOR_DEEP_DIVE_CONFIG.get(sector_key)
+        if not config:
+            await safe_edit_or_reply(query, f"❌ 알 수 없는 섹터: {sector_key}")
+            return
+
+        # 분석 중 메시지
+        await safe_edit_or_reply(
+            query,
+            f"{config['emoji']} {config['label']} 딥다이브 분석 중...\n"
+            "📊 증권사 리포트 + 유튜브 + 뉴스 + 글로벌 피어 종합 분석\n"
+            "⏳ 20~30초 소요"
+        )
+
+        # AI 클라이언트
+        anthropic_client = None
+        if hasattr(self, "ai") and hasattr(self.ai, "client"):
+            anthropic_client = self.ai.client
+        elif hasattr(self, "_anthropic_client"):
+            anthropic_client = self._anthropic_client
+        else:
+            try:
+                import anthropic
+                anthropic_client = anthropic.Anthropic()
+            except Exception:
+                pass
+
+        result = await generate_sector_deep_dive(
+            self.db, sector_key,
+            anthropic_client=anthropic_client,
+            include_peers=True,
+        )
+
+        if result.get("error"):
+            await safe_edit_or_reply(
+                query,
+                f"❌ 딥다이브 생성 실패: {result['error']}"
+            )
+            return
+
+        report = result.get("report", {})
+        text = format_deep_dive_telegram(report)
+
+        cached = result.get("cached", False)
+        if cached:
+            text += "\n\n📦 캐시된 리포트 (6시간 이내)"
+
+        # 후속 액션 버튼
+        buttons = [
+            [InlineKeyboardButton("🔄 새로 분석", callback_data=f"sdive:{sector_key}")],
+            [InlineKeyboardButton("📋 다른 섹터", callback_data="sdive:menu")],
+            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+        ]
+
+        # 메시지 길이 제한 (텔레그램 4096자)
+        if len(text) > 4000:
+            text = text[:3950] + "\n\n... (상세 내용 축약)"
+
+        await safe_edit_or_reply(
+            query, text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
     async def _action_dismiss(self, query, context, payload: str) -> None:
         """범용 닫기 버튼 — 메뉴를 닫고 상태 정리 + Reply Keyboard 복구.

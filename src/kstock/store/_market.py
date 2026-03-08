@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -935,6 +936,87 @@ class MarketMixin:
             return [dict(row) for row in rows]
         except Exception as e:
             logger.error("get_recent_briefings error: %s", e)
+            return []
+
+    # -- sector_deep_dive (v9.5.4) --------------------------------------------
+
+    def save_sector_deep_dive(
+        self, sector_key: str, report_json: str, data_sources: str = "{}",
+    ) -> bool:
+        """섹터 딥다이브 리포트 저장."""
+        try:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._connect() as conn:
+                conn.execute(
+                    """INSERT INTO sector_deep_dive
+                    (sector_key, report_json, data_sources, created_at)
+                    VALUES (?, ?, ?, ?)""",
+                    (sector_key, report_json, data_sources, now),
+                )
+            return True
+        except Exception as e:
+            logger.error("save_sector_deep_dive error: %s", e)
+            return False
+
+    def get_sector_deep_dive(
+        self, sector_key: str, hours: int = 24,
+    ) -> dict | None:
+        """최근 섹터 딥다이브 리포트 조회."""
+        import json as _json
+        cutoff = (
+            datetime.now() - timedelta(hours=hours)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    """SELECT report_json, data_sources, created_at
+                    FROM sector_deep_dive
+                    WHERE sector_key = ? AND created_at >= ?
+                    ORDER BY created_at DESC LIMIT 1""",
+                    (sector_key, cutoff),
+                ).fetchone()
+            if not row:
+                return None
+            report = _json.loads(row["report_json"])
+            report["_cached_at"] = row["created_at"]
+            return report
+        except Exception as e:
+            logger.error("get_sector_deep_dive error: %s", e)
+            return None
+
+    def get_all_recent_deep_dives(self, hours: int = 48) -> list[dict]:
+        """최근 모든 섹터 딥다이브 리포트 조회 (컨텍스트 주입용)."""
+        import json as _json
+        cutoff = (
+            datetime.now() - timedelta(hours=hours)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """SELECT sector_key, report_json, created_at
+                    FROM sector_deep_dive
+                    WHERE created_at >= ?
+                    ORDER BY created_at DESC""",
+                    (cutoff,),
+                ).fetchall()
+            results = []
+            seen = set()
+            for row in rows:
+                key = row["sector_key"]
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    report = _json.loads(row["report_json"])
+                    report["_cached_at"] = row["created_at"]
+                    results.append(report)
+                except Exception:
+                    continue
+            return results
+        except Exception as e:
+            logger.error("get_all_recent_deep_dives error: %s", e)
             return []
 
     # -- surge_stocks ----------------------------------------------------------

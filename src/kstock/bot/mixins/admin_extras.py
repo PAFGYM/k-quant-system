@@ -1045,8 +1045,10 @@ class AdminExtrasMixin:
              InlineKeyboardButton("📡 KIS설정", callback_data="menu:kis_setup")],
             [InlineKeyboardButton("🔔 알림 설정", callback_data="menu:notification"),
              InlineKeyboardButton("⚙️ 최적화", callback_data="menu:optimize")],
-            [InlineKeyboardButton("📋 오늘의 할 일", callback_data="menu:daily_actions"),
-             InlineKeyboardButton("📖 온보딩", callback_data="menu:onboarding")],
+            [InlineKeyboardButton("🔬 섹터 딥다이브", callback_data="sdive:menu"),
+             InlineKeyboardButton("📊 비주얼 차트", callback_data="vchart:menu")],
+            [InlineKeyboardButton("📖 온보딩", callback_data="menu:onboarding"),
+             InlineKeyboardButton("📋 오늘의 할 일", callback_data="menu:daily_actions")],
             [InlineKeyboardButton("🛠 관리자", callback_data="menu:admin")],
             [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:more")],
         ]
@@ -1084,6 +1086,9 @@ class AdminExtrasMixin:
             [
                 InlineKeyboardButton("📊 멀티분석", callback_data="hub:multi"),
                 InlineKeyboardButton("⚠️ 리스크 점검", callback_data="quick_q:risk"),
+            ],
+            [
+                InlineKeyboardButton("🔬 섹터 딥다이브", callback_data="sdive:menu"),
             ],
             make_feedback_row("분석허브"),
         ]

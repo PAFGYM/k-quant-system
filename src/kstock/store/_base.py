@@ -1223,6 +1223,18 @@ CREATE TABLE IF NOT EXISTS event_score_adjustments (
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_adj_expires ON event_score_adjustments(expires_at);
+
+-- v9.5.4: 섹터 딥다이브 리서치 리포트 (AI 생성, 캐시)
+CREATE TABLE IF NOT EXISTS sector_deep_dive (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    sector_key      TEXT    NOT NULL,
+    report_json     TEXT    NOT NULL,
+    data_sources    TEXT    DEFAULT '{}',
+    created_at      TEXT    NOT NULL,
+    UNIQUE(sector_key, created_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sector_dive_key ON sector_deep_dive(sector_key, created_at);
 """
 
 

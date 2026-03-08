@@ -258,6 +258,12 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 [멀티에이전트 분석 점수]
 {multi_agent_scores}
 
+[학습 엔진 — 매니저 성적/매매 패턴/이벤트 조정]
+{learning_context}
+
+[섹터 딥다이브 인텔리전스]
+{sector_intelligence}
+
 [종목 분석 시 필수 포인트 태깅]
 보유 종목처럼 위 데이터에 현재가가 있는 경우만:
 🟡 관심: 아직 매수 타이밍 아님, 조건 제시
@@ -352,6 +358,8 @@ def build_system_prompt(context: dict) -> str:
         recent_briefing=context.get("recent_briefing", "오늘 아직 브리핑 없음"),
         manager_stances=context.get("manager_stances", "매니저 의견 없음"),
         multi_agent_scores=context.get("multi_agent_scores", "멀티에이전트 분석 없음"),
+        learning_context=context.get("learning_context", "학습 데이터 없음"),
+        sector_intelligence=context.get("sector_intelligence", "섹터 딥다이브 미생성"),
     )
 
 
@@ -1083,6 +1091,22 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
     except Exception:
         logger.debug("Learning context injection failed", exc_info=True)
 
+    # v9.5.4: 섹터 딥다이브 인텔리전스 주입
+    sector_dive_text = ""
+    try:
+        from kstock.bot.sector_intelligence import format_deep_dive_for_context
+        deep_dives = db.get_all_recent_deep_dives(hours=48)
+        if deep_dives:
+            sd_lines = []
+            for dd in deep_dives[:3]:
+                ctx = format_deep_dive_for_context(dd)
+                if ctx:
+                    sd_lines.append(ctx)
+            if sd_lines:
+                sector_dive_text = "\n\n".join(sd_lines)
+    except Exception:
+        logger.debug("Sector deep dive context injection failed", exc_info=True)
+
     return {
         "portfolio": portfolio,
         "market": market,
@@ -1099,6 +1123,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
         "manager_stances": manager_stances_text,
         "multi_agent_scores": multi_agent_text,
         "learning_context": learning_context,
+        "sector_intelligence": sector_dive_text,
     }
 
 
