@@ -994,22 +994,7 @@ class CoreHandlersMixin:
             "📖 온보딩": self._menu_onboarding,
             "📖 사용설명서": self._menu_guide,
             "📋 오늘의 할 일": self._menu_daily_actions,
-            # ── 이전 메뉴 하위호환 ──
-            "\U0001f4d6 사용법 가이드": self._menu_usage_guide,
-            "\U0001f514 알림": self._menu_notification_settings,
-            "\U0001f30d 시장현황": self._menu_market_status,
-            "\U0001f4c8 추천 성과": self._menu_reco_performance,
-            "\U0001f4ac AI에게 질문": self._menu_ai_chat,
-            "\U0001f4cb 증권사 리포트": self._menu_reports,
-            "\U0001f916 에이전트": self._menu_agent_chat,
-            "\U0001f514 실시간 알림": self._menu_alerts,
-            "\U0001f4ca 오늘의 추천종목": self._menu_recommendations,
-            "\U0001f4bc 내 포트폴리오": self._menu_portfolio,
-            "\U0001f4ca 백테스트": self._menu_backtest,
-            "\u2753 도움말": self._menu_usage_guide,
-            "\U0001f4b0 잔고": self._menu_balance,
-            "\U0001f4cb 리포트": self._menu_reports,
-            "\U0001f4e1 KIS설정": self._menu_kis_setup,
+            # v9.6.2: 이전 하위호환 메뉴 삭제 (v9.0 이후 Reply Keyboard만 사용)
         }
         handler = handlers.get(text)
         if handler:

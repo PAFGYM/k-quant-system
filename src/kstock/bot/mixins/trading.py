@@ -899,12 +899,16 @@ class TradingMixin:
             if extras:
                 text += "\n" + "\n".join(extras)
 
-            # 후속 액션 버튼
+            # v9.6.2: 후속 액션 버튼 강화 (4→6개)
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             kb = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("🎙️ 재토론", callback_data=f"mgr_debate:{ticker}"),
                     InlineKeyboardButton("📜 토론 이력", callback_data=f"debhist:{ticker}"),
+                ],
+                [
+                    InlineKeyboardButton("🔍 다른종목", callback_data="menu:debate"),
+                    InlineKeyboardButton("📊 종목상세", callback_data=f"fav:stock:{ticker}"),
                 ],
                 [
                     InlineKeyboardButton("📊 차트", callback_data=f"fav:chtm:{ticker}"),

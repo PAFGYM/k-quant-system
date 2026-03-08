@@ -1067,25 +1067,18 @@ class AdminExtrasMixin:
     ) -> None:
         """더보기 메뉴 — InlineKeyboard로 표시하여 클로드 메뉴(Reply Keyboard) 유지."""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        # v9.6.2: 22→12개로 정리 (중복/실험적 기능 제거)
         buttons = [
-            [InlineKeyboardButton("📸 계좌분석", callback_data="menu:account_analysis"),
-             InlineKeyboardButton("🎯 전략별 보기", callback_data="menu:strategy_view")],
             [InlineKeyboardButton("🔥 급등주", callback_data="menu:surge"),
              InlineKeyboardButton("⚡ 스윙 기회", callback_data="menu:swing")],
             [InlineKeyboardButton("📊 멀티분석", callback_data="menu:multi_agent"),
              InlineKeyboardButton("🕵️ 매집탐지", callback_data="menu:accumulation")],
             [InlineKeyboardButton("📅 주간 보고서", callback_data="menu:weekly_report"),
              InlineKeyboardButton("📊 공매도", callback_data="menu:short")],
-            [InlineKeyboardButton("🚀 미래기술", callback_data="menu:future_tech"),
-             InlineKeyboardButton("🎯 30억 목표", callback_data="menu:goal")],
-            [InlineKeyboardButton("📊 재무 진단", callback_data="menu:financial"),
-             InlineKeyboardButton("📡 KIS설정", callback_data="menu:kis_setup")],
-            [InlineKeyboardButton("🔔 알림 설정", callback_data="menu:notification"),
-             InlineKeyboardButton("⚙️ 최적화", callback_data="menu:optimize")],
-            [InlineKeyboardButton("🔬 섹터 딥다이브", callback_data="sdive:menu"),
-             InlineKeyboardButton("📊 비주얼 차트", callback_data="vchart:menu")],
             [InlineKeyboardButton("🎙️ AI 토론", callback_data="menu:debate"),
-             InlineKeyboardButton("📋 오늘의 할 일", callback_data="menu:daily_actions")],
+             InlineKeyboardButton("🔬 섹터 딥다이브", callback_data="sdive:menu")],
+            [InlineKeyboardButton("🔔 알림 설정", callback_data="menu:notification"),
+             InlineKeyboardButton("📡 KIS설정", callback_data="menu:kis_setup")],
             [InlineKeyboardButton("📖 사용설명서", callback_data="guide:main"),
              InlineKeyboardButton("🛠 관리자", callback_data="menu:admin")],
             [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:more")],
