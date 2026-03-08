@@ -474,11 +474,17 @@ def _clean_reasoning(text: str) -> str:
     """reasoning에서 JSON/코드펜스 잔여물 제거."""
     if not text:
         return ""
-    # markdown 코드펜스 제거
+    # 닫힌 코드펜스 제거: ```json ... ```
     text = re.sub(r'```(?:json)?.*?```', '', text, flags=re.DOTALL)
-    # JSON 블록 제거
-    text = re.sub(r'\{[^}]*\}', '', text, flags=re.DOTALL)
+    # 닫히지 않은 코드펜스도 제거: ```json ... (끝까지)
+    text = re.sub(r'```\w*.*$', '', text, flags=re.DOTALL)
+    # 남은 ``` 마커 제거
+    text = text.replace('```', '')
+    # JSON 블록 제거 (완결/미완결 모두)
+    text = re.sub(r'\{.*?\}', '', text, flags=re.DOTALL)
+    text = re.sub(r'\{[^}]*$', '', text)  # 닫히지 않은 { 제거
     text = re.sub(r'^\s*[\-\*]\s*', '', text)  # 불릿 제거
+    text = re.sub(r'"[^"]*"', '', text)  # 남은 JSON 키/값 따옴표 제거
     return text.strip()
 
 
@@ -514,7 +520,8 @@ def format_debate_telegram(result: DebateResult) -> str:
         lines.append(f"{ae} {op.manager_name}: {op.action}{change_mark} — {reason}")
     lines.append("")
 
-    # Round 3 합의
+    # Round 3 최종 종합
+    lines.append("📍 Round 3: 최종 종합")
     lines.append("━" * 20)
     ae = _ACTION_EMOJI.get(result.final_verdict, "⚪")
     buy_count = sum(1 for op in result.round2_opinions if op.action == result.final_verdict)
@@ -535,6 +542,16 @@ def format_debate_telegram(result: DebateResult) -> str:
 
     if result.dissenting_view:
         lines.append(f"⚠️ 소수 의견: {result.dissenting_view}")
+
+    # 의견 분포 요약
+    action_counts: dict[str, int] = {}
+    for op in result.round2_opinions:
+        action_counts[op.action] = action_counts.get(op.action, 0) + 1
+    if action_counts:
+        dist = " / ".join(
+            f"{_ACTION_EMOJI.get(a, '⚪')}{a} {c}명" for a, c in action_counts.items()
+        )
+        lines.append(f"\n투표: {dist}")
 
     return "\n".join(lines)
 
