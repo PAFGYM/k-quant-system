@@ -1,7 +1,7 @@
-"""K-Quant v10.0 LightGBM + XGBoost ensemble predictor.
+"""K-Quant v10.1 LightGBM + XGBoost ensemble predictor.
 
 Binary classification: will the stock's 5-business-day return exceed +3%?
-Uses 46 features (30 core + 16 Korea-specific) from the K-Quant data pipeline.
+Uses 48 features (30 core + 16 Korea + 2 anomaly) from the K-Quant data pipeline.
 
 The module degrades gracefully -- if lightgbm, xgboost, shap, or optuna are
 not installed, predictions fall back to a neutral 50% probability.
@@ -128,9 +128,12 @@ FEATURE_NAMES: list[str] = [
     "institution_net_amount",   # 기관 순매수 금액 (10억 단위 클램프)
     "foreign_inst_alignment",   # 외인+기관 동조 (1=동매수, -1=동매도, 0=혼합)
     "retail_contrarian",        # 개인 역발상 지표 (-1~+1)
+    # ── v10.1: Anomaly Detection (2) ──
+    "anomaly_score",            # 이상 거래 종합 점수 (0~100)
+    "anomaly_type_encoded",     # 이상 유형 (0=없음, 1=거래량, 2=매집, 3=돌파, 4=숏스퀴즈, 5=신용)
 ]
 
-_NUM_FEATURES = 46
+_NUM_FEATURES = 48
 
 assert len(FEATURE_NAMES) == _NUM_FEATURES, (
     f"Expected {_NUM_FEATURES} features, got {len(FEATURE_NAMES)}"
@@ -329,8 +332,11 @@ def build_features(
     sentiment_data: dict | None = None,
     korea_risk_score: float = 0.0,
     weekly_acc_score: float = 0.0,
+    # v10.1: 이상 탐지 피처
+    anomaly_score: float = 0.0,
+    anomaly_type_encoded: int = 0,
 ) -> dict[str, float]:
-    """Build the 46-feature dict from K-Quant data objects.
+    """Build the 48-feature dict from K-Quant data objects.
 
     Args:
         tech: ``TechnicalIndicators`` instance.
@@ -343,9 +349,11 @@ def build_features(
         sentiment_data: Dict with youtube/news data.
         korea_risk_score: Korea risk total (0~100).
         weekly_acc_score: Weekly accumulation pattern score (0~100).
+        anomaly_score: 이상 거래 종합 점수 (0~100).
+        anomaly_type_encoded: 이상 유형 인코딩.
 
     Returns:
-        Dict mapping each of the 46 feature names to a float value.
+        Dict mapping each of the 48 feature names to a float value.
     """
     current_price = getattr(info, "current_price", 0.0) or 1.0
     high_52w = getattr(tech, "high_52w", 0.0) or 1.0
@@ -408,6 +416,10 @@ def build_features(
     features["korea_risk_score"] = float(korea_risk_score)
     features["weekly_accumulation"] = float(weekly_acc_score)
     features.update(_build_advanced_flow_features(korea_flow))
+
+    # v10.1: 이상 탐지 피처
+    features["anomaly_score"] = float(anomaly_score)
+    features["anomaly_type_encoded"] = float(anomaly_type_encoded)
 
     return features
 

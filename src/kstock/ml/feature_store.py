@@ -96,7 +96,7 @@ class FeatureStore:
         Default time-to-live for cleanup operations.
     """
 
-    def __init__(self, db_path: str | Path = "data/features.db", ttl_days: int = 90):
+    def __init__(self, db_path: str | Path = "data/features.db", ttl_days: int = 365):
         self.db_path = str(db_path)
         self.ttl_days = ttl_days
         self._conn: sqlite3.Connection | None = None
@@ -225,6 +225,46 @@ class FeatureStore:
             "SELECT ticker, value FROM features "
             "WHERE date = ? AND feature_name = ?",
             (date, feature_name),
+        )
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+    # -- v10.1: training data helpers ----------------------------------------
+
+    def get_available_dates(self, before: str = "", limit: int = 60) -> list[str]:
+        """feature_store에 기록된 고유 날짜 목록 (최신순).
+
+        Args:
+            before: 이 날짜 이전만 반환 (빈 문자열이면 전체).
+            limit: 최대 반환 개수.
+        """
+        if before:
+            cur = self.conn.execute(
+                "SELECT DISTINCT date FROM features "
+                "WHERE date < ? ORDER BY date DESC LIMIT ?",
+                (before, limit),
+            )
+        else:
+            cur = self.conn.execute(
+                "SELECT DISTINCT date FROM features "
+                "ORDER BY date DESC LIMIT ?",
+                (limit,),
+            )
+        return [row[0] for row in cur.fetchall()]
+
+    def get_tickers_for_date(self, date_str: str) -> list[str]:
+        """특정 날짜에 피처가 저장된 종목 코드 목록."""
+        cur = self.conn.execute(
+            "SELECT DISTINCT ticker FROM features WHERE date = ?",
+            (date_str,),
+        )
+        return [row[0] for row in cur.fetchall()]
+
+    def get_features_dict(self, ticker: str, date_str: str) -> dict[str, float]:
+        """종목+날짜의 피처를 {name: value} dict로 반환 (학습 데이터용)."""
+        cur = self.conn.execute(
+            "SELECT feature_name, value FROM features "
+            "WHERE ticker = ? AND date = ?",
+            (ticker, date_str),
         )
         return {row[0]: row[1] for row in cur.fetchall()}
 

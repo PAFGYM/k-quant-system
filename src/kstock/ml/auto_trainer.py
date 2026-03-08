@@ -495,18 +495,19 @@ class AutoTrainer:
             )
 
     async def _collect_training_data(self) -> list[dict]:
-        """DB + yfinance에서 학습 데이터 수집.
+        """DB + feature_store에서 학습 데이터 수집.
 
-        기존 predictor.build_features()로 feature dict 구성 후
-        5영업일 후 수익률 기준 target 라벨링.
+        v10.1: feature_store 우선 → recommendation_results 보조 → 합성 폴백.
         """
         if not self.db:
             return []
 
-        # DB에서 추천 이력 기반 학습 데이터 수집
-        training_data = []
+        # 1. Feature Store 기반 (best quality — 전 종목 일별 데이터)
+        fs_data = self._collect_from_feature_store()
+
+        # 2. Recommendation Results (legacy)
+        rec_data = []
         try:
-            # recommendation_results에서 예측-실제 대비
             recs = self.db.get_recommendation_results(limit=500)
             for r in recs:
                 features = r.get("features", {})
@@ -522,12 +523,31 @@ class AutoTrainer:
                 actual_return = r.get("actual_return_pct", 0) or 0
                 target = 1 if actual_return > 3.0 else 0
                 features["target"] = target
-                training_data.append(features)
+                rec_data.append(features)
 
         except Exception as e:
-            logger.debug("Training data collection: %s", e)
+            logger.debug("Recommendation data collection: %s", e)
 
-        # 데이터 부족 시 합성 데이터로 보충 (최소 50개)
+        # 3. Merge (feature_store 우선, dedup by feature hash)
+        seen = set()
+        training_data = []
+        for item in fs_data + rec_data:
+            key = (
+                item.get("rsi", 0),
+                item.get("vix", 0),
+                item.get("per", 0),
+                item.get("target", -1),
+            )
+            if key not in seen:
+                seen.add(key)
+                training_data.append(item)
+
+        logger.info(
+            "Training data collected: %d total (fs=%d, rec=%d)",
+            len(training_data), len(fs_data), len(rec_data),
+        )
+
+        # 4. 합성 데이터 보충 (최소 50개)
         if len(training_data) < 50:
             logger.debug(
                 "Training data insufficient (%d), generating synthetic",
@@ -538,6 +558,91 @@ class AutoTrainer:
             ))
 
         return training_data
+
+    def _collect_from_feature_store(self) -> list[dict]:
+        """feature_store에서 D+5 실제 수익률이 확정된 데이터를 학습용으로 수집.
+
+        v10.1: 매일 스캔 시 축적된 46개 피처 + OHLCV 기반 실제 수익률 매칭.
+        """
+        try:
+            from kstock.ml.feature_store import FeatureStore
+        except ImportError:
+            return []
+
+        training_data = []
+        try:
+            fs = FeatureStore()
+
+            # D+8일(영업일 5일+여유) 이전 데이터만 사용 (수익률 확정)
+            cutoff = (date.today() - timedelta(days=8)).strftime("%Y-%m-%d")
+            dates = fs.get_available_dates(before=cutoff, limit=60)
+
+            if not dates:
+                return []
+
+            for date_str in dates:
+                tickers = fs.get_tickers_for_date(date_str)
+                for ticker in tickers:
+                    features = fs.get_features_dict(ticker, date_str)
+                    if not features or len(features) < 30:
+                        continue
+
+                    # D+5 실제 수익률 계산
+                    actual_return = self._calc_actual_return(ticker, date_str, days=5)
+                    if actual_return is None:
+                        continue
+
+                    features["target"] = 1 if actual_return > 3.0 else 0
+                    training_data.append(features)
+
+            logger.info("Feature store training data: %d samples from %d dates", len(training_data), len(dates))
+        except Exception as e:
+            logger.debug("Feature store data collection failed: %s", e)
+
+        return training_data
+
+    def _calc_actual_return(self, ticker: str, base_date: str, days: int = 5) -> float | None:
+        """base_date 기준 D+days 실제 수익률(%) 계산.
+
+        OHLCV 데이터에서 base_date의 종가와 D+days 종가 비교.
+        """
+        try:
+            if not self.db:
+                return None
+
+            # DB에서 OHLCV 조회 (supply_demand에 price 정보가 없으므로 yfinance 캐시 활용)
+            # 간단한 접근: recommendation_results에서 해당 종목의 actual return 검색
+            recs = self.db.get_recommendation_results(limit=500)
+            for r in recs:
+                if r.get("ticker") == ticker:
+                    created = r.get("created_at", "")
+                    if created and created[:10] == base_date:
+                        ret = r.get("day5_return")
+                        if ret is not None:
+                            return float(ret)
+
+            # 대안: pykrx로 직접 조회
+            try:
+                from pykrx import stock as pykrx_stock
+                base_dt = datetime.strptime(base_date, "%Y-%m-%d")
+                end_dt = base_dt + timedelta(days=days + 5)  # 여유
+
+                df = pykrx_stock.get_market_ohlcv(
+                    base_dt.strftime("%Y%m%d"),
+                    end_dt.strftime("%Y%m%d"),
+                    ticker,
+                )
+                if df is not None and len(df) > days:
+                    base_price = float(df.iloc[0]["종가"])
+                    target_price = float(df.iloc[days]["종가"])
+                    if base_price > 0:
+                        return (target_price - base_price) / base_price * 100
+            except Exception:
+                pass
+
+            return None
+        except Exception:
+            return None
 
     def format_train_report(self) -> str:
         """최근 학습 히스토리 텔레그램 포맷."""

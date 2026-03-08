@@ -339,6 +339,13 @@ class CoreHandlersMixin:
             days=(6,),
             name="lstm_retrain",
         )
+        # v10.1: 텐배거 이상 거래 스캔 (평일 16:30)
+        jq.run_daily(
+            self.job_anomaly_scan,
+            time=dt_time(hour=16, minute=30, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="anomaly_scan",
+        )
         # v6.2.2: 경계 모드에 따른 초기 인터벌 설정
         _acfg = self._get_alert_config() if hasattr(self, '_get_alert_config') else {}
         _risk_iv = _acfg.get("risk_interval", 120)

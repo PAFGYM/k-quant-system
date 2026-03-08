@@ -262,6 +262,19 @@ class CommandsMixin:
             except Exception:
                 logger.debug("weekly_accumulation failed for %s", ticker, exc_info=True)
 
+            # v10.1: 이상 거래 탐지 (anomaly detection)
+            _anomaly_score = 0.0
+            _anomaly_type = 0
+            try:
+                from kstock.ml.anomaly_detector import AnomalyDetector
+                _ad = AnomalyDetector()
+                _sd_data = self.db.get_supply_demand(ticker, days=20) if self.db else []
+                _anomaly = _ad.detect_anomalies(ticker, ohlcv, _sd_data, name=name)
+                _anomaly_score = _anomaly.anomaly_score
+                _anomaly_type = _anomaly.signal_type_encoded
+            except Exception:
+                logger.debug("anomaly detection failed: %s", ticker, exc_info=True)
+
             # v3.0+v10.0: ML bonus + ML probability
             ml_bonus_val = 0
             ml_probability = 0.5  # neutral default
@@ -278,10 +291,21 @@ class CommandsMixin:
                         },
                         korea_risk_score=_mc.get("korea_risk_score", 0.0),
                         weekly_acc_score=weekly_acc_score,
+                        anomaly_score=_anomaly_score,
+                        anomaly_type_encoded=_anomaly_type,
                     )
                     ml_pred = predict(features, self._ml_model)
                     ml_bonus_val = get_ml_bonus(ml_pred.probability)
                     ml_probability = ml_pred.probability
+
+                    # v10.1: 피처를 feature_store에 축적 (학습 데이터)
+                    try:
+                        from kstock.ml.feature_store import FeatureStore
+                        from kstock.ml.predictor import persist_features
+                        _fs = FeatureStore()
+                        persist_features(_fs, ticker, _today(), features)
+                    except Exception:
+                        logger.debug("feature persist failed: %s", ticker, exc_info=True)
                 except Exception:
                     logger.debug("_run_scan_for_stock ML prediction failed for %s", ticker, exc_info=True)
 

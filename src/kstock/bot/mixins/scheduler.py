@@ -3986,6 +3986,48 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("job_ml_auto_train upsert_job_run also failed", exc_info=True)
 
+    async def job_anomaly_scan(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """v10.1: 매일 장 마감 후 텐배거 후보 이상 거래 스캔 (16:30 KST).
+
+        전 종목 대상 Isolation Forest + 규칙 기반 이상 탐지 수행.
+        anomaly_score >= 60인 종목만 텔레그램 알림.
+        """
+        if not self.chat_id:
+            return
+
+        try:
+            from kstock.ml.anomaly_detector import scan_anomalies, format_anomaly_alert
+
+            signals = await scan_anomalies(
+                all_tickers=self.all_tickers,
+                yf_client=self.yf_client,
+                db=self.db,
+                threshold=60.0,
+                max_results=10,
+            )
+
+            if signals:
+                text = format_anomaly_alert(signals)
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=text,
+                    parse_mode="Markdown",
+                )
+                logger.info("Anomaly scan: %d signals sent", len(signals))
+            else:
+                logger.info("Anomaly scan: no significant anomalies found")
+
+            self.db.upsert_job_run("anomaly_scan", _today(), status="success")
+
+        except Exception as e:
+            logger.error("Anomaly scan job error: %s", e, exc_info=True)
+            try:
+                self.db.upsert_job_run("anomaly_scan", _today(), status="error")
+            except Exception:
+                logger.debug("job_anomaly_scan upsert_job_run also failed", exc_info=True)
+
     async def job_risk_monitor(
         self, context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
