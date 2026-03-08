@@ -630,10 +630,18 @@ class MarketMixin:
         with self._connect() as conn:
             for item in items:
                 url = item.get("url", "")
-                # URL 기반 중복 체크
+                title = item.get("title", "")
+                # URL 기반 중복 체크 (URL 없으면 제목으로 체크)
                 if url:
                     existing = conn.execute(
                         "SELECT id FROM global_news WHERE url=?", (url,)
+                    ).fetchone()
+                    if existing:
+                        continue
+                elif title:
+                    existing = conn.execute(
+                        "SELECT id FROM global_news WHERE title=? AND created_at>=?",
+                        (title, (datetime.now() - timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S")),
                     ).fetchone()
                     if existing:
                         continue
@@ -696,7 +704,7 @@ class MarketMixin:
 
     # -- sent_urgent_alerts (v9.5.3) 긴급 알림 중복 방지 -----------------------
 
-    def is_alert_sent(self, alert_hash: str, hours: int = 6) -> bool:
+    def is_alert_sent(self, alert_hash: str, hours: int = 24) -> bool:
         """이 해시의 긴급 알림이 최근 N시간 내 전송됐는지 확인."""
         cutoff = (
             datetime.now() - timedelta(hours=hours)

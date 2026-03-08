@@ -358,8 +358,9 @@ def filter_urgent_news(items: list[NewsItem]) -> list[NewsItem]:
     for item in items:
         if not item.is_urgent:
             continue
-        # YouTube 방송 코멘터리 제외
-        if item.video_id and item.source in _YOUTUBE_COMMENTARY_SOURCES:
+        # YouTube 방송 코멘터리 제외 (🎬 접두사 제거 후 비교)
+        raw_source = item.source.lstrip("🎬")
+        if item.video_id and raw_source in _YOUTUBE_COMMENTARY_SOURCES:
             continue
         urgent.append(item)
     return urgent
@@ -786,16 +787,18 @@ def _format_urgent_alert_basic(groups: list[list[NewsItem]]) -> str:
 def make_alert_hash(items: list[NewsItem]) -> str:
     """긴급 뉴스 그룹의 해시 키 생성 (DB 중복 방지용).
 
+    v9.6.3: 대표 기사(첫 번째) 제목 기준 해시 — 그룹 구성 변경 시에도 안정적.
     핵심 명사만 추출하여 정렬 후 해시 → 제목 변형에도 동일 해시.
     """
     import hashlib
-    # 모든 제목의 핵심 단어 합집합
-    all_words = set()
-    for item in items:
-        words = _normalize_title(item.title).split()
-        # 2글자 이상 단어만 (조사/접속사 제거)
-        all_words.update(w for w in words if len(w) >= 2)
-    key = "|".join(sorted(all_words))
+    if not items:
+        return "empty"
+    # 대표 기사(impact 최고) 제목의 핵심 단어만 사용 — 그룹 변경에도 해시 안정
+    rep = max(items, key=lambda x: x.impact_score)
+    words = _normalize_title(rep.title).split()
+    # 2글자 이상 단어만 (조사/접속사 제거)
+    key_words = sorted(w for w in words if len(w) >= 2)
+    key = "|".join(key_words)
     return hashlib.md5(key.encode()).hexdigest()[:16]
 
 
