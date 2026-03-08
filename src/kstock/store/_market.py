@@ -693,6 +693,42 @@ class MarketMixin:
             )
         return cursor.rowcount
 
+    # -- sent_urgent_alerts (v9.5.3) 긴급 알림 중복 방지 -----------------------
+
+    def is_alert_sent(self, alert_hash: str, hours: int = 6) -> bool:
+        """이 해시의 긴급 알림이 최근 N시간 내 전송됐는지 확인."""
+        cutoff = (
+            datetime.now() - timedelta(hours=hours)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM sent_urgent_alerts "
+                "WHERE alert_hash=? AND created_at>=?",
+                (alert_hash, cutoff),
+            ).fetchone()
+        return row is not None
+
+    def save_sent_alert(self, alert_hash: str, title_summary: str = "") -> None:
+        """전송한 긴급 알림 해시를 DB에 기록."""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO sent_urgent_alerts "
+                "(alert_hash, title_summary, created_at) VALUES (?, ?, ?)",
+                (alert_hash, title_summary[:200], now),
+            )
+
+    def cleanup_old_alerts(self, days: int = 3) -> int:
+        """오래된 긴급 알림 기록 정리."""
+        cutoff = (
+            datetime.now() - timedelta(days=days)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM sent_urgent_alerts WHERE created_at < ?", (cutoff,)
+            )
+        return cursor.rowcount
+
     # -- youtube_intelligence (v9.5) -------------------------------------------
 
     def save_youtube_intelligence(self, data: dict) -> bool:

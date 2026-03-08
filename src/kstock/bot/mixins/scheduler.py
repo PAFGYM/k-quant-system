@@ -5104,6 +5104,9 @@ class SchedulerMixin:
                 format_crisis_alert,
                 translate_titles_to_korean,
                 enrich_youtube_summaries,
+                group_similar_news,
+                analyze_urgent_news,
+                make_alert_hash,
             )
 
             # 1. RSS 뉴스 수집
@@ -5137,29 +5140,45 @@ class SchedulerMixin:
                 saved = self.db.save_global_news(news_dicts)
                 logger.info("Global news: %d fetched, %d saved", len(items), saved)
 
-                # 2. 긴급 뉴스 감지 → 텔레그램 알림
+                # 2. 긴급 뉴스 감지 → 유사 그룹핑 → AI 분석 → 텔레그램 알림
                 urgent = filter_urgent_news(items)
                 if urgent and self.chat_id:
-                    # 이미 전송한 긴급 뉴스 title 기반 중복 방지
-                    sent_urgent = getattr(self, "_sent_urgent_titles", set())
-                    if not hasattr(self, "_sent_urgent_titles"):
-                        self._sent_urgent_titles = sent_urgent
-                    new_urgent = [
-                        it for it in urgent
-                        if it.title[:30] not in sent_urgent
-                    ]
-                    if new_urgent:
-                        alert_msg = format_urgent_alert(new_urgent)
+                    # v9.5.3: 유사 뉴스 그룹핑 (같은 이벤트 통합)
+                    groups = group_similar_news(urgent, threshold=0.35)
+
+                    # DB 기반 중복 방지 (재시작 후에도 유지)
+                    new_groups = []
+                    for group in groups:
+                        h = make_alert_hash(group)
+                        if not self.db.is_alert_sent(h, hours=6):
+                            new_groups.append(group)
+
+                    if new_groups:
+                        # AI 분석 포함 리치 알림 생성
+                        try:
+                            alert_msg = await analyze_urgent_news(
+                                new_groups, db=self.db,
+                            )
+                        except Exception as e:
+                            logger.warning("AI news analysis failed, fallback: %s", e)
+                            alert_msg = format_urgent_alert(
+                                [g[0] for g in new_groups],
+                            )
+
                         if alert_msg:
                             await context.bot.send_message(
                                 chat_id=self.chat_id, text=alert_msg,
                             )
-                            for it in new_urgent:
-                                sent_urgent.add(it.title[:30])
-                            # 세트 과다 증가 방지
-                            if len(sent_urgent) > 200:
-                                self._sent_urgent_titles = set()
-                            logger.info("Urgent news alert sent: %d items", len(new_urgent))
+                            # DB에 전송 기록
+                            for group in new_groups:
+                                h = make_alert_hash(group)
+                                title = group[0].title[:100]
+                                self.db.save_sent_alert(h, title)
+                            logger.info(
+                                "Urgent news alert sent: %d groups (%d items)",
+                                len(new_groups),
+                                sum(len(g) for g in new_groups),
+                            )
 
                 # 2-1. 뉴스 키워드 기반 경계 모드 자동 에스컬레이션
                 await self._check_news_escalation(items)

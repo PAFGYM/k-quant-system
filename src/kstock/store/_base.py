@@ -1018,6 +1018,14 @@ CREATE TABLE IF NOT EXISTS sent_news_urls (
     created_at TEXT    DEFAULT (datetime('now'))
 );
 
+-- v9.5.3: 긴급 글로벌 알림 중복 방지 (내용 해시 기반)
+CREATE TABLE IF NOT EXISTS sent_urgent_alerts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    alert_hash    TEXT    UNIQUE NOT NULL,
+    title_summary TEXT    DEFAULT '',
+    created_at    TEXT    NOT NULL
+);
+
 -- v9.0: 프로그램 매매 추적
 CREATE TABLE IF NOT EXISTS program_trading (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

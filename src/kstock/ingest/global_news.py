@@ -468,7 +468,7 @@ def format_news_for_telegram(
 
 
 def format_urgent_alert(items: list[NewsItem]) -> str:
-    """긴급 이벤트 텔레그램 알림 포맷."""
+    """긴급 이벤트 텔레그램 알림 포맷 (레거시 폴백)."""
     if not items:
         return ""
 
@@ -485,6 +485,211 @@ def format_urgent_alert(items: list[NewsItem]) -> str:
 
     lines.append("\n⚠️ 포트폴리오 리스크 점검을 권장합니다")
     return "\n".join(lines)
+
+
+# ── v9.5.3: 뉴스 유사도 그룹핑 + AI 분석 ─────────────────
+
+def _normalize_title(title: str) -> str:
+    """제목에서 핵심 단어만 추출 (중복 판별용)."""
+    # 특수문자, 따옴표, 괄호 등 제거
+    t = re.sub(r"[^\w\s]", " ", title)
+    # 공백 정리
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _title_similarity(t1: str, t2: str) -> float:
+    """두 제목의 단어 기반 Jaccard 유사도 (0~1)."""
+    w1 = set(_normalize_title(t1).split())
+    w2 = set(_normalize_title(t2).split())
+    if not w1 or not w2:
+        return 0.0
+    intersection = w1 & w2
+    union = w1 | w2
+    return len(intersection) / len(union) if union else 0.0
+
+
+def group_similar_news(items: list[NewsItem], threshold: float = 0.4) -> list[list[NewsItem]]:
+    """유사한 뉴스를 그룹으로 묶기.
+
+    같은 이벤트에 대한 여러 헤드라인을 하나로 통합.
+    threshold=0.4 → 단어 40% 이상 겹치면 같은 이벤트.
+    """
+    if not items:
+        return []
+
+    groups: list[list[NewsItem]] = []
+    used = set()
+
+    for i, item in enumerate(items):
+        if i in used:
+            continue
+        group = [item]
+        used.add(i)
+        for j, other in enumerate(items):
+            if j in used:
+                continue
+            if _title_similarity(item.title, other.title) >= threshold:
+                group.append(other)
+                used.add(j)
+        groups.append(group)
+
+    return groups
+
+
+async def analyze_urgent_news(groups: list[list[NewsItem]], db=None) -> str:
+    """AI로 긴급 뉴스 그룹을 분석하여 한국 시장 영향 해석.
+
+    각 이벤트 그룹에 대해:
+    1. 실제 심각도 재평가 (키워드가 아닌 내용 기반)
+    2. 한국 시장/섹터 영향 분석
+    3. 보유 종목 영향 (DB 있으면)
+
+    비용: ~$0.002/호출 (Haiku, 최대 3그룹)
+    """
+    if not groups:
+        return ""
+
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return _format_urgent_alert_basic(groups)
+
+    # 보유 종목 정보 가져오기
+    holdings_text = ""
+    if db:
+        try:
+            holdings = db.get_active_holdings()
+            if holdings:
+                names = [h.get("name", "") for h in holdings[:15] if h.get("name")]
+                holdings_text = f"\n사용자 보유 종목: {', '.join(names)}"
+        except Exception:
+            pass
+
+    # 뉴스 그룹 텍스트 구성
+    news_text = ""
+    for i, group in enumerate(groups[:3]):
+        titles = [it.title for it in group]
+        sources = list({it.source for it in group})
+        max_impact = max(it.impact_score for it in group)
+        news_text += f"\n이벤트 {i+1} (키워드 영향도: {max_impact}/10):\n"
+        for t in titles[:3]:
+            news_text += f"  - {t}\n"
+        news_text += f"  출처: {', '.join(sources)}\n"
+
+    prompt = (
+        f"다음 긴급 글로벌 뉴스를 분석해줘.\n"
+        f"{news_text}\n"
+        f"{holdings_text}\n\n"
+        "각 이벤트에 대해 다음을 판단해줘:\n"
+        "1. 실제 심각도 (1-10): 키워드가 아닌 실제 내용 기반. "
+        "'전쟁 추모식 참석'은 전쟁 발발이 아니므로 낮게.\n"
+        "2. 한국 증시 영향: 어떤 섹터/종목이 어떻게 영향받는지 구체적으로\n"
+        "3. 보유 종목 영향: 있으면 구체적 영향, 없으면 생략\n"
+        "4. 투자자 행동 제안: 구체적 (단순히 '점검 권장' 금지)\n\n"
+        "형식:\n"
+        "이벤트 제목 (한 줄 요약)\n"
+        "실제 심각도: X/10\n"
+        "시장 영향: (2줄 이내)\n"
+        "보유종목: (해당 시 1줄)\n"
+        "행동: (1줄)\n\n"
+        "규칙:\n"
+        "- 한국어, 간결하게\n"
+        "- 과장 금지. 추모식/의전 행사는 심각도 2-3\n"
+        "- 실제 군사 충돌/경제 위기만 심각도 8+\n"
+        "- ** 볼드 금지"
+    )
+
+    try:
+        import anthropic
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        response = await client.messages.create(
+            model="claude-haiku-4-20250414",
+            max_tokens=600,
+            temperature=0.2,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        analysis = response.content[0].text.replace("**", "")
+
+        # 토큰 사용량 기록
+        try:
+            if db:
+                from kstock.core.token_tracker import track_usage
+                track_usage(
+                    db=db, provider="anthropic",
+                    model="claude-haiku-4-20250414",
+                    function_name="urgent_news_analysis",
+                    response=response,
+                )
+        except Exception:
+            pass
+
+        return _format_urgent_alert_rich(groups, analysis)
+
+    except Exception as e:
+        logger.warning("Urgent news AI analysis failed: %s", e)
+        return _format_urgent_alert_basic(groups)
+
+
+def _format_urgent_alert_rich(
+    groups: list[list[NewsItem]], analysis: str,
+) -> str:
+    """AI 분석이 포함된 리치 긴급 알림 포맷."""
+    now = datetime.now(KST)
+    lines = [
+        f"🚨 긴급 글로벌 이벤트 ({now.strftime('%H:%M')} KST)",
+        f"{'━' * 22}",
+    ]
+
+    # 헤드라인 요약 (그룹별 대표 1개만)
+    for group in groups[:3]:
+        rep = group[0]
+        impact_bar = "🔴" * min(rep.impact_score // 2, 5)
+        lines.append(f"\n{impact_bar} {rep.title}")
+        if len(group) > 1:
+            lines.append(f"  (관련 뉴스 {len(group)}건 통합)")
+        lines.append(f"  출처: {', '.join(list({it.source for it in group})[:2])}")
+
+    # AI 분석
+    lines.append(f"\n{'━' * 22}")
+    lines.append("📋 AI 영향 분석")
+    lines.append(analysis[:1500])
+
+    return "\n".join(lines)
+
+
+def _format_urgent_alert_basic(groups: list[list[NewsItem]]) -> str:
+    """AI 없이 기본 포맷 (폴백)."""
+    now = datetime.now(KST)
+    lines = [
+        f"🚨 긴급 글로벌 이벤트 ({now.strftime('%H:%M')} KST)",
+        f"{'━' * 22}",
+    ]
+    for group in groups[:3]:
+        rep = group[0]
+        impact_bar = "🔴" * min(rep.impact_score // 2, 5)
+        lines.append(f"\n{impact_bar} {rep.title}")
+        if len(group) > 1:
+            lines.append(f"  (관련 뉴스 {len(group)}건)")
+        lines.append(f"  출처: {', '.join(list({it.source for it in group})[:2])}")
+        lines.append(f"  영향도: {rep.impact_score}/10")
+
+    lines.append("\n⚠️ 포트폴리오 리스크 점검을 권장합니다")
+    return "\n".join(lines)
+
+
+def make_alert_hash(items: list[NewsItem]) -> str:
+    """긴급 뉴스 그룹의 해시 키 생성 (DB 중복 방지용).
+
+    핵심 명사만 추출하여 정렬 후 해시 → 제목 변형에도 동일 해시.
+    """
+    import hashlib
+    # 모든 제목의 핵심 단어 합집합
+    all_words = set()
+    for item in items:
+        words = _normalize_title(item.title).split()
+        # 2글자 이상 단어만 (조사/접속사 제거)
+        all_words.update(w for w in words if len(w) >= 2)
+    key = "|".join(sorted(all_words))
+    return hashlib.md5(key.encode()).hexdigest()[:16]
 
 
 # ── 영문 → 한글 번역 ──────────────────────────────────────
