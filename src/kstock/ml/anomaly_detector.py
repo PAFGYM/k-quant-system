@@ -810,9 +810,11 @@ async def scan_anomalies(
                 continue
 
             supply = db.get_supply_demand(ticker, days=20) if db else []
+            short = db.get_short_selling_latest(ticker) if db else None
 
             signal = detector.detect_anomalies(
                 ticker, ohlcv, supply,
+                short_data=short,
                 name=stock.get("name", ticker),
             )
 
@@ -845,6 +847,8 @@ def format_anomaly_alert(signals: list[AnomalySignal]) -> str:
         "normal": "⚪",
     }
 
+    flow_labels = {0: "", 1: "🔄단기", 2: "📈매집", 3: "📉공매도"}
+
     for i, s in enumerate(signals, 1):
         emoji = pattern_emoji.get(s.signal_type, "⚪")
         lines.append(
@@ -853,6 +857,15 @@ def format_anomaly_alert(signals: list[AnomalySignal]) -> str:
         lines.append(
             f"   점수: {s.anomaly_score:.0f}/100 | 유형: {s.signal_type}"
         )
+        # 공매도 상환 + 외인 성격
+        extras = []
+        if s.short_cover_pressure >= 30:
+            extras.append(f"숏커버압박 {s.short_cover_pressure:.0f}")
+        fl = flow_labels.get(s.foreign_flow_type, "")
+        if fl:
+            extras.append(f"외인: {fl}")
+        if extras:
+            lines.append(f"   {' | '.join(extras)}")
         if s.details:
             lines.append(f"   {s.details}")
         lines.append("")

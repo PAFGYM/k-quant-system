@@ -851,6 +851,14 @@ def _generate_synthetic_training_data(n: int) -> list[dict]:
                 features[fname] = rng.uniform(0.5, 3.0)
             elif fname == "usdkrw":
                 features[fname] = rng.uniform(1200, 1500)
+            elif fname == "anomaly_score":
+                features[fname] = rng.uniform(0, 100)
+            elif fname == "anomaly_type_encoded":
+                features[fname] = float(rng.choice([0, 1, 2, 3, 4, 5]))
+            elif fname == "short_cover_pressure":
+                features[fname] = rng.uniform(0, 100)
+            elif fname == "foreign_flow_type_encoded":
+                features[fname] = float(rng.choice([0, 1, 2, 3]))
             else:
                 features[fname] = rng.standard_normal()
 
