@@ -1,7 +1,7 @@
-"""K-Quant v10.1 LightGBM + XGBoost ensemble predictor.
+"""K-Quant v10.1.1 LightGBM + XGBoost ensemble predictor.
 
 Binary classification: will the stock's 5-business-day return exceed +3%?
-Uses 48 features (30 core + 16 Korea + 2 anomaly) from the K-Quant data pipeline.
+Uses 50 features (30 core + 16 Korea + 4 anomaly/flow) from the K-Quant data pipeline.
 
 The module degrades gracefully -- if lightgbm, xgboost, shap, or optuna are
 not installed, predictions fall back to a neutral 50% probability.
@@ -131,13 +131,16 @@ FEATURE_NAMES: list[str] = [
     # ── v10.1: Anomaly Detection (2) ──
     "anomaly_score",            # 이상 거래 종합 점수 (0~100)
     "anomaly_type_encoded",     # 이상 유형 (0=없음, 1=거래량, 2=매집, 3=돌파, 4=숏스퀴즈, 5=신용)
+    # ── v10.1.1: Short Cover + Foreign Flow (2) ──
+    "short_cover_pressure",     # 공매도 상환 압박도 (0~100)
+    "foreign_flow_type_encoded",  # 외인 매매 성격 (0=중립, 1=단기매매, 2=장기매집, 3=공매도)
 ]
 
-_NUM_FEATURES = 48
+_NUM_FEATURES = 50
 
 assert len(FEATURE_NAMES) == _NUM_FEATURES, (
     f"Expected {_NUM_FEATURES} features, got {len(FEATURE_NAMES)}"
-)
+)  # v10.1.1: 50 features
 
 _REGIME_MAP: dict[str, int] = {
     "bubble_attack": 4,
@@ -335,8 +338,11 @@ def build_features(
     # v10.1: 이상 탐지 피처
     anomaly_score: float = 0.0,
     anomaly_type_encoded: int = 0,
+    # v10.1.1: 공매도 상환 + 외인 성격
+    short_cover_pressure: float = 0.0,
+    foreign_flow_type_encoded: int = 0,
 ) -> dict[str, float]:
-    """Build the 48-feature dict from K-Quant data objects.
+    """Build the 50-feature dict from K-Quant data objects.
 
     Args:
         tech: ``TechnicalIndicators`` instance.
@@ -351,9 +357,11 @@ def build_features(
         weekly_acc_score: Weekly accumulation pattern score (0~100).
         anomaly_score: 이상 거래 종합 점수 (0~100).
         anomaly_type_encoded: 이상 유형 인코딩.
+        short_cover_pressure: 공매도 상환 압박도 (0~100).
+        foreign_flow_type_encoded: 외인 매매 성격 (0~3).
 
     Returns:
-        Dict mapping each of the 48 feature names to a float value.
+        Dict mapping each of the 50 feature names to a float value.
     """
     current_price = getattr(info, "current_price", 0.0) or 1.0
     high_52w = getattr(tech, "high_52w", 0.0) or 1.0
@@ -420,6 +428,10 @@ def build_features(
     # v10.1: 이상 탐지 피처
     features["anomaly_score"] = float(anomaly_score)
     features["anomaly_type_encoded"] = float(anomaly_type_encoded)
+
+    # v10.1.1: 공매도 상환 + 외인 성격
+    features["short_cover_pressure"] = float(short_cover_pressure)
+    features["foreign_flow_type_encoded"] = float(foreign_flow_type_encoded)
 
     return features
 

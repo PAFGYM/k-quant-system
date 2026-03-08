@@ -265,13 +265,20 @@ class CommandsMixin:
             # v10.1: 이상 거래 탐지 (anomaly detection)
             _anomaly_score = 0.0
             _anomaly_type = 0
+            _short_cover_pressure = 0.0
+            _foreign_flow_type = 0
             try:
                 from kstock.ml.anomaly_detector import AnomalyDetector
                 _ad = AnomalyDetector()
                 _sd_data = self.db.get_supply_demand(ticker, days=20) if self.db else []
-                _anomaly = _ad.detect_anomalies(ticker, ohlcv, _sd_data, name=name)
+                _short_data = self.db.get_short_selling_latest(ticker) if self.db else None
+                _anomaly = _ad.detect_anomalies(
+                    ticker, ohlcv, _sd_data, short_data=_short_data, name=name,
+                )
                 _anomaly_score = _anomaly.anomaly_score
                 _anomaly_type = _anomaly.signal_type_encoded
+                _short_cover_pressure = _anomaly.short_cover_pressure
+                _foreign_flow_type = _anomaly.foreign_flow_type
             except Exception:
                 logger.debug("anomaly detection failed: %s", ticker, exc_info=True)
 
@@ -293,6 +300,8 @@ class CommandsMixin:
                         weekly_acc_score=weekly_acc_score,
                         anomaly_score=_anomaly_score,
                         anomaly_type_encoded=_anomaly_type,
+                        short_cover_pressure=_short_cover_pressure,
+                        foreign_flow_type_encoded=_foreign_flow_type,
                     )
                     ml_pred = predict(features, self._ml_model)
                     ml_bonus_val = get_ml_bonus(ml_pred.probability)

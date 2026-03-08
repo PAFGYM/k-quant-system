@@ -133,11 +133,11 @@ def sample_historical_data() -> list[dict]:
 
 class TestFeatureNames:
     def test_feature_names_length(self) -> None:
-        """FEATURE_NAMES has exactly 48 entries (v10.1: 46→48)."""
-        assert len(FEATURE_NAMES) == 48
+        """FEATURE_NAMES has exactly 50 entries (v10.1.1: 48→50)."""
+        assert len(FEATURE_NAMES) == 50
 
     def test_feature_names_are_unique(self) -> None:
-        assert len(set(FEATURE_NAMES)) == 48
+        assert len(set(FEATURE_NAMES)) == 50
 
 
 # ===========================================================================
@@ -147,10 +147,10 @@ class TestFeatureNames:
 
 class TestBuildFeatures:
     def test_returns_dict_with_all_46_keys(self, sample_features: dict) -> None:
-        """build_features returns dict with all 48 feature keys (v10.1)."""
+        """build_features returns dict with all 50 feature keys (v10.1.1)."""
         assert isinstance(sample_features, dict)
         assert set(sample_features.keys()) == set(FEATURE_NAMES)
-        assert len(sample_features) == 48
+        assert len(sample_features) == 50
 
     def test_values_are_float(self, sample_features: dict) -> None:
         for key, value in sample_features.items():
@@ -168,7 +168,7 @@ class TestBuildFeatures:
             macro=Empty(),
             flow=Empty(),
         )
-        assert len(result) == 48
+        assert len(result) == 50
         # Defaults should produce finite floats
         for key, value in result.items():
             assert np.isfinite(value), f"{key} is not finite: {value}"

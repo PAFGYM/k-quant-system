@@ -39,7 +39,7 @@ if _HAS_TORCH:
         """
         def __init__(
             self,
-            input_size: int = 48,  # v10.1: 46→48 features (anomaly)
+            input_size: int = 50,  # v10.1.1: 48→50 features (short_cover + foreign_flow)
             hidden_size: int = 64,
             num_layers: int = 2,
             dropout: float = 0.2,

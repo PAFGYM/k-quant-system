@@ -53,6 +53,9 @@ class AnomalySignal:
     signal_type_encoded: int = 0         # ML 피처용 인코딩
     details: str = ""                    # 설명 문자열
     sub_scores: dict = field(default_factory=dict)  # 세부 점수
+    # v10.1.1: 공매도 상환압박 + 외인 매매 성격
+    short_cover_pressure: float = 0.0    # 공매도 상환 압박도 (0~100)
+    foreign_flow_type: int = 0           # 외인 매매 성격 (0=중립, 1=단기매매, 2=장기매집, 3=공매도)
 
 
 # ── Anomaly Detector ────────────────────────────────────
@@ -134,6 +137,16 @@ class AnomalyDetector:
         if _HAS_SKLEARN and len(ohlcv) >= 40:
             iso_bonus = self._isolation_forest_score(ohlcv, supply_data)
             sub_scores["isolation_forest"] = iso_bonus
+
+        # ── 6.5: 공매도 상환 압박도 ──────────────────────
+        signal.short_cover_pressure = self._calc_short_cover_pressure(
+            close, volume, supply_data, short_data,
+        )
+
+        # ── 6.6: 외인 매매 성격 분류 ────────────────────
+        signal.foreign_flow_type = self._classify_foreign_flow(
+            close, volume, supply_data, short_data,
+        )
 
         # ── 종합 점수 계산 ────────────────────────────────
         # 기관 매집 강도
@@ -515,6 +528,199 @@ class AnomalyDetector:
         except Exception:
             return None
 
+    # ── Short Cover Pressure + Foreign Flow Type ─────────
+
+    def _calc_short_cover_pressure(
+        self,
+        close: pd.Series,
+        volume: pd.Series,
+        supply_data: list[dict] | None,
+        short_data: dict | None,
+    ) -> float:
+        """공매도 상환 압박도 계산 (0~100).
+
+        높은 점수 = 숏커버 가능성 높음 (매수 압력 증가).
+
+        핵심 로직:
+        1. 공매도 잔고 비율이 높을수록 → 상환 압박 증가
+        2. 공매도 잔고가 감소 추세 → 이미 상환 시작 (초기 매수 신호)
+        3. 주가 상승 + 공매도 잔고 높음 → 손절 압박 (숏스퀴즈 가능)
+        4. 거래량 급증 + 공매도 잔고 감소 → 대량 숏커버 진행 중
+        """
+        score = 0.0
+
+        # --- 공매도 비율/잔고 기본 정보 수집 ---
+        short_ratio = 0.0
+        short_balance = 0
+        short_balance_ratio = 0.0
+        prev_short_balance = 0
+        balance_trend = 0.0  # 잔고 변화율
+
+        if short_data:
+            short_ratio = float(short_data.get("short_ratio", 0) or 0)
+            short_balance = int(short_data.get("short_balance", 0) or 0)
+            short_balance_ratio = float(short_data.get("short_balance_ratio", 0) or 0)
+
+        # supply_data에서도 공매도 정보 보완
+        if supply_data and len(supply_data) >= 2:
+            if short_ratio == 0:
+                short_ratio = float(supply_data[0].get("short_ratio", 0) or 0)
+            if short_balance == 0:
+                short_balance = int(supply_data[0].get("short_balance", 0) or 0)
+
+            # 잔고 추세 계산 (최근 vs 이전)
+            recent_balances = []
+            older_balances = []
+            for i, sd in enumerate(supply_data[:10]):
+                sb = int(sd.get("short_balance", 0) or 0)
+                if sb > 0:
+                    if i < 3:
+                        recent_balances.append(sb)
+                    elif i < 8:
+                        older_balances.append(sb)
+
+            if recent_balances and older_balances:
+                avg_recent = np.mean(recent_balances)
+                avg_older = np.mean(older_balances)
+                if avg_older > 0:
+                    balance_trend = (avg_recent - avg_older) / avg_older
+
+        # --- 1. 공매도 잔고 비율 (기본 압박) ---
+        if short_balance_ratio >= 5.0:
+            score += 35.0  # 잔고비율 5%+ → 강한 상환 압박
+        elif short_balance_ratio >= 3.0:
+            score += 25.0
+        elif short_balance_ratio >= 1.5:
+            score += 15.0
+        elif short_ratio >= 10.0:
+            score += 20.0  # 일별 공매도 비율 10%+
+        elif short_ratio >= 5.0:
+            score += 10.0
+
+        # --- 2. 잔고 감소 추세 (상환 진행 중) ---
+        if balance_trend < -0.10:
+            score += 20.0  # 10%+ 감소 → 상환 활발
+        elif balance_trend < -0.05:
+            score += 12.0
+
+        # --- 3. 주가 상승 + 공매도 잔고 (손절 압박) ---
+        if len(close) >= 10:
+            price_chg_5d = (float(close.iloc[-1]) - float(close.iloc[-5])) / max(float(close.iloc[-5]), 1)
+            if price_chg_5d > 0.05 and (short_balance_ratio >= 2.0 or short_ratio >= 5.0):
+                score += 25.0  # 주가 5%+ 상승 + 높은 공매도 → 강한 숏커버 압박
+            elif price_chg_5d > 0.03 and (short_balance_ratio >= 1.5 or short_ratio >= 3.0):
+                score += 15.0
+
+        # --- 4. 거래량 급증 + 잔고 감소 (대량 숏커버) ---
+        if len(volume) >= 20 and balance_trend < -0.05:
+            recent_vol = float(volume.iloc[-3:].mean())
+            avg_vol = float(volume.iloc[-20:].mean())
+            if avg_vol > 0 and recent_vol / avg_vol > 2.0:
+                score += 20.0  # 거래량 2배+ + 잔고 감소 → 숏커버 진행
+
+        return max(0.0, min(100.0, round(score, 1)))
+
+    def _classify_foreign_flow(
+        self,
+        close: pd.Series,
+        volume: pd.Series,
+        supply_data: list[dict] | None,
+        short_data: dict | None,
+    ) -> int:
+        """외국인 매매 성격 분류.
+
+        Returns:
+            0: 중립/데이터 없음
+            1: 단기 트레이딩 (짧은 주기 매수/매도 반복)
+            2: 장기 매집 (일관된 방향 연속 매수)
+            3: 공매도 성격 (매도 + 공매도 비율 상승)
+        """
+        if not supply_data or len(supply_data) < 5:
+            return 0
+
+        # 최근 10일 외인 순매수 패턴 분석
+        foreign_nets = []
+        for sd in supply_data[:10]:
+            fn = sd.get("foreign_net", 0) or 0
+            foreign_nets.append(float(fn))
+
+        if not foreign_nets:
+            return 0
+
+        # --- 방향 일관성 분석 ---
+        pos_days = sum(1 for f in foreign_nets if f > 0)
+        neg_days = sum(1 for f in foreign_nets if f < 0)
+        total_days = len(foreign_nets)
+        direction_changes = sum(
+            1 for i in range(1, len(foreign_nets))
+            if (foreign_nets[i] > 0) != (foreign_nets[i - 1] > 0)
+            and foreign_nets[i] != 0 and foreign_nets[i - 1] != 0
+        )
+
+        # --- 공매도 성격 판별 ---
+        short_ratio = 0.0
+        if short_data:
+            short_ratio = float(short_data.get("short_ratio", 0) or 0)
+        elif supply_data:
+            for sd in supply_data[:3]:
+                sr = sd.get("short_ratio", 0) or 0
+                if sr > 0:
+                    short_ratio = float(sr)
+                    break
+
+        # 최근 공매도 비율 변화
+        short_ratios = []
+        for sd in supply_data[:10]:
+            sr = sd.get("short_ratio", 0) or 0
+            if sr > 0:
+                short_ratios.append(float(sr))
+
+        short_increasing = False
+        if len(short_ratios) >= 3:
+            recent_avg = np.mean(short_ratios[:3])
+            older_avg = np.mean(short_ratios[3:]) if len(short_ratios) > 3 else recent_avg
+            short_increasing = recent_avg > older_avg * 1.2
+
+        # --- 분류 로직 ---
+
+        # 타입 3: 공매도 성격
+        # 외인 순매도 우세 + 공매도 비율 상승 → 외인이 공매도 중
+        if neg_days >= pos_days and short_ratio >= 5.0 and short_increasing:
+            return 3
+
+        # 타입 3 (보조): 외인 대규모 매도 + 높은 공매도 비율
+        if neg_days >= total_days * 0.7 and short_ratio >= 8.0:
+            return 3
+
+        # 타입 2: 장기 매집
+        # 일관된 방향 (매수 쪽) + 방향 전환 적음
+        if pos_days >= total_days * 0.7 and direction_changes <= 2:
+            return 2
+
+        # 타입 2 (보조): 5일 연속 순매수
+        consecutive_buy = 0
+        for fn in foreign_nets:
+            if fn > 0:
+                consecutive_buy += 1
+            else:
+                break
+        if consecutive_buy >= 5:
+            return 2
+
+        # 타입 1: 단기 트레이딩
+        # 방향 전환 잦음 (3회 이상) → 단기 매매
+        if direction_changes >= 3:
+            return 1
+
+        # 타입 1 (보조): 큰 금액 1회 매수 후 매도 반복
+        if total_days >= 5:
+            max_abs = max(abs(f) for f in foreign_nets)
+            avg_abs = np.mean([abs(f) for f in foreign_nets if f != 0]) if any(f != 0 for f in foreign_nets) else 0
+            if avg_abs > 0 and max_abs / avg_abs > 3.0:
+                return 1
+
+        return 0
+
     # ── Helpers ───────────────────────────────────────────
 
     def _calc_inst_accumulation(self, supply_data: list[dict] | None) -> float:
@@ -563,6 +769,11 @@ class AnomalyDetector:
             parts.append(f"기관매집 {signal.institutional_accumulation:.2f}")
         if signal.short_squeeze_potential > 0.3:
             parts.append(f"숏스퀴즈 {signal.short_squeeze_potential:.1%}")
+        if signal.short_cover_pressure >= 40:
+            parts.append(f"상환압박 {signal.short_cover_pressure:.0f}")
+        flow_labels = {1: "단기매매", 2: "장기매집", 3: "공매도"}
+        if signal.foreign_flow_type in flow_labels:
+            parts.append(f"외인: {flow_labels[signal.foreign_flow_type]}")
 
         return " | ".join(parts)
 
