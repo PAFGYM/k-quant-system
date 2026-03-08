@@ -507,3 +507,36 @@ def compute_near_high_pct(df: pd.DataFrame, period: int = 252) -> float:
     if period_high == 0:
         return 0.0
     return round(float(close.iloc[-1] / period_high * 100), 2)
+
+
+def detect_support_level(
+    closes: list[float] | pd.Series, window: int = 20,
+) -> float:
+    """최근 가격에서 지지선 탐지 — 분할 매수 눌림가 산출용.
+
+    최근 window봉의 최저점과 SMA-1σ 중 높은 값을 지지선으로 반환.
+
+    v9.6.0: plan_split_entry()에서 눌림 매수가 결정에 사용.
+
+    Args:
+        closes: 종가 리스트 (최근순 정렬 불필요, 시계열 순서)
+        window: 지지선 탐지 기간 (기본 20봉)
+
+    Returns:
+        지지선 가격 (float). 데이터 부족 시 0.0.
+    """
+    if isinstance(closes, pd.Series):
+        vals = closes.dropna().astype(float).tolist()
+    else:
+        vals = [float(c) for c in closes if c]
+
+    if len(vals) < window:
+        return 0.0
+
+    recent = vals[-window:]
+    lowest = min(recent)
+    sma = sum(recent) / len(recent)
+    std = (sum((c - sma) ** 2 for c in recent) / len(recent)) ** 0.5
+    support_sma = sma - std
+
+    return round(max(lowest, support_sma), 0)

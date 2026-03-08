@@ -69,6 +69,105 @@ TRAILING_STOP_CONFIG = {
     "auto":     {"trail_pct": 0.08, "activate_at": 0.10},
 }
 
+# ── v9.6.0: ATR 기반 동적 손절/익절 설정 ──────────────────
+ATR_STOP_MULTIPLIERS = {
+    "scalp":     {"stop": 1.5, "tp1": 2.0, "tp2": 3.0, "trail_activate": 1.5, "trail": 1.0},
+    "swing":     {"stop": 2.0, "tp1": 3.0, "tp2": 5.0, "trail_activate": 2.5, "trail": 1.5},
+    "short":     {"stop": 2.0, "tp1": 3.0, "tp2": 5.0, "trail_activate": 2.5, "trail": 1.5},
+    "mid":       {"stop": 2.5, "tp1": 4.0, "tp2": 8.0, "trail_activate": 3.0, "trail": 2.0},
+    "position":  {"stop": 2.5, "tp1": 4.0, "tp2": 8.0, "trail_activate": 3.0, "trail": 2.0},
+    "long":      {"stop": 3.0, "tp1": 5.0, "tp2": 10.0, "trail_activate": 4.0, "trail": 2.5},
+    "long_term": {"stop": 3.0, "tp1": 5.0, "tp2": 10.0, "trail_activate": 4.0, "trail": 2.5},
+    "auto":      {"stop": 2.0, "tp1": 3.0, "tp2": 5.0, "trail_activate": 2.5, "trail": 1.5},
+}
+
+
+def compute_atr_stops(
+    atr_pct: float, holding_type: str, buy_price: float,
+) -> dict:
+    """ATR 기반 동적 손절/익절/트레일링 레벨 계산.
+
+    Args:
+        atr_pct: ATR(14) as % of price (예: 2.5 = 2.5%)
+        holding_type: scalp/swing/position/long_term 등
+        buy_price: 매수가 (원)
+
+    Returns:
+        dict: stop_pct, stop_price, target_1_pct, target_1_price,
+              target_2_pct, target_2_price, trail_activate_pct, trail_pct
+
+    Examples:
+        ATR 2.5% 스윙 → stop=-5.0%, TP1=+7.5%, TP2=+12.5%
+        ATR 5.0% 스윙 → stop=-10.0%, TP1=+15.0%, TP2=+25.0%
+        ATR 1.0% 스캘핑 → stop=-2.0%(floor), TP1=+2.0%, TP2=+3.0%
+    """
+    mults = ATR_STOP_MULTIPLIERS.get(holding_type, ATR_STOP_MULTIPLIERS["swing"])
+    atr = max(atr_pct, 0.5)  # 최소 0.5%
+
+    # 손절: ATR × 배수, floor -2%, ceiling -20%
+    raw_stop = -(atr * mults["stop"]) / 100
+    stop_pct = max(raw_stop, -0.20)  # 최대 -20%
+    stop_pct = min(stop_pct, -0.02)  # 최소 -2%
+
+    # 익절: ATR × 배수
+    tp1_pct = (atr * mults["tp1"]) / 100
+    tp2_pct = (atr * mults["tp2"]) / 100
+
+    # 트레일링: ATR × 배수
+    trail_activate = (atr * mults["trail_activate"]) / 100
+    trail = (atr * mults["trail"]) / 100
+
+    return {
+        "stop_pct": round(stop_pct, 4),
+        "stop_price": round(buy_price * (1 + stop_pct)),
+        "target_1_pct": round(tp1_pct, 4),
+        "target_1_price": round(buy_price * (1 + tp1_pct)),
+        "target_2_pct": round(tp2_pct, 4),
+        "target_2_price": round(buy_price * (1 + tp2_pct)),
+        "trail_activate_pct": round(trail_activate, 4),
+        "trail_pct": round(trail, 4),
+    }
+
+
+def compute_dynamic_profit_stages(
+    atr_pct: float, holding_type: str,
+) -> list[dict]:
+    """ATR 기반 동적 차익실현 단계 생성.
+
+    atr_pct가 0이면 기존 PROFIT_STAGES 반환 (backward compatible).
+    """
+    if atr_pct <= 0:
+        return PROFIT_STAGES
+
+    mults = ATR_STOP_MULTIPLIERS.get(holding_type, ATR_STOP_MULTIPLIERS["swing"])
+    atr = max(atr_pct, 0.5)
+
+    tp1 = (atr * mults["tp1"]) / 100
+    tp2 = (atr * mults["tp2"]) / 100
+
+    return [
+        {
+            "threshold": tp1,
+            "sell_pct": 0.33,
+            "label": f"1차 익절 (ATR {atr:.1f}% × {mults['tp1']})",
+            "emoji": "🟡",
+            "message": (
+                f"🟡 ATR 기반 1차 목표 도달! (+{tp1*100:.1f}%)\n"
+                f"   1/3 매도로 수익 확보 권장."
+            ),
+        },
+        {
+            "threshold": tp2,
+            "sell_pct": 0.33,
+            "label": f"2차 익절 (ATR {atr:.1f}% × {mults['tp2']})",
+            "emoji": "🟠",
+            "message": (
+                f"🟠 ATR 기반 2차 목표 도달! (+{tp2*100:.1f}%)\n"
+                f"   추가 1/3 매도, 나머지 트레일링."
+            ),
+        },
+    ]
+
 
 # ── Dataclasses ────────────────────────────────────────────
 @dataclass
@@ -114,6 +213,96 @@ class TrailingStopState:
     activated_at: float = 0.0   # 활성화 시점 가격
     stop_price: float = 0.0     # 현재 트레일링 스탑 가격
     stages_triggered: list = field(default_factory=list)
+
+
+@dataclass
+class SplitEntryPlan:
+    """v9.6.0: 분할 매수 실행 계획."""
+    ticker: str
+    name: str = ""
+    total_shares: int = 0
+    total_amount: float = 0.0
+    entries: list = field(default_factory=list)  # [{"tranche": 1, "shares": N, "trigger": str, "price": P, "label": str}]
+    reason: str = ""
+
+
+def plan_split_entry(
+    ticker: str,
+    name: str,
+    current_price: float,
+    atr_pct: float,
+    total_shares: int,
+    holding_type: str = "swing",
+    support_price: float = 0.0,
+) -> SplitEntryPlan:
+    """ATR + 지지선 기반 분할 매수 계획 생성.
+
+    스캘핑: 전량 즉시 진입
+    스윙/포지션/장기: 50% 즉시 + 30% 눌림 + 20% 돌파 확인
+
+    Args:
+        support_price: 기술적 지지선 가격 (0이면 무시)
+    """
+    if total_shares <= 0 or current_price <= 0:
+        return SplitEntryPlan(
+            ticker=ticker, name=name, reason="수량/가격 부족",
+        )
+
+    # 스캘핑: 분할 없이 전량
+    if holding_type == "scalp":
+        return SplitEntryPlan(
+            ticker=ticker, name=name,
+            total_shares=total_shares,
+            total_amount=total_shares * current_price,
+            entries=[{
+                "tranche": 1, "shares": total_shares,
+                "trigger": "immediate", "price": current_price,
+                "label": "전량 즉시 진입",
+            }],
+            reason="초단타: 전량 즉시 진입",
+        )
+
+    # 분할: 50 / 30 / 20
+    t1 = max(1, int(total_shares * 0.50))
+    t2 = max(1, int(total_shares * 0.30))
+    t3 = max(1, total_shares - t1 - t2)
+
+    atr = max(atr_pct, 0.5)
+
+    # 눌림 매수가: 현재가 - 1 ATR
+    dip_price = round(current_price * (1 - atr / 100))
+    if support_price > 0 and support_price < current_price:
+        dip_price = max(dip_price, round(support_price))
+
+    # 돌파 확인가: 현재가 + 0.5 ATR
+    breakout_price = round(current_price * (1 + atr / 200))
+
+    entries = [
+        {
+            "tranche": 1, "shares": t1,
+            "trigger": "immediate", "price": current_price,
+            "label": f"1차 즉시 ({t1}주, 50%)",
+        },
+        {
+            "tranche": 2, "shares": t2,
+            "trigger": "dip", "price": dip_price,
+            "label": f"2차 눌림 {dip_price:,.0f}원 ({t2}주, 30%)",
+        },
+        {
+            "tranche": 3, "shares": t3,
+            "trigger": "breakout", "price": breakout_price,
+            "label": f"3차 돌파 {breakout_price:,.0f}원 ({t3}주, 20%)",
+        },
+    ]
+
+    return SplitEntryPlan(
+        ticker=ticker, name=name,
+        total_shares=total_shares,
+        total_amount=round(t1 * current_price + t2 * dip_price + t3 * breakout_price),
+        entries=entries,
+        reason=f"분할 매수: ATR {atr:.1f}%, 지지선 {support_price:,.0f}원" if support_price > 0
+               else f"분할 매수: ATR {atr:.1f}%",
+    )
 
 
 # ── Position Sizer ─────────────────────────────────────────
@@ -299,6 +488,75 @@ class PositionSizer:
                 ticker=ticker, name=name,
                 reason="계산 중 오류 발생",
             )
+
+    # ── v9.6.0: 확신도 기반 포지션 사이징 ───────────────────
+    def calculate_conviction_size(
+        self,
+        ticker: str,
+        current_price: float,
+        composite_score: float = 0.0,
+        ensemble_confidence: float = 0.5,
+        ensemble_agreement: float = 0.5,
+        manager_weight: float = 1.0,
+        atr_pct: float = 1.5,
+        existing_weight: float = 0.0,
+        sector_weight: float = 0.0,
+        name: str = "",
+        holding_type: str = "swing",
+    ) -> PositionSize:
+        """확신도 기반 포지션 사이징 — 점수가 높을수록 큰 비중.
+
+        composite_score(0~175) + ensemble_confidence + agreement를
+        win_rate로 변환 후 기존 Half-Kelly 엔진에 위임.
+
+        Args:
+            composite_score: 종합 점수 (0-175, scoring.py)
+            ensemble_confidence: 앙상블 신뢰도 (0-1)
+            ensemble_agreement: 전략 합의도 (0-1)
+            manager_weight: 매니저 가중치 (0.8-1.2, learning_engine)
+        """
+        # 1. 점수 기반 승률 추정 (linear mapping)
+        #    score 60 → 0.47, score 100 → 0.55, score 140 → 0.63
+        score_win = 0.35 + min(max(composite_score, 0), 175) / 500
+
+        # 2. 앙상블 신뢰도 보정 (±0.05)
+        conf_boost = (ensemble_confidence - 0.5) * 0.10
+
+        # 3. 전략 합의도 보정 (±0.025)
+        agree_boost = (ensemble_agreement - 0.5) * 0.05
+
+        # 4. 매니저 실적 보정 (±0.006)
+        mgr_boost = (manager_weight - 1.0) * 0.03
+
+        # 5. 최종 승률 (0.35 ~ 0.75 범위)
+        win_rate = min(0.75, max(0.35, score_win + conf_boost + agree_boost + mgr_boost))
+
+        # 6. ATR 기반 목표/손절 (Phase 2 연동)
+        if atr_pct > 0:
+            stops = compute_atr_stops(atr_pct, holding_type, current_price)
+            target_pct = stops["target_1_pct"]
+            stop_pct = stops["stop_pct"]
+        else:
+            # 기본값
+            target_pct = 0.10
+            stop_pct = -0.05
+
+        logger.info(
+            "ConvictionSize [%s]: score=%.0f, conf=%.2f, agree=%.2f → win_rate=%.3f",
+            ticker, composite_score, ensemble_confidence, ensemble_agreement, win_rate,
+        )
+
+        return self.calculate(
+            ticker=ticker,
+            current_price=current_price,
+            atr_pct=atr_pct,
+            win_rate=win_rate,
+            target_pct=target_pct,
+            stop_pct=stop_pct,
+            existing_weight=existing_weight,
+            sector_weight=sector_weight,
+            name=name,
+        )
 
     # ── Dynamic Kelly ─────────────────────────────────────
     def calculate_dynamic_kelly(
@@ -512,6 +770,7 @@ class PositionSizer:
         quantity: int,
         holding_type: str = "auto",
         sold_pct: float = 0.0,
+        atr_pct: float = 0.0,
     ) -> ProfitAlert | None:
         """보유 종목의 차익실현 조건을 체크한다.
 
@@ -523,6 +782,7 @@ class PositionSizer:
             quantity: 보유 수량
             holding_type: 투자 유형 (scalp/swing/mid/long 등)
             sold_pct: 이미 매도한 비율 (0~1)
+            atr_pct: v9.6.0 ATR(14)% — 0이면 기존 고정 방식
 
         Returns:
             ProfitAlert if action needed, None otherwise.
@@ -539,13 +799,18 @@ class PositionSizer:
             )
 
             # 1. 손절 체크 (매수가 대비)
-            stop_configs = {
-                "scalp": -0.03, "swing": -0.05, "short": -0.05,
-                "mid": -0.08, "position": -0.08,
-                "long": -0.15, "long_term": -0.15,
-                "auto": -0.05,
-            }
-            stop_limit = stop_configs.get(holding_type, -0.05)
+            # v9.6.0: ATR 기반 동적 손절 (atr_pct > 0이면 적용)
+            if atr_pct > 0:
+                atr_stops = compute_atr_stops(atr_pct, holding_type, buy_price)
+                stop_limit = atr_stops["stop_pct"]
+            else:
+                stop_configs = {
+                    "scalp": -0.03, "swing": -0.05, "short": -0.05,
+                    "mid": -0.08, "position": -0.08,
+                    "long": -0.15, "long_term": -0.15,
+                    "auto": -0.05,
+                }
+                stop_limit = stop_configs.get(holding_type, -0.05)
             if pnl_pct <= stop_limit:
                 return ProfitAlert(
                     ticker=ticker, name=name,
@@ -588,8 +853,9 @@ class PositionSizer:
                     ),
                 )
 
-            # 3. 단계별 차익실현 체크
-            for i, stage in enumerate(PROFIT_STAGES):
+            # 3. 단계별 차익실현 체크 (v9.6.0: ATR 동적 스테이지)
+            active_stages = compute_dynamic_profit_stages(atr_pct, holding_type)
+            for i, stage in enumerate(active_stages):
                 stage_key = f"stage_{i+1}"
                 if stage_key in trail_state.stages_triggered:
                     continue  # 이미 알림 발송됨

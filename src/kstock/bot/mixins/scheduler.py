@@ -5341,6 +5341,14 @@ class SchedulerMixin:
             # 1. 미평가 신호 가격 추적
             evaluated = await evaluate_pending_signals(self.db)
 
+            # 1-b. v9.6.0: 추천(Recommendation) D+N 추적
+            rec_evaluated = 0
+            try:
+                from kstock.signal.auto_debrief import evaluate_pending_recommendations
+                rec_evaluated = await evaluate_pending_recommendations(self.db)
+            except Exception as e:
+                logger.debug("추천 추적: %s", e)
+
             # 2. 가중치 재계산
             weights = compute_signal_weights(self.db, period_days=90)
 
@@ -5390,7 +5398,7 @@ class SchedulerMixin:
 
             self.db.upsert_job_run(
                 "signal_evaluation", _today(), status="success",
-                message=f"evaluated={evaluated}, sources={len(weights)}{mgr_msg}",
+                message=f"evaluated={evaluated}, recs={rec_evaluated}, sources={len(weights)}{mgr_msg}",
             )
             logger.info(
                 "Signal evaluation: %d signals evaluated, %d sources weighted",

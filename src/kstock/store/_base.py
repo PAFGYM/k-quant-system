@@ -1135,6 +1135,22 @@ CREATE TABLE IF NOT EXISTS debate_accuracy (
 CREATE INDEX IF NOT EXISTS idx_accuracy_debate ON debate_accuracy(debate_id);
 CREATE INDEX IF NOT EXISTS idx_accuracy_ticker ON debate_accuracy(ticker);
 
+-- v9.6.0: 분할 매수 대기 주문
+CREATE TABLE IF NOT EXISTS pending_entries (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker              TEXT    NOT NULL,
+    name                TEXT    NOT NULL,
+    tranche             INTEGER DEFAULT 1,
+    target_price        REAL    NOT NULL,
+    shares              INTEGER DEFAULT 0,
+    trigger_type        TEXT    DEFAULT 'dip',
+    recommendation_id   INTEGER DEFAULT 0,
+    status              TEXT    DEFAULT 'pending',
+    expires_at          TEXT,
+    created_at          TEXT    NOT NULL,
+    filled_at           TEXT
+);
+
 -- v9.5: YouTube 인텔리전스 (구조화 분석 결과)
 CREATE TABLE IF NOT EXISTS youtube_intelligence (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1313,6 +1329,17 @@ class StoreBase:
                 ("quantity", "ALTER TABLE holdings ADD COLUMN quantity INTEGER DEFAULT 0"),
                 ("eval_amount", "ALTER TABLE holdings ADD COLUMN eval_amount REAL DEFAULT 0"),
                 ("holding_type", "ALTER TABLE holdings ADD COLUMN holding_type TEXT DEFAULT 'auto'"),
+            ]:
+                try:
+                    conn.execute(f"SELECT {col} FROM holdings LIMIT 1")
+                except sqlite3.OperationalError:
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass
+            # v9.6.0: holdings — atr_at_entry (매수 시점 ATR)
+            for col, sql in [
+                ("atr_at_entry", "ALTER TABLE holdings ADD COLUMN atr_at_entry REAL DEFAULT 0"),
             ]:
                 try:
                     conn.execute(f"SELECT {col} FROM holdings LIMIT 1")

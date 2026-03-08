@@ -21,6 +21,28 @@ MANAGER_THRESHOLDS: dict[str, dict] = {
     "long_term": {"stop_loss": -20.0, "take_profit_1": 30.0, "take_profit_2": 80.0},
 }
 
+
+def get_dynamic_thresholds(
+    manager_key: str, atr_pct: float = 0.0,
+) -> dict:
+    """ATR 기반 동적 손절/목표가 임계치. atr=0이면 기존 고정값.
+
+    v9.6.0: 변동성에 맞춘 손절/익절로 조기 손절·늦은 손절 방지.
+    """
+    if atr_pct > 0:
+        try:
+            from kstock.core.position_sizer import compute_atr_stops
+            stops = compute_atr_stops(atr_pct, manager_key, buy_price=100000)
+            return {
+                "stop_loss": round(stops["stop_pct"] * 100, 1),
+                "take_profit_1": round(stops["target_1_pct"] * 100, 1),
+                "take_profit_2": round(stops["target_2_pct"] * 100, 1),
+            }
+        except Exception:
+            pass
+    return MANAGER_THRESHOLDS.get(manager_key, MANAGER_THRESHOLDS["swing"])
+
+
 # ── 매니저 정의 ─────────────────────────────────────────────
 
 MANAGERS: dict[str, dict] = {

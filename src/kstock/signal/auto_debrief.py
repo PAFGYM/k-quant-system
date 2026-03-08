@@ -513,6 +513,175 @@ async def evaluate_pending_signals(db: Any) -> int:
     return evaluated_count
 
 
+# ---------------------------------------------------------------------------
+# 추천(Recommendation) D+N 적중률 추적 — v9.6.0
+# ---------------------------------------------------------------------------
+
+async def evaluate_pending_recommendations(db: Any) -> int:
+    """미평가 추천의 D+N 가격 추적 + 적중률 마킹.
+
+    recommendations + recommendation_results 테이블 대상.
+    기존 evaluate_pending_signals()와 동일 패턴.
+    스케줄러 job_signal_evaluation에서 매일 16:20 호출.
+    """
+    pending = db.get_unevaluated_recommendations(min_days=1)
+    if not pending:
+        return 0
+
+    # 고유 티커 추출
+    tickers = list({r["ticker"] for r in pending})
+
+    # 현재가 일괄 조회 (기존 함수 재사용)
+    prices = _fetch_current_prices(tickers)
+    if not prices:
+        logger.warning("추천 평가: 가격 조회 실패")
+        return 0
+
+    evaluated_count = 0
+    today = datetime.utcnow()
+
+    for rec in pending:
+        ticker = rec["ticker"]
+        rec_price = rec.get("rec_price") or 0
+        if rec_price <= 0 or ticker not in prices:
+            continue
+
+        current_price = prices[ticker]
+        rec_date = rec.get("rec_date", "")
+        try:
+            rec_dt = datetime.strptime(rec_date[:10], "%Y-%m-%d")
+            days_since = (today - rec_dt).days
+        except (ValueError, TypeError):
+            continue
+
+        if days_since < 1:
+            continue
+
+        # 수익률 계산
+        def ret(p: float | None) -> float | None:
+            if p and rec_price > 0:
+                return round((p - rec_price) / rec_price * 100, 2)
+            return None
+
+        price_d5 = current_price if days_since >= 5 else None
+        price_d10 = current_price if days_since >= 10 else None
+        price_d20 = current_price if days_since >= 20 else None
+
+        return_d5 = ret(price_d5)
+        return_d10 = ret(price_d10)
+        return_d20 = ret(price_d20)
+
+        # hit 판정: D+5 기준 양수면 적중
+        correct = None
+        if return_d5 is not None:
+            correct = 1 if return_d5 > 0 else 0
+
+        result_id = rec.get("result_id")
+        rec_id = rec["id"]
+
+        try:
+            if result_id is None:
+                # recommendation_results 레코드 생성
+                if days_since >= 5:
+                    new_id = db.add_recommendation_result(
+                        recommendation_id=rec_id,
+                        ticker=ticker,
+                        rec_price=rec_price,
+                        strategy_type=rec.get("strategy_type", "A"),
+                        regime_at_rec="",
+                    )
+                    # D+N 값 업데이트
+                    update_kwargs = {}
+                    if return_d5 is not None:
+                        update_kwargs["day5_price"] = price_d5
+                        update_kwargs["day5_return"] = return_d5
+                    if return_d10 is not None:
+                        update_kwargs["day10_price"] = price_d10
+                        update_kwargs["day10_return"] = return_d10
+                    if return_d20 is not None:
+                        update_kwargs["day20_price"] = price_d20
+                        update_kwargs["day20_return"] = return_d20
+                    if correct is not None:
+                        update_kwargs["correct"] = correct
+                    update_kwargs["evaluated_at"] = today.isoformat()
+
+                    if update_kwargs:
+                        db.update_recommendation_result(new_id, **update_kwargs)
+                    evaluated_count += 1
+            else:
+                # 기존 레코드에 누락된 D+N 채우기
+                update_kwargs = {}
+                if rec.get("day5_return") is None and return_d5 is not None:
+                    update_kwargs["day5_price"] = price_d5
+                    update_kwargs["day5_return"] = return_d5
+                if rec.get("day10_return") is None and return_d10 is not None:
+                    update_kwargs["day10_price"] = price_d10
+                    update_kwargs["day10_return"] = return_d10
+                if rec.get("day20_return") is None and return_d20 is not None:
+                    update_kwargs["day20_price"] = price_d20
+                    update_kwargs["day20_return"] = return_d20
+                if correct is not None and rec.get("day5_return") is None:
+                    update_kwargs["correct"] = correct
+                if update_kwargs:
+                    update_kwargs["evaluated_at"] = today.isoformat()
+                    db.update_recommendation_result(result_id, **update_kwargs)
+                    evaluated_count += 1
+        except Exception as e:
+            logger.debug("추천 결과 업데이트 실패 (%s): %s", ticker, e)
+            continue
+
+        # recommendation_tracking 테이블도 업데이트
+        try:
+            # 현재가로 D+N 추적
+            price_d1 = current_price if days_since >= 1 else None
+            price_d3 = current_price if days_since >= 3 else None
+            return_d1 = ret(price_d1)
+            return_d3 = ret(price_d3)
+
+            track_kwargs = {}
+            if price_d1:
+                track_kwargs["price_d1"] = price_d1
+                track_kwargs["return_d1"] = return_d1
+            if price_d3:
+                track_kwargs["price_d3"] = price_d3
+                track_kwargs["return_d3"] = return_d3
+            if price_d5:
+                track_kwargs["price_d5"] = price_d5
+                track_kwargs["return_d5"] = return_d5
+            if price_d10:
+                track_kwargs["price_d10"] = price_d10
+                track_kwargs["return_d10"] = return_d10
+            if price_d20:
+                track_kwargs["price_d20"] = price_d20
+                track_kwargs["return_d20"] = return_d20
+            if correct is not None:
+                track_kwargs["hit"] = correct
+
+            if track_kwargs:
+                # 기존 tracking 레코드 찾기
+                tracks = db.get_recommendation_tracks(limit=500)
+                track_found = False
+                for t in tracks:
+                    if t.get("ticker") == ticker and t.get("entry_price") == rec_price:
+                        db.update_recommendation_track(t["id"], **track_kwargs)
+                        track_found = True
+                        break
+                if not track_found:
+                    db.add_recommendation_track(
+                        ticker=ticker,
+                        name=rec.get("name", ""),
+                        strategy=rec.get("strategy_type", "A"),
+                        score=rec.get("rec_score", 0) if "rec_score" in rec else 0,
+                        recommended_date=rec_date,
+                        entry_price=rec_price,
+                    )
+        except Exception as e:
+            logger.debug("추천 tracking 업데이트 실패 (%s): %s", ticker, e)
+
+    logger.info("추천 적중률 평가 완료: %d건 평가", evaluated_count)
+    return evaluated_count
+
+
 def _fetch_current_prices(tickers: list[str]) -> dict[str, float]:
     """yfinance로 현재가 일괄 조회."""
     try:

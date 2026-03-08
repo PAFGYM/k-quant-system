@@ -423,6 +423,95 @@ class TradingMixin:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # -- v9.6.0: 미평가 추천 조회 -----------------------------------------------
+
+    def get_unevaluated_recommendations(self, min_days: int = 1) -> list[dict]:
+        """D+N 결과가 없거나 불완전한 추천 목록 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.id, r.ticker, r.name, r.rec_price, r.rec_date,
+                       r.rec_score, r.strategy_type, r.status,
+                       rr.id as result_id,
+                       rr.day5_return, rr.day10_return, rr.day20_return
+                FROM recommendations r
+                LEFT JOIN recommendation_results rr
+                    ON rr.recommendation_id = r.id
+                WHERE julianday('now') - julianday(r.rec_date) >= ?
+                  AND (rr.id IS NULL
+                       OR (rr.day5_return IS NULL
+                           AND julianday('now') - julianday(r.rec_date) >= 5)
+                       OR (rr.day10_return IS NULL
+                           AND julianday('now') - julianday(r.rec_date) >= 10)
+                       OR (rr.day20_return IS NULL
+                           AND julianday('now') - julianday(r.rec_date) >= 20))
+                ORDER BY r.rec_date ASC
+                LIMIT 200
+                """,
+                (min_days,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- v9.6.0: pending_entries (분할 매수 대기 주문) ----------------------------
+
+    def add_pending_entry(
+        self, ticker: str, name: str, tranche: int,
+        target_price: float, shares: int, trigger_type: str = "dip",
+        recommendation_id: int = 0,
+        expires_hours: int = 72,
+    ) -> int:
+        """분할 매수 대기 주문 등록."""
+        now = datetime.utcnow()
+        expires = (now + timedelta(hours=expires_hours)).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO pending_entries
+                   (ticker, name, tranche, target_price, shares,
+                    trigger_type, recommendation_id, status, expires_at, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                (ticker, name, tranche, target_price, shares,
+                 trigger_type, recommendation_id, expires, now.isoformat()),
+            )
+        return cur.lastrowid or 0
+
+    def get_pending_entries(self, status: str = "pending") -> list[dict]:
+        """활성 대기 주문 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM pending_entries
+                   WHERE status=? AND (expires_at IS NULL OR expires_at > ?)
+                   ORDER BY created_at ASC""",
+                (status, datetime.utcnow().isoformat()),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_pending_entry(self, entry_id: int, **kwargs) -> None:
+        """대기 주문 상태 업데이트."""
+        allowed = {"status", "filled_at"}
+        sets, vals = [], []
+        for k, v in kwargs.items():
+            if k in allowed:
+                sets.append(f"{k}=?")
+                vals.append(v)
+        if not sets:
+            return
+        vals.append(entry_id)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE pending_entries SET {', '.join(sets)} WHERE id=?", vals
+            )
+
+    def expire_old_pending_entries(self) -> int:
+        """만료된 대기 주문 정리."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE pending_entries SET status='expired' "
+                "WHERE status='pending' AND expires_at IS NOT NULL AND expires_at <= ?",
+                (now,),
+            )
+        return cur.rowcount
+
     # -- trade_executions -------------------------------------------------------
 
     def add_trade_execution(
