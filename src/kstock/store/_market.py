@@ -779,8 +779,13 @@ class MarketMixin:
             ticker_map: dict = {}
             for row in rows:
                 tickers = _json.loads(row["mentioned_tickers"] or "[]")
+                # v9.5.1: 타입 검증
+                if not isinstance(tickers, list):
+                    continue
                 source = row["source"]
                 for t in tickers:
+                    if not isinstance(t, dict):
+                        continue
                     name = t.get("name", "")
                     if not name:
                         continue
@@ -789,13 +794,16 @@ class MarketMixin:
                             "name": name,
                             "ticker": t.get("ticker", ""),
                             "mentions": 0,
-                            "positive": 0,
-                            "negative": 0,
-                            "neutral": 0,
+                            "긍정": 0,
+                            "부정": 0,
+                            "중립": 0,
                             "sources": [],
                         }
                     ticker_map[name]["mentions"] += 1
-                    sent = t.get("sentiment", "neutral")
+                    sent = t.get("sentiment", "중립")
+                    # v9.5.1: 영문→한글 호환 (기존 DB 데이터 대응)
+                    _sent_norm = {"positive": "긍정", "negative": "부정", "neutral": "중립"}
+                    sent = _sent_norm.get(sent, sent)
                     ticker_map[name][sent] = ticker_map[name].get(sent, 0) + 1
                     if source not in ticker_map[name]["sources"]:
                         ticker_map[name]["sources"].append(source)

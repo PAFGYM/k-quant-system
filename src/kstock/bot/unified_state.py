@@ -243,7 +243,7 @@ def _load_debate_verdicts(db: Any) -> dict:
     verdicts = {}
     try:
         holdings = db.get_active_holdings()
-        for h in (holdings or [])[:10]:
+        for h in (holdings or [])[:20]:
             ticker = h.get("ticker", "")
             d = db.get_latest_debate(ticker)
             if d:
@@ -273,7 +273,7 @@ def _load_multi_agent_summary(db: Any) -> dict:
     summary = {}
     try:
         holdings = db.get_active_holdings()
-        for h in (holdings or [])[:10]:
+        for h in (holdings or [])[:20]:
             ticker = h.get("ticker", "")
             results = db.get_multi_agent_results(ticker=ticker, limit=1)
             if results:

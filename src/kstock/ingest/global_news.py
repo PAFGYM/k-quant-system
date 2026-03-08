@@ -797,7 +797,7 @@ async def summarize_transcript_structured(
         '{\n'
         '  "full_summary": "10-15줄 상세 요약 (시장 상황, 전문가 의견, 핵심 수치, 전망 포함. 불필요한 인사/광고 제외)",\n'
         '  "mentioned_tickers": [\n'
-        '    {"name": "종목명", "ticker": "6자리코드(모르면 빈 문자열)", "sentiment": "positive/negative/neutral", "context": "왜 언급됐는지 1줄"}\n'
+        '    {"name": "종목명", "ticker": "6자리코드(모르면 빈 문자열)", "sentiment": "긍정/부정/중립", "context": "왜 언급됐는지 1줄"}\n'
         '  ],\n'
         '  "mentioned_sectors": ["반도체", "2차전지"],\n'
         '  "market_outlook": "bullish/bearish/neutral/mixed",\n'
@@ -825,7 +825,11 @@ async def summarize_transcript_structured(
                 },
             )
             if resp.status_code != 200:
-                logger.debug("Structured summary API error %d", resp.status_code)
+                logger.warning(
+                    "Structured summary API error %d for '%s': %s",
+                    resp.status_code, title[:30],
+                    resp.text[:200] if resp.text else "no body",
+                )
                 return empty
 
             raw_text = resp.json()["content"][0]["text"].strip()
@@ -878,19 +882,33 @@ async def summarize_transcript_structured(
             if data.get("investment_implications"):
                 conf += 0.1
 
+            # v9.5.1: 타입 검증 — AI가 string 반환 시 빈 리스트로 대체
+            mentioned_tickers = data.get("mentioned_tickers", [])
+            if not isinstance(mentioned_tickers, list):
+                mentioned_tickers = []
+            mentioned_sectors = data.get("mentioned_sectors", [])
+            if not isinstance(mentioned_sectors, list):
+                mentioned_sectors = []
+            key_numbers = data.get("key_numbers", [])
+            if not isinstance(key_numbers, list):
+                key_numbers = []
+
             return {
                 "full_summary": full_summary,
-                "mentioned_tickers": data.get("mentioned_tickers", []),
-                "mentioned_sectors": data.get("mentioned_sectors", []),
+                "mentioned_tickers": mentioned_tickers,
+                "mentioned_sectors": mentioned_sectors,
                 "market_outlook": data.get("market_outlook", ""),
-                "key_numbers": data.get("key_numbers", []),
+                "key_numbers": key_numbers,
                 "investment_implications": data.get("investment_implications", ""),
                 "raw_summary": raw_summary,
                 "confidence": min(conf, 1.0),
             }
 
     except Exception as e:
-        logger.debug("Structured summary generation failed: %s", e)
+        logger.warning(
+            "Structured summary generation failed for '%s': %s",
+            title[:30] if title else "unknown", e, exc_info=True,
+        )
         return empty
 
 

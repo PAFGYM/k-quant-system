@@ -167,9 +167,10 @@ def get_youtube_mention_bonus(
             m_ticker = m.get("ticker", "")
             m_name = m.get("name", "")
             if ticker in (m_ticker, m_name) or (m_ticker and m_ticker in ticker):
-                pos = m.get("positive", 0)
-                neg = m.get("negative", 0)
-                total = m.get("count", 1)
+                # v9.5.1: 한글 키 사용 (영문 fallback)
+                pos = m.get("긍정", 0) or m.get("positive", 0)
+                neg = m.get("부정", 0) or m.get("negative", 0)
+                total = m.get("count", 0) or m.get("mentions", 1)
 
                 if pos > neg:
                     # 긍정 언급: 여러 채널일수록 높은 보너스

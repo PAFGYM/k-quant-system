@@ -1881,6 +1881,111 @@ class CoreHandlersMixin:
                     reply_markup=get_reply_markup(context),
                 )
 
+    def _get_callback_dispatch(self) -> dict:
+        """v9.5.1: 콜백 디스패치 테이블 (handle_callback + _action_back 공용)."""
+        return {
+            "buy": self._action_buy,
+            "skip": self._action_skip,
+            "watch_alert": self._action_watch,
+            "pass": self._action_skip,
+            "sell_profit": self._action_sell_profit,
+            "hold_profit": self._action_hold_profit,
+            "stop_loss": self._action_stop_loss,
+            "hold_through": self._action_hold_through,
+            "newstop": self._action_new_stop,
+            "setstop": self._action_set_stop,
+            "newtgt": self._action_new_target,
+            "settgt": self._action_set_target,
+            "holdai": self._action_hold_ai,
+            "sell_half": self._action_sell_profit,
+            "hold_more": self._action_hold_profit,
+            "detail": self._action_detail,
+            "nowatch": self._action_nowatch,
+            "watch_btn": self._action_watch_btn,
+            "strat": self._action_strategy,
+            "opt_apply": self._action_opt_apply,
+            "opt_ignore": self._action_opt_ignore,
+            "kis_buy": self._action_kis_buy,
+            "kis_pass": self._action_skip,
+            "hz": self._action_horizon_select,
+            "ht": self._action_set_holding_type,
+            "sol": self._action_solution_detail,
+            "scn": self._action_scenario_run,
+            "notif": self._action_notification_toggle,
+            "rpt": self._action_report_submenu,
+            "sector_rpt": self._action_sector_report,
+            "weekly": self._action_weekly_submenu,
+            "sell_plans": self._action_sell_plans,
+            "multi_run": self._action_multi_run,
+            "mgr_debate": self._action_manager_debate,
+            "quick_q": self._handle_quick_question,
+            "add_ss": self._action_add_from_screenshot,
+            "add_txt": self._action_confirm_text_holding,
+            "sell_confirm": self._action_confirm_sell,
+            "stock_act": self._action_stock_action,
+            "bal": self._action_balance,
+            "selfupd": self._action_self_update,
+            "kis_hub": self._action_kis_hub,
+            "kis_mode": self._action_kis_mode,
+            "price_alert": self._action_price_alert,
+            "kis": self._action_kis,
+            "opt_run": self._action_opt_run,
+            "fav": self._action_favorites,
+            "agent": self._action_agent,
+            "goto": self._action_goto,
+            "adm": self._handle_admin_callback,
+            # v3.6 신규
+            "ai": self._action_ai_status,
+            "orderbook": self._action_orderbook,
+            "short": self._action_short_analysis,
+            "hub": self._action_hub,
+            # v3.7: 매수 플래너
+            "bp": self._action_buy_plan,
+            # Backtest Pro
+            "bt": self._action_backtest_pro,
+            # v3.8: 고급 리스크
+            "risk": self._action_risk_advanced,
+            # v3.9: 매도 알림 뮤트
+            "mute": self._action_mute_alert,
+            # v3.9: 매니저 조회
+            "mgr": self._action_manager_view,
+            # v3.9: 거품 판별
+            "bubble": self._action_bubble_check,
+            # v4.1: 차익실현 콜백
+            "pt": self._action_profit_taking,
+            # v4.3: 매매일지/섹터로테이션/역발상
+            "journal": self._action_journal_view,
+            "sector_rotate": self._action_sector_rotate,
+            "contrarian": self._action_contrarian_view,
+            "bt_adv": self._action_backtest_advanced,
+            # auto-fix 승인/거부
+            "autofix": self._action_autofix,
+            # AI 후속 질문
+            "followup": self._action_followup,
+            "followup_q": self._action_followup_dynamic,
+            # v5.3: 범용 닫기 버튼
+            "dismiss": self._action_dismiss,
+            # v5.5: 피드백 + 일일 평가
+            "fb": self._action_feedback,
+            "rate": self._action_daily_rate,
+            # v5.9: 더보기 인라인 메뉴 → 텍스트 메뉴 호출
+            "menu": self._action_menu_dispatch,
+            # v8.3: 원격접속 메뉴
+            "remote": self._action_remote,
+            # v8.5: 온보딩
+            "onboard": self._action_onboarding,
+            # v8.6: 매니저 도메인 관리
+            "mgr_tab": self._action_manager_tab,
+            "mgr_scan": self._action_manager_scan,
+            # v8.7: 시스템 컨트롤
+            "ctrl": self._handle_control_callback,
+            # v9.4: AI 토론
+            "debhist": self._action_debate_history,
+            "aistat": self._action_ai_accuracy,
+            # v9.5: 뒤로가기
+            "back": self._action_back,
+        }
+
     async def handle_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
@@ -1892,108 +1997,7 @@ class CoreHandlersMixin:
         data = query.data or ""
         try:
             action, _, payload = data.partition(":")
-            dispatch = {
-                "buy": self._action_buy,
-                "skip": self._action_skip,
-                "watch_alert": self._action_watch,
-                "pass": self._action_skip,
-                "sell_profit": self._action_sell_profit,
-                "hold_profit": self._action_hold_profit,
-                "stop_loss": self._action_stop_loss,
-                "hold_through": self._action_hold_through,
-                "newstop": self._action_new_stop,
-                "setstop": self._action_set_stop,
-                "newtgt": self._action_new_target,
-                "settgt": self._action_set_target,
-                "holdai": self._action_hold_ai,
-                "sell_half": self._action_sell_profit,
-                "hold_more": self._action_hold_profit,
-                "detail": self._action_detail,
-                "nowatch": self._action_nowatch,
-                "watch_btn": self._action_watch_btn,
-                "strat": self._action_strategy,
-                "opt_apply": self._action_opt_apply,
-                "opt_ignore": self._action_opt_ignore,
-                "kis_buy": self._action_kis_buy,
-                "kis_pass": self._action_skip,
-                "hz": self._action_horizon_select,
-                "ht": self._action_set_holding_type,
-                "sol": self._action_solution_detail,
-                "scn": self._action_scenario_run,
-                "notif": self._action_notification_toggle,
-                "rpt": self._action_report_submenu,
-                "sector_rpt": self._action_sector_report,
-                "weekly": self._action_weekly_submenu,
-                "sell_plans": self._action_sell_plans,
-                "multi_run": self._action_multi_run,
-                "mgr_debate": self._action_manager_debate,
-                "quick_q": self._handle_quick_question,
-                "add_ss": self._action_add_from_screenshot,
-                "add_txt": self._action_confirm_text_holding,
-                "sell_confirm": self._action_confirm_sell,
-                "stock_act": self._action_stock_action,
-                "bal": self._action_balance,
-                "selfupd": self._action_self_update,
-                "kis_hub": self._action_kis_hub,
-                "kis_mode": self._action_kis_mode,
-                "price_alert": self._action_price_alert,
-                "kis": self._action_kis,
-                "opt_run": self._action_opt_run,
-                "fav": self._action_favorites,
-                "agent": self._action_agent,
-                "goto": self._action_goto,
-                "adm": self._handle_admin_callback,
-                # v3.6 신규
-                "ai": self._action_ai_status,
-                "orderbook": self._action_orderbook,
-                "short": self._action_short_analysis,
-                "hub": self._action_hub,
-                # v3.7: 매수 플래너
-                "bp": self._action_buy_plan,
-                # Backtest Pro
-                "bt": self._action_backtest_pro,
-                # v3.8: 고급 리스크
-                "risk": self._action_risk_advanced,
-                # v3.9: 매도 알림 뮤트
-                "mute": self._action_mute_alert,
-                # v3.9: 매니저 조회
-                "mgr": self._action_manager_view,
-                # v3.9: 거품 판별
-                "bubble": self._action_bubble_check,
-                # v4.1: 차익실현 콜백
-                "pt": self._action_profit_taking,
-                # v4.3: 매매일지/섹터로테이션/역발상
-                "journal": self._action_journal_view,
-                "sector_rotate": self._action_sector_rotate,
-                "contrarian": self._action_contrarian_view,
-                "bt_adv": self._action_backtest_advanced,
-                # auto-fix 승인/거부
-                "autofix": self._action_autofix,
-                # AI 후속 질문
-                "followup": self._action_followup,
-                "followup_q": self._action_followup_dynamic,
-                # v5.3: 범용 닫기 버튼
-                "dismiss": self._action_dismiss,
-                # v5.5: 피드백 + 일일 평가
-                "fb": self._action_feedback,
-                "rate": self._action_daily_rate,
-                # v5.9: 더보기 인라인 메뉴 → 텍스트 메뉴 호출
-                "menu": self._action_menu_dispatch,
-                # v8.3: 원격접속 메뉴
-                "remote": self._action_remote,
-                # v8.5: 온보딩
-                "onboard": self._action_onboarding,
-                # v8.6: 매니저 도메인 관리
-                "mgr_tab": self._action_manager_tab,
-                "mgr_scan": self._action_manager_scan,
-                # v8.7: 시스템 컨트롤
-                "ctrl": self._handle_control_callback,
-                # v9.4: AI 토론
-                "debhist": self._action_debate_history,
-                "aistat": self._action_ai_accuracy,
-                # v9.5: 뒤로가기
-                "back": self._action_back,
-            }
+            dispatch = self._get_callback_dispatch()
             handler = dispatch.get(action)
             if handler:
                 await handler(query, context, payload)
@@ -2129,19 +2133,16 @@ class CoreHandlersMixin:
         return stack.pop() if stack else None
 
     async def _action_back(self, query, context, payload: str) -> None:
-        """v9.5: 뒤로가기 — 이전 화면으로 복귀."""
+        """v9.5: 뒤로가기 — 이전 화면으로 복귀.
+
+        v9.5.1: 전체 디스패치 테이블 사용 (기존 5개 → 전체 액션 지원).
+        """
         prev = self._pop_nav(context)
         if prev and prev.get("callback_data"):
             cb = prev["callback_data"]
             action, _, p = cb.partition(":")
-            # dispatch 테이블에서 핸들러 찾기
-            dispatch = {
-                "detail": self._action_detail,
-                "quick_q": self._action_quick_query,
-                "trade": self._action_trade,
-                "menu": self._action_menu_dispatch,
-                "mgr": self._action_manager_view,
-            }
+            # v9.5.1: 공용 디스패치 테이블에서 핸들러 찾기
+            dispatch = self._get_callback_dispatch()
             handler = dispatch.get(action)
             if handler:
                 try:
