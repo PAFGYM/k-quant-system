@@ -99,3 +99,10 @@ factor_bonus:
   quintile_2: 5    # 60-80% -> +5
   quintile_4: -5   # 20-40% -> -5
   quintile_5: -10  # Bottom 20% -> -10
+
+# v10.0: ML blending configuration
+ml_blend:
+  enabled: true
+  ml_weight: 0.40           # ML 기여 비중 (40%)
+  traditional_weight: 0.60  # 전통 스코어 기여 비중 (60%)
+  min_confidence: 0.55      # 이 이하면 ML 사용 안 함

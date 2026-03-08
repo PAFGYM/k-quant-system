@@ -775,6 +775,24 @@ class MarketMixin:
             logger.error("save_youtube_intelligence error: %s", e)
             return False
 
+    def check_youtube_processed(self, video_id: str) -> bool:
+        """video_id가 이미 youtube_intelligence에 있는지 확인.
+
+        v10.0: 중복 처리 방지용.
+        """
+        if not video_id:
+            return False
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM youtube_intelligence WHERE video_id = ? LIMIT 1",
+                    (video_id,),
+                ).fetchone()
+                return row is not None
+        except Exception:
+            logger.debug("check_youtube_processed error for %s", video_id, exc_info=True)
+            return False
+
     def get_recent_youtube_intelligence(
         self, hours: int = 24, limit: int = 10,
     ) -> list[dict]:

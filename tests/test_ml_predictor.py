@@ -133,11 +133,11 @@ def sample_historical_data() -> list[dict]:
 
 class TestFeatureNames:
     def test_feature_names_length(self) -> None:
-        """FEATURE_NAMES has exactly 30 entries."""
-        assert len(FEATURE_NAMES) == 30
+        """FEATURE_NAMES has exactly 46 entries (v10.0: 30→46)."""
+        assert len(FEATURE_NAMES) == 46
 
     def test_feature_names_are_unique(self) -> None:
-        assert len(set(FEATURE_NAMES)) == 30
+        assert len(set(FEATURE_NAMES)) == 46
 
 
 # ===========================================================================
@@ -146,11 +146,11 @@ class TestFeatureNames:
 
 
 class TestBuildFeatures:
-    def test_returns_dict_with_all_30_keys(self, sample_features: dict) -> None:
-        """build_features returns dict with all 30 feature keys."""
+    def test_returns_dict_with_all_46_keys(self, sample_features: dict) -> None:
+        """build_features returns dict with all 46 feature keys (v10.0)."""
         assert isinstance(sample_features, dict)
         assert set(sample_features.keys()) == set(FEATURE_NAMES)
-        assert len(sample_features) == 30
+        assert len(sample_features) == 46
 
     def test_values_are_float(self, sample_features: dict) -> None:
         for key, value in sample_features.items():
@@ -168,7 +168,7 @@ class TestBuildFeatures:
             macro=Empty(),
             flow=Empty(),
         )
-        assert len(result) == 30
+        assert len(result) == 46
         # Defaults should produce finite floats
         for key, value in result.items():
             assert np.isfinite(value), f"{key} is not finite: {value}"
@@ -214,7 +214,7 @@ class TestBuildTrainingData:
     def test_valid_data(self, sample_historical_data: list[dict]) -> None:
         """build_training_data returns correct shapes for valid data."""
         X, y = build_training_data(sample_historical_data)
-        assert X.shape == (20, 30)
+        assert X.shape == (20, len(FEATURE_NAMES))
         assert y.shape == (20,)
         assert X.dtype == np.float32
         assert y.dtype == np.int32
@@ -222,7 +222,7 @@ class TestBuildTrainingData:
     def test_empty_data(self) -> None:
         """build_training_data returns empty arrays for empty input."""
         X, y = build_training_data([])
-        assert X.shape == (0, 30)
+        assert X.shape == (0, len(FEATURE_NAMES))
         assert y.shape == (0,)
 
     def test_target_values(self, sample_historical_data: list[dict]) -> None:

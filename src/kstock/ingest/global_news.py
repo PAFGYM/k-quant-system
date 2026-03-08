@@ -136,6 +136,13 @@ YOUTUBE_FEEDS: list[dict] = [
         "lang": "ko",
         "category": "youtube_finance",
     },
+    # v10.0: 추가 채널
+    {
+        "name": "슈카월드",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCsJ6RuBiTVWRX156FVbeaGg",
+        "lang": "ko",
+        "category": "youtube_finance",
+    },
 ]
 
 # ── 긴급 이벤트 키워드 ────────────────────────────────────
@@ -1242,12 +1249,13 @@ async def summarize_transcript(
 
 async def enrich_youtube_summaries(
     items: list[NewsItem],
-    max_summaries: int = 5,
+    max_summaries: int = 15,
     db=None,
 ) -> list[NewsItem]:
     """YouTube 영상 뉴스에 자막 기반 내용 요약을 추가.
 
     v9.5: 구조화 추출 후 DB에 인텔리전스 저장.
+    v10.0: max_summaries 5→15, DB 중복 스킵, 자막 없을 때 제목+설명 폴백.
 
     Args:
         items: NewsItem 리스트 (YouTube video_id가 있는 항목)
@@ -1259,22 +1267,40 @@ async def enrich_youtube_summaries(
         return items
 
     count = 0
+    skipped = 0
     for item in yt_items:
         if count >= max_summaries:
             break
+
+        # v10.0: DB 중복 스킵 — 이미 처리한 영상은 건너뛰기
+        if db:
+            try:
+                if db.check_youtube_processed(item.video_id):
+                    skipped += 1
+                    continue
+            except Exception:
+                logger.debug("check_youtube_processed failed for %s", item.video_id, exc_info=True)
 
         # 자막 추출 (동기 — youtube_transcript_api는 동기 라이브러리)
         transcript = await asyncio.get_event_loop().run_in_executor(
             None, fetch_transcript, item.video_id,
         )
 
+        # v10.0: 자막 없을 때 제목+설명 폴백
         if not transcript:
-            continue
-
-        # v9.5: 구조화 추출
-        structured = await summarize_transcript_structured(
-            transcript, item.title, item.source.replace("\U0001f3ac", "").strip(),
-        )
+            fallback_text = f"제목: {item.title}\n설명: {item.content_summary[:500]}" if item.content_summary else ""
+            if len(fallback_text) > 50:
+                logger.info("YouTube transcript unavailable, using title+desc fallback: %s", item.title[:30])
+                structured = await summarize_transcript_structured(
+                    fallback_text, item.title, item.source.replace("\U0001f3ac", "").strip(),
+                )
+            else:
+                continue
+        else:
+            # v9.5: 구조화 추출
+            structured = await summarize_transcript_structured(
+                transcript, item.title, item.source.replace("\U0001f3ac", "").strip(),
+            )
 
         raw_summary = structured.get("raw_summary", "")
         full_summary = structured.get("full_summary", "")
@@ -1307,5 +1333,8 @@ async def enrich_youtube_summaries(
                 except Exception:
                     logger.debug("YouTube intelligence DB save failed", exc_info=True)
 
-    logger.info("Enriched %d/%d YouTube items with summaries", count, len(yt_items))
+    logger.info(
+        "Enriched %d/%d YouTube items with summaries (skipped %d already processed)",
+        count, len(yt_items), skipped,
+    )
     return items

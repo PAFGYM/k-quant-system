@@ -308,8 +308,12 @@ def compute_composite_score(
     multi_agent_bonus: int = 0,
     factor_bonus: int = 0,
     event_bonus: int = 0,
+    ml_probability: float = 0.5,  # v10.0: ML 모델 raw 확률
 ) -> ScoreBreakdown:
-    """Compute the 100-point composite score.
+    """Compute the 100-point composite score with ML blending.
+
+    v10.0: ML 확률이 유효하면 전통적 스코어와 ML 스코어를 블렌딩.
+    ML이 40%, 전통이 60% (config.ml_blend.ml_weight로 조절 가능).
 
     Args:
         macro: Macro snapshot.
@@ -317,6 +321,7 @@ def compute_composite_score(
         info: Stock info.
         tech: Technical indicators.
         config: Scoring config dict. Loaded from YAML if None.
+        ml_probability: Raw ML model probability (0.0~1.0).
 
     Returns:
         ScoreBreakdown with individual and composite scores.
@@ -336,7 +341,7 @@ def compute_composite_score(
     s_technical = score_technical(tech, thresholds)
     s_risk = score_risk(tech, info, thresholds)
 
-    composite = (
+    traditional = (
         s_macro * weights["macro"]
         + s_flow * weights["flow"]
         + s_fundamental * weights["fundamental"]
@@ -344,13 +349,26 @@ def compute_composite_score(
         + s_risk * weights["risk"]
     ) * 100
 
+    # v10.0: ML 블렌딩 — ML 유효 시 전통 스코어와 혼합
+    ml_blend_cfg = config.get("ml_blend", {})
+    ml_enabled = ml_blend_cfg.get("enabled", False)
+    ml_weight = ml_blend_cfg.get("ml_weight", 0.40)
+    ml_min_conf = ml_blend_cfg.get("min_confidence", 0.55)
+
+    if ml_enabled and 0.05 < ml_probability < 0.95:
+        # ML 확률 → 0~100 스케일 변환
+        ml_score = ml_probability * 100
+        composite = ml_score * ml_weight + traditional * (1.0 - ml_weight)
+    else:
+        composite = traditional
+
     # v2.5: Multi-timeframe and sector adjustments
     composite += mtf_bonus  # +10 aligned, -10 misaligned
     composite += sector_adj  # +5 top sector, -5 bottom
 
     # v3.0: Policy, ML, sentiment, leading sector bonuses
     composite += policy_bonus       # +10 밸류업 수혜, +5 코스닥
-    composite += ml_bonus           # +15/+10/+5/-10
+    composite += ml_bonus           # +15/+10/+5/-10 (기존 보너스 유지)
     composite += sentiment_bonus    # +10/+5/-10
     composite += leading_sector_bonus  # +5 tier1, +2 tier2
 

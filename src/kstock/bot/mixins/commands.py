@@ -48,6 +48,31 @@ class CommandsMixin:
                 logger.debug("_run_scan pre-scan failed for %s", stock.get("code"), exc_info=True)
                 pre_results.append((stock, 0.0))
 
+        # v10.0: 사이클당 1회 한국 시장 데이터 수집 (전 종목 공유)
+        _ml_market_cache = {}
+        try:
+            _ml_market_cache["credit"] = self.db.get_credit_balance(days=3)
+            _ml_market_cache["program"] = self.db.get_program_trading(days=3)
+            _ml_market_cache["etf"] = self.db.get_etf_flow(days=3)
+            _ml_market_cache["youtube"] = self.db.get_youtube_mentioned_tickers(hours=48)
+            _ml_market_cache["news"] = self.db.get_recent_global_news(hours=48) if hasattr(self.db, "get_recent_global_news") else []
+            # 한국형 리스크 1회 계산
+            try:
+                from kstock.signal.korea_risk import assess_korea_risk
+                kr = assess_korea_risk(
+                    credit_data=_ml_market_cache.get("credit"),
+                    etf_data=_ml_market_cache.get("etf"),
+                    program_data=_ml_market_cache.get("program"),
+                    vix=macro.vix if macro else 0,
+                    usdkrw=macro.usdkrw if macro else 0,
+                )
+                _ml_market_cache["korea_risk_score"] = kr.total_risk
+            except Exception:
+                logger.debug("korea_risk assessment failed", exc_info=True)
+                _ml_market_cache["korea_risk_score"] = 0.0
+        except Exception:
+            logger.debug("ML market cache collection failed", exc_info=True)
+
         # Second pass: full analysis with RS rank
         results = []
         for stock, ret_3m in pre_results:
@@ -60,6 +85,7 @@ class CommandsMixin:
                     category=stock.get("category", ""),
                     rs_rank=rs_rank,
                     rs_total=len(all_returns),
+                    ml_market_cache=_ml_market_cache,
                 )
                 if r:
                     results.append(r)
@@ -72,6 +98,7 @@ class CommandsMixin:
         self, ticker: str, name: str, macro: MacroSnapshot,
         market: str = "KOSPI", sector: str = "", category: str = "",
         rs_rank: int = 0, rs_total: int = 1,
+        ml_market_cache: dict | None = None,
     ) -> ScanResult | None:
         try:
             import asyncio
@@ -225,13 +252,36 @@ class CommandsMixin:
             # v3.0: policy bonus
             policy_bonus = get_policy_bonus(ticker, sector=sector, market=market)
 
-            # v3.0: ML bonus
+            # v10.0: 주봉 매집 점수 (종목별)
+            weekly_acc_score = 0.0
+            try:
+                from kstock.features.weekly_pattern import analyze_weekly_accumulation
+                sd_data = self.db.get_supply_demand(ticker, days=20) if self.db else None
+                acc_result = analyze_weekly_accumulation(ohlcv, supply_data=sd_data)
+                weekly_acc_score = acc_result.total
+            except Exception:
+                logger.debug("weekly_accumulation failed for %s", ticker, exc_info=True)
+
+            # v3.0+v10.0: ML bonus + ML probability
             ml_bonus_val = 0
+            ml_probability = 0.5  # neutral default
+            _mc = ml_market_cache or {}
             if HAS_ML and self._ml_model:
                 try:
-                    features = build_features(tech, info, macro, flow, policy_bonus=policy_bonus)
+                    features = build_features(
+                        tech, info, macro, flow, policy_bonus=policy_bonus,
+                        korea_flow=_mc,
+                        sentiment_data={
+                            "youtube": _mc.get("youtube", []),
+                            "news": _mc.get("news", []),
+                            "ticker": ticker,
+                        },
+                        korea_risk_score=_mc.get("korea_risk_score", 0.0),
+                        weekly_acc_score=weekly_acc_score,
+                    )
                     ml_pred = predict(features, self._ml_model)
                     ml_bonus_val = get_ml_bonus(ml_pred.probability)
+                    ml_probability = ml_pred.probability
                 except Exception:
                     logger.debug("_run_scan_for_stock ML prediction failed for %s", ticker, exc_info=True)
 
@@ -292,6 +342,7 @@ class CommandsMixin:
                 multi_agent_bonus=multi_agent_bonus,
                 factor_bonus=supply_demand_bonus,  # v9.3: 수급 보너스
                 event_bonus=event_bonus,  # v9.5.3: 이벤트 보너스
+                ml_probability=ml_probability,  # v10.0: ML 블렌딩
             )
 
             # Multi-strategy evaluation

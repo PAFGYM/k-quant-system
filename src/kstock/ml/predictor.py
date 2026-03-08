@@ -1,7 +1,7 @@
-"""K-Quant v3.5 LightGBM + XGBoost ensemble predictor.
+"""K-Quant v10.0 LightGBM + XGBoost ensemble predictor.
 
 Binary classification: will the stock's 5-business-day return exceed +3%?
-Uses 30 hand-crafted features drawn from the existing K-Quant data pipeline.
+Uses 46 features (30 core + 16 Korea-specific) from the K-Quant data pipeline.
 
 The module degrades gracefully -- if lightgbm, xgboost, shap, or optuna are
 not installed, predictions fall back to a neutral 50% probability.
@@ -108,18 +108,42 @@ FEATURE_NAMES: list[str] = [
     # Other (2)
     "sector_encoded",
     "policy_bonus",
+    # ── v10.0: Korea Flow (6) ──
+    "credit_change_rate",       # 신용잔고 변화율 (%)
+    "deposit_change_rate",      # 예탁금 변화율 (%)
+    "program_net_norm",         # 프로그램매매 순매수 (10억 단위 정규화)
+    "short_ratio",              # 공매도 비율
+    "short_balance_change",     # 공매도 잔고 변화율
+    "etf_leverage_ratio",       # 레버리지/(레버리지+인버스) 비율 0~1
+    # ── v10.0: Sentiment (4) ──
+    "youtube_mention_count",    # 48h 유튜브 언급 수
+    "youtube_sentiment",        # 유튜브 종합 센티먼트 (-1~+1)
+    "news_impact_avg",          # 24h 뉴스 평균 영향도 (0~10)
+    "news_urgency_count",       # 48h 긴급 뉴스 수
+    # ── v10.0: Korea Risk (2) ──
+    "korea_risk_score",         # 한국형 리스크 종합 (0~100)
+    "weekly_accumulation",      # 주봉 매집 패턴 점수 (0~100)
+    # ── v10.0: Advanced Flow (4) ──
+    "foreign_net_amount",       # 외국인 순매수 금액 (10억 단위 클램프)
+    "institution_net_amount",   # 기관 순매수 금액 (10억 단위 클램프)
+    "foreign_inst_alignment",   # 외인+기관 동조 (1=동매수, -1=동매도, 0=혼합)
+    "retail_contrarian",        # 개인 역발상 지표 (-1~+1)
 ]
 
-_NUM_FEATURES = 30
+_NUM_FEATURES = 46
 
 assert len(FEATURE_NAMES) == _NUM_FEATURES, (
     f"Expected {_NUM_FEATURES} features, got {len(FEATURE_NAMES)}"
 )
 
 _REGIME_MAP: dict[str, int] = {
+    "bubble_attack": 4,
+    "attack": 3,
     "risk_on": 2,
     "neutral": 1,
     "risk_off": 0,
+    "defense": -1,
+    "panic": -2,
 }
 
 _NEUTRAL_PROB = 0.5
@@ -144,6 +168,155 @@ class PredictionResult:
 # ---------------------------------------------------------------------------
 
 
+def _build_korea_flow_features(korea_flow: dict | None) -> dict[str, float]:
+    """DB 한국 시장 데이터 → 6개 ML 피처 변환."""
+    defaults = {
+        "credit_change_rate": 0.0,
+        "deposit_change_rate": 0.0,
+        "program_net_norm": 0.0,
+        "short_ratio": 0.0,
+        "short_balance_change": 0.0,
+        "etf_leverage_ratio": 0.5,  # 중립
+    }
+    if not korea_flow:
+        return defaults
+
+    # 신용잔고 변화율
+    credit_data = korea_flow.get("credit") or []
+    if credit_data and len(credit_data) >= 1:
+        latest = credit_data[0] if isinstance(credit_data[0], dict) else {}
+        credit = latest.get("credit", 0) or 0
+        credit_chg = latest.get("credit_change", 0) or 0
+        if credit > 0:
+            defaults["credit_change_rate"] = max(-10, min(10, credit_chg / credit * 100))
+        deposit = latest.get("deposit", 0) or 0
+        deposit_chg = latest.get("deposit_change", 0) or 0
+        if deposit > 0:
+            defaults["deposit_change_rate"] = max(-10, min(10, deposit_chg / deposit * 100))
+
+    # 프로그램매매 순매수 (10억 단위 정규화)
+    prog_data = korea_flow.get("program") or []
+    if prog_data and len(prog_data) >= 1:
+        latest = prog_data[0] if isinstance(prog_data[0], dict) else {}
+        total_net = latest.get("total_net", 0) or 0
+        defaults["program_net_norm"] = max(-50, min(50, total_net / 1_000_000_000))
+
+    # 공매도 (종목별 데이터)
+    supply = korea_flow.get("supply") or []
+    if supply and len(supply) >= 1:
+        latest = supply[0] if isinstance(supply[0], dict) else {}
+        defaults["short_ratio"] = float(latest.get("short_ratio", 0) or 0)
+        sb = latest.get("short_balance", 0) or 0
+        if len(supply) >= 2:
+            prev = supply[1] if isinstance(supply[1], dict) else {}
+            prev_sb = prev.get("short_balance", 0) or 0
+            if prev_sb > 0:
+                defaults["short_balance_change"] = max(-5, min(5, (sb - prev_sb) / prev_sb))
+
+    # ETF 레버리지/인버스 비율
+    etf_data = korea_flow.get("etf") or []
+    lev_cap, inv_cap = 0.0, 0.0
+    for row in etf_data:
+        if not isinstance(row, dict):
+            continue
+        etype = (row.get("etf_type") or row.get("name", "")).lower()
+        cap = float(row.get("market_cap", 0) or row.get("volume", 0) or 0)
+        if "레버리지" in etype or "leverage" in etype:
+            lev_cap += cap
+        elif "인버스" in etype or "inverse" in etype:
+            inv_cap += cap
+    total_etf = lev_cap + inv_cap
+    if total_etf > 0:
+        defaults["etf_leverage_ratio"] = lev_cap / total_etf
+
+    return defaults
+
+
+def _build_sentiment_features(
+    sentiment_data: dict | None, ticker: str = "",
+) -> dict[str, float]:
+    """YouTube + 뉴스 데이터 → 4개 ML 피처 변환."""
+    defaults = {
+        "youtube_mention_count": 0.0,
+        "youtube_sentiment": 0.0,
+        "news_impact_avg": 0.0,
+        "news_urgency_count": 0.0,
+    }
+    if not sentiment_data:
+        return defaults
+
+    # YouTube 센티먼트
+    yt_data = sentiment_data.get("youtube") or []
+    for m in yt_data:
+        if not isinstance(m, dict):
+            continue
+        m_ticker = m.get("ticker", "") or ""
+        m_name = m.get("name", "") or ""
+        if ticker and ticker in (m_ticker, m_name):
+            defaults["youtube_mention_count"] = float(m.get("mentions", 1) or m.get("count", 1))
+            pos = float(m.get("긍정", 0) or m.get("positive", 0) or 0)
+            neg = float(m.get("부정", 0) or m.get("negative", 0) or 0)
+            total = max(pos + neg, 1.0)
+            defaults["youtube_sentiment"] = (pos - neg) / total
+            break
+
+    # 뉴스 임팩트
+    news_data = sentiment_data.get("news") or []
+    if news_data:
+        impacts = []
+        urgency = 0
+        for n in news_data:
+            if not isinstance(n, dict):
+                continue
+            impacts.append(float(n.get("impact_score", 0) or 0))
+            if n.get("is_urgent"):
+                urgency += 1
+        if impacts:
+            defaults["news_impact_avg"] = sum(impacts) / len(impacts)
+        defaults["news_urgency_count"] = float(urgency)
+
+    return defaults
+
+
+def _build_advanced_flow_features(
+    korea_flow: dict | None,
+) -> dict[str, float]:
+    """수급 데이터 → 4개 고급 Flow 피처 변환."""
+    defaults = {
+        "foreign_net_amount": 0.0,
+        "institution_net_amount": 0.0,
+        "foreign_inst_alignment": 0.0,
+        "retail_contrarian": 0.0,
+    }
+    if not korea_flow:
+        return defaults
+
+    supply = korea_flow.get("supply") or []
+    if supply and len(supply) >= 1:
+        latest = supply[0] if isinstance(supply[0], dict) else {}
+        fnet = float(latest.get("foreign_net", 0) or 0)
+        inet = float(latest.get("institution_net", 0) or 0)
+        rnet = float(latest.get("retail_net", 0) or 0)
+
+        # 10억 단위 클램프 (-10 ~ +10)
+        defaults["foreign_net_amount"] = max(-10, min(10, fnet / 1_000_000_000))
+        defaults["institution_net_amount"] = max(-10, min(10, inet / 1_000_000_000))
+
+        # 외인+기관 동조 여부
+        f_sign = 1 if fnet > 0 else (-1 if fnet < 0 else 0)
+        i_sign = 1 if inet > 0 else (-1 if inet < 0 else 0)
+        if f_sign == i_sign and f_sign != 0:
+            defaults["foreign_inst_alignment"] = float(f_sign)
+
+        # 개인 역발상 (개인이 많이 사면 -1, 많이 팔면 +1)
+        if rnet != 0:
+            r_sign = -1 if rnet > 0 else 1
+            r_mag = min(abs(rnet) / 1_000_000_000, 1.0)
+            defaults["retail_contrarian"] = r_sign * r_mag
+
+    return defaults
+
+
 def build_features(
     tech: Any,
     info: Any,
@@ -151,8 +324,13 @@ def build_features(
     flow: Any,
     sector_encoded: int = 0,
     policy_bonus: int = 0,
+    # v10.0: 한국 시장 ML 피처
+    korea_flow: dict | None = None,
+    sentiment_data: dict | None = None,
+    korea_risk_score: float = 0.0,
+    weekly_acc_score: float = 0.0,
 ) -> dict[str, float]:
-    """Build the 30-feature dict from existing K-Quant data objects.
+    """Build the 46-feature dict from K-Quant data objects.
 
     Args:
         tech: ``TechnicalIndicators`` instance.
@@ -161,9 +339,13 @@ def build_features(
         flow: ``FlowData`` instance (from ``scoring.py``).
         sector_encoded: Integer-encoded sector (0 = unknown).
         policy_bonus: Score bonus from ``policy_engine.get_score_bonus``.
+        korea_flow: Dict with credit/program/etf/supply DB data.
+        sentiment_data: Dict with youtube/news data.
+        korea_risk_score: Korea risk total (0~100).
+        weekly_acc_score: Weekly accumulation pattern score (0~100).
 
     Returns:
-        Dict mapping each of the 30 feature names to a float value.
+        Dict mapping each of the 46 feature names to a float value.
     """
     current_price = getattr(info, "current_price", 0.0) or 1.0
     high_52w = getattr(tech, "high_52w", 0.0) or 1.0
@@ -173,7 +355,8 @@ def build_features(
 
     weekly_trend = getattr(tech, "weekly_trend", "neutral")
 
-    return {
+    # 기본 30개 피처
+    features = {
         # Technical (12)
         "rsi": float(getattr(tech, "rsi", 50.0)),
         "bb_pctb": float(getattr(tech, "bb_pctb", 0.5)),
@@ -217,6 +400,46 @@ def build_features(
         "sector_encoded": float(sector_encoded),
         "policy_bonus": float(policy_bonus),
     }
+
+    # v10.0: 한국 시장 피처 16개 추가
+    ticker = sentiment_data.get("ticker", "") if sentiment_data else ""
+    features.update(_build_korea_flow_features(korea_flow))
+    features.update(_build_sentiment_features(sentiment_data, ticker))
+    features["korea_risk_score"] = float(korea_risk_score)
+    features["weekly_accumulation"] = float(weekly_acc_score)
+    features.update(_build_advanced_flow_features(korea_flow))
+
+    return features
+
+
+def persist_features(
+    feature_store: Any,
+    ticker: str,
+    date_str: str,
+    features: dict[str, float],
+) -> None:
+    """Persist computed features to the feature store for later ML training.
+
+    Args:
+        feature_store: FeatureStore instance.
+        ticker: Stock ticker code.
+        date_str: Date string (YYYY-MM-DD).
+        features: Dict of 46 feature values.
+    """
+    if not feature_store or not ticker:
+        return
+    try:
+        for fname, fval in features.items():
+            feature_store.add_feature(
+                ticker=ticker,
+                date=date_str,
+                feature_name=fname,
+                value=float(fval),
+                category="ml_v10",
+                source="scan_engine",
+            )
+    except Exception:
+        logger.debug("persist_features failed for %s", ticker, exc_info=True)
 
 
 def build_training_data(

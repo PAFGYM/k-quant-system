@@ -39,7 +39,7 @@ if _HAS_TORCH:
         """
         def __init__(
             self,
-            input_size: int = 30,
+            input_size: int = 46,  # v10.0: 30→46 features
             hidden_size: int = 64,
             num_layers: int = 2,
             dropout: float = 0.2,
@@ -301,6 +301,16 @@ def load_lstm_model(path: str | None = None):
         return None, None, None
     try:
         checkpoint = torch.load(path, map_location='cpu')
+        # v10.0: 피처 크기 불일치 시 LSTM 비활성화 (다음 재훈련 시 자동 복구)
+        from kstock.ml.predictor import _NUM_FEATURES
+        saved_input_size = checkpoint.get('input_size', 30)
+        if saved_input_size != _NUM_FEATURES:
+            logger.warning(
+                "LSTM input_size mismatch: saved=%d, current=%d. "
+                "LSTM disabled until next retrain cycle.",
+                saved_input_size, _NUM_FEATURES,
+            )
+            return None, None, None
         model = StockLSTM(
             input_size=checkpoint['input_size'],
             hidden_size=checkpoint['hidden_size'],
