@@ -3,10 +3,10 @@
 
 weights:
   macro: 0.10
-  flow: 0.30
+  flow: 0.15          # v9.6.1: 30→15% (수급 데이터 부족 현실 반영)
   fundamental: 0.30
-  technical: 0.20
-  risk: 0.10
+  technical: 0.30     # v9.6.1: 20→30% (가격 기반, 안정적)
+  risk: 0.15          # v9.6.1: 10→15%
 
 thresholds:
   # Technical
@@ -38,9 +38,14 @@ thresholds:
   max_drawdown_pct: 20
   beta_max: 1.5
 
-# Decision thresholds
-buy_threshold: 70
-watch_threshold: 55
+# Decision thresholds (v9.6.1: 현실화)
+buy_threshold: 60          # 70→60
+watch_threshold: 45        # 55→45
+
+# v9.6.1: 상위 시그널 임계치 (config 연동)
+strong_buy_threshold: 130
+buy_threshold_high: 110
+watch_threshold_high: 90
 
 # Sell reason classifier thresholds
 sell_reason:
@@ -63,30 +68,30 @@ sell_reason:
 # v7.0: Market regime-specific weight overrides
 # When VIX is in a specific regime, these weights replace the default
 regime_weights:
-  risk_on:    # VIX < 15
+  risk_on:    # VIX < 15 (v9.6.1: flow 축소)
     macro: 0.05
-    flow: 0.25
+    flow: 0.15
     fundamental: 0.25
+    technical: 0.35
+    risk: 0.20
+  neutral:    # VIX 15-25 (v9.6.1: flow 축소, tech 강화)
+    macro: 0.10
+    flow: 0.15
+    fundamental: 0.30
     technical: 0.30
     risk: 0.15
-  neutral:    # VIX 15-25
-    macro: 0.10
-    flow: 0.30
-    fundamental: 0.30
-    technical: 0.20
-    risk: 0.10
   risk_off:   # VIX > 25
     macro: 0.20
-    flow: 0.20
+    flow: 0.10
     fundamental: 0.20
-    technical: 0.15
-    risk: 0.25
+    technical: 0.20
+    risk: 0.30
   panic:      # VIX > 35
     macro: 0.25
-    flow: 0.15
+    flow: 0.05
     fundamental: 0.15
-    technical: 0.10
-    risk: 0.35
+    technical: 0.15
+    risk: 0.40
 
 # Factor integration bonus
 factor_bonus:

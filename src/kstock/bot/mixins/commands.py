@@ -164,7 +164,8 @@ class CommandsMixin:
                 if inv_data:
                     inv_trend = analyze_investor_trend(inv_data)
                     sd_score = inv_trend.get("score", 0)
-                    # 수급 보너스: -5 ~ +8
+                    # v9.6.1: 수급 보너스 감점 완화 (-2~+8)
+                    # 수급 데이터 부족 시 과도한 감점이 전체 점수를 끌어내림 방지
                     if sd_score >= 4:
                         supply_demand_bonus = 8
                     elif sd_score >= 2:
@@ -172,9 +173,9 @@ class CommandsMixin:
                     elif sd_score >= 0:
                         supply_demand_bonus = 0
                     elif sd_score >= -2:
-                        supply_demand_bonus = -3
+                        supply_demand_bonus = -1   # v9.6.1: -3 → -1
                     else:
-                        supply_demand_bonus = -5
+                        supply_demand_bonus = -2   # v9.6.1: -5 → -2
 
                     # Naver 연속매수일로 KIS 데이터 보정
                     nv_f_days = inv_trend.get("consecutive_foreign_buy", 0)

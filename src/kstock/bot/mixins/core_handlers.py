@@ -1918,6 +1918,7 @@ class CoreHandlersMixin:
             "weekly": self._action_weekly_submenu,
             "sell_plans": self._action_sell_plans,
             "multi_run": self._action_multi_run,
+            "debate": self._action_manager_debate,  # v9.6.1: 토론 버튼 콜백 등록
             "mgr_debate": self._action_manager_debate,
             "quick_q": self._handle_quick_question,
             "add_ss": self._action_add_from_screenshot,
@@ -2051,6 +2052,8 @@ class CoreHandlersMixin:
             # v8.5
             "daily_actions": self._menu_daily_actions,
             "onboarding": self._menu_onboarding,
+            # v9.6.1: AI 토론 바로가기
+            "debate": self._menu_debate,
         }
         # v6.2.1: 기능별 로딩 메시지
         _loading_msg = {
@@ -2071,6 +2074,7 @@ class CoreHandlersMixin:
             "admin": "🛠 관리자 메뉴 로딩 중...",
             "daily_actions": "📋 오늘의 할 일 생성 중...",
             "onboarding": "📖 온보딩 가이드 로딩 중...",
+            "debate": "🎙️ AI 토론 메뉴 로딩 중...",
         }
         handler = menu_map.get(payload)
         if not handler:

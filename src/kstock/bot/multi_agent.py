@@ -593,6 +593,7 @@ def format_multi_agent_report(report: MultiAgentReport) -> str:
 
 def create_empty_report(ticker: str, name: str, price: float) -> MultiAgentReport:
     """API 실패 시 기본 리포트를 생성합니다."""
+    price = price or 0.0  # v9.6.1: None 방어
     try:
         now = datetime.now(tz=KST).strftime("%Y.%m.%d %H:%M")
         results = {}
@@ -656,6 +657,9 @@ async def run_multi_agent_analysis(
     import asyncio
     import os
 
+    # v9.6.1: price=None 방어 (NoneType crash 방지)
+    price = price or 0.0
+
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         logger.warning("ANTHROPIC_API_KEY not set, returning empty report")
@@ -672,7 +676,8 @@ async def run_multi_agent_analysis(
         """단일 에이전트 API 호출."""
         agent_config = AGENTS[agent_key]
         data_text = format_data_for_agent(agent_key, stock_data)
-        prompt = f"종목: {name} ({ticker})\n현재가: {price:,.0f}원\n\n{data_text}"
+        _price_str = f"{price:,.0f}" if price else "N/A"
+        prompt = f"종목: {name} ({ticker})\n현재가: {_price_str}원\n\n{data_text}"
         model = agent_config["model"]
         try:
             logger.info("[멀티분석] %s 에이전트 호출 시작 (model=%s)", agent_key, model)
@@ -798,7 +803,7 @@ def format_multi_agent_report_v2(report: MultiAgentReport) -> str:
     """멀티 분석 리포트 v2 (이모지 + 구조화 + 3 에이전트)."""
     try:
         now = report.created_at or datetime.now(tz=KST).strftime("%Y.%m.%d %H:%M")
-        price_str = f"{report.price:,.0f}원" if report.price > 0 else "가격정보 없음"
+        price_str = f"{report.price:,.0f}원" if report.price and report.price > 0 else "가격정보 없음"
         lines = [
             f"\U0001f4ca [{report.name}] 멀티 분석 리포트",
             f"현재가: {price_str}",

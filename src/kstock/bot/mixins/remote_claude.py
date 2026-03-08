@@ -255,22 +255,16 @@ class RemoteClaudeMixin:
             return False
         return bool(self._WORK_PATTERNS.search(text))
 
-    # v9.5.2: 투자/주식 질문 감지 패턴 (Claude CLI 대신 AI비서로 라우팅)
-    _INVESTMENT_QUESTION_RE = re.compile(
-        r"(주식|주가|매수|매도|종목|차트|시황|코스피|코스닥|배당|PER|PBR|"
-        r"포트폴리오|리스크|수익률|잔고|보유|시장|나스닥|환율|금리|"
-        r"에코프로|삼성전자|SK하이닉스|현대차|하이닉스|"
-        r"분석해|어떻게.*보|어때|괜찮|전망|추천|매집|수급|"
-        r"가격.*봐|얼마|몇원|지지선|저항선|목표가|손절)",
-        re.IGNORECASE,
-    )
+    # v9.6.1: 투자 질문 강제 라우팅 제거 — 클로드 모드에서 자유롭게 대화
+    # 기존 _INVESTMENT_QUESTION_RE 삭제: 클로드가 투자 질문도 직접 처리
+    # (필요 시 클로드 CLI 프롬프트에 투자 컨텍스트 주입)
 
     async def _handle_claude_free_chat(
         self, update: Update, context, text: str
     ) -> None:
-        """클로드 자유 대화 — 투자 질문은 AI비서로, 코드/시스템은 CLI로.
+        """클로드 자유 대화 — 모든 질문을 클로드가 직접 처리.
 
-        v9.5.2: 투자 관련 질문 스마트 라우팅 추가.
+        v9.6.1: 투자 질문 강제 라우팅 제거 — 클로드 모드의 자유도 보장.
         이미지 대기 중이면 이미지+텍스트 합쳐서 Vision 분석.
         """
         # 대기 중인 이미지가 있으면 이미지+텍스트 합쳐서 분석
@@ -288,15 +282,7 @@ class RemoteClaudeMixin:
                     "텍스트만으로 진행합니다.",
                 )
 
-        # v9.5.2: 투자/주식 질문이면 AI비서로 라우팅 (더 풍부한 컨텍스트)
-        if self._INVESTMENT_QUESTION_RE.search(text):
-            try:
-                await self._handle_ai_question(update, context, text)
-                return
-            except Exception:
-                logger.debug("Investment routing from Claude mode failed, fallback to CLI", exc_info=True)
-
-        # 코드/시스템/일반 질문은 Claude CLI로 실행
+        # v9.6.1: 모든 질문(투자 포함)을 클로드 CLI로 직접 처리
         await self._execute_claude_prompt(update, text, context=context)
 
     async def _execute_claude_prompt(

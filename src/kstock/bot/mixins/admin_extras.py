@@ -1023,6 +1023,43 @@ class AdminExtrasMixin:
         """잔고 조회 메뉴."""
         await self.cmd_balance(update, context)
 
+    # ── v9.6.1: AI 토론 바로가기 메뉴 ──────────────────────────────────
+
+    async def _menu_debate(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """AI 토론 바로가기 — 보유종목 중 빠른 토론 시작."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        lines = ["🎙️ AI 매니저 토론\n"]
+        lines.append("4명의 투자 매니저가 종목을 토론합니다.")
+        lines.append("종목명을 입력하거나 아래 버튼을 누르세요.\n")
+
+        # 보유종목 기반 빠른 토론 버튼
+        holdings = self.db.get_active_holdings()
+        buttons = []
+        for h in holdings[:6]:
+            ticker = h.get("ticker", "")
+            name = h.get("name", ticker)[:6]
+            buttons.append(
+                InlineKeyboardButton(
+                    f"🎙️ {name}", callback_data=f"debate:{ticker}"
+                )
+            )
+        # 2열로 배치
+        rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+
+        if not rows:
+            lines.append("보유종목이 없습니다. 종목명을 직접 입력하세요.")
+            lines.append("예: '삼성전자 토론' 또는 종목코드 입력")
+
+        rows.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:debate")])
+
+        await update.message.reply_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
     # ── v3.6 신규 메뉴 핸들러 ────────────────────────────────────────
 
     async def _menu_more(
@@ -1047,9 +1084,10 @@ class AdminExtrasMixin:
              InlineKeyboardButton("⚙️ 최적화", callback_data="menu:optimize")],
             [InlineKeyboardButton("🔬 섹터 딥다이브", callback_data="sdive:menu"),
              InlineKeyboardButton("📊 비주얼 차트", callback_data="vchart:menu")],
-            [InlineKeyboardButton("📖 사용설명서", callback_data="guide:main"),
+            [InlineKeyboardButton("🎙️ AI 토론", callback_data="menu:debate"),
              InlineKeyboardButton("📋 오늘의 할 일", callback_data="menu:daily_actions")],
-            [InlineKeyboardButton("🛠 관리자", callback_data="menu:admin")],
+            [InlineKeyboardButton("📖 사용설명서", callback_data="guide:main"),
+             InlineKeyboardButton("🛠 관리자", callback_data="menu:admin")],
             [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:more")],
         ]
         await update.message.reply_text(

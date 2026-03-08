@@ -366,12 +366,16 @@ def compute_composite_score(
     # v3.0: max ~175 points possible (event_bonus 추가)
     composite = round(max(0.0, min(175.0, composite)), 2)
 
-    # v3.0 thresholds (max 160 scale)
-    if composite >= 130:
+    # v9.6.1: 시그널 임계치를 config에서 읽어 동적 적용
+    strong_buy_th = config.get("strong_buy_threshold", 130)
+    buy_high_th = config.get("buy_threshold_high", 110)
+    watch_high_th = config.get("watch_threshold_high", 90)
+
+    if composite >= strong_buy_th:
         signal = "STRONG_BUY"
-    elif composite >= 110:
+    elif composite >= buy_high_th:
         signal = "BUY"
-    elif composite >= 90:
+    elif composite >= watch_high_th:
         signal = "WATCH"
     elif composite >= buy_threshold:
         signal = "MILD_BUY"
