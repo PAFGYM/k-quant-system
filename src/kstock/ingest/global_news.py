@@ -336,9 +336,33 @@ async def fetch_global_news(
     return all_items
 
 
+# v9.5.3: YouTube 경제방송 코멘터리 소스 (속보가 아닌 분석/해설)
+# 이 채널들의 영상 제목에 '전쟁' 등 키워드가 있어도 속보가 아님
+_YOUTUBE_COMMENTARY_SOURCES = {
+    "삼프로TV", "한국경제TV", "SBS Biz", "이데일리TV",
+    "MTN머니투데이", "매일경제TV", "토마토증권통",
+    "뉴욕주민", "월가아재", "박곰희TV",
+    # 추가 채널 방어
+    "슈카월드", "신사임당", "월급쟁이부자들",
+    "체인지그라운드", "언더스탠딩",
+}
+
+
 def filter_urgent_news(items: list[NewsItem]) -> list[NewsItem]:
-    """긴급 뉴스만 필터 (impact_score >= 8)."""
-    return [item for item in items if item.is_urgent]
+    """긴급 뉴스만 필터 (impact_score >= 8).
+
+    v9.5.3: YouTube 경제방송 코멘터리는 제외 (분석 영상 ≠ 뉴스 속보).
+    방송에서 '전쟁' 키워드를 분석해도 그건 속보가 아님.
+    """
+    urgent = []
+    for item in items:
+        if not item.is_urgent:
+            continue
+        # YouTube 방송 코멘터리 제외
+        if item.video_id and item.source in _YOUTUBE_COMMENTARY_SOURCES:
+            continue
+        urgent.append(item)
+    return urgent
 
 
 def format_news_for_context(items: list[NewsItem], max_items: int = 8) -> str:
@@ -602,8 +626,8 @@ async def analyze_urgent_news(groups: list[list[NewsItem]], db=None) -> str:
         import anthropic
         client = anthropic.AsyncAnthropic(api_key=api_key)
         response = await client.messages.create(
-            model="claude-haiku-4-20250414",
-            max_tokens=600,
+            model="claude-haiku-4-5-20251001",
+            max_tokens=800,
             temperature=0.2,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -615,7 +639,7 @@ async def analyze_urgent_news(groups: list[list[NewsItem]], db=None) -> str:
                 from kstock.core.token_tracker import track_usage
                 track_usage(
                     db=db, provider="anthropic",
-                    model="claude-haiku-4-20250414",
+                    model="claude-haiku-4-5-20251001",
                     function_name="urgent_news_analysis",
                     response=response,
                 )
@@ -639,14 +663,19 @@ def _format_urgent_alert_rich(
         f"{'━' * 22}",
     ]
 
-    # 헤드라인 요약 (그룹별 대표 1개만)
+    # 헤드라인 요약 (그룹별 대표 1개만) + URL 링크
     for group in groups[:3]:
         rep = group[0]
         impact_bar = "🔴" * min(rep.impact_score // 2, 5)
         lines.append(f"\n{impact_bar} {rep.title}")
         if len(group) > 1:
             lines.append(f"  (관련 뉴스 {len(group)}건 통합)")
-        lines.append(f"  출처: {', '.join(list({it.source for it in group})[:2])}")
+        sources = list({it.source for it in group})
+        lines.append(f"  출처: {', '.join(sources[:2])}")
+        # URL 링크 추가
+        for it in group[:2]:
+            if it.url:
+                lines.append(f"  🔗 {it.url}")
 
     # AI 분석
     lines.append(f"\n{'━' * 22}")
@@ -671,8 +700,12 @@ def _format_urgent_alert_basic(groups: list[list[NewsItem]]) -> str:
             lines.append(f"  (관련 뉴스 {len(group)}건)")
         lines.append(f"  출처: {', '.join(list({it.source for it in group})[:2])}")
         lines.append(f"  영향도: {rep.impact_score}/10")
+        # URL 링크
+        for it in group[:2]:
+            if it.url:
+                lines.append(f"  🔗 {it.url}")
 
-    lines.append("\n⚠️ 포트폴리오 리스크 점검을 권장합니다")
+    lines.append("\n⚠️ 포트폴리오 영향 분석은 AI 모드에서 확인하세요")
     return "\n".join(lines)
 
 
