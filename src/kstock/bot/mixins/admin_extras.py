@@ -121,7 +121,7 @@ class AdminExtrasMixin:
 
         if subcmd == "bug":
             # v5.2: 오류 신고 FAQ 메뉴 표시
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\U0001f41b 오류 신고\n\n"
                 "자주 발생하는 오류를 선택하거나\n"
                 "직접 작성해주세요.\n\n"
@@ -133,7 +133,7 @@ class AdminExtrasMixin:
         elif subcmd == "request":
             # 업데이트 요청 모드
             context.user_data["admin_mode"] = "update_request"
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\U0001f4a1 업데이트 요청 모드\n\n"
                 "원하는 기능이나 개선사항을\n"
                 "메시지로 보내주세요!\n\n"
@@ -170,7 +170,7 @@ class AdminExtrasMixin:
                     InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu"),
                     InlineKeyboardButton("❌ 종료", callback_data="adm:close"),
                 ]]
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"\U0001f41b 오류 접수: {auto_msg}\n\n"
                     f"추가 설명이나 스크린샷을 보내주세요.\n"
                     f"(캡션에 설명을 넣으면 같이 기록됩니다)\n\n"
@@ -184,7 +184,7 @@ class AdminExtrasMixin:
                     InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu"),
                     InlineKeyboardButton("❌ 종료", callback_data="adm:close"),
                 ]]
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "\U0001f41b 오류 신고 모드\n\n"
                     "오류 내용을 텍스트로 보내주세요.\n"
                     "스크린샷도 함께 보내면 더 좋습니다!\n"
@@ -197,7 +197,7 @@ class AdminExtrasMixin:
             # 관리자 메뉴로 복귀
             context.user_data.pop("admin_mode", None)
             context.user_data.pop("admin_faq_type", None)
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\U0001f6e0 관리자 모드 v9.1\n\n"
                 "아래 버튼을 눌러주세요.",
                 reply_markup=InlineKeyboardMarkup(_admin_buttons()),
@@ -211,7 +211,7 @@ class AdminExtrasMixin:
             if sub2 == "edit":
                 # 수정 모드 진입
                 context.user_data["admin_mode"] = "directive_edit"
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "📋 운영 지침 수정 모드\n\n"
                     "새로운 지침을 메시지로 보내주세요.\n"
                     "전체 내용이 교체됩니다.\n\n"
@@ -221,15 +221,15 @@ class AdminExtrasMixin:
                 )
             elif sub2 == "run":
                 # 지금 즉시 실행
-                await query.edit_message_text("📋 운영 지침 실행 중...")
+                await safe_edit_or_reply(query,"📋 운영 지침 실행 중...")
                 try:
                     await self.job_daily_directive(context)
-                    await query.edit_message_text(
+                    await safe_edit_or_reply(query,
                         "📋 운영 지침 실행 완료!\n채팅에서 결과를 확인하세요.",
                         reply_markup=InlineKeyboardMarkup(back_btn),
                     )
                 except Exception as e:
-                    await query.edit_message_text(
+                    await safe_edit_or_reply(query,
                         f"⚠️ 실행 실패: {e}",
                         reply_markup=InlineKeyboardMarkup(back_btn),
                     )
@@ -247,7 +247,7 @@ class AdminExtrasMixin:
                      InlineKeyboardButton("▶️ 지금 실행", callback_data="adm:directive:run")],
                     [InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu")],
                 ]
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"📋 현재 운영 지침\n{'━' * 20}\n\n{content}",
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
@@ -259,7 +259,7 @@ class AdminExtrasMixin:
 
             if sub2 == "restart_confirm":
                 # 재시작 확인 완료 → 실행
-                await query.edit_message_text("🔄 봇 재시작 중... (5초 후 복귀)")
+                await safe_edit_or_reply(query,"🔄 봇 재시작 중... (5초 후 복귀)")
                 import subprocess as _sp
                 _sp.Popen(
                     ["bash", "-c", f"sleep 2 && cd {os.getcwd()} && ./kbot restart"],
@@ -269,7 +269,7 @@ class AdminExtrasMixin:
 
             if sub2 == "restart":
                 # 재시작 확인 요청
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "🔄 봇을 재시작하시겠습니까?\n\n"
                     "⚠️ 재시작 동안 5~10초간 응답이 중단됩니다.",
                     reply_markup=InlineKeyboardMarkup([
@@ -331,7 +331,7 @@ class AdminExtrasMixin:
                 except Exception:
                     pass
 
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "\n".join(lines),
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔙 시스템 제어", callback_data="adm:sys")],
@@ -356,7 +356,7 @@ class AdminExtrasMixin:
                         text = "✅ 에러 없음!"
                 except Exception as e:
                     text = f"⚠️ 로그 확인 실패: {e}"
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     text[:4000],
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔙 시스템 제어", callback_data="adm:sys")],
@@ -383,7 +383,7 @@ class AdminExtrasMixin:
                         lines.append("job_queue 없음")
                 except Exception as e:
                     lines.append(f"조회 실패: {e}")
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "\n".join(lines),
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔙 시스템 제어", callback_data="adm:sys")],
@@ -419,7 +419,7 @@ class AdminExtrasMixin:
             except Exception:
                 pass
 
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"🔧 시스템 제어\n{'━' * 22}\n\n"
                 f"상태: {status_line}\n"
                 f"버전: v9.1",
@@ -431,7 +431,7 @@ class AdminExtrasMixin:
             # 관리자 메뉴 닫기 + 상태 초기화 + Reply Keyboard 복구
             context.user_data.pop("admin_mode", None)
             context.user_data.pop("admin_faq_type", None)
-            await query.edit_message_text("\U0001f6e0 관리자 메뉴를 닫았습니다.")
+            await safe_edit_or_reply(query,"\U0001f6e0 관리자 메뉴를 닫았습니다.")
             try:
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
@@ -451,13 +451,13 @@ class AdminExtrasMixin:
                     [InlineKeyboardButton("📊 점수 추이", callback_data="adm:score_trend")],
                     [InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu")],
                 ]
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     text,
                     reply_markup=InlineKeyboardMarkup(score_buttons),
                 )
             except Exception as e:
                 logger.error("System score error: %s", e, exc_info=True)
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"⚠️ 점수 계산 실패: {e}",
                     reply_markup=InlineKeyboardMarkup(back_btn),
                 )
@@ -467,12 +467,12 @@ class AdminExtrasMixin:
             try:
                 from kstock.core.system_score import format_score_trend
                 text = format_score_trend(self.db, days=14)
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     text,
                     reply_markup=InlineKeyboardMarkup(back_btn),
                 )
             except Exception as e:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"⚠️ 추이 조회 실패: {e}",
                     reply_markup=InlineKeyboardMarkup(back_btn),
                 )
@@ -486,13 +486,13 @@ class AdminExtrasMixin:
                     [InlineKeyboardButton("📅 오늘 사용량", callback_data="adm:cost_today")],
                     [InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu")],
                 ]
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     text,
                     reply_markup=InlineKeyboardMarkup(cost_buttons),
                 )
             except Exception as e:
                 logger.error("Cost report error: %s", e, exc_info=True)
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"⚠️ 비용 조회 실패: {e}",
                     reply_markup=InlineKeyboardMarkup(back_btn),
                 )
@@ -515,12 +515,12 @@ class AdminExtrasMixin:
                     f"⚡ 캐시절약: {daily.get('total_cache_read', 0):,} tok\n"
                     f"⏱ 평균응답: {daily.get('avg_latency', 0):.0f}ms"
                 )
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     text,
                     reply_markup=InlineKeyboardMarkup(back_btn),
                 )
             except Exception as e:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"⚠️ 조회 실패: {e}",
                     reply_markup=InlineKeyboardMarkup(back_btn),
                 )
@@ -535,7 +535,7 @@ class AdminExtrasMixin:
                 # 다시 경계 모드 메뉴 표시
                 status_text = self.get_alert_mode_status()
                 alert_buttons = self._alert_mode_buttons()
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"🚨 경계 모드 설정\n{'━' * 20}\n\n{status_text}",
                     reply_markup=InlineKeyboardMarkup(alert_buttons),
                 )
@@ -543,7 +543,7 @@ class AdminExtrasMixin:
                 # 현재 상태 + 변경 버튼
                 status_text = self.get_alert_mode_status()
                 alert_buttons = self._alert_mode_buttons()
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"🚨 경계 모드 설정\n{'━' * 20}\n\n{status_text}",
                     reply_markup=InlineKeyboardMarkup(alert_buttons),
                 )
@@ -551,7 +551,7 @@ class AdminExtrasMixin:
         elif subcmd == "security":
             # v3.6: 보안 감사
             audit_result = security_audit()
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 audit_result,
                 reply_markup=InlineKeyboardMarkup(back_btn),
             )
@@ -573,7 +573,7 @@ class AdminExtrasMixin:
             ws_text = "연결" if self.ws.is_connected else "미연결"
             ws_subs = len(self.ws.get_subscriptions())
 
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"\U0001f4ca 봇 상태 v9.1\n\n"
                 f"\u2705 가동: {hours}시간 {mins}분\n"
                 f"\U0001f4b0 보유종목: {len(holdings)}개\n"
@@ -588,7 +588,7 @@ class AdminExtrasMixin:
         elif subcmd == "holdings":
             holdings = self.db.get_active_holdings()
             if not holdings:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "\U0001f4ad DB에 보유종목 없음\n잔고 스크린샷을 보내주세요!",
                     reply_markup=InlineKeyboardMarkup(back_btn),
                 )
@@ -600,7 +600,7 @@ class AdminExtrasMixin:
                 lines.append(
                     f"{e} {h.get('name', '')} {pnl:+.1f}%"
                 )
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\n".join(lines),
                 reply_markup=InlineKeyboardMarkup(back_btn),
             )
@@ -618,17 +618,17 @@ class AdminExtrasMixin:
                     if "ERROR" in l
                 ][-8:]
                 if errors:
-                    await query.edit_message_text(
+                    await safe_edit_or_reply(query,
                         "\U0001f6a8 최근 에러\n\n" + "\n\n".join(errors),
                         reply_markup=InlineKeyboardMarkup(back_btn),
                     )
                 else:
-                    await query.edit_message_text(
+                    await safe_edit_or_reply(query,
                         "\u2705 에러 없음!",
                         reply_markup=InlineKeyboardMarkup(back_btn),
                     )
             except Exception as e:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"\u26a0\ufe0f 로그 확인 실패: {e}",
                     reply_markup=InlineKeyboardMarkup(back_btn),
                 )
@@ -1173,7 +1173,7 @@ class AdminExtrasMixin:
     async def _action_hub(self, query, context, payload: str) -> None:
         """분석 허브 버튼 콜백 — 각 기능 직접 실행."""
         if payload == "surge":
-            await query.edit_message_text("🔥 급등주 실시간 스캔 중...")
+            await safe_edit_or_reply(query,"🔥 급등주 실시간 스캔 중...")
             # cmd_surge는 update.message를 사용하므로 직접 실행
             try:
                 stocks_data = []
@@ -1202,7 +1202,7 @@ class AdminExtrasMixin:
                         continue
 
                 if not stocks_data:
-                    await query.edit_message_text("🔥 현재 급등 조건을 충족하는 종목이 없습니다.")
+                    await safe_edit_or_reply(query,"🔥 현재 급등 조건을 충족하는 종목이 없습니다.")
                     return
 
                 stocks_data.sort(key=lambda s: s["change_pct"], reverse=True)
@@ -1213,10 +1213,10 @@ class AdminExtrasMixin:
                         f"{i}. {icon} {s['name']}({s['ticker']}) "
                         f"{s['change_pct']:+.1f}% 거래량 {s['volume_ratio']:.1f}배"
                     )
-                await query.edit_message_text("\n".join(lines))
+                await safe_edit_or_reply(query,"\n".join(lines))
             except Exception as e:
                 logger.error("Hub surge error: %s", e, exc_info=True)
-                await query.edit_message_text("⚠️ 급등주 스캔 중 오류가 발생했습니다.")
+                await safe_edit_or_reply(query,"⚠️ 급등주 스캔 중 오류가 발생했습니다.")
 
         elif payload == "swing":
             active_swings = self.db.get_active_swing_trades()
@@ -1228,9 +1228,9 @@ class AdminExtrasMixin:
                         f"{sw['name']} {_won(sw['entry_price'])} → "
                         f"목표 {_won(sw.get('target_price', 0))} ({pnl:+.1f}%)"
                     )
-                await query.edit_message_text("\n".join(lines))
+                await safe_edit_or_reply(query,"\n".join(lines))
             else:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "⚡ 현재 활성 스윙 거래가 없습니다.\n\n"
                     "스캔 중 조건 충족 종목 발견 시 알려드리겠습니다."
                 )
@@ -1247,12 +1247,12 @@ class AdminExtrasMixin:
                         f"🔍 {name} 분석", callback_data=f"multi_run:{ticker}",
                     )])
             if buttons:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "📊 멀티 에이전트 분석\n\n보유종목을 선택하세요:",
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
             else:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "📊 멀티분석\n\n종목명을 직접 입력하면 자동 분석됩니다.\n"
                     "예: 삼성전자 분석"
                 )
@@ -1263,7 +1263,7 @@ class AdminExtrasMixin:
         routing = self.ai.get_routing_table()
         ws_status = self.ws.get_status()
         text = f"{status}\n\n{routing}\n\n\U0001f4e1 실시간: {ws_status}"
-        await query.edit_message_text(text)
+        await safe_edit_or_reply(query,text)
 
     async def _action_orderbook(self, query, context, payload: str) -> None:
         """호가 조회 액션."""
@@ -1271,7 +1271,7 @@ class AdminExtrasMixin:
             # 보유종목 목록에서 선택
             holdings = await self._load_holdings_with_fallback()
             if not holdings:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "\U0001f4ca 호가를 조회할 보유종목이 없습니다.\n종목코드를 직접 입력해주세요."
                 )
                 return
@@ -1284,7 +1284,7 @@ class AdminExtrasMixin:
                         f"\U0001f4ca {name}",
                         callback_data=f"orderbook:{ticker}",
                     )])
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\U0001f4ca 호가 조회할 종목을 선택하세요:",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
@@ -1297,7 +1297,7 @@ class AdminExtrasMixin:
                     name = item["name"]
                     break
 
-            await query.edit_message_text(f"\U0001f4ca {name} 호가 조회 중...")
+            await safe_edit_or_reply(query,f"\U0001f4ca {name} 호가 조회 중...")
 
             orderbook = None
             # WebSocket 데이터 우선
@@ -1798,7 +1798,7 @@ class AdminExtrasMixin:
             name = parts[2] if len(parts) > 2 else ticker
             if ticker:
                 self.db.add_watchlist(ticker, name)
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"⭐ {name}({ticker})을 즐겨찾기에 등록했습니다!",
                     reply_markup=InlineKeyboardMarkup([
                         [
@@ -1812,7 +1812,7 @@ class AdminExtrasMixin:
         if action == "add_mode":
             # 종목 추가 모드: 채팅에 종목명 입력하라고 안내
             context.user_data["awaiting_fav_add"] = True
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "⭐ 종목 추가\n\n"
                 "추가할 종목명을 채팅창에 입력하세요.\n"
                 "예: 에코프로비엠, 삼성전자"
@@ -1823,7 +1823,7 @@ class AdminExtrasMixin:
             # AI가 종목 특성 분석 → 투자유형 자동 추천
             ticker = parts[1] if len(parts) > 1 else ""
             name = self._resolve_name(ticker, ticker)
-            await query.edit_message_text(f"🤖 {name} 투자유형 분석 중...")
+            await safe_edit_or_reply(query,f"🤖 {name} 투자유형 분석 중...")
             try:
                 from kstock.bot.investment_managers import recommend_investment_type
                 rec_hz = await recommend_investment_type(ticker, name)
@@ -1831,7 +1831,7 @@ class AdminExtrasMixin:
                     from kstock.bot.investment_managers import MANAGERS
                     mgr = MANAGERS.get(rec_hz, {})
                     self.db.update_watchlist_horizon(ticker, rec_hz, rec_hz)
-                    await query.edit_message_text(
+                    await safe_edit_or_reply(query,
                         f"🤖 AI 추천 완료: {name}\n\n"
                         f"유형: {mgr.get('emoji', '')} {mgr.get('title', rec_hz)}\n"
                         f"담당: {mgr.get('name', '')}",
@@ -2359,7 +2359,7 @@ class AdminExtrasMixin:
             if ticker:
                 name = self._resolve_name(ticker, ticker)
                 self.db.remove_watchlist(ticker)
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"⭐ {name} 즐겨찾기에서 삭제되었습니다.",
                     reply_markup=InlineKeyboardMarkup([
                         [
@@ -2379,7 +2379,7 @@ class AdminExtrasMixin:
             ai_line = ""
             try:
                 from kstock.bot.investment_managers import recommend_investment_type, MANAGERS
-                await query.edit_message_text(f"🤖 {name} 분석 중...")
+                await safe_edit_or_reply(query,f"🤖 {name} 분석 중...")
                 rec_hz = await recommend_investment_type(ticker, name)
                 if rec_hz:
                     mgr = MANAGERS.get(rec_hz, {})
@@ -2398,7 +2398,7 @@ class AdminExtrasMixin:
                 ],
                 [InlineKeyboardButton("⭐ 돌아가기", callback_data="fav:refresh")],
             ]
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"🔄 {name} 투자유형 분류\n"
                 f"{ai_line}\n"
                 f"⚡ 단타: 1~3일 (제시 리버모어)\n"
@@ -2422,7 +2422,7 @@ class AdminExtrasMixin:
             mgr_name = mgr.get("name", "알 수 없음") if mgr else "알 수 없음"
             mgr_emoji = mgr.get("emoji", "📌") if mgr else "📌"
 
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"✅ {name} 투자유형 설정 완료\n\n"
                 f"유형: {mgr_emoji} {mgr.get('title', horizon)}\n"
                 f"담당: {mgr_name}",
@@ -2509,7 +2509,7 @@ class AdminExtrasMixin:
                 InlineKeyboardButton("❌", callback_data="dismiss:0"),
             ])
 
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\n".join(lines),
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
@@ -2652,13 +2652,13 @@ class AdminExtrasMixin:
                     ["sudo", "-n", "systemsetup", "-setremotelogin", "on"],
                     capture_output=True, text=True, timeout=5,
                 )
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "✅ SSH 활성화 시도 완료.\n\n"
                     "admin 비밀번호가 필요하면 맥미니에서 직접:\n"
                     "시스템 설정 → 일반 → 공유 → 원격 로그인 켜기"
                 )
             except Exception:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "⚠️ SSH 활성화에 admin 권한이 필요합니다.\n\n"
                     "맥미니에서 직접 설정하세요:\n"
                     "시스템 설정 → 일반 → 공유 → 원격 로그인 켜기"
@@ -2670,13 +2670,13 @@ class AdminExtrasMixin:
                     ["open", "/Applications/Tailscale.app"],
                     stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
                 )
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "🌐 Tailscale 앱을 실행했습니다.\n\n"
                     "맥미니 화면에서 로그인해주세요.\n"
                     "로그인 후 맥북에서도 같은 계정으로 Tailscale 설치."
                 )
             except Exception:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "⚠️ Tailscale 앱을 찾을 수 없습니다.\n"
                     "Mac App Store에서 Tailscale을 설치하세요."
                 )
@@ -2717,7 +2717,7 @@ class AdminExtrasMixin:
                     f"VNC(외부): vnc://{ts_ip}\n"
                 )
 
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"📋 접속 정보\n\n```\n{copy_text}```",
                 parse_mode="Markdown",
             )
@@ -2749,7 +2749,7 @@ class AdminExtrasMixin:
         if payload == "bug":
             context.user_data["agent_mode"] = True
             context.user_data["agent_type"] = "bug"
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "🐛 오류 신고\n\n"
                 "어떤 오류가 발생했나요?\n"
                 "스크린샷을 보내거나, 메시지로 설명해주세요.\n\n"
@@ -2758,7 +2758,7 @@ class AdminExtrasMixin:
         elif payload == "feature":
             context.user_data["agent_mode"] = True
             context.user_data["agent_type"] = "feature"
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "💡 기능 요청\n\n"
                 "어떤 기능이 필요하신가요?\n"
                 "자유롭게 설명해주세요.\n\n"
@@ -2767,7 +2767,7 @@ class AdminExtrasMixin:
         elif payload == "question":
             context.user_data["agent_mode"] = True
             context.user_data["agent_type"] = "question"
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "❓ 질문하기\n\n"
                 "궁금한 점을 물어보세요.\n\n"
                 "예: '모멘텀 전략이 뭔가요?', '자동매매는 언제 되나요?'"
@@ -2813,7 +2813,7 @@ class AdminExtrasMixin:
         elif payload == "exit":
             context.user_data.pop("agent_mode", None)
             context.user_data.pop("agent_type", None)
-            await query.edit_message_text("🔙 에이전트 모드를 종료했습니다.")
+            await safe_edit_or_reply(query,"🔙 에이전트 모드를 종료했습니다.")
 
 
     async def _action_goto(self, query, context, payload: str = "") -> None:
@@ -2834,7 +2834,7 @@ class AdminExtrasMixin:
                     InlineKeyboardButton("💥 돌파", callback_data="strat:G"),
                 ],
             ]
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "🎯 전략을 선택하세요:",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
@@ -2846,9 +2846,9 @@ class AdminExtrasMixin:
                     pnl = r.get("pnl_pct", 0)
                     emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "🟡"
                     lines.append(f"{emoji} {r['name']} ({pnl:+.1f}%)")
-                await query.edit_message_text("\n".join(lines))
+                await safe_edit_or_reply(query,"\n".join(lines))
             else:
-                await query.edit_message_text("📈 아직 추천 내역이 없습니다.")
+                await safe_edit_or_reply(query,"📈 아직 추천 내역이 없습니다.")
 
     # ── v8.5: 온보딩 + 오늘의 할 일 ───────────────────────────────────
 

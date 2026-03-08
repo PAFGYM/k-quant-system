@@ -178,7 +178,7 @@ class MenusKisMixin:
                 ),
             ])
         buttons.append(make_feedback_row("알림설정"))
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             f"\U0001f514 알림 설정 ({label} \u2192 {status})\n각 항목을 눌러 ON/OFF를 전환하세요:",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -308,7 +308,7 @@ class MenusKisMixin:
                 for name in self.SECTOR_KEYWORDS
             ]
             buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\U0001f4cb 섹터를 선택하세요:",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
@@ -325,7 +325,7 @@ class MenusKisMixin:
         else:
             msg = "\U0001f4cb 알 수 없는 메뉴입니다."
 
-        await query.edit_message_text(msg)
+        await safe_edit_or_reply(query,msg)
 
     async def _action_sector_report(self, query, context, payload: str) -> None:
         """Handle sector report selection."""
@@ -337,7 +337,7 @@ class MenusKisMixin:
             )
         else:
             msg = f"\U0001f4cb {payload} 섹터 관련 리포트가 없습니다."
-        await query.edit_message_text(msg)
+        await safe_edit_or_reply(query,msg)
 
     # == Weekly report menu ====================================================
 
@@ -369,7 +369,7 @@ class MenusKisMixin:
                     msg = f"\U0001f4c5 {label} 보고서 (구글 문서 링크 없음)"
             else:
                 msg = "\U0001f4c5 아직 생성된 주간 보고서가 없습니다."
-            await query.edit_message_text(msg)
+            await safe_edit_or_reply(query,msg)
 
         elif payload == "history":
             reports = self.db.get_weekly_reports(limit=4)
@@ -385,10 +385,10 @@ class MenusKisMixin:
                 msg = "\n".join(lines)
             else:
                 msg = "\U0001f4c5 아직 생성된 주간 보고서가 없습니다."
-            await query.edit_message_text(msg)
+            await safe_edit_or_reply(query,msg)
 
         elif payload == "generate":
-            await query.edit_message_text("\U0001f50d 주간 보고서 생성 중... 잠시만 기다려주세요.")
+            await safe_edit_or_reply(query,"\U0001f50d 주간 보고서 생성 중... 잠시만 기다려주세요.")
             try:
                 from kstock.bot.weekly_report import generate_weekly_report
                 telegram_msg, doc_url = await generate_weekly_report(self.db)
@@ -943,14 +943,14 @@ class MenusKisMixin:
         """KIS 설정 콜백: kis:setup, kis:reset, kis:test."""
         if payload in ("setup", "reset"):
             context.user_data["kis_setup"] = {"step": "id"}
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "🔧 KIS 설정을 시작합니다.\n\n"
                 "1/4 단계: HTS ID를 입력하세요.\n"
                 "(한국투자증권 로그인 ID)\n\n"
                 "예: hongildong"
             )
         elif payload == "test":
-            await query.edit_message_text("🧪 연결 테스트 중...")
+            await safe_edit_or_reply(query,"🧪 연결 테스트 중...")
             # 1차: KIS 직접 토큰 테스트
             try:
                 token_ok = await self.kis._ensure_token()
@@ -1021,7 +1021,7 @@ class MenusKisMixin:
 
         if action in ("home", ""):
             # 투자 허브 홈으로 리다이렉트
-            await query.edit_message_text("📡 '📡 KIS설정' 메뉴를 눌러주세요.")
+            await safe_edit_or_reply(query,"📡 '📡 KIS설정' 메뉴를 눌러주세요.")
             return
 
         if action == "guide":
@@ -1047,13 +1047,13 @@ class MenusKisMixin:
                     "🔧 지금 설정하기", callback_data="kis:setup",
                 )],
             ]
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 guide, reply_markup=InlineKeyboardMarkup(buttons),
             )
             return
 
         if action == "balance":
-            await query.edit_message_text("💰 실시간 잔고 조회 중...")
+            await safe_edit_or_reply(query,"💰 실시간 잔고 조회 중...")
             try:
                 # KIS API 잔고 조회 시도
                 balance = await self.kis.get_balance()
@@ -1152,7 +1152,7 @@ class MenusKisMixin:
             return
 
         if action == "supply":
-            await query.edit_message_text("📊 수급 분석 중...")
+            await safe_edit_or_reply(query,"📊 수급 분석 중...")
             holdings = self.db.get_active_holdings()
             if not holdings:
                 await query.message.reply_text(
@@ -1196,7 +1196,7 @@ class MenusKisMixin:
             # 가격 알림 설정 → 보유종목 리스트 표시
             holdings = self.db.get_active_holdings()
             if not holdings:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "🔔 보유종목이 없습니다.\n종목을 먼저 등록해주세요."
                 )
                 return
@@ -1213,14 +1213,14 @@ class MenusKisMixin:
                     callback_data=f"price_alert:sel:{ticker}",
                 )])
 
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\n".join(lines),
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
             return
 
         if action == "scan":
-            await query.edit_message_text("📈 매수 시그널 스캔 중...")
+            await safe_edit_or_reply(query,"📈 매수 시그널 스캔 중...")
             # 기존 스윙 기회 스캔 기능 재활용
             try:
                 from kstock.signal.swing_scanner import scan_swing_opportunities
@@ -1263,7 +1263,7 @@ class MenusKisMixin:
         if action == "safety":
             s = getattr(self.kis_broker, "safety", None)
             if not s:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "⚙️ KIS 브로커가 연결되지 않았습니다."
                 )
                 return
@@ -1284,7 +1284,7 @@ class MenusKisMixin:
                 "\n⚠️ 안전 설정은 자동매매 사고를 방지합니다.",
                 "실전투자 모드에서는 자동매매가 차단됩니다.",
             ]
-            await query.edit_message_text("\n".join(lines))
+            await safe_edit_or_reply(query,"\n".join(lines))
             return
 
     async def _action_price_alert(
@@ -1297,7 +1297,7 @@ class MenusKisMixin:
         if action == "sel":
             ticker = parts[1] if len(parts) > 1 else ""
             if not ticker:
-                await query.edit_message_text("⚠️ 종목 정보가 없습니다.")
+                await safe_edit_or_reply(query,"⚠️ 종목 정보가 없습니다.")
                 return
 
             holding = self.db.get_holding_by_ticker(ticker)
@@ -1354,7 +1354,7 @@ class MenusKisMixin:
                 ],
             ]
 
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\n".join(lines),
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
@@ -1391,7 +1391,7 @@ class MenusKisMixin:
                     alert_type=alert_type,
                     message=f"{name} {label} {target:,}원 알림 설정",
                 )
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"✅ 알림 설정 완료!\n\n"
                     f"{emoji} {name}\n"
                     f"현재가: {cur:,.0f}원\n"
@@ -1400,7 +1400,7 @@ class MenusKisMixin:
                 )
             except Exception as e:
                 logger.error("Alert setup error: %s", e)
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "❌ 알림 설정에 실패했어요. 잠시 후 다시 시도해주세요."
                 )
             return
@@ -1468,7 +1468,7 @@ class MenusKisMixin:
         """KIS 모드 선택 콜백: kis_mode:virtual/real."""
         setup_data = context.user_data.get("kis_setup", {})
         if not setup_data:
-            await query.edit_message_text("⚠️ 설정 데이터가 없습니다. 다시 시도해주세요.")
+            await safe_edit_or_reply(query,"⚠️ 설정 데이터가 없습니다. 다시 시도해주세요.")
             return
 
         hts_id = setup_data.get("id", "")
@@ -1481,12 +1481,12 @@ class MenusKisMixin:
         context.user_data.pop("kis_setup", None)
 
         if not all([hts_id, app_key, app_secret, account]):
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "⚠️ 입력값이 부족합니다. 다시 시도해주세요."
             )
             return
 
-        await query.edit_message_text(f"⏳ {mode_text} 모드로 설정 중...")
+        await safe_edit_or_reply(query,f"⏳ {mode_text} 모드로 설정 중...")
 
         # 1. .env 파일 업데이트
         try:

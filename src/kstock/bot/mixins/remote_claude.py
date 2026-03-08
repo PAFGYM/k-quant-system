@@ -651,11 +651,11 @@ class RemoteClaudeMixin:
     async def _action_autofix(self, query, context, payload: str) -> None:
         """오류 자동수정 승인/거부 콜백."""
         if payload == "approve":
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 query.message.text + "\n\n\u2705 \uc2b9\uc778 \uc644\ub8cc \u2014 \uc218\uc815\uc774 \uc801\uc6a9\ub418\uc5c8\uc2b5\ub2c8\ub2e4."
             )
         else:
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 query.message.text + "\n\n\u274c \ubb34\uc2dc\ub428 \u2014 \uc218\uc815\uc744 \uc801\uc6a9\ud558\uc9c0 \uc54a\uc558\uc2b5\ub2c8\ub2e4."
             )
 

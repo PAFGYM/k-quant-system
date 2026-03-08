@@ -16,6 +16,10 @@ class CommandsMixin:
         if _t.monotonic() - getattr(self, '_ohlcv_cache_time', 0) > _OHLCV_CACHE_TTL:
             self._ohlcv_cache.clear()
             self._ohlcv_cache_time = _t.monotonic()
+        # v9.6.3: 캐시 크기 제한 (500종목 초과 시 정리)
+        if len(self._ohlcv_cache) > 500:
+            self._ohlcv_cache.clear()
+            self._ohlcv_cache_time = _t.monotonic()
 
         macro = await self.macro_client.get_snapshot()
         await self._update_sector_strengths()
@@ -1609,12 +1613,12 @@ class CommandsMixin:
             return
 
         if not self.anthropic_key:
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "주호님, AI 기능을 사용하려면 ANTHROPIC_API_KEY 설정이 필요합니다."
             )
             return
 
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "🤖 Claude가 실시간 데이터 수집 + 분석 중..."
         )
 
@@ -1743,7 +1747,7 @@ class CommandsMixin:
             markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None
 
             try:
-                await query.edit_message_text(answer, reply_markup=markup)
+                await safe_edit_or_reply(query,answer, reply_markup=markup)
             except Exception:
                 logger.debug("_action_quick_question edit_text failed, falling back", exc_info=True)
                 await context.bot.send_message(
@@ -1754,7 +1758,7 @@ class CommandsMixin:
         except Exception as e:
             logger.error("Quick question error: %s", e, exc_info=True)
             try:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "주호님, AI 응답 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
                 )
             except Exception:
@@ -1825,7 +1829,7 @@ class CommandsMixin:
         리버모어(단타)/오닐(스윙)/린치(포지션)/버핏(장기) 병렬 분석.
         ~3-5초 내 완료 (순차 20초 대비 75% 단축).
         """
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "🎯 4매니저가 동시에 종목을 분석 중...\n"
             "⚡리버모어 🔥오닐 📊린치 💎버핏\n"
             "(약 5초 소요)"
@@ -1993,7 +1997,7 @@ class CommandsMixin:
                 await send_long_message(query.message, result_text, reply_markup=markup)
             else:
                 try:
-                    await query.edit_message_text(result_text, reply_markup=markup)
+                    await safe_edit_or_reply(query,result_text, reply_markup=markup)
                 except Exception:
                     logger.debug("_action_4manager_picks edit_text failed, falling back", exc_info=True)
                     await query.message.reply_text(
@@ -2020,7 +2024,7 @@ class CommandsMixin:
         v5.3: AI가 자체 학습 데이터의 옛날 주가를 사용하는 문제를 근본 해결.
         실시간 스캔 → TOP3 실시간 가격 조회 → 가격 데이터를 AI에 주입.
         """
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "🔍 실시간 종목 스캔 + 가격 조회 중..."
         )
 
@@ -2037,7 +2041,7 @@ class CommandsMixin:
                 self._scan_cache_time = now
 
             if not results:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "⚠️ 현재 스캔 결과가 없습니다. 잠시 후 다시 시도해주세요."
                 )
                 return
@@ -2109,7 +2113,7 @@ class CommandsMixin:
             markup = InlineKeyboardMarkup(followup_buttons) if followup_buttons else None
 
             try:
-                await query.edit_message_text(answer, reply_markup=markup)
+                await safe_edit_or_reply(query,answer, reply_markup=markup)
             except Exception:
                 logger.debug("_handle_buy_pick edit_text failed, falling back", exc_info=True)
                 await query.message.reply_text(answer, reply_markup=markup or get_reply_markup(context))
@@ -2300,7 +2304,7 @@ class CommandsMixin:
             # 전체 보유종목 요약 (기존 cmd_short 로직)
             holdings = self.db.get_active_holdings()
             if not holdings:
-                await query.edit_message_text("📊 보유 종목이 없습니다.")
+                await safe_edit_or_reply(query,"📊 보유 종목이 없습니다.")
                 return
             lines = ["📊 포트폴리오 공매도/레버리지 현황\n"]
             for h in holdings[:10]:
@@ -2334,7 +2338,7 @@ class CommandsMixin:
                 await send_long_message(query.message, text, reply_markup=dismiss_kb)
             else:
                 try:
-                    await query.edit_message_text(text, reply_markup=dismiss_kb)
+                    await safe_edit_or_reply(query,text, reply_markup=dismiss_kb)
                 except Exception:
                     await query.message.reply_text(text, reply_markup=dismiss_kb)
         else:
@@ -2350,7 +2354,7 @@ class CommandsMixin:
             if h:
                 name = h.get("name", name)
 
-            await query.edit_message_text(f"🔍 {name} ({ticker}) 공매도 분석 중...")
+            await safe_edit_or_reply(query,f"🔍 {name} ({ticker}) 공매도 분석 중...")
 
             short_data = self.db.get_short_selling(ticker, days=60)
 
@@ -2651,7 +2655,7 @@ class CommandsMixin:
         """멀티 에이전트 분석 인라인 버튼 콜백."""
         ticker = payload
         try:
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"\U0001f4ca {ticker} 멀티 에이전트 분석 중... (3개 AI 동시 분석)"
             )
 
@@ -2836,7 +2840,7 @@ class CommandsMixin:
             # 피드백 행
             buttons.append(make_feedback_row("멀티분석"))
 
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 msg,
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
@@ -2852,7 +2856,7 @@ class CommandsMixin:
         try:
             holdings = self.db.get_active_holdings()
             if not holdings:
-                await query.edit_message_text("보유종목이 없어 매도 계획을 생성할 수 없습니다.")
+                await safe_edit_or_reply(query,"보유종목이 없어 매도 계획을 생성할 수 없습니다.")
                 return
 
             for h in holdings:
@@ -2873,7 +2877,7 @@ class CommandsMixin:
             if len(msg) > 3800:
                 await send_long_message(query.message, msg)
             else:
-                await query.edit_message_text(msg)
+                await safe_edit_or_reply(query,msg)
         except Exception as e:
             logger.error("Sell plans error: %s", e, exc_info=True)
             await safe_edit_or_reply(
@@ -2887,13 +2891,13 @@ class CommandsMixin:
             scenario_key, _, _ = payload.partition(":")
             last_ss = self.db.get_last_screenshot()
             if not last_ss or not last_ss.get("holdings_json"):
-                await query.edit_message_text("\u26a0\ufe0f 포트폴리오 데이터가 없습니다.")
+                await safe_edit_or_reply(query,"\u26a0\ufe0f 포트폴리오 데이터가 없습니다.")
                 return
             import json
             holdings = json.loads(last_ss["holdings_json"])
             result = simulate_scenario(holdings, scenario_key)
             msg = format_scenario_report(scenario_key, result)
-            await query.edit_message_text(msg)
+            await safe_edit_or_reply(query,msg)
         except Exception as e:
             logger.error("Scenario run error: %s", e, exc_info=True)
             await safe_edit_or_reply(

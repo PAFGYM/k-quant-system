@@ -1499,12 +1499,12 @@ class CoreHandlersMixin:
     async def _action_confirm_sell(self, query, context, payload: str) -> None:
         """매도 기록 확인 콜백."""
         if payload != "yes":
-            await query.edit_message_text("\u274c 매도 기록을 취소했습니다.")
+            await safe_edit_or_reply(query,"\u274c 매도 기록을 취소했습니다.")
             return
 
         sell = context.user_data.pop("pending_sell", None)
         if not sell:
-            await query.edit_message_text("\u26a0\ufe0f 매도 정보가 만료되었습니다.")
+            await safe_edit_or_reply(query,"\u26a0\ufe0f 매도 정보가 만료되었습니다.")
             return
 
         ticker = sell["ticker"]
@@ -1529,7 +1529,7 @@ class CoreHandlersMixin:
             logger.warning("Failed to update holding after sell: %s", e)
 
         pnl_emoji = "\U0001f4c8" if pnl_pct > 0 else "\U0001f4c9" if pnl_pct < 0 else "\u2796"
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             f"\u2705 매도 기록 완료!\n\n"
             f"종목: {name} ({ticker})\n"
             f"매도가: {sell_price:,.0f}원\n"
@@ -2082,12 +2082,12 @@ class CoreHandlersMixin:
         }
         handler = menu_map.get(payload)
         if not handler:
-            await query.edit_message_text(f"⚠️ 알 수 없는 메뉴: {payload}")
+            await safe_edit_or_reply(query,f"⚠️ 알 수 없는 메뉴: {payload}")
             return
         # 로딩 메시지 표시
         loading = _loading_msg.get(payload, "⏳ 로딩 중...")
         try:
-            await query.edit_message_text(loading)
+            await safe_edit_or_reply(query,loading)
         except Exception:
             logger.debug("_action_menu_dispatch edit_text transition failed", exc_info=True)
         # 메뉴 함수는 update.message를 기대 → SimpleNamespace로 래핑
@@ -2569,9 +2569,9 @@ class CoreHandlersMixin:
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔙 이전 화면", callback_data="back:0")],
                 ])
-                await query.edit_message_text("✅ 메뉴를 닫았습니다.", reply_markup=kb)
+                await safe_edit_or_reply(query,"✅ 메뉴를 닫았습니다.", reply_markup=kb)
             else:
-                await query.edit_message_text("✅ 메뉴를 닫았습니다.")
+                await safe_edit_or_reply(query,"✅ 메뉴를 닫았습니다.")
                 # Reply Keyboard 복구 (InlineKeyboard 닫은 후 하단 메뉴 보이게)
                 await context.bot.send_message(
                     chat_id=query.message.chat_id,
@@ -2672,7 +2672,7 @@ class CoreHandlersMixin:
 
         emoji = {"상": "🌟", "중": "👌", "하": "😔"}.get(rating, "📝")
         try:
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"{emoji} 오늘 평가: {rating}\n\n"
                 f"소중한 평가 감사합니다.\n"
                 f"더 나은 서비스를 위해 노력하겠습니다."
@@ -2697,10 +2697,10 @@ class CoreHandlersMixin:
             holdings = context.user_data.get("pending_holdings", [])
             screenshot_id = context.user_data.get("pending_screenshot_id")
             if not holdings:
-                await query.edit_message_text("\u26a0\ufe0f 진단할 종목이 없습니다.")
+                await safe_edit_or_reply(query,"\u26a0\ufe0f 진단할 종목이 없습니다.")
                 return
 
-            await query.edit_message_text("\U0001f50d 전체 기본 진단 실행 중...")
+            await safe_edit_or_reply(query,"\U0001f50d 전체 기본 진단 실행 중...")
             tech_map: dict = {}
             flow_map: dict = {}
             diagnoses = await batch_diagnose(
@@ -2760,7 +2760,7 @@ class CoreHandlersMixin:
                 ticker=ticker, name=name, horizon=horizon,
             )
 
-        await query.edit_message_text(f"\u2705 {name}: {label} 선택됨")
+        await safe_edit_or_reply(query,f"\u2705 {name}: {label} 선택됨")
 
         # Check if all holdings have been assigned a horizon (스크린샷 플로우)
         holdings = context.user_data.get("pending_holdings", [])
@@ -2908,11 +2908,11 @@ class CoreHandlersMixin:
                 for s in solutions
             ]
             msg = format_solution_detail(sol_dicts)
-            await query.edit_message_text(msg)
+            await safe_edit_or_reply(query,msg)
         except Exception as e:
             logger.error("Solution detail callback failed: %s", e, exc_info=True)
             try:
-                await query.edit_message_text("\u26a0\ufe0f 솔루션 조회 중 오류가 발생했습니다.")
+                await safe_edit_or_reply(query,"\u26a0\ufe0f 솔루션 조회 중 오류가 발생했습니다.")
             except Exception:
                 logger.debug("_action_solution_detail error recovery edit_text also failed", exc_info=True)
 
@@ -2948,14 +2948,14 @@ class CoreHandlersMixin:
                     if hasattr(self, '_position_sizer'):
                         self._position_sizer.reset_trailing_stop(ticker)
 
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"✅ {name or ticker} {shares}주 매도 기록 완료\n\n"
                     f"실제 매도는 증권사 앱에서 진행하세요."
                 )
 
             elif action == "ignore":
                 ticker = parts[1] if len(parts) > 1 else ""
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"👌 확인했습니다. 알림을 무시합니다."
                 )
 
@@ -2965,14 +2965,14 @@ class CoreHandlersMixin:
                 if hasattr(self, '_muted_tickers'):
                     import time
                     self._muted_tickers[ticker] = time.time() + 3600
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"⏰ 1시간 뒤에 다시 알려드릴게요."
                 )
 
         except Exception as e:
             logger.error("Profit taking callback error: %s", e, exc_info=True)
             try:
-                await query.edit_message_text("⚠️ 처리 중 오류가 발생했습니다.")
+                await safe_edit_or_reply(query,"⚠️ 처리 중 오류가 발생했습니다.")
             except Exception:
                 logger.debug("_action_profit_taking error recovery edit_text also failed", exc_info=True)
 

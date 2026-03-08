@@ -9,7 +9,7 @@ class TradingMixin:
         """최적화 콜백: opt_run:{ticker} or opt_run:manual."""
         if payload == "manual":
             context.user_data["awaiting_optimize_ticker"] = True
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\u270f\ufe0f 최적화할 종목을 입력하세요.\n\n"
                 "종목코드 또는 종목명 입력\n"
                 "예: 005930 또는 삼성전자"
@@ -71,7 +71,7 @@ class TradingMixin:
         if not result:
             result = await self._scan_single_stock(ticker)
         if not result:
-            await query.edit_message_text("\u26a0\ufe0f 종목 정보를 찾을 수 없습니다.")
+            await safe_edit_or_reply(query,"\u26a0\ufe0f 종목 정보를 찾을 수 없습니다.")
             return
         price = result.info.current_price
         if not price or price <= 0:
@@ -81,7 +81,7 @@ class TradingMixin:
             except Exception:
                 pass
         if not price or price <= 0:
-            await query.edit_message_text("⚠️ 현재가를 가져올 수 없습니다. 잠시 후 다시 시도해주세요.")
+            await safe_edit_or_reply(query,"⚠️ 현재가를 가져올 수 없습니다. 잠시 후 다시 시도해주세요.")
             return
         holding_id = self.db.add_holding(ticker, result.name, price)
         # v9.6.0: ATR 저장
@@ -111,7 +111,7 @@ class TradingMixin:
             result.name, "buy", price,
             atr_pct=_atr, composite_score=_cscore,
         )
-        await query.edit_message_text(msg)
+        await safe_edit_or_reply(query,msg)
 
         # v6.2: 신호 성과 추적 기록
         try:
@@ -144,7 +144,7 @@ class TradingMixin:
             strategy_type=strat, recommended_price=price,
         )
         msg = format_trade_record(name, "skip", price)
-        await query.edit_message_text(msg)
+        await safe_edit_or_reply(query,msg)
 
     async def _analyze_new_holding(
         self, ticker: str, name: str, price: float, holding_id: int,
@@ -235,7 +235,7 @@ class TradingMixin:
         holdings = context.user_data.get("screenshot_new_holdings", [])
 
         if payload == "skip":
-            await query.edit_message_text("⏭️ 건너뛰었습니다.")
+            await safe_edit_or_reply(query,"⏭️ 건너뛰었습니다.")
             context.user_data.pop("screenshot_new_holdings", None)
             return
 
@@ -264,7 +264,7 @@ class TradingMixin:
                 )
             else:
                 msg = "⚠️ 추가할 수 있는 종목이 없습니다."
-            await query.edit_message_text(msg)
+            await safe_edit_or_reply(query,msg)
             # 투자전략 일괄 선택 키보드
             if added_ids:
                 context.user_data["recent_holding_ids"] = added_ids
@@ -288,7 +288,7 @@ class TradingMixin:
                 price = target.get("avg_price", 0) or target.get("current_price", 0)
                 if price > 0:
                     holding_id = self.db.add_holding(ticker, name, price)
-                    await query.edit_message_text(
+                    await safe_edit_or_reply(query,
                         f"✅ {name} 포트폴리오 추가!\n"
                         f"매수가: {price:,.0f}원"
                     )
@@ -303,11 +303,11 @@ class TradingMixin:
                     except Exception:
                         logger.debug("_action_add_screenshot analyze_new_holding failed for %s", ticker, exc_info=True)
                 else:
-                    await query.edit_message_text(
+                    await safe_edit_or_reply(query,
                         f"⚠️ {name} 가격 정보가 없어 추가할 수 없습니다."
                     )
             else:
-                await query.edit_message_text("⚠️ 종목을 찾을 수 없습니다.")
+                await safe_edit_or_reply(query,"⚠️ 종목을 찾을 수 없습니다.")
             return
 
     async def _action_confirm_text_holding(
@@ -316,7 +316,7 @@ class TradingMixin:
         """자연어로 입력된 보유종목 확인 후 추가."""
         pending = context.user_data.get("pending_text_holding")
         if not pending:
-            await query.edit_message_text("⚠️ 등록할 종목 정보가 없습니다.")
+            await safe_edit_or_reply(query,"⚠️ 등록할 종목 정보가 없습니다.")
             return
 
         if payload == "yes":
@@ -334,7 +334,7 @@ class TradingMixin:
                     source="text",
                 )
                 qty_str = f" {quantity}주" if quantity else ""
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"✅ {name}{qty_str} 포트폴리오 추가!\n"
                     f"매수가: {price:,.0f}원"
                 )
@@ -349,9 +349,9 @@ class TradingMixin:
                 except Exception:
                     logger.debug("_action_text_add analyze_new_holding failed for %s", ticker, exc_info=True)
             else:
-                await query.edit_message_text("⚠️ 가격 정보가 부족합니다.")
+                await safe_edit_or_reply(query,"⚠️ 가격 정보가 부족합니다.")
         else:
-            await query.edit_message_text("⏭️ 등록을 건너뛰었습니다.")
+            await safe_edit_or_reply(query,"⏭️ 등록을 건너뛰었습니다.")
 
         context.user_data.pop("pending_text_holding", None)
 
@@ -366,7 +366,7 @@ class TradingMixin:
         market = stock_data.get("market", "KOSPI")
 
         if action == "analyze":
-            await query.edit_message_text(f"🔍 {name}({code}) 분석 중...")
+            await safe_edit_or_reply(query,f"🔍 {name}({code}) 분석 중...")
             try:
                 # 기존 분석 로직 재활용
                 tech_data = ""
@@ -467,7 +467,7 @@ class TradingMixin:
                 self.db.upsert_portfolio_horizon(
                     ticker=code, name=name, horizon="dangi",
                 )
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"✅ {name} 포트폴리오 추가!\n"
                     f"매수가(현재가): {price:,.0f}원\n"
                     f"기간: 단기(스윙)"
@@ -477,16 +477,16 @@ class TradingMixin:
                 except Exception:
                     logger.debug("_action_stock_action analyze_new_holding failed for %s", code, exc_info=True)
             else:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"⚠️ {name} 가격 조회 실패.\n다시 시도해주세요."
                 )
 
         elif action == "watch":
             self.db.add_watchlist(code, name)
-            await query.edit_message_text(f"👀 {name} 관심종목 등록!")
+            await safe_edit_or_reply(query,f"👀 {name} 관심종목 등록!")
 
         elif action == "noop":
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"ℹ️ {name}은(는) 이미 포트폴리오에 있습니다."
             )
 
@@ -575,7 +575,7 @@ class TradingMixin:
         hold_type, _, target = payload.partition(":")
 
         if hold_type == "skip":
-            await query.edit_message_text("⏭️ 투자 전략 설정을 건너뛰었습니다.")
+            await safe_edit_or_reply(query,"⏭️ 투자 전략 설정을 건너뛰었습니다.")
             context.user_data.pop("recent_holding_ids", None)
             return
 
@@ -589,7 +589,7 @@ class TradingMixin:
                 except Exception:
                     logger.debug("_action_holding_type update_holding_type failed for id=%s", hid, exc_info=True)
             label = get_manager_label(hold_type)
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"✅ {len(ids)}종목 → {label} 배정 완료\n\n"
                 f"📌 이 종목들은 {label}이 관리합니다."
             )
@@ -604,10 +604,10 @@ class TradingMixin:
 
                 # 매니저 인사 메시지
                 greeting = await get_manager_greeting(hold_type, name, ticker)
-                await query.edit_message_text(greeting)
+                await safe_edit_or_reply(query,greeting)
             except Exception as e:
                 logger.error("holding_type 설정 실패: %s", e)
-                await query.edit_message_text("⚠️ 투자 전략 설정 실패")
+                await safe_edit_or_reply(query,"⚠️ 투자 전략 설정 실패")
 
     async def _action_manager_view(
         self, query, context, payload: str,
@@ -626,7 +626,7 @@ class TradingMixin:
 
         manager = MANAGERS.get(mgr_type)
         if not manager:
-            await query.edit_message_text("⚠️ 알 수 없는 매니저 유형")
+            await safe_edit_or_reply(query,"⚠️ 알 수 없는 매니저 유형")
             return
 
         holdings = self.db.get_active_holdings()
@@ -666,7 +666,7 @@ class TradingMixin:
             ]
 
         if not type_holdings:
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"{manager['emoji']} {manager['name']}: 담당 종목이 없습니다."
             )
             return
@@ -677,7 +677,7 @@ class TradingMixin:
             if target_name
             else f"{manager['emoji']} {manager['name']} 분석 중..."
         )
-        await query.edit_message_text(loading_text)
+        await safe_edit_or_reply(query,loading_text)
 
         try:
             macro = await self.macro_client.get_snapshot()
@@ -810,7 +810,7 @@ class TradingMixin:
                 name = s["name"]
                 break
 
-        await query.edit_message_text(f"🎙️ {name} 3라운드 토론 중... (약 15초)")
+        await safe_edit_or_reply(query,f"🎙️ {name} 3라운드 토론 중... (약 15초)")
 
         # 차트+재무 데이터 수집
         stock_data = ""
@@ -933,7 +933,7 @@ class TradingMixin:
 
         history = self.db.get_debate_history(ticker, days=30)
         if not history:
-            await query.edit_message_text(f"📜 {name} 토론 이력 없음")
+            await safe_edit_or_reply(query,f"📜 {name} 토론 이력 없음")
             return
 
         _AE = {"매수": "🟢", "매도": "🔴", "관망": "🟡", "홀딩": "🔵"}
@@ -958,7 +958,7 @@ class TradingMixin:
                 InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
             ],
         ])
-        await query.edit_message_text("\n".join(lines), reply_markup=kb)
+        await safe_edit_or_reply(query,"\n".join(lines), reply_markup=kb)
 
     async def _action_ai_accuracy(
         self, query, context, payload: str,
@@ -966,7 +966,7 @@ class TradingMixin:
         """aistat — AI 예측 정확도 통계."""
         stats = self.db.get_prediction_accuracy(days=30)
         if stats.get("total", 0) == 0:
-            await query.edit_message_text("📊 AI 예측 데이터 없음 (최소 5일 후 집계)")
+            await safe_edit_or_reply(query,"📊 AI 예측 데이터 없음 (최소 5일 후 집계)")
             return
 
         text = (
@@ -980,7 +980,7 @@ class TradingMixin:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
         ])
-        await query.edit_message_text(text, reply_markup=kb)
+        await safe_edit_or_reply(query,text, reply_markup=kb)
 
     async def _action_bubble_check(
         self, query, context, payload: str,
@@ -995,7 +995,7 @@ class TradingMixin:
             # 보유종목 선택 리스트 표시
             holdings = self.db.get_active_holdings()
             if not holdings:
-                await query.edit_message_text("📦 보유종목이 없습니다.")
+                await safe_edit_or_reply(query,"📦 보유종목이 없습니다.")
                 return
 
             buttons = []
@@ -1012,13 +1012,13 @@ class TradingMixin:
             if row:
                 buttons.append(row)
 
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "🫧 거품 판별할 종목을 선택하세요:",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
             return
 
-        await query.edit_message_text(f"🫧 {ticker} 거품 분석 중...")
+        await safe_edit_or_reply(query,f"🫧 {ticker} 거품 분석 중...")
 
         # yfinance에서 데이터 조회
         data = await get_bubble_data_from_yfinance(ticker, self.yf_client)
@@ -1067,7 +1067,7 @@ class TradingMixin:
         """잔고 메뉴 액션 처리: bal:add/refresh/remove:ticker."""
         if payload == "add":
             context.user_data["awaiting_stock_add"] = True
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "📝 추가할 종목명을 입력하세요.\n\n"
                 "예: 삼성전자\n"
                 "예: 005930\n\n"
@@ -1075,7 +1075,7 @@ class TradingMixin:
             )
 
         elif payload == "refresh":
-            await query.edit_message_text("🔄 잔고 새로고침 중...")
+            await safe_edit_or_reply(query,"🔄 잔고 새로고침 중...")
             try:
                 holdings = await self._load_holdings_with_fallback()
                 if not holdings:
@@ -1119,17 +1119,17 @@ class TradingMixin:
                     lines = self._format_balance_lines(holdings, total_eval, total_invested)
                     lines.insert(0, f"\U0001f5d1\ufe0f {hname} 삭제 완료!\n")
                     bal_buttons = self._build_balance_buttons(holdings)
-                    await query.edit_message_text(
+                    await safe_edit_or_reply(query,
                         "\n".join(lines),
                         reply_markup=InlineKeyboardMarkup(bal_buttons),
                     )
                 else:
-                    await query.edit_message_text(
+                    await safe_edit_or_reply(query,
                         f"\U0001f5d1\ufe0f {hname} 삭제 완료!\n\n"
                         "\U0001f4b0 보유종목이 없습니다."
                     )
             else:
-                await query.edit_message_text("\u26a0\ufe0f 종목을 찾을 수 없습니다.")
+                await safe_edit_or_reply(query,"\u26a0\ufe0f 종목을 찾을 수 없습니다.")
 
     def _resolve_ticker_from_name(self, name: str) -> str:
         """종목명으로 유니버스에서 티커 코드를 찾습니다."""
@@ -1463,7 +1463,7 @@ class TradingMixin:
         name = result.name if result else ticker
         tp = result.info.current_price * 0.97 if result else None
         self.db.add_watchlist(ticker, name, target_price=tp)
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             f"\U0001f514 {name} \uc54c\ub9bc \ub4f1\ub85d!\n\ub9e4\uc218 \uc870\uac74 \ucda9\uc871 \uc2dc \uc54c\ub824\ub4dc\ub9ac\uaca0\uc2b5\ub2c8\ub2e4."
         )
 
@@ -1479,7 +1479,7 @@ class TradingMixin:
                 recommended_price=holding["buy_price"], quantity_pct=50,
             )
             msg = format_trade_record(holding["name"], "sell", price, pnl)
-            await query.edit_message_text(msg)
+            await safe_edit_or_reply(query,msg)
             # v6.2: 자동 복기 트리거
             await self._trigger_auto_debrief(
                 ticker=ticker, name=holding["name"], action="sell",
@@ -1487,7 +1487,7 @@ class TradingMixin:
                 pnl_pct=pnl, holding=holding, trade_id=trade_id,
             )
         else:
-            await query.edit_message_text("\u26a0\ufe0f 보유 종목을 찾을 수 없습니다.")
+            await safe_edit_or_reply(query,"\u26a0\ufe0f 보유 종목을 찾을 수 없습니다.")
 
     async def _action_hold_profit(self, query, context, ticker: str) -> None:
         holding = self.db.get_holding_by_ticker(ticker)
@@ -1498,7 +1498,7 @@ class TradingMixin:
             action_price=price,
         )
         msg = format_trade_record(name, "hold", price)
-        await query.edit_message_text(msg)
+        await safe_edit_or_reply(query,msg)
 
     async def _action_stop_loss(self, query, context, ticker: str) -> None:
         holding = self.db.get_holding_by_ticker(ticker)
@@ -1512,7 +1512,7 @@ class TradingMixin:
                 recommended_price=holding["buy_price"], quantity_pct=100,
             )
             msg = format_trade_record(holding["name"], "stop_loss", price, pnl)
-            await query.edit_message_text(msg)
+            await safe_edit_or_reply(query,msg)
             # v6.2: 자동 복기 트리거
             await self._trigger_auto_debrief(
                 ticker=ticker, name=holding["name"], action="stop_loss",
@@ -1520,7 +1520,7 @@ class TradingMixin:
                 pnl_pct=pnl, holding=holding, trade_id=trade_id,
             )
         else:
-            await query.edit_message_text("\u26a0\ufe0f 보유 종목을 찾을 수 없습니다.")
+            await safe_edit_or_reply(query,"\u26a0\ufe0f 보유 종목을 찾을 수 없습니다.")
 
     async def _action_hold_through(self, query, context, ticker: str) -> None:
         """v9.3: 버틸래요 → 후속 조치 메뉴 제공."""
@@ -1585,13 +1585,13 @@ class TradingMixin:
         """선택한 손절% 적용."""
         parts = payload.split(":")
         if len(parts) < 2:
-            await query.edit_message_text("⚠️ 잘못된 요청입니다.")
+            await safe_edit_or_reply(query,"⚠️ 잘못된 요청입니다.")
             return
         ticker, pct_str = parts[0], parts[1]
         pct = int(pct_str)
         holding = self.db.get_holding_by_ticker(ticker)
         if not holding:
-            await query.edit_message_text("⚠️ 보유 종목을 찾을 수 없습니다.")
+            await safe_edit_or_reply(query,"⚠️ 보유 종목을 찾을 수 없습니다.")
             return
         buy_price = holding["buy_price"]
         new_stop = round(buy_price * (1 - pct / 100), 0)
@@ -1625,13 +1625,13 @@ class TradingMixin:
         """선택한 목표% 적용."""
         parts = payload.split(":")
         if len(parts) < 2:
-            await query.edit_message_text("⚠️ 잘못된 요청입니다.")
+            await safe_edit_or_reply(query,"⚠️ 잘못된 요청입니다.")
             return
         ticker, pct_str = parts[0], parts[1]
         pct = int(pct_str)
         holding = self.db.get_holding_by_ticker(ticker)
         if not holding:
-            await query.edit_message_text("⚠️ 보유 종목을 찾을 수 없습니다.")
+            await safe_edit_or_reply(query,"⚠️ 보유 종목을 찾을 수 없습니다.")
             return
         buy_price = holding["buy_price"]
         new_t1 = round(buy_price * (1 + pct / 100), 0)
@@ -1649,7 +1649,7 @@ class TradingMixin:
         """AI 매니저 의견 요청."""
         holding = self.db.get_holding_by_ticker(ticker)
         if not holding:
-            await query.edit_message_text("⚠️ 보유 종목을 찾을 수 없습니다.")
+            await safe_edit_or_reply(query,"⚠️ 보유 종목을 찾을 수 없습니다.")
             return
         name = holding["name"]
         buy_price = holding["buy_price"]
@@ -1664,7 +1664,7 @@ class TradingMixin:
             f"손절선에 도달했지만 버티기로 했습니다. "
             f"현재 시점에서 보유 유지 vs 손절 의견을 분석해주세요."
         )
-        await query.edit_message_text(f"🤖 {name} AI 분석 요청 중...")
+        await safe_edit_or_reply(query,f"🤖 {name} AI 분석 요청 중...")
         try:
             await self._handle_ai_question(
                 query, context, question, is_callback=True,
@@ -1685,7 +1685,7 @@ class TradingMixin:
         if not result:
             result = await self._scan_single_stock(ticker)
             if not result:
-                await query.edit_message_text("\u26a0\ufe0f 종목 정보를 가져올 수 없습니다.")
+                await safe_edit_or_reply(query,"\u26a0\ufe0f 종목 정보를 가져올 수 없습니다.")
                 return
         macro = await self.macro_client.get_snapshot()
         # v9.4: debate 데이터 조회
@@ -1723,48 +1723,48 @@ class TradingMixin:
             make_back_row(),
         ]
         try:
-            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
+            await safe_edit_or_reply(query,msg, reply_markup=InlineKeyboardMarkup(buttons))
         except Exception:
             logger.debug("_action_watch_detail edit_text failed, falling back", exc_info=True)
             await query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
 
     async def _action_nowatch(self, query, context, ticker: str) -> None:
         self.db.remove_watchlist(ticker)
-        await query.edit_message_text("\u274c 관심 목록에서 제외했습니다.")
+        await safe_edit_or_reply(query,"\u274c 관심 목록에서 제외했습니다.")
 
     async def _action_watch_btn(self, query, context, ticker: str) -> None:
         result = self._find_cached_result(ticker)
         name = result.name if result else ticker
         tp = result.info.current_price * 0.97 if result else None
         self.db.add_watchlist(ticker, name, target_price=tp)
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             f"\U0001f440 {name} 지켜보기 등록!\n조건 변화 시 다시 알려드리겠습니다."
         )
 
     async def _action_strategy(self, query, context, strategy_type: str) -> None:
         recs = self.db.get_recommendations_by_strategy(strategy_type)
         msg = format_strategy_list(strategy_type, recs)
-        await query.edit_message_text(msg)
+        await safe_edit_or_reply(query,msg)
 
     async def _action_opt_apply(self, query, context, ticker: str) -> None:
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "\u2705 최적화 파라미터 적용 완료!\n"
             "다음 스캔부터 새 파라미터가 반영됩니다."
         )
 
     async def _action_opt_ignore(self, query, context, payload: str) -> None:
-        await query.edit_message_text("\u274c 최적화 결과를 무시합니다.")
+        await safe_edit_or_reply(query,"\u274c 최적화 결과를 무시합니다.")
 
     async def _action_kis_buy(self, query, context, ticker: str) -> None:
         """Handle KIS auto-buy button."""
         if not self.kis_broker.connected:
-            await query.edit_message_text("\u26a0\ufe0f KIS 미연결. /setup_kis 로 설정하세요.")
+            await safe_edit_or_reply(query,"\u26a0\ufe0f KIS 미연결. /setup_kis 로 설정하세요.")
             return
         # 안전장치: 실전매매 환경변수 체크
         real_trade = os.getenv("REAL_TRADE_ENABLED", "false").lower() == "true"
         is_virtual = getattr(self.kis, '_is_virtual', True)
         if not is_virtual and not real_trade:
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\U0001f6ab 실전투자 모드에서 자동매매가 비활성화되어 있습니다.\n\n"
                 ".env에 REAL_TRADE_ENABLED=true 설정 필요.\n"
                 "\U0001f4e1 KIS설정 → 안전 설정에서 확인하세요."
@@ -1774,27 +1774,27 @@ class TradingMixin:
         if not result:
             result = await self._scan_single_stock(ticker)
         if not result:
-            await query.edit_message_text("\u26a0\ufe0f 종목 정보를 찾을 수 없습니다.")
+            await safe_edit_or_reply(query,"\u26a0\ufe0f 종목 정보를 찾을 수 없습니다.")
             return
         price = result.info.current_price
         balance = self.kis_broker.get_balance()
         total_eval = balance.get("total_eval", 0) if balance else 0
         qty = self.kis_broker.compute_buy_quantity(price, total_eval, pct=10.0)
         if qty <= 0:
-            await query.edit_message_text("\u26a0\ufe0f 매수 가능 수량이 없습니다.")
+            await safe_edit_or_reply(query,"\u26a0\ufe0f 매수 가능 수량이 없습니다.")
             return
         # Safety check
         order_pct = (price * qty / total_eval * 100) if total_eval > 0 else 100
         can, reason = self.kis_broker.safety.can_order(order_pct)
         if not can:
-            await query.edit_message_text(f"\u26a0\ufe0f 안전 제한: {reason}")
+            await safe_edit_or_reply(query,f"\u26a0\ufe0f 안전 제한: {reason}")
             return
         # 실전 모드 1회 주문 한도: 투자금 10% 또는 500만원 중 작은 값
         if not is_virtual:
             order_amount = price * qty
             max_amount = min(total_eval * 0.1, 5_000_000)
             if order_amount > max_amount:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"\u26a0\ufe0f 실전매매 1회 한도 초과\n\n"
                     f"주문금액: {order_amount:,.0f}원\n"
                     f"한도: {max_amount:,.0f}원 (투자금 10% / 500만원 중 작은 값)"
@@ -1807,12 +1807,12 @@ class TradingMixin:
                 side="buy", quantity=qty, price=price, order_id=order.order_id,
             )
             self.db.add_holding(ticker, result.name, price)
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"\u2705 {result.name} {qty}주 시장가 매수 주문 완료!\n"
                 f"주문번호: {order.order_id}"
             )
         else:
-            await query.edit_message_text(f"\u274c 매수 실패: {order.message}")
+            await safe_edit_or_reply(query,f"\u274c 매수 실패: {order.message}")
 
     # == Buy Planner =========================================================
 
@@ -1902,7 +1902,7 @@ class TradingMixin:
                 ],
                 [InlineKeyboardButton("❌ 취소", callback_data="bp:no")],
             ]
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "💰 주호님, 오늘 매수 금액을 선택해주세요\n"
                 "(만원 단위)",
                 reply_markup=InlineKeyboardMarkup(buttons),
@@ -1913,7 +1913,7 @@ class TradingMixin:
             amt_val = payload.split(":")[1]
             if amt_val == "custom":
                 context.user_data["awaiting_buy_amount"] = True
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "💰 투자 금액을 입력해주세요\n"
                     "(만원 단위 숫자만 입력)\n\n"
                     "예: 50 → 50만원"
@@ -1935,7 +1935,7 @@ class TradingMixin:
                 ],
                 [InlineKeyboardButton("🔙 금액 재선택", callback_data="bp:yes")],
             ]
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"💰 {amount_만원}만원 매수 계획\n\n"
                 f"투자 타입을 선택해주세요.\n"
                 f"선택한 타입의 전담 매니저가\n"
@@ -1962,15 +1962,15 @@ class TradingMixin:
                 "investment_type": inv_type,
             }
             if inv_type == "ai":
-                await query.edit_message_text("🤖 AI가 최적 포트폴리오를 분석 중...")
+                await safe_edit_or_reply(query,"🤖 AI가 최적 포트폴리오를 분석 중...")
                 await self._show_ai_recommendation(query, context)
             else:
-                await query.edit_message_text("💭 종목을 분석하고 있습니다...")
+                await safe_edit_or_reply(query,"💭 종목을 분석하고 있습니다...")
                 await self._show_horizon_picks(query, context, inv_type)
             return
 
         if payload == "no":
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "🏖️ 알겠습니다!\n"
                 "좋은 하루 보내세요, 주호님\n\n"
                 "매수 계획이 생기면 언제든 말씀하세요"
@@ -1978,7 +1978,7 @@ class TradingMixin:
             return
 
         if payload == "dismiss":
-            await query.edit_message_text("👋 확인했습니다.")
+            await safe_edit_or_reply(query,"👋 확인했습니다.")
             return
 
         if payload.startswith("view:"):
@@ -1995,7 +1995,7 @@ class TradingMixin:
             ai_picks = context.user_data.get("_ai_picks", [])
             cart = context.user_data.get("buy_cart")
             if not cart or not ai_picks:
-                await query.edit_message_text("⚠️ 장바구니 정보가 없습니다.")
+                await safe_edit_or_reply(query,"⚠️ 장바구니 정보가 없습니다.")
                 return
             added = 0
             for p in ai_picks:
@@ -2005,7 +2005,7 @@ class TradingMixin:
                 cart["remaining"] -= p["amount"]
                 added += 1
             context.user_data.pop("_ai_picks", None)
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"✅ {added}종목을 장바구니에 담았습니다"
             )
             await self._show_cart_menu(query, context)
@@ -2035,7 +2035,7 @@ class TradingMixin:
             context.user_data.pop("buy_cart", None)
             context.user_data.pop("_horizon_picks", None)
             context.user_data.pop("_ai_picks", None)
-            await query.edit_message_text("❌ 매수 계획을 취소했습니다.")
+            await safe_edit_or_reply(query,"❌ 매수 계획을 취소했습니다.")
             return
 
         # 하위 호환: 기존 hz:{horizon}:{amount}
@@ -2053,7 +2053,7 @@ class TradingMixin:
                 "items": [],
                 "active": True,
             }
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "💭 종목을 분석하고 있습니다..."
             )
             await self._show_horizon_picks(query, context, horizon)
@@ -2316,10 +2316,10 @@ class TradingMixin:
         """기간별 종목 리스트 표시 + [담기] 버튼."""
         cart = context.user_data.get("buy_cart")
         if not cart:
-            await query.edit_message_text("⚠️ 장바구니 정보가 없습니다.")
+            await safe_edit_or_reply(query,"⚠️ 장바구니 정보가 없습니다.")
             return
 
-        await query.edit_message_text("🔍 종목을 분석하고 있습니다...")
+        await safe_edit_or_reply(query,"🔍 종목을 분석하고 있습니다...")
 
         picks_data, error = await self._get_horizon_picks_data(
             horizon, cart["remaining"],
@@ -2387,7 +2387,7 @@ class TradingMixin:
         """종목을 장바구니에 추가."""
         cart = context.user_data.get("buy_cart")
         if not cart:
-            await query.edit_message_text("⚠️ 장바구니 정보가 없습니다.")
+            await safe_edit_or_reply(query,"⚠️ 장바구니 정보가 없습니다.")
             return
 
         # 캐시에서 종목 데이터 가져오기
@@ -2395,21 +2395,21 @@ class TradingMixin:
         pick = picks_cache.get(ticker)
 
         if not pick:
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "⚠️ 종목 정보를 찾을 수 없습니다.\n다시 종목 보기를 선택해주세요."
             )
             return
 
         # 이미 담긴 종목 체크
         if any(item["ticker"] == ticker for item in cart["items"]):
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"⚠️ {pick['name']}은 이미 장바구니에 있습니다."
             )
             return
 
         # 예산 체크
         if pick["amount"] > cart["remaining"]:
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"⚠️ 예산이 부족합니다\n\n"
                 f"필요: {pick['amount']:,.0f}원\n"
                 f"남은 예산: {cart['remaining']:,.0f}원"
@@ -2423,7 +2423,7 @@ class TradingMixin:
         horizon_emoji = {"scalp": "⚡", "short": "🔥", "mid": "📊", "long": "💎"}
         emoji = horizon_emoji.get(horizon, "📌")
 
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             f"✅ {pick['name']} 담김 ({emoji})\n\n"
             f"🛒 장바구니 ({len(cart['items'])}종목)\n"
             f"💰 남은 예산: {cart['remaining']:,.0f}원"
@@ -2436,10 +2436,10 @@ class TradingMixin:
         """AI가 전 기간 통합 최적 포트폴리오 추천."""
         cart = context.user_data.get("buy_cart")
         if not cart:
-            await query.edit_message_text("⚠️ 장바구니 정보가 없습니다.")
+            await safe_edit_or_reply(query,"⚠️ 장바구니 정보가 없습니다.")
             return
 
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "🤖 AI가 최적 포트폴리오를 분석 중...\n"
             "(약 30초 소요)"
         )
@@ -2605,7 +2605,7 @@ class TradingMixin:
         """장바구니 최종 확인 화면."""
         cart = context.user_data.get("buy_cart")
         if not cart or not cart["items"]:
-            await query.edit_message_text("🛒 장바구니가 비어있습니다.")
+            await safe_edit_or_reply(query,"🛒 장바구니가 비어있습니다.")
             return
 
         budget_만원 = cart["budget"] // 10000
@@ -2676,7 +2676,7 @@ class TradingMixin:
             ],
         ]
 
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             text, reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -2684,7 +2684,7 @@ class TradingMixin:
         """장바구니 확정: 보유종목 등록 + 모니터링 시작."""
         cart = context.user_data.get("buy_cart")
         if not cart or not cart["items"]:
-            await query.edit_message_text("🛒 장바구니가 비어있습니다.")
+            await safe_edit_or_reply(query,"🛒 장바구니가 비어있습니다.")
             return
 
         # 보유종목 등록
@@ -2745,7 +2745,7 @@ class TradingMixin:
         context.user_data.pop("_horizon_picks", None)
 
         if not registered:
-            await query.edit_message_text("⚠️ 종목 등록에 실패했습니다.")
+            await safe_edit_or_reply(query,"⚠️ 종목 등록에 실패했습니다.")
             return
 
         # 결과 메시지
@@ -2772,7 +2772,7 @@ class TradingMixin:
 
         lines.append("\n행운을 빕니다, 주호님!")
 
-        await query.edit_message_text("\n".join(lines))
+        await safe_edit_or_reply(query,"\n".join(lines))
 
     # == Backtest Pro ========================================================
 
@@ -2781,9 +2781,9 @@ class TradingMixin:
         if payload == "portfolio":
             holdings = self.db.get_active_holdings()
             if not holdings:
-                await query.edit_message_text("\u26a0\ufe0f 보유종목이 없습니다.")
+                await safe_edit_or_reply(query,"\u26a0\ufe0f 보유종목이 없습니다.")
                 return
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 "\U0001f4ca 포트폴리오 백테스트 실행 중...\n(시간이 걸릴 수 있습니다)"
             )
             from kstock.backtest.engine import (
@@ -2819,7 +2819,7 @@ class TradingMixin:
                     name = item["name"]
                     market = item.get("market", "KOSPI")
                     break
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"\U0001f4ca {name} 비용 포함 백테스트 실행 중..."
             )
             from kstock.backtest.engine import (
@@ -2844,9 +2844,9 @@ class TradingMixin:
             return
         holdings = self.db.get_active_holdings()
         if not holdings:
-            await query.edit_message_text("\u26a0\ufe0f 보유종목이 없습니다.")
+            await safe_edit_or_reply(query,"\u26a0\ufe0f 보유종목이 없습니다.")
             return
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "📊 고급 리스크 분석 실행 중...\n"
             "(VaR, Monte Carlo, 스트레스 테스트)"
         )
@@ -2969,7 +2969,7 @@ class TradingMixin:
         try:
             reports = self.db.get_journal_reports(period=period, limit=1)
             if not reports:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"📋 {period_label} 매매일지가 아직 없습니다."
                 )
                 return
@@ -2988,18 +2988,18 @@ class TradingMixin:
             if ai_review:
                 text += f"\n🤖 AI 복기\n{ai_review[:800]}"
 
-            await query.edit_message_text(text)
+            await safe_edit_or_reply(query,text)
 
         except Exception as e:
             logger.error("Journal view error: %s", e, exc_info=True)
-            await query.edit_message_text("⚠️ 매매일지 조회 중 오류 발생")
+            await safe_edit_or_reply(query,"⚠️ 매매일지 조회 중 오류 발생")
 
     async def _action_sector_rotate(self, query, context, payload: str) -> None:
         """섹터 로테이션 콜백: sector_rotate:detail."""
         try:
             snapshots = self.db.get_sector_snapshots(limit=1)
             if not snapshots:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "🔄 섹터 로테이션 데이터가 아직 없습니다.\n"
                     "매일 09:05에 자동 분석됩니다."
                 )
@@ -3038,18 +3038,18 @@ class TradingMixin:
                     dir_emoji = "🟢" if sig.get("direction") in ("overweight", "rotate_in") else "🔴"
                     lines.append(f"  {dir_emoji} {sig['sector']} → {sig['direction']}")
 
-            await query.edit_message_text("\n".join(lines))
+            await safe_edit_or_reply(query,"\n".join(lines))
 
         except Exception as e:
             logger.error("Sector rotation view error: %s", e, exc_info=True)
-            await query.edit_message_text("⚠️ 섹터 로테이션 조회 중 오류 발생")
+            await safe_edit_or_reply(query,"⚠️ 섹터 로테이션 조회 중 오류 발생")
 
     async def _action_contrarian_view(self, query, context, payload: str) -> None:
         """역발상 시그널 콜백: contrarian:history."""
         try:
             signals = self.db.get_contrarian_signals(limit=10)
             if not signals:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     "🔮 역발상 시그널 이력이 없습니다.\n"
                     "매일 14:00에 자동 스캔됩니다."
                 )
@@ -3064,11 +3064,11 @@ class TradingMixin:
                     f"  강도: {strength:.0%} | {s.get('created_at', '')[:16]}"
                 )
 
-            await query.edit_message_text("\n".join(lines))
+            await safe_edit_or_reply(query,"\n".join(lines))
 
         except Exception as e:
             logger.error("Contrarian view error: %s", e, exc_info=True)
-            await query.edit_message_text("⚠️ 역발상 시그널 조회 중 오류 발생")
+            await safe_edit_or_reply(query,"⚠️ 역발상 시그널 조회 중 오류 발생")
 
     async def _action_backtest_advanced(self, query, context, payload: str) -> None:
         """고급 백테스트 콜백: bt_adv:mc:{ticker} / bt_adv:wf:{ticker}."""
@@ -3083,12 +3083,12 @@ class TradingMixin:
                 format_walk_forward, format_risk_metrics,
             )
 
-            await query.edit_message_text(f"⏳ {ticker} 고급 백테스트 실행 중...")
+            await safe_edit_or_reply(query,f"⏳ {ticker} 고급 백테스트 실행 중...")
 
             # 기본 백테스트 실행
             result = run_backtest(ticker, period="1y")
             if not result or not result.trades:
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"⚠️ {ticker} 백테스트 데이터 부족"
                 )
                 return
@@ -3122,11 +3122,11 @@ class TradingMixin:
                 ))
 
             keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
-            await query.edit_message_text(text, reply_markup=keyboard)
+            await safe_edit_or_reply(query,text, reply_markup=keyboard)
 
         except Exception as e:
             logger.error("Advanced backtest error: %s", e, exc_info=True)
-            await query.edit_message_text("⚠️ 고급 백테스트 실행 중 오류 발생")
+            await safe_edit_or_reply(query,"⚠️ 고급 백테스트 실행 중 오류 발생")
 
     # == v6.2: 자동 매매 복기 ================================================
 

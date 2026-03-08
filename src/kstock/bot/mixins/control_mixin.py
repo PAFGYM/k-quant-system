@@ -7,6 +7,8 @@ import sys
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from kstock.bot.bot_imports import safe_edit_or_reply
+
 logger = logging.getLogger(__name__)
 
 # 사용자에게 보여줄 주요 작업 목록 (트리거 가능)
@@ -78,7 +80,7 @@ class ControlMixin:
                 InlineKeyboardButton("🔙 관리자 메뉴", callback_data="adm:menu"),
             ],
         ]
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "🎮 시스템 컨트롤\n\n실행 중인 봇을 제어합니다.",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -88,7 +90,7 @@ class ControlMixin:
     async def _ctrl_jobs(self, query, context, _arg: str) -> None:
         jq = getattr(self, "_job_queue", None)
         if not jq:
-            await query.edit_message_text("작업 큐를 사용할 수 없습니다.")
+            await safe_edit_or_reply(query,"작업 큐를 사용할 수 없습니다.")
             return
         lines = ["📋 스케줄 작업 목록\n"]
         jobs = sorted(jq.jobs(), key=lambda j: j.name or "")
@@ -100,7 +102,7 @@ class ControlMixin:
         if len(text) > 4000:
             text = text[:4000] + "\n..."
         back = [[InlineKeyboardButton("🔙 컨트롤", callback_data="ctrl:menu")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(back))
+        await safe_edit_or_reply(query,text, reply_markup=InlineKeyboardMarkup(back))
 
     # ── Trigger ───────────────────────────────────────
 
@@ -115,7 +117,7 @@ class ControlMixin:
         if row:
             buttons.append(row)
         buttons.append([InlineKeyboardButton("🔙 컨트롤", callback_data="ctrl:menu")])
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "▶️ 실행할 작업을 선택하세요",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -123,21 +125,21 @@ class ControlMixin:
     async def _ctrl_run_job(self, query, context, job_name: str) -> None:
         if not job_name:
             return
-        await query.edit_message_text(f"⏳ '{job_name}' 실행 중...")
+        await safe_edit_or_reply(query,f"⏳ '{job_name}' 실행 중...")
         try:
             handler = getattr(self, f"job_{job_name}", None)
             if not handler:
-                await query.edit_message_text(f"작업 '{job_name}'을 찾을 수 없습니다.")
+                await safe_edit_or_reply(query,f"작업 '{job_name}'을 찾을 수 없습니다.")
                 return
             await handler(context)
             back = [[InlineKeyboardButton("🔙 컨트롤", callback_data="ctrl:menu")]]
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"✅ '{job_name}' 실행 완료",
                 reply_markup=InlineKeyboardMarkup(back),
             )
         except Exception as e:
             back = [[InlineKeyboardButton("🔙 컨트롤", callback_data="ctrl:menu")]]
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"❌ '{job_name}' 실행 실패\n{str(e)[:500]}",
                 reply_markup=InlineKeyboardMarkup(back),
             )
@@ -163,7 +165,7 @@ class ControlMixin:
         if not buttons:
             buttons.append([InlineKeyboardButton("모든 작업이 이미 중지됨", callback_data="ctrl:menu")])
         buttons.append([InlineKeyboardButton("🔙 컨트롤", callback_data="ctrl:menu")])
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "⏸ 일시중지할 작업 선택",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -176,12 +178,12 @@ class ControlMixin:
             if job.name == job_name:
                 job.enabled = False
                 back = [[InlineKeyboardButton("🔙 컨트롤", callback_data="ctrl:menu")]]
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"⏸ '{job_name}' 일시중지됨",
                     reply_markup=InlineKeyboardMarkup(back),
                 )
                 return
-        await query.edit_message_text(f"작업 '{job_name}'을 찾을 수 없습니다.")
+        await safe_edit_or_reply(query,f"작업 '{job_name}'을 찾을 수 없습니다.")
 
     async def _ctrl_resume_menu(self, query, context, _arg: str) -> None:
         jq = getattr(self, "_job_queue", None)
@@ -202,7 +204,7 @@ class ControlMixin:
         if not buttons:
             buttons.append([InlineKeyboardButton("중지된 작업 없음", callback_data="ctrl:menu")])
         buttons.append([InlineKeyboardButton("🔙 컨트롤", callback_data="ctrl:menu")])
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "▶️ 재개할 작업 선택",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -215,12 +217,12 @@ class ControlMixin:
             if job.name == job_name:
                 job.enabled = True
                 back = [[InlineKeyboardButton("🔙 컨트롤", callback_data="ctrl:menu")]]
-                await query.edit_message_text(
+                await safe_edit_or_reply(query,
                     f"▶️ '{job_name}' 재개됨",
                     reply_markup=InlineKeyboardMarkup(back),
                 )
                 return
-        await query.edit_message_text(f"작업 '{job_name}'을 찾을 수 없습니다.")
+        await safe_edit_or_reply(query,f"작업 '{job_name}'을 찾을 수 없습니다.")
 
     # ── Quick Stats ───────────────────────────────────
 
@@ -264,7 +266,7 @@ class ControlMixin:
             lines.append(f"비용 조회 실패: {e}")
 
         back = [[InlineKeyboardButton("🔙 컨트롤", callback_data="ctrl:menu")]]
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "\n".join(lines),
             reply_markup=InlineKeyboardMarkup(back),
         )
@@ -279,7 +281,7 @@ class ControlMixin:
                 InlineKeyboardButton("🔙 컨트롤", callback_data="ctrl:menu"),
             ],
         ]
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             f"📜 최근 로그 (30줄)\n\n{text}",
             reply_markup=InlineKeyboardMarkup(back),
         )
@@ -292,7 +294,7 @@ class ControlMixin:
                 InlineKeyboardButton("🔙 컨트롤", callback_data="ctrl:menu"),
             ],
         ]
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             f"🔴 에러 로그\n\n{text}",
             reply_markup=InlineKeyboardMarkup(back),
         )
@@ -323,13 +325,13 @@ class ControlMixin:
                 InlineKeyboardButton("❌ 취소", callback_data="ctrl:menu"),
             ],
         ]
-        await query.edit_message_text(
+        await safe_edit_or_reply(query,
             "🔄 봇을 재시작하시겠습니까?\n\n재시작하면 약 10초간 봇이 응답하지 않습니다.",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
     async def _ctrl_restart_exec(self, query, context, _arg: str) -> None:
-        await query.edit_message_text("🔄 봇 재시작 중...")
+        await safe_edit_or_reply(query,"🔄 봇 재시작 중...")
         try:
             await context.bot.send_message(
                 chat_id=self.chat_id,

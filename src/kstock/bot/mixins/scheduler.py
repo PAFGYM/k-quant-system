@@ -117,7 +117,7 @@ class SchedulerMixin:
                     self._alert_mode = saved
                     logger.info("Alert mode restored from DB: %s", saved)
             except Exception:
-                pass
+                logger.debug("Failed to restore alert_mode from DB", exc_info=True)
 
     # ── 경계 모드 관리 메서드 ──────────────────────────────
     def _get_alert_config(self) -> dict:
@@ -154,7 +154,7 @@ class SchedulerMixin:
         try:
             self.db.set_meta("alert_mode", mode)
         except Exception:
-            pass
+            logger.debug("Failed to persist alert_mode '%s' to DB", mode, exc_info=True)
 
         # 스케줄 동적 재조정
         if context:
@@ -277,6 +277,7 @@ class SchedulerMixin:
                     detail = await self._get_price_detail(ticker, bp)
                     cur = detail["price"]
                 except Exception:
+                    logger.debug("Failed to get price for %s in wartime review, using buy_price", ticker, exc_info=True)
                     cur = bp
 
                 pnl_pct = (cur - bp) / bp if bp > 0 else 0
@@ -751,7 +752,7 @@ class SchedulerMixin:
                     mgr_perf = self.db.get_manager_performance(mtype, days=90)
                     mgr_lessons = self.db.get_trade_lessons_by_manager(mtype, limit=5)
                 except Exception:
-                    pass
+                    logger.debug("Failed to load manager performance/lessons for %s", mtype, exc_info=True)
 
                 try:
                     report = await get_manager_analysis(
@@ -778,7 +779,7 @@ class SchedulerMixin:
                                 _badge = f"{_badge_e} 적중률 {_hr:.0f}% | 5일 평균 {_ar:+.1f}%"
                                 report = report.replace("\n", f"\n{_badge}\n", 1)
                         except Exception:
-                            pass
+                            logger.debug("Failed to prepend scorecard badge for manager %s", mtype, exc_info=True)
                         _mgr_btns = InlineKeyboardMarkup([
                             [
                                 InlineKeyboardButton("👍", callback_data=f"fb:like:매니저_{mtype}"),
@@ -800,7 +801,7 @@ class SchedulerMixin:
                                     break
                             self.db.save_manager_stance(mtype, stance_line)
                         except Exception:
-                            pass
+                            logger.debug("Failed to save manager stance for %s", mtype, exc_info=True)
                 except Exception as e:
                     logger.debug("Manager briefing %s error: %s", mtype, e)
 
@@ -813,7 +814,7 @@ class SchedulerMixin:
                         chat_id=self.chat_id, text=balance_msg[:2000],
                     )
             except Exception:
-                pass
+                logger.debug("Failed to send portfolio balance advice", exc_info=True)
 
             logger.info("Manager briefings sent: %s", list(by_type.keys()))
         except Exception as e:
@@ -947,7 +948,7 @@ class SchedulerMixin:
             try:
                 cur = (await self._get_price(ticker, base_price=buy_price)) or cur
             except Exception:
-                pass
+                logger.debug("Failed to get current price for %s in daily actions", ticker, exc_info=True)
             if cur <= 0:
                 continue
 
@@ -1014,7 +1015,7 @@ class SchedulerMixin:
                     "callback_data": "fav:tab::0",
                 })
         except Exception:
-            pass
+            logger.debug("Failed to detect market regime for daily actions", exc_info=True)
 
         # 확인: 포트폴리오 점검
         if len(holdings) >= 2:
@@ -1148,7 +1149,7 @@ class SchedulerMixin:
                 if directive:
                     special_ctx = f"\n[📌 운영자 특별 관심사항]\n{directive}\n"
             except Exception:
-                pass
+                logger.debug("Failed to load special market context from DB", exc_info=True)
 
             # v6.2.2: 보유종목 외인/기관 수급 데이터
             flow_ctx = ""
@@ -1169,7 +1170,7 @@ class SchedulerMixin:
                                 f"  {name}: 외인{f_e}{f_net:+,}주 기관{i_e}{i_net:+,}주 (3일)"
                             )
                         except Exception:
-                            pass
+                            logger.debug("Failed to get foreign/institution flow for %s", ticker, exc_info=True)
                     if flow_lines:
                         flow_ctx = "\n[외인/기관 수급 (3일)]\n" + "\n".join(flow_lines) + "\n"
 
@@ -1193,7 +1194,7 @@ class SchedulerMixin:
                         if pattern_lines:
                             flow_ctx += "\n[수급 패턴 감지]\n" + "\n".join(pattern_lines) + "\n"
                     except Exception:
-                        pass
+                        logger.debug("Failed to detect Korean flow patterns for briefing", exc_info=True)
             except Exception:
                 logger.debug("Morning briefing flow data failed", exc_info=True)
 
@@ -1219,7 +1220,7 @@ class SchedulerMixin:
                                 if acc.pattern:
                                     accum_lines[-1] += f" [{acc.pattern}]"
                     except Exception:
-                        pass
+                        logger.debug("Failed to analyze weekly accumulation for %s", ticker, exc_info=True)
                 if accum_lines:
                     accum_ctx = "\n[주봉 매집 분석]\n" + "\n".join(accum_lines) + "\n"
             except Exception:
@@ -1285,7 +1286,7 @@ class SchedulerMixin:
                         f"(차익={latest['arb_net']:+,.0f}, 비차익={latest['non_arb_net']:+,.0f})\n"
                     )
             except Exception:
-                pass
+                logger.debug("Failed to load program trading data for briefing", exc_info=True)
 
             # v9.0: 신용잔고/예탁금
             credit_ctx = ""
@@ -1300,7 +1301,7 @@ class SchedulerMixin:
                         f"예탁금={deposit_tril:.1f}조({c['deposit_change']:+,.0f}억)\n"
                     )
             except Exception:
-                pass
+                logger.debug("Failed to load credit balance data for briefing", exc_info=True)
 
             # v9.0: ETF 자금흐름
             etf_ctx = ""
@@ -1315,7 +1316,7 @@ class SchedulerMixin:
                             f"인버스={inv_cap/10000:.1f}조\n"
                         )
             except Exception:
-                pass
+                logger.debug("Failed to load ETF flow data for briefing", exc_info=True)
 
             # v9.0: 산업 생태계 컨텍스트
             industry_ctx = ""
@@ -1330,7 +1331,7 @@ class SchedulerMixin:
                 if ind_lines:
                     industry_ctx = "\n[산업 생태계]\n" + "\n".join(ind_lines) + "\n"
             except Exception:
-                pass
+                logger.debug("Failed to build industry ecosystem context for briefing", exc_info=True)
 
             # v9.0: 한국형 리스크 종합
             korea_risk_ctx = ""
@@ -1348,19 +1349,19 @@ class SchedulerMixin:
                     if cred:
                         kr_args["credit_data"] = cred
                 except Exception:
-                    pass
+                    logger.debug("Failed to load credit balance for korea_risk in briefing", exc_info=True)
                 try:
                     etf = self.db.get_etf_flow(days=1)
                     if etf:
                         kr_args["etf_data"] = etf
                 except Exception:
-                    pass
+                    logger.debug("Failed to load ETF flow for korea_risk in briefing", exc_info=True)
                 try:
                     prog = self.db.get_program_trading(days=1, market="KOSPI")
                     if prog:
                         kr_args["program_data"] = prog
                 except Exception:
-                    pass
+                    logger.debug("Failed to load program trading for korea_risk in briefing", exc_info=True)
                 # 만기일
                 from calendar import monthcalendar
                 now_br = datetime.now(KST)
@@ -1524,7 +1525,7 @@ class SchedulerMixin:
                             bd = _dt.fromisoformat(h["buy_date"].replace("Z", ""))
                             hold_days = (_dt.utcnow() - bd).days
                         except Exception:
-                            pass
+                            logger.debug("Failed to parse buy_date for hold_days in manager alerts, ticker=%s", ticker, exc_info=True)
 
                     alerts = check_manager_alert_conditions(
                         mtype, ticker, h.get("name", ""),
@@ -1730,7 +1731,7 @@ class SchedulerMixin:
                         conf = d.get("confidence", 0)
                         debate_badge = f"{v}{conf:.0f}%"
                 except Exception:
-                    pass
+                    logger.debug("Failed to get debate badge for %s in EOD report", r.ticker, exc_info=True)
                 _atr = getattr(r.tech, "atr_pct", 0.0) if r.tech else 0.0
                 reco_data.append((
                     i, r.name, r.ticker, r.score.composite, r.score.signal,
@@ -1854,24 +1855,24 @@ class SchedulerMixin:
                 if cred:
                     kr_args["credit_data"] = cred
             except Exception:
-                pass
+                logger.debug("Failed to load credit balance for korea_risk in EOD report", exc_info=True)
             try:
                 etf = self.db.get_etf_flow(days=1)
                 if etf:
                     kr_args["etf_data"] = etf
             except Exception:
-                pass
+                logger.debug("Failed to load ETF flow for korea_risk in EOD report", exc_info=True)
             try:
                 prog = self.db.get_program_trading(days=1, market="KOSPI")
                 if prog:
                     kr_args["program_data"] = prog
             except Exception:
-                pass
+                logger.debug("Failed to load program trading for korea_risk in EOD report", exc_info=True)
             assessment = assess_korea_risk(**kr_args)
             if assessment.total_risk > 0:
                 eod_risk_ctx = f"\n{format_korea_risk(assessment)}\n"
         except Exception:
-            pass
+            logger.debug("Failed to assess korea_risk for EOD report", exc_info=True)
 
         prompt = (
             f"오늘 한국/미국 주식 시장 장 마감 종합 분석을 작성해줘.\n"
@@ -2308,14 +2309,14 @@ class SchedulerMixin:
                     _p = _prog[0]
                     extra_lines.append(f"프로그램: {_p['total_net']:+,.0f}억")
             except Exception:
-                pass
+                logger.debug("Failed to load program trading for market pulse", exc_info=True)
             try:
                 _cred = self.db.get_credit_balance(days=1)
                 if _cred:
                     _c = _cred[0]
                     extra_lines.append(f"신용: {_c['credit']/10000:.1f}조({_c['credit_change']:+,.0f}억)")
             except Exception:
-                pass
+                logger.debug("Failed to load credit balance for market pulse", exc_info=True)
             try:
                 _etf = self.db.get_etf_flow(days=1)
                 if _etf:
@@ -2324,7 +2325,7 @@ class SchedulerMixin:
                     if _lev > 0:
                         extra_lines.append(f"레버ETF: {_lev/10000:.1f}조")
             except Exception:
-                pass
+                logger.debug("Failed to load ETF flow for market pulse", exc_info=True)
             extra_text = " | ".join(extra_lines)
             if extra_text:
                 extra_text = f"\n{extra_text}"
@@ -2976,7 +2977,7 @@ class SchedulerMixin:
         action = parts[1] if len(parts) > 1 else ""
 
         if action == "skip":
-            await query.edit_message_text("⏭️ 업데이트를 건너뛰었습니다.")
+            await safe_edit_or_reply(query,"⏭️ 업데이트를 건너뛰었습니다.")
             return
 
         if action == "detail":
@@ -3001,13 +3002,13 @@ class SchedulerMixin:
                     ),
                 ],
             ])
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 text=detail_msg, reply_markup=keyboard,
             )
             return
 
         if action == "apply":
-            await query.edit_message_text("⏳ 자동 업데이트 실행 중...")
+            await safe_edit_or_reply(query,"⏳ 자동 업데이트 실행 중...")
             results = []
             holdings = self.db.get_active_holdings()
 
@@ -3847,14 +3848,14 @@ class SchedulerMixin:
 
         if duration == "24h":
             self._muted_tickers[ticker] = now + 86400  # 24시간
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"🔇 {ticker} 매도 알림을 24시간 동안 무시합니다.\n"
                 f"내일 이 시간 이후 다시 알림이 올 수 있습니다."
             )
             logger.info("Muted sell alert: %s for 24h", ticker)
         elif duration == "off":
             self._muted_tickers[ticker] = now + 86400 * 365  # 사실상 영구
-            await query.edit_message_text(
+            await safe_edit_or_reply(query,
                 f"🔕 {ticker} 매도 알림을 끕니다.\n"
                 f"종목을 매도하거나 봇을 재시작하면 다시 활성화됩니다."
             )
@@ -4083,7 +4084,7 @@ class SchedulerMixin:
                                     elif _macro.vix >= 18: _regime = "normal"
                                     else: _regime = "calm"
                             except Exception:
-                                pass
+                                logger.debug("Failed to get macro snapshot for market regime in holdings check", exc_info=True)
 
                             # 보유일수 계산
                             _hold_days = 0
@@ -4093,7 +4094,7 @@ class SchedulerMixin:
                                     _bd_dt = datetime.strptime(bd[:10], "%Y-%m-%d")
                                     _hold_days = max(0, (datetime.utcnow() - _bd_dt).days)
                             except Exception:
-                                pass
+                                logger.debug("Failed to parse buy_date for hold_days in holdings check, ticker=%s", ticker, exc_info=True)
 
                             smart_msg = build_holding_alert(
                                 name=name, ticker=ticker,
@@ -4105,7 +4106,7 @@ class SchedulerMixin:
                                 market_regime=_regime,
                             )
                         except Exception:
-                            pass
+                            logger.debug("Failed to build smart holding alert for %s", ticker, exc_info=True)
 
                         alert_text = smart_msg if smart_msg else sizer.format_profit_alert(alert)
 
@@ -4848,7 +4849,7 @@ class SchedulerMixin:
                     f"환율={macro.usdkrw:,.0f}원"
                 )
             except Exception:
-                pass
+                logger.debug("Failed to get macro snapshot for manager discovery scan", exc_info=True)
 
             current_alert = getattr(self, '_alert_mode', 'normal')
             found = 0
@@ -5045,7 +5046,7 @@ class SchedulerMixin:
                         )
                         self.db.conn.commit()
                     except Exception:
-                        pass
+                        logger.debug("Failed to create sent_news_urls table", exc_info=True)
             # 오래된 항목 정리 (1000개 초과 시)
             if len(sent_news) > 1000:
                 context.bot_data["sent_news"] = set()
@@ -5057,7 +5058,7 @@ class SchedulerMixin:
                     )
                     self.db.conn.commit()
                 except Exception:
-                    pass
+                    logger.debug("Failed to cleanup old sent_news_urls entries", exc_info=True)
 
             # 중요 키워드
             important_kw = [
@@ -5119,7 +5120,7 @@ class SchedulerMixin:
                                 )
                                 self.db.conn.commit()
                             except Exception:
-                                pass
+                                logger.debug("Failed to persist sent news URL to DB", exc_info=True)
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.debug("News monitor for %s: %s", ticker, e)
