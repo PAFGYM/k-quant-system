@@ -992,6 +992,7 @@ class CoreHandlersMixin:
             "🛠 관리자": self._menu_admin,
             # ── v8.5: 온보딩 + 오늘의 할 일 ──
             "📖 온보딩": self._menu_onboarding,
+            "📖 사용설명서": self._menu_guide,
             "📋 오늘의 할 일": self._menu_daily_actions,
             # ── 이전 메뉴 하위호환 ──
             "\U0001f4d6 사용법 가이드": self._menu_usage_guide,
@@ -1987,6 +1988,8 @@ class CoreHandlersMixin:
             # v9.5.4: 섹터 딥다이브 + 비주얼 브리핑
             "sdive": self._action_sector_dive,
             "vchart": self._action_visual_chart,
+            # v9.5.5: 사용설명서
+            "guide": self._action_guide,
         }
 
     async def handle_callback(
@@ -2158,6 +2161,140 @@ class CoreHandlersMixin:
                     logger.debug("_action_back handler %s failed", action, exc_info=True)
         # fallback: 닫기
         await self._action_dismiss(query, context, "0")
+
+    # == v9.5.5: 사용설명서 =====================================================
+
+    _GUIDE_PAGES = {
+        "main": (
+            "📖 K-Quant 사용설명서\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "AI 투자 비서가 24시간 서포트합니다.\n\n"
+            "🔹 기본 사용법\n"
+            "  종목명 입력 → 즉시 AI 분석\n"
+            "  예: '삼성전자', 'SK하이닉스'\n\n"
+            "🔹 하단 메뉴 (항상 표시)\n"
+            "  💬 자유롭게 대화하면 AI가 응답\n\n"
+            "🔹 자동 알림 (매일)\n"
+            "  07:30 모닝브리핑\n"
+            "  09:30 AI 토론 (장 시작)\n"
+            "  16:00 장마감 리포트 + PDF\n"
+            "  21:00 일일 자가진단\n\n"
+            "아래에서 상세 기능을 확인하세요 👇"
+        ),
+        "analysis": (
+            "📊 분석 기능\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "1️⃣ 종목 분석\n"
+            "  종목명 입력 → AI가 종합 분석\n"
+            "  차트(5종), 재무, 수급, 공매도 포함\n\n"
+            "2️⃣ 🔬 섹터 딥다이브 ⭐NEW\n"
+            "  더보기 > 섹터 딥다이브\n"
+            "  6개 섹터 애널리스트급 리서치\n"
+            "  글로벌 피어, 밸류체인, 촉매/리스크\n\n"
+            "3️⃣ 📊 비주얼 차트 ⭐NEW\n"
+            "  더보기 > 비주얼 차트\n"
+            "  포트폴리오/수익추이/섹터/매니저 이미지\n\n"
+            "4️⃣ 🎙 AI 토론\n"
+            "  종목 상세 > AI토론\n"
+            "  4매니저가 동시 토론 후 합의\n\n"
+            "5️⃣ 📊 멀티분석\n"
+            "  분석 > 멀티분석\n"
+            "  4개 AI가 독립 채점 후 종합"
+        ),
+        "manager": (
+            "🤖 4매니저 시스템\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "보유종목을 4명이 동시에 관리합니다.\n\n"
+            "⚡ 리버모어 (단타 1~3일)\n"
+            "  기술적 분석, 차트 패턴, 모멘텀\n\n"
+            "🔥 오닐 (스윙 1~2주)\n"
+            "  CAN-SLIM, 상대강도, 돌파 매수\n\n"
+            "📊 린치 (포지션 1~3개월)\n"
+            "  PEG, 성장성, 카테고리 분류\n\n"
+            "💎 버핏 (장기 3개월+)\n"
+            "  내재가치, 경제적 해자, 안전마진\n\n"
+            "매니저별 성적표가 자동 기록되고,\n"
+            "교훈을 학습하여 점점 정확해집니다.\n\n"
+            "💡 사용법: 잔고에서 종목별 매니저 탭"
+        ),
+        "alerts": (
+            "🔔 자동 알림 시스템\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "45개 스케줄이 하루 종일 작동합니다.\n\n"
+            "⏰ 일일 스케줄\n"
+            "  07:00 미국장 프리마켓\n"
+            "  07:30 모닝브리핑 + 매니저분석\n"
+            "  08:20 증권사 리포트 수집\n"
+            "  09:30 AI 토론 (장 시작)\n"
+            "  09~15시 장중 60초 모니터링\n"
+            "  14:00 AI 토론 (오후)\n"
+            "  14:30 단타 청산 리마인더\n"
+            "  16:00 장마감 리포트 + PDF\n"
+            "  21:00 일일 자가진단\n\n"
+            "🚨 실시간 알림\n"
+            "  급등/급락 감지\n"
+            "  손절선/목표가 도달\n"
+            "  글로벌 긴급 뉴스\n"
+            "  경계모드 자동 전환"
+        ),
+        "new": (
+            "⭐ v9.5 신규 기능\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🔬 섹터 딥다이브\n"
+            "  6개 섹터 심층 리서치 리포트\n"
+            "  증권사+유튜브+뉴스+글로벌피어 종합\n"
+            "  → 더보기 > 섹터 딥다이브\n\n"
+            "📊 비주얼 차트\n"
+            "  포트폴리오, 수익추이, 섹터 이미지\n"
+            "  → 더보기 > 비주얼 차트\n\n"
+            "🎓 학습 엔진\n"
+            "  매니저 성적표 자동 기록\n"
+            "  매매 교훈 → 전략 자동 보정\n\n"
+            "📅 이벤트→전략 연동\n"
+            "  FOMC, 실적발표 등 → 점수 자동 조정\n\n"
+            "🎬 유튜브 인텔리전스\n"
+            "  경제방송 AI 분석 → 종목/섹터 추출\n\n"
+            "🔗 통합 컨텍스트\n"
+            "  모든 시스템이 서로 참조\n"
+            "  AI 대화 시 매니저+뉴스+토론 반영\n\n"
+            "👍👎 모든 화면에 피드백 + 뒤로가기"
+        ),
+    }
+
+    async def _action_guide(self, query, context, payload: str) -> None:
+        """v9.5.5 사용설명서."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        page = payload if payload in self._GUIDE_PAGES else "main"
+
+        text = self._GUIDE_PAGES[page]
+
+        if page == "main":
+            buttons = [
+                [
+                    InlineKeyboardButton("📊 분석 기능", callback_data="guide:analysis"),
+                    InlineKeyboardButton("🤖 4매니저", callback_data="guide:manager"),
+                ],
+                [
+                    InlineKeyboardButton("🔔 알림 시스템", callback_data="guide:alerts"),
+                    InlineKeyboardButton("⭐ 신규 기능", callback_data="guide:new"),
+                ],
+                [
+                    InlineKeyboardButton("🔬 섹터분석", callback_data="sdive:menu"),
+                    InlineKeyboardButton("📊 차트", callback_data="vchart:menu"),
+                ],
+                make_feedback_row("사용설명서"),
+            ]
+        else:
+            buttons = [
+                [InlineKeyboardButton("📖 메인으로", callback_data="guide:main")],
+                make_feedback_row("사용설명서"),
+            ]
+
+        await safe_edit_or_reply(
+            query, text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
     # == v9.5.4: 비주얼 차트 ===================================================
 

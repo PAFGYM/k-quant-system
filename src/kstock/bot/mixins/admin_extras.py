@@ -1047,7 +1047,7 @@ class AdminExtrasMixin:
              InlineKeyboardButton("⚙️ 최적화", callback_data="menu:optimize")],
             [InlineKeyboardButton("🔬 섹터 딥다이브", callback_data="sdive:menu"),
              InlineKeyboardButton("📊 비주얼 차트", callback_data="vchart:menu")],
-            [InlineKeyboardButton("📖 온보딩", callback_data="menu:onboarding"),
+            [InlineKeyboardButton("📖 사용설명서", callback_data="guide:main"),
              InlineKeyboardButton("📋 오늘의 할 일", callback_data="menu:daily_actions")],
             [InlineKeyboardButton("🛠 관리자", callback_data="menu:admin")],
             [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:more")],
@@ -1064,6 +1064,46 @@ class AdminExtrasMixin:
         await update.message.reply_text(
             "\U0001f3e0 메인 메뉴로 돌아왔습니다.",
             reply_markup=get_reply_markup(context),
+        )
+
+    async def _menu_guide(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """v9.5.5 사용설명서 — 텍스트 메뉴에서 진입."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        text = (
+            "📖 K-Quant 사용설명서\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "AI 투자 비서가 24시간 서포트합니다.\n\n"
+            "🔹 기본 사용법\n"
+            "  종목명 입력 → 즉시 AI 분석\n"
+            "  예: '삼성전자', 'SK하이닉스'\n\n"
+            "🔹 하단 메뉴 (항상 표시)\n"
+            "  💬 자유롭게 대화하면 AI가 응답\n\n"
+            "🔹 자동 알림 (매일)\n"
+            "  07:30 모닝브리핑\n"
+            "  09:30 AI 토론 (장 시작)\n"
+            "  16:00 장마감 리포트 + PDF\n"
+            "  21:00 일일 자가진단\n\n"
+            "아래에서 상세 기능을 확인하세요 👇"
+        )
+        buttons = [
+            [
+                InlineKeyboardButton("📊 분석 기능", callback_data="guide:analysis"),
+                InlineKeyboardButton("🤖 4매니저", callback_data="guide:manager"),
+            ],
+            [
+                InlineKeyboardButton("🔔 알림 시스템", callback_data="guide:alerts"),
+                InlineKeyboardButton("⭐ 신규 기능", callback_data="guide:new"),
+            ],
+            [
+                InlineKeyboardButton("🔬 섹터분석", callback_data="sdive:menu"),
+                InlineKeyboardButton("📊 차트", callback_data="vchart:menu"),
+            ],
+            make_feedback_row("사용설명서"),
+        ]
+        await update.message.reply_text(
+            text, reply_markup=InlineKeyboardMarkup(buttons),
         )
 
     async def _menu_analysis_hub(
