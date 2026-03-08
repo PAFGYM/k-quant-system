@@ -567,7 +567,22 @@ class SchedulerMixin:
                     )
                 )
 
-            await context.bot.send_message(chat_id=self.chat_id, text=msg)
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            morning_buttons = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📊 차트", callback_data="vchart:menu"),
+                    InlineKeyboardButton("🔬 섹터", callback_data="sdive:menu"),
+                    InlineKeyboardButton("💼 잔고", callback_data="bal:0"),
+                ],
+                [
+                    InlineKeyboardButton("👍", callback_data="fb:like:모닝브리핑"),
+                    InlineKeyboardButton("👎", callback_data="fb:dislike:모닝브리핑"),
+                ],
+            ])
+            await context.bot.send_message(
+                chat_id=self.chat_id, text=msg,
+                reply_markup=morning_buttons,
+            )
 
             # v9.5.1: 브리핑을 DB에 저장 (AI 채팅이 참조할 수 있도록)
             try:
@@ -607,6 +622,7 @@ class SchedulerMixin:
         """
         try:
             from collections import defaultdict
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             from kstock.bot.investment_managers import get_manager_analysis, MANAGERS
 
             holdings = self.db.get_active_holdings()
@@ -746,8 +762,15 @@ class SchedulerMixin:
                         manager_lessons=mgr_lessons,
                     )
                     if report:
+                        _mgr_btns = InlineKeyboardMarkup([
+                            [
+                                InlineKeyboardButton("👍", callback_data=f"fb:like:매니저_{mtype}"),
+                                InlineKeyboardButton("👎", callback_data=f"fb:dislike:매니저_{mtype}"),
+                            ],
+                        ])
                         await context.bot.send_message(
                             chat_id=self.chat_id, text=report[:4000],
+                            reply_markup=_mgr_btns,
                         )
                         # v9.5: 매니저 stance를 DB에 저장 (통합 상태용)
                         try:
@@ -1703,6 +1726,16 @@ class SchedulerMixin:
                 )]
                 for r in results[:3]
             ]
+            buttons.extend([
+                [
+                    InlineKeyboardButton("📊 차트", callback_data="vchart:portfolio"),
+                    InlineKeyboardButton("🔬 섹터", callback_data="sdive:menu"),
+                ],
+                [
+                    InlineKeyboardButton("👍", callback_data="fb:like:장마감"),
+                    InlineKeyboardButton("👎", callback_data="fb:dislike:장마감"),
+                ],
+            ])
             keyboard = InlineKeyboardMarkup(buttons) if buttons else None
             await context.bot.send_message(chat_id=self.chat_id, text=msg, reply_markup=keyboard)
 
@@ -5166,8 +5199,21 @@ class SchedulerMixin:
                             )
 
                         if alert_msg:
+                            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                            news_buttons = InlineKeyboardMarkup([
+                                [
+                                    InlineKeyboardButton("📊 시장분석", callback_data="quick_q:market"),
+                                    InlineKeyboardButton("🔬 섹터분석", callback_data="sdive:menu"),
+                                ],
+                                [
+                                    InlineKeyboardButton("👍", callback_data="fb:like:글로벌뉴스"),
+                                    InlineKeyboardButton("👎", callback_data="fb:dislike:글로벌뉴스"),
+                                    InlineKeyboardButton("❌", callback_data="dismiss:0"),
+                                ],
+                            ])
                             await context.bot.send_message(
                                 chat_id=self.chat_id, text=alert_msg,
+                                reply_markup=news_buttons,
                             )
                             # DB에 전송 기록
                             for group in new_groups:

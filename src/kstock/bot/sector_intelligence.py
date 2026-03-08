@@ -539,6 +539,7 @@ async def generate_sector_deep_dive(
     sector_key: str,
     anthropic_client=None,
     include_peers: bool = True,
+    skip_cache: bool = False,
 ) -> dict[str, Any]:
     """섹터 딥다이브 리포트 생성.
 
@@ -554,13 +555,14 @@ async def generate_sector_deep_dive(
         return {"error": f"Unknown sector: {sector_key}", "report": None}
 
     # 캐시 체크 (6시간 이내)
-    try:
-        cached = db.get_sector_deep_dive(sector_key, hours=6)
-        if cached:
-            logger.info("sector_deep_dive cache hit for %s", sector_key)
-            return {"report": cached, "research": None, "error": None, "cached": True}
-    except Exception:
-        pass
+    if not skip_cache:
+        try:
+            cached = db.get_sector_deep_dive(sector_key, hours=6)
+            if cached:
+                logger.info("sector_deep_dive cache hit for %s", sector_key)
+                return {"report": cached, "research": None, "error": None, "cached": True}
+        except Exception:
+            pass
 
     # 데이터 수집
     research = await gather_sector_research(db, sector_key, include_peers=include_peers)
@@ -580,22 +582,45 @@ async def generate_sector_deep_dive(
     try:
         response = anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=1500,
+            max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         )
         raw_text = response.content[0].text.strip()
 
-        # JSON 파싱
-        # ```json ... ``` 블록 추출
-        if "```json" in raw_text:
-            raw_text = raw_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw_text:
-            raw_text = raw_text.split("```")[1].split("```")[0].strip()
+        # JSON 파싱 — 여러 방식으로 추출 시도
+        json_text = raw_text
+        if "```json" in json_text:
+            json_text = json_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in json_text:
+            json_text = json_text.split("```")[1].split("```")[0].strip()
 
-        report = json.loads(raw_text)
-        report["sector_key"] = sector_key
-        report["sector_label"] = config["label"]
-        report["generated_at"] = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+        # JSON 블록 시작/끝 찾기
+        report = None
+        try:
+            report = json.loads(json_text)
+        except json.JSONDecodeError:
+            # 중괄호 범위로 재시도
+            start = json_text.find("{")
+            end = json_text.rfind("}")
+            if start != -1 and end > start:
+                try:
+                    report = json.loads(json_text[start:end + 1])
+                except json.JSONDecodeError:
+                    pass
+
+        if report and isinstance(report, dict):
+            report["sector_key"] = sector_key
+            report["sector_label"] = config["label"]
+            report["generated_at"] = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+        else:
+            # JSON 파싱 완전 실패 → AI 원문을 자연어로 정리
+            report = {
+                "sector_key": sector_key,
+                "sector_label": config["label"],
+                "executive_summary": _extract_plain_summary(raw_text),
+                "generated_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
+                "parse_error": True,
+            }
 
         # DB 저장
         try:
@@ -615,26 +640,37 @@ async def generate_sector_deep_dive(
 
         return {"report": report, "research": research, "error": None, "cached": False}
 
-    except json.JSONDecodeError:
-        # JSON 파싱 실패 시 raw text 반환
-        report = {
-            "sector_key": sector_key,
-            "sector_label": config["label"],
-            "executive_summary": raw_text[:500],
-            "generated_at": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
-            "parse_error": True,
-        }
-        return {"report": report, "research": research, "error": None}
     except Exception as e:
         logger.error("sector deep dive AI generation failed: %s", e)
         return {"error": str(e), "report": None, "research": research}
+
+
+def _extract_plain_summary(raw_text: str) -> str:
+    """JSON 파싱 실패 시, AI 원문에서 자연어 요약 추출."""
+    # JSON 블록 제거 시도
+    clean = raw_text
+    for tag in ("```json", "```"):
+        clean = clean.replace(tag, "")
+    # JSON 키/값 패턴 정리: "key": "value" → value만 추출
+    import re
+    values = re.findall(r'"(?:executive_summary|sector_outlook|investment_thesis)":\s*"([^"]{10,})"', clean)
+    if values:
+        return " ".join(values)[:600]
+    # JSON 브레이스 내부 제거
+    clean = re.sub(r'[{}\[\]]', '', clean)
+    clean = re.sub(r'"[a-z_]+":\s*', '', clean)
+    clean = clean.replace('"', '').strip()
+    return clean[:600] if clean else "AI 분석 결과를 텍스트로 변환하지 못했습니다."
 
 
 # ── 텔레그램 포맷 ────────────────────────────────────────────────
 
 
 def format_deep_dive_telegram(report: dict) -> str:
-    """딥다이브 리포트를 텔레그램 메시지로 포맷."""
+    """딥다이브 리포트를 텔레그램 메시지로 포맷.
+
+    Telegram 4096자 제한 고려하여 핵심만 표시.
+    """
     if not report:
         return "❌ 리포트 생성 실패"
 
@@ -645,62 +681,68 @@ def format_deep_dive_telegram(report: dict) -> str:
 
     lines = [
         f"{emoji} {label} 딥다이브 리서치",
-        "━" * 28,
+        "━" * 25,
         f"⏰ {generated}",
     ]
+
+    # 길이 제어 헬퍼
+    def _trim(text: str, max_len: int = 300) -> str:
+        if not text:
+            return ""
+        text = str(text).strip()
+        if len(text) > max_len:
+            return text[:max_len - 3] + "..."
+        return text
 
     # Executive Summary
     summary = report.get("executive_summary", "")
     if summary:
-        lines.extend(["", "📋 핵심 요약", summary])
+        lines.extend(["", "📋 핵심 요약", _trim(summary, 400)])
 
     # Sector Outlook
     outlook = report.get("sector_outlook", "")
     if outlook:
-        # 전망에 따른 이모지
         if any(kw in outlook for kw in ["강세", "긍정", "상승"]):
             ol_emoji = "📈"
         elif any(kw in outlook for kw in ["약세", "부정", "하락"]):
             ol_emoji = "📉"
         else:
             ol_emoji = "➡️"
-        lines.extend(["", f"{ol_emoji} 섹터 전망", outlook])
+        lines.extend(["", f"{ol_emoji} 섹터 전망", _trim(outlook, 250)])
 
     # Value Chain Analysis
     vc = report.get("value_chain_analysis", "")
     if vc:
-        lines.extend(["", "🔗 밸류체인 분석", vc])
+        lines.extend(["", "🔗 밸류체인", _trim(vc, 250)])
 
     # Global Comparison
     gc = report.get("global_comparison", "")
     if gc:
-        lines.extend(["", "🌍 글로벌 비교", gc])
+        lines.extend(["", "🌍 글로벌 비교", _trim(gc, 200)])
 
-    # Key Catalysts
+    # Key Catalysts + Risk (합쳐서 표시)
     catalysts = report.get("key_catalysts", [])
-    if catalysts:
-        lines.extend(["", "🚀 핵심 촉매"])
-        for c in catalysts[:4]:
-            lines.append(f"  • {c}")
-
-    # Risk Factors
     risks = report.get("risk_factors", [])
+    if catalysts:
+        lines.extend(["", "🚀 촉매"])
+        for c in catalysts[:3]:
+            lines.append(f"  • {_trim(c, 80)}")
     if risks:
-        lines.extend(["", "⚠️ 리스크 요인"])
-        for r in risks[:4]:
-            lines.append(f"  • {r}")
+        lines.extend(["", "⚠️ 리스크"])
+        for r in risks[:3]:
+            lines.append(f"  • {_trim(r, 80)}")
 
     # Monitoring Points
     monitors = report.get("monitoring_points", [])
     if monitors:
-        lines.extend(["", "👁️ 모니터링 포인트"])
-        for m in monitors[:4]:
-            lines.append(f"  • {m}")
+        lines.extend(["", "👁️ 모니터링"])
+        for m in monitors[:3]:
+            lines.append(f"  • {_trim(m, 60)}")
 
     # Investment Thesis
     thesis = report.get("investment_thesis", "")
     if thesis:
-        lines.extend(["", "💡 투자 전략", thesis])
+        lines.extend(["", "💡 투자 전략", _trim(thesis, 250)])
 
     # Top Picks
     picks = report.get("top_picks", [])
@@ -710,14 +752,15 @@ def format_deep_dive_telegram(report: dict) -> str:
             if isinstance(p, dict):
                 name = p.get("name", "")
                 ticker = p.get("ticker", "")
-                reason = p.get("reason", "")
+                reason = _trim(p.get("reason", ""), 60)
                 lines.append(f"  • {name}({ticker}): {reason}")
 
     # Confidence
     conf = report.get("confidence", 0)
     if conf:
-        conf_bar = "●" * int(conf * 10) + "○" * (10 - int(conf * 10))
-        lines.extend(["", f"확신도: [{conf_bar}] {conf*100:.0f}%"])
+        conf_pct = float(conf) * 100 if float(conf) <= 1 else float(conf)
+        conf_bar = "●" * int(conf_pct / 10) + "○" * (10 - int(conf_pct / 10))
+        lines.append(f"\n확신도: [{conf_bar}] {conf_pct:.0f}%")
 
     return "\n".join(lines)
 

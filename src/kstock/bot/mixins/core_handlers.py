@@ -2119,13 +2119,16 @@ class CoreHandlersMixin:
 
     # == v9.5: 네비게이션 스택 ====================================================
 
-    def _push_nav(self, context, callback_data: str, text: str = ""):
-        """현재 화면을 네비게이션 스택에 저장."""
+    def _push_nav(self, context, state, text: str = ""):
+        """현재 화면을 네비게이션 스택에 저장.
+
+        Args:
+            state: dict {"callback_data": str, "text": str} 또는 str (callback_data)
+        """
         stack = context.user_data.setdefault("nav_stack", [])
-        stack.append({
-            "callback_data": callback_data,
-            "text": text[:100] if text else "",
-        })
+        if isinstance(state, str):
+            state = {"callback_data": state, "text": text[:100] if text else ""}
+        stack.append(state)
         # 스택 과다 증가 방지
         if len(stack) > 10:
             stack.pop(0)
@@ -2160,6 +2163,7 @@ class CoreHandlersMixin:
 
     async def _action_visual_chart(self, query, context, payload: str) -> None:
         """비주얼 브리핑 — 차트 이미지 생성/전송."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         try:
             from kstock.bot.visual_briefing import (
                 generate_portfolio_chart,
@@ -2175,14 +2179,15 @@ class CoreHandlersMixin:
         chat_id = query.message.chat_id
 
         if payload == "menu" or not payload:
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            self._push_nav(context, {"callback_data": "more:0", "text": "더보기"})
             buttons = [
                 [InlineKeyboardButton("📊 포트폴리오 현황", callback_data="vchart:portfolio")],
                 [InlineKeyboardButton("📈 수익 추이", callback_data="vchart:pnl")],
                 [InlineKeyboardButton("🔄 섹터 분석", callback_data="vchart:sector")],
                 [InlineKeyboardButton("🎯 매니저 성적", callback_data="vchart:manager")],
                 [InlineKeyboardButton("📋 전체 브리핑", callback_data="vchart:all")],
-                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+                make_back_row(),
+                make_feedback_row("비주얼차트"),
             ]
             await safe_edit_or_reply(
                 query,
@@ -2193,6 +2198,15 @@ class CoreHandlersMixin:
             return
 
         await safe_edit_or_reply(query, "📊 차트 생성 중... ⏳")
+
+        # 차트 후 공통 버튼
+        after_buttons = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📊 다른 차트", callback_data="vchart:menu"),
+                InlineKeyboardButton("🔬 섹터분석", callback_data="sdive:menu"),
+            ],
+            make_feedback_row("비주얼차트"),
+        ])
 
         img_data = None
         caption = ""
@@ -2222,7 +2236,10 @@ class CoreHandlersMixin:
                         )
                     except Exception as e:
                         logger.debug("send_photo failed: %s", e)
-                await safe_edit_or_reply(query, f"✅ {len(charts)}개 차트 전송 완료")
+                await safe_edit_or_reply(
+                    query, f"✅ {len(charts)}개 차트 전송 완료",
+                    reply_markup=after_buttons,
+                )
             else:
                 await safe_edit_or_reply(query, "❌ 생성 가능한 차트가 없습니다.")
             return
@@ -2235,7 +2252,10 @@ class CoreHandlersMixin:
                     photo=io.BytesIO(img_data),
                     caption=caption,
                 )
-                await safe_edit_or_reply(query, f"✅ {caption} 차트 전송 완료")
+                await safe_edit_or_reply(
+                    query, f"✅ {caption} 차트 전송 완료",
+                    reply_markup=after_buttons,
+                )
             except Exception as e:
                 logger.error("send_photo failed: %s", e)
                 await safe_edit_or_reply(query, f"❌ 차트 전송 실패: {e}")
@@ -2260,6 +2280,7 @@ class CoreHandlersMixin:
 
         if payload == "menu" or not payload:
             # 섹터 선택 메뉴
+            self._push_nav(context, {"callback_data": "more:0", "text": "더보기"})
             focus_sectors = detect_user_focus_sectors(self.db)
             buttons = []
             for key, cfg in SECTOR_DEEP_DIVE_CONFIG.items():
@@ -2269,31 +2290,40 @@ class CoreHandlersMixin:
                 buttons.append(
                     [InlineKeyboardButton(label, callback_data=f"sdive:{key}")]
                 )
-            buttons.append(
-                [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")]
-            )
+            buttons.append(make_back_row())
+            buttons.append(make_feedback_row("섹터딥다이브"))
             await safe_edit_or_reply(
                 query,
                 "🔬 섹터 딥다이브 인텔리전스\n"
                 "━" * 25 + "\n"
                 "분석할 섹터를 선택하세요.\n"
-                "💼 표시 = 현재 보유 섹터",
+                "💼 = 현재 보유 섹터",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
             return
 
-        # 특정 섹터 딥다이브 실행
-        sector_key = payload
+        # 캐시 삭제 (새로 분석 시 fresh=으로 시작)
+        if payload.startswith("fresh="):
+            sector_key = payload.split("=", 1)[1]
+            # 캐시 무시 플래그
+            force_refresh = True
+        else:
+            sector_key = payload
+            force_refresh = False
+
         config = SECTOR_DEEP_DIVE_CONFIG.get(sector_key)
         if not config:
             await safe_edit_or_reply(query, f"❌ 알 수 없는 섹터: {sector_key}")
             return
 
+        # nav stack push
+        self._push_nav(context, {"callback_data": "sdive:menu", "text": "섹터선택"})
+
         # 분석 중 메시지
         await safe_edit_or_reply(
             query,
             f"{config['emoji']} {config['label']} 딥다이브 분석 중...\n"
-            "📊 증권사 리포트 + 유튜브 + 뉴스 + 글로벌 피어 종합 분석\n"
+            "📊 증권사 리포트 + 유튜브 + 뉴스 + 글로벌 피어 종합\n"
             "⏳ 20~30초 소요"
         )
 
@@ -2314,12 +2344,19 @@ class CoreHandlersMixin:
             self.db, sector_key,
             anthropic_client=anthropic_client,
             include_peers=True,
+            skip_cache=force_refresh,
         )
 
         if result.get("error"):
+            buttons = [
+                [InlineKeyboardButton("🔄 재시도", callback_data=f"sdive:{sector_key}")],
+                [InlineKeyboardButton("📋 다른 섹터", callback_data="sdive:menu")],
+                make_back_row(),
+            ]
             await safe_edit_or_reply(
                 query,
-                f"❌ 딥다이브 생성 실패: {result['error']}"
+                f"❌ 딥다이브 생성 실패: {result['error']}",
+                reply_markup=InlineKeyboardMarkup(buttons),
             )
             return
 
@@ -2330,21 +2367,43 @@ class CoreHandlersMixin:
         if cached:
             text += "\n\n📦 캐시된 리포트 (6시간 이내)"
 
+        # 종목 상세 버튼 (보유종목이 있으면)
+        action_row = []
+        tickers = config.get("domestic_tickers", [])
+        if tickers:
+            first_ticker = tickers[0]
+            action_row = [InlineKeyboardButton(
+                f"📊 대표 종목 분석", callback_data=f"detail:{first_ticker}"
+            )]
+
         # 후속 액션 버튼
-        buttons = [
-            [InlineKeyboardButton("🔄 새로 분석", callback_data=f"sdive:{sector_key}")],
+        buttons = []
+        if action_row:
+            buttons.append(action_row)
+        buttons.extend([
+            [
+                InlineKeyboardButton("🔄 새로 분석", callback_data=f"sdive:fresh={sector_key}"),
+                InlineKeyboardButton("📊 차트", callback_data="vchart:sector"),
+            ],
             [InlineKeyboardButton("📋 다른 섹터", callback_data="sdive:menu")],
-            [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
-        ]
+            make_back_row(),
+            make_feedback_row("섹터딥다이브"),
+        ])
 
-        # 메시지 길이 제한 (텔레그램 4096자)
-        if len(text) > 4000:
-            text = text[:3950] + "\n\n... (상세 내용 축약)"
+        markup = InlineKeyboardMarkup(buttons)
 
-        await safe_edit_or_reply(
-            query, text,
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
+        # 메시지 길이 분할 전송 (텔레그램 4096자 제한)
+        if len(text) > 3900:
+            # edit로 첫 부분, send_long_message로 나머지
+            await safe_edit_or_reply(query, text[:3850] + "\n\n⬇️ 계속...")
+            remaining = text[3850:]
+            if remaining.strip():
+                await send_long_message(
+                    query.message, remaining,
+                    reply_markup=markup,
+                )
+        else:
+            await safe_edit_or_reply(query, text, reply_markup=markup)
 
     async def _action_dismiss(self, query, context, payload: str) -> None:
         """범용 닫기 버튼 — 메뉴를 닫고 상태 정리 + Reply Keyboard 복구.

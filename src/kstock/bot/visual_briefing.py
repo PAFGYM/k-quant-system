@@ -140,7 +140,7 @@ def generate_portfolio_chart(db) -> bytes | None:
         bar_colors = [COLORS["success"] if p >= 0 else COLORS["danger"] for p in pnl_pcts]
         bars = ax1.barh(names, pnl_pcts, color=bar_colors, edgecolor="none", height=0.6)
         ax1.set_xlabel("수익률 (%)")
-        ax1.set_title("📊 종목별 수익률", fontsize=13, fontweight="bold")
+        ax1.set_title("[종목별 수익률]", fontsize=13, fontweight="bold")
         ax1.axvline(x=0, color=COLORS["text"], linewidth=0.8, alpha=0.5)
 
         # 수치 표시
@@ -180,7 +180,7 @@ def generate_portfolio_chart(db) -> bytes | None:
             )
             for at in autotexts:
                 at.set_fontsize(8)
-            ax2.set_title("💼 포트폴리오 비중", fontsize=13, fontweight="bold")
+            ax2.set_title("[포트폴리오 비중]", fontsize=13, fontweight="bold")
 
         # 전체 수익률 표시
         total_buy = sum(
@@ -250,7 +250,7 @@ def generate_manager_scorecard_chart(db) -> bytes | None:
         ax1.set_xticks(x)
         ax1.set_xticklabels(labels, fontsize=9)
         ax1.set_ylabel("적중률 (%)")
-        ax1.set_title("🎯 매니저 적중률", fontsize=13, fontweight="bold")
+        ax1.set_title("[매니저 적중률]", fontsize=13, fontweight="bold")
         ax1.set_ylim(0, 100)
         ax1.axhline(y=50, color=COLORS["warning"], linewidth=1, alpha=0.5, linestyle="--")
 
@@ -280,7 +280,7 @@ def generate_manager_scorecard_chart(db) -> bytes | None:
         ax2.set_xticks(x_arr)
         ax2.set_xticklabels(labels, fontsize=9)
         ax2.set_ylabel("평균 수익률 (%)")
-        ax2.set_title("📈 매니저별 평균 수익률", fontsize=13, fontweight="bold")
+        ax2.set_title("[매니저별 평균 수익률]", fontsize=13, fontweight="bold")
         ax2.axhline(y=0, color=COLORS["text"], linewidth=0.8, alpha=0.5)
         ax2.legend(fontsize=8, facecolor=COLORS["bg_light"],
                    edgecolor=COLORS["grid"], labelcolor=COLORS["text"])
@@ -347,7 +347,7 @@ def generate_sector_momentum_chart(db) -> bytes | None:
             ax1.set_yticks(list(y_pos))
             ax1.set_yticklabels(sector_names, fontsize=9)
             ax1.set_xlabel("수익률 (%)")
-            ax1.set_title("🔥 섹터 모멘텀", fontsize=13, fontweight="bold")
+            ax1.set_title("[섹터 모멘텀]", fontsize=13, fontweight="bold")
             ax1.axvline(x=0, color=COLORS["text"], linewidth=0.8, alpha=0.5)
             ax1.legend(fontsize=8, facecolor=COLORS["bg_light"],
                        edgecolor=COLORS["grid"], labelcolor=COLORS["text"])
@@ -372,12 +372,12 @@ def generate_sector_momentum_chart(db) -> bytes | None:
             )
             for at in autotexts:
                 at.set_fontsize(8)
-            ax2.set_title("💼 내 섹터 비중", fontsize=13, fontweight="bold")
+            ax2.set_title("[내 섹터 비중]", fontsize=13, fontweight="bold")
         else:
             ax2.text(0.5, 0.5, "포트폴리오 섹터 데이터 없음",
                      ha="center", va="center", color=COLORS["text"], fontsize=12,
                      transform=ax2.transAxes)
-            ax2.set_title("💼 내 섹터 비중", fontsize=13, fontweight="bold")
+            ax2.set_title("[내 섹터 비중]", fontsize=13, fontweight="bold")
 
         fig.suptitle(
             f"K-Quant 섹터 분석  |  "
@@ -400,9 +400,9 @@ def generate_pnl_trend_chart(db) -> bytes | None:
     try:
         with db._connect() as conn:
             rows = conn.execute(
-                """SELECT snapshot_date, total_value, total_pnl_pct
+                """SELECT date, total_value, total_pnl_pct
                    FROM portfolio_snapshots
-                   ORDER BY snapshot_date DESC LIMIT 60""",
+                   ORDER BY date DESC LIMIT 60""",
             ).fetchall()
 
         if not rows or len(rows) < 3:
@@ -415,7 +415,7 @@ def generate_pnl_trend_chart(db) -> bytes | None:
 
         for r in rows:
             try:
-                d = datetime.strptime(r["snapshot_date"], "%Y-%m-%d")
+                d = datetime.strptime(r["date"], "%Y-%m-%d")
                 dates.append(d)
                 values.append(float(r["total_value"] or 0))
                 pnls.append(float(r["total_pnl_pct"] or 0))
@@ -433,7 +433,7 @@ def generate_pnl_trend_chart(db) -> bytes | None:
         ax1.plot(dates, values, color=COLORS["primary"], linewidth=2)
         ax1.fill_between(dates, values, alpha=0.1, color=COLORS["primary"])
         ax1.set_ylabel("평가금액 (원)")
-        ax1.set_title("💰 포트폴리오 추이", fontsize=13, fontweight="bold")
+        ax1.set_title("[포트폴리오 추이]", fontsize=13, fontweight="bold")
         ax1.yaxis.set_major_formatter(ticker.FuncFormatter(
             lambda x, _: f"{x/1e6:.0f}M" if x >= 1e6 else f"{x:,.0f}"
         ))
@@ -443,7 +443,7 @@ def generate_pnl_trend_chart(db) -> bytes | None:
         ax2.bar(dates, pnls, color=fill_colors, width=1.0, edgecolor="none")
         ax2.axhline(y=0, color=COLORS["text"], linewidth=0.8, alpha=0.5)
         ax2.set_ylabel("수익률 (%)")
-        ax2.set_title("📈 일별 수익률", fontsize=13, fontweight="bold")
+        ax2.set_title("[일별 수익률]", fontsize=13, fontweight="bold")
         ax2.xaxis.set_major_formatter(mdates.DateFormatter("%m/%d"))
         ax2.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
 
