@@ -199,26 +199,57 @@ async def _call_ai(
 
 
 def _parse_json(text: str) -> dict:
-    """AI 응답에서 JSON 추출 (유연한 파싱)."""
-    # JSON 블록 추출 시도
-    match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
-    if match:
+    """AI 응답에서 JSON 추출 (v9.6.1: 강화된 파싱).
+
+    1단계: markdown 코드펜스 제거 후 파싱
+    2단계: 균형 중괄호 매칭으로 가장 큰 JSON 블록 추출
+    3단계: 전체 텍스트 직접 파싱
+    4단계: 키워드 fallback (reasoning에서 JSON 잔여물 제거)
+    """
+    # 1단계: markdown ```json ... ``` 코드펜스 제거
+    fence_match = re.search(r'```(?:json)?\s*(\{.+?\})\s*```', text, re.DOTALL)
+    if fence_match:
         try:
-            return json.loads(match.group())
+            return json.loads(fence_match.group(1))
         except json.JSONDecodeError:
             pass
-    # 전체 텍스트 시도
+
+    # 2단계: 균형 중괄호 매칭 (중첩 지원)
+    start = text.find('{')
+    if start >= 0:
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break
+
+    # 3단계: 전체 텍스트 직접 파싱
     try:
-        return json.loads(text)
+        return json.loads(text.strip())
     except json.JSONDecodeError:
         pass
-    # 실패 시 텍스트에서 핵심 키워드 추출
+
+    # 4단계: 키워드 fallback — reasoning에서 JSON 잔여물 제거
     action = "관망"
     for kw in ("매수", "매도", "홀딩"):
         if kw in text:
             action = kw
             break
-    return {"action": action, "confidence": 0.5, "reasoning": text[:200], "error": "JSON 파싱 실패"}
+    # JSON/코드펜스 제거하여 깨끗한 reasoning 추출
+    clean = re.sub(r'```(?:json)?.*?```', '', text, flags=re.DOTALL)
+    clean = re.sub(r'\{[^}]*$', '', clean)  # 미완결 JSON 제거
+    clean = re.sub(r'\{.*?\}', '', clean, flags=re.DOTALL)  # 남은 JSON 블록 제거
+    clean = clean.strip()
+    if not clean:
+        clean = "분석 결과 파싱 실패 — 원문 참조"
+    return {"action": action, "confidence": 0.5, "reasoning": clean[:200], "error": "JSON 파싱 실패"}
 
 
 # ── 메인 토론 엔진 ───────────────────────────────────────────
@@ -439,6 +470,18 @@ class DebateEngine:
 _ACTION_EMOJI = {"매수": "🟢", "매도": "🔴", "관망": "🟡", "홀딩": "🔵"}
 
 
+def _clean_reasoning(text: str) -> str:
+    """reasoning에서 JSON/코드펜스 잔여물 제거."""
+    if not text:
+        return ""
+    # markdown 코드펜스 제거
+    text = re.sub(r'```(?:json)?.*?```', '', text, flags=re.DOTALL)
+    # JSON 블록 제거
+    text = re.sub(r'\{[^}]*\}', '', text, flags=re.DOTALL)
+    text = re.sub(r'^\s*[\-\*]\s*', '', text)  # 불릿 제거
+    return text.strip()
+
+
 def format_debate_telegram(result: DebateResult) -> str:
     """DebateResult → Telegram 텍스트."""
     if result.error:
@@ -454,7 +497,8 @@ def format_debate_telegram(result: DebateResult) -> str:
     lines.append("📍 Round 1: 독립 분석")
     for op in result.round1_opinions:
         ae = _ACTION_EMOJI.get(op.action, "⚪")
-        lines.append(f"{ae} {op.manager_name}: {op.action} — {op.reasoning[:60]}")
+        reason = _clean_reasoning(op.reasoning)[:60] or op.action
+        lines.append(f"{ae} {op.manager_name}: {op.action} — {reason}")
     lines.append("")
 
     # Round 2
@@ -466,7 +510,8 @@ def format_debate_telegram(result: DebateResult) -> str:
             change_mark = f" (수정: {op.previous_action}→{op.action})"
         else:
             change_mark = f" (유지)"
-        lines.append(f"{ae} {op.manager_name}: {op.action}{change_mark} — {op.reasoning[:50]}")
+        reason = _clean_reasoning(op.reasoning)[:50] or op.action
+        lines.append(f"{ae} {op.manager_name}: {op.action}{change_mark} — {reason}")
     lines.append("")
 
     # Round 3 합의
