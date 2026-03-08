@@ -1030,6 +1030,59 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
     except Exception:
         logger.debug("Recent briefing context failed", exc_info=True)
 
+    # v9.5.3: 학습 엔진 — 매니저 성적표 + 매매 프로필 + 이벤트 조정
+    learning_context = ""
+    try:
+        from kstock.bot.learning_engine import (
+            get_user_trade_profile,
+            get_active_event_adjustments,
+        )
+        # 매매 프로필
+        profile = get_user_trade_profile(db)
+        if profile:
+            wr = profile.get("win_rate", 0)
+            avg = profile.get("avg_pnl", 0) * 100
+            learning_context += f"[주호님 매매 프로필] 승률 {wr:.0f}%, 평균수익 {avg:+.1f}%\n"
+
+        # 활성 이벤트 조정
+        events = get_active_event_adjustments(db)
+        if events:
+            ev_lines = ["[활성 이벤트 점수 조정]"]
+            for ev in events[:3]:
+                adj = ev.get("score_adjustment", 0)
+                sectors = ", ".join(ev.get("affected_sectors", [])[:3])
+                ev_lines.append(
+                    f"- {ev.get('event_summary', '')[:50]}: "
+                    f"{'%+d' % adj}점 ({sectors})"
+                )
+            learning_context += "\n".join(ev_lines)
+
+        # 매니저 성적표
+        try:
+            with db._connect() as conn:
+                mgr_rows = conn.execute(
+                    "SELECT manager_key, hit_rate, weight_adj "
+                    "FROM manager_scorecard "
+                    "ORDER BY calculated_at DESC LIMIT 4",
+                ).fetchall()
+            if mgr_rows:
+                mgr_names = {
+                    "scalp": "리버모어", "swing": "오닐",
+                    "position": "린치", "long_term": "버핏",
+                }
+                sc_lines = ["\n[매니저 성적표]"]
+                for r in mgr_rows:
+                    name = mgr_names.get(r["manager_key"], r["manager_key"])
+                    sc_lines.append(
+                        f"- {name}: 적중률 {r['hit_rate']:.0f}%, "
+                        f"가중치 {r['weight_adj']:.2f}x"
+                    )
+                learning_context += "\n".join(sc_lines)
+        except Exception:
+            pass
+    except Exception:
+        logger.debug("Learning context injection failed", exc_info=True)
+
     return {
         "portfolio": portfolio,
         "market": market,
@@ -1045,6 +1098,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
         "recent_briefing": recent_briefing_text,
         "manager_stances": manager_stances_text,
         "multi_agent_scores": multi_agent_text,
+        "learning_context": learning_context,
     }
 
 

@@ -251,6 +251,16 @@ class CommandsMixin:
             except Exception:
                 pass
 
+            # v9.5.3: 글로벌 이벤트 기반 점수 조정
+            event_bonus = 0
+            try:
+                from kstock.bot.learning_engine import get_event_bonus_for_ticker
+                event_bonus = get_event_bonus_for_ticker(
+                    self.db, ticker, sector=sector,
+                )
+            except Exception:
+                pass
+
             score = compute_composite_score(
                 macro, flow, info, tech, self.scoring_config,
                 mtf_bonus=mtf_bonus, sector_adj=sector_adj,
@@ -260,6 +270,7 @@ class CommandsMixin:
                 leading_sector_bonus=leading_sector_bonus,
                 multi_agent_bonus=multi_agent_bonus,
                 factor_bonus=supply_demand_bonus,  # v9.3: 수급 보너스
+                event_bonus=event_bonus,  # v9.5.3: 이벤트 보너스
             )
 
             # Multi-strategy evaluation

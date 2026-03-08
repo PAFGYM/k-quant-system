@@ -646,11 +646,85 @@ async def analyze_urgent_news(groups: list[list[NewsItem]], db=None) -> str:
         except Exception:
             pass
 
+        # v9.5.3: 이벤트 → 전략 점수 반영 (학습 엔진 연동)
+        try:
+            if db:
+                await _extract_and_save_event_adjustments(
+                    client, analysis, groups, db,
+                )
+        except Exception as e:
+            logger.debug("Event adjustment extraction: %s", e)
+
         return _format_urgent_alert_rich(groups, analysis)
 
     except Exception as e:
         logger.warning("Urgent news AI analysis failed: %s", e)
         return _format_urgent_alert_basic(groups)
+
+
+async def _extract_and_save_event_adjustments(
+    client, analysis: str, groups: list[list[NewsItem]], db,
+) -> None:
+    """AI 분석 결과에서 섹터/종목 점수 조정을 추출하여 DB 저장.
+
+    긴급 뉴스 분석 결과를 구조화하여 scan_engine이 사용할 수 있도록
+    event_score_adjustments 테이블에 저장.
+    """
+    import json as _json
+
+    # 간단한 2차 호출로 구조화 데이터 추출
+    extract_prompt = (
+        f"다음 뉴스 분석을 JSON으로 구조화해줘.\n\n"
+        f"{analysis[:800]}\n\n"
+        "JSON 형식 (배열):\n"
+        '[{"summary": "이벤트 1줄 요약", '
+        '"severity": 1-10, '
+        '"affected_sectors": ["반도체", "방산"], '
+        '"score_adj": -5~+10, '
+        '"duration_hours": 24-72}]\n\n'
+        "규칙:\n"
+        "- severity 5 이하 = score_adj 0 (무시)\n"
+        "- severity 6-7 = score_adj ±3~5\n"
+        "- severity 8+ = score_adj ±5~10\n"
+        "- 긍정 영향 = 양수, 부정 = 음수\n"
+        "- JSON만 출력, 설명 없이"
+    )
+
+    try:
+        resp2 = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            temperature=0.1,
+            messages=[{"role": "user", "content": extract_prompt}],
+        )
+        raw = resp2.content[0].text.strip()
+
+        # JSON 추출
+        if "[" in raw:
+            raw = raw[raw.index("["):raw.rindex("]") + 1]
+        events = _json.loads(raw)
+
+        if not isinstance(events, list):
+            return
+
+        from kstock.bot.learning_engine import apply_event_to_strategy
+        for evt in events[:3]:
+            adj = evt.get("score_adj", 0)
+            if adj == 0:
+                continue
+            await apply_event_to_strategy(
+                db=db,
+                event_summary=evt.get("summary", ""),
+                affected_sectors=evt.get("affected_sectors", []),
+                affected_tickers=[],
+                adjustment=adj,
+                confidence=min(evt.get("severity", 5) / 10, 1.0),
+                duration_hours=evt.get("duration_hours", 48),
+            )
+        logger.info("Event adjustments saved: %d events", len(events))
+
+    except Exception as e:
+        logger.debug("Event adjustment extraction failed: %s", e)
 
 
 def _format_urgent_alert_rich(

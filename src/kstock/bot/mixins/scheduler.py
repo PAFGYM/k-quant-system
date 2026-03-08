@@ -5298,9 +5298,31 @@ class SchedulerMixin:
             # 2. 가중치 재계산
             weights = compute_signal_weights(self.db, period_days=90)
 
+            # v9.5.3: 매니저 성적표 + 매매 패턴 학습
+            mgr_msg = ""
+            try:
+                from kstock.bot.learning_engine import (
+                    calculate_manager_scorecard,
+                    analyze_user_trade_patterns,
+                    format_manager_scorecard,
+                )
+                scorecards = calculate_manager_scorecard(self.db, days=30)
+                profile = analyze_user_trade_patterns(self.db)
+                mgr_msg = f", managers={len(scorecards)}"
+
+                # 주간 성적표 전송 (일요일만)
+                if datetime.now(KST).weekday() == 6:  # Sunday
+                    card_text = format_manager_scorecard(scorecards)
+                    if card_text and self.chat_id:
+                        await context.bot.send_message(
+                            chat_id=self.chat_id, text=card_text,
+                        )
+            except Exception as e:
+                logger.debug("Learning engine update: %s", e)
+
             self.db.upsert_job_run(
                 "signal_evaluation", _today(), status="success",
-                message=f"evaluated={evaluated}, sources={len(weights)}",
+                message=f"evaluated={evaluated}, sources={len(weights)}{mgr_msg}",
             )
             logger.info(
                 "Signal evaluation: %d signals evaluated, %d sources weighted",

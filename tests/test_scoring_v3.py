@@ -652,7 +652,7 @@ class TestCompositeCap:
         bullish_info: StockInfo,
         bullish_tech: TechnicalIndicators,
     ) -> None:
-        """Even with absurdly large bonuses, composite must not exceed 160."""
+        """Even with absurdly large bonuses, composite must not exceed 175."""
         result = compute_composite_score(
             bullish_macro,
             bullish_flow,
@@ -666,7 +666,7 @@ class TestCompositeCap:
             sentiment_bonus=50,
             leading_sector_bonus=50,
         )
-        assert result.composite == 160.0
+        assert result.composite == 175.0
 
 
 # ---------------------------------------------------------------------------

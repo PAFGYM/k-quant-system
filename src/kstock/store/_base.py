@@ -1177,6 +1177,52 @@ CREATE TABLE IF NOT EXISTS briefings (
 
 CREATE INDEX IF NOT EXISTS idx_briefings_type ON briefings(briefing_type);
 CREATE INDEX IF NOT EXISTS idx_briefings_created ON briefings(created_at);
+
+-- v9.5.3: 매니저 성적표 (매니저별 추천 성과 추적)
+CREATE TABLE IF NOT EXISTS manager_scorecard (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    manager_key     TEXT    NOT NULL,
+    period          TEXT    NOT NULL DEFAULT 'daily',
+    total_recs      INTEGER DEFAULT 0,
+    evaluated_recs  INTEGER DEFAULT 0,
+    hits            INTEGER DEFAULT 0,
+    hit_rate        REAL    DEFAULT 0.0,
+    avg_return_5d   REAL    DEFAULT 0.0,
+    avg_return_10d  REAL    DEFAULT 0.0,
+    avg_return_20d  REAL    DEFAULT 0.0,
+    best_trade      TEXT    DEFAULT '',
+    worst_trade     TEXT    DEFAULT '',
+    strength_note   TEXT    DEFAULT '',
+    weakness_note   TEXT    DEFAULT '',
+    weight_adj      REAL    DEFAULT 1.0,
+    calculated_at   TEXT    NOT NULL,
+    UNIQUE(manager_key, period, calculated_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mgr_scorecard ON manager_scorecard(manager_key, calculated_at);
+
+-- v9.5.3: 사용자 매매 프로필 (주호님 매매 패턴 학습)
+CREATE TABLE IF NOT EXISTS user_trade_profile (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_key     TEXT    UNIQUE NOT NULL,
+    profile_value   TEXT    DEFAULT '',
+    updated_at      TEXT    NOT NULL
+);
+
+-- v9.5.3: 이벤트 → 전략 점수 반영 (글로벌 이벤트가 실제 점수에 영향)
+CREATE TABLE IF NOT EXISTS event_score_adjustments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type      TEXT    NOT NULL,
+    event_summary   TEXT    DEFAULT '',
+    affected_sectors TEXT   DEFAULT '[]',
+    affected_tickers TEXT   DEFAULT '[]',
+    score_adjustment INTEGER DEFAULT 0,
+    confidence      REAL    DEFAULT 0.5,
+    expires_at      TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_adj_expires ON event_score_adjustments(expires_at);
 """
 
 

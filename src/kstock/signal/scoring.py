@@ -307,6 +307,7 @@ def compute_composite_score(
     leading_sector_bonus: int = 0,
     multi_agent_bonus: int = 0,
     factor_bonus: int = 0,
+    event_bonus: int = 0,
 ) -> ScoreBreakdown:
     """Compute the 100-point composite score.
 
@@ -359,8 +360,11 @@ def compute_composite_score(
     # v7.0: 멀티팩터 모델 연동 보너스 (+10/+5/-5/-10)
     composite += factor_bonus
 
-    # v3.0: max ~160 points possible
-    composite = round(max(0.0, min(160.0, composite)), 2)
+    # v9.5.3: 글로벌 이벤트 기반 점수 조정 (±15)
+    composite += event_bonus
+
+    # v3.0: max ~175 points possible (event_bonus 추가)
+    composite = round(max(0.0, min(175.0, composite)), 2)
 
     # v3.0 thresholds (max 160 scale)
     if composite >= 130:
