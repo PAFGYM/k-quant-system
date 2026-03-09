@@ -80,6 +80,13 @@ class MacroSnapshot:
     # v9.0: 한국 실현변동성 (VKOSPI 프록시)
     korean_vol: float = 0.0       # 한국 실현변동성 (연환산 %)
     vol_regime: str = ""          # 변동성 레짐: low/normal/high/extreme
+    # v10.2: 유가/원자재 (WTI, Brent, 천연가스)
+    wti_price: float = 0.0        # WTI 원유 선물 (CL=F) 달러
+    wti_change_pct: float = 0.0
+    brent_price: float = 0.0      # Brent 원유 선물 (BZ=F) 달러
+    brent_change_pct: float = 0.0
+    natural_gas_price: float = 0.0  # 천연가스 선물 (NG=F) 달러
+    natural_gas_change_pct: float = 0.0
 
 
 def _snapshot_to_json(snap: MacroSnapshot) -> str:
@@ -270,6 +277,7 @@ class MacroClient:
             "BTC-USD", "GC=F", "^KS11", "^KQ11",
             "KORU", "SOXL", "TQQQ",  # v6.6: 미국 레버리지 ETF
             "ES=F", "NQ=F",  # v9.0: 미국 선물지수
+            "CL=F", "BZ=F", "NG=F",  # v10.2: 유가/원자재 (WTI, Brent, 천연가스)
         ]
         data = yf.download(symbols, period="5d", group_by="ticker", progress=False)
 
@@ -355,6 +363,11 @@ class MacroClient:
         es_price, es_change = _etf_data("ES=F")
         nq_price, nq_change = _etf_data("NQ=F")
 
+        # v10.2: 유가/원자재
+        wti_price, wti_change = _etf_data("CL=F")
+        brent_price, brent_change = _etf_data("BZ=F")
+        ng_price, ng_change = _etf_data("NG=F")
+
         # v9.0: 한국 실현변동성 (VKOSPI 프록시)
         kr_vol = 0.0
         vol_regime_str = ""
@@ -374,12 +387,12 @@ class MacroClient:
         except Exception as e:
             logger.debug("Korean vol computation in macro: %s", e)
 
-        regime = self._classify_regime(spx_change, vix, usdkrw_change)
+        regime = self._classify_regime(spx_change, vix, usdkrw_change, wti_change)
 
         # Fear & Greed composite score (0=극도공포, 100=극도탐욕)
         fg_score, fg_label = self._compute_fear_greed(
             vix=vix, spx_change=spx_change, usdkrw_change=usdkrw_change,
-            btc_change=btc_change, gold_change=gold_change,
+            btc_change=btc_change, gold_change=gold_change, wti_change=wti_change,
         )
 
         # KIS API 미연동 — 기관/외국인 수급 데이터 없음 (0 = 미제공)
@@ -432,6 +445,13 @@ class MacroClient:
             # v9.0: 변동성 레짐
             korean_vol=round(kr_vol, 2),
             vol_regime=vol_regime_str,
+            # v10.2: 유가/원자재
+            wti_price=round(wti_price, 2),
+            wti_change_pct=round(wti_change, 2),
+            brent_price=round(brent_price, 2),
+            brent_change_pct=round(brent_change, 2),
+            natural_gas_price=round(ng_price, 3),
+            natural_gas_change_pct=round(ng_change, 2),
         )
 
     @staticmethod
@@ -497,18 +517,19 @@ class MacroClient:
     @staticmethod
     def _compute_fear_greed(
         vix: float, spx_change: float, usdkrw_change: float,
-        btc_change: float, gold_change: float,
+        btc_change: float, gold_change: float, wti_change: float = 0.0,
     ) -> tuple[float, str]:
         """Compute Fear & Greed composite score (0-100).
 
         Components:
-        - VIX level (40% weight): VIX < 15 = greed, VIX > 30 = fear
+        - VIX level (35% weight): VIX < 15 = greed, VIX > 30 = fear
         - S&P500 change (20%): positive = greed
         - USD/KRW change (15%): KRW strengthen = greed
         - BTC momentum (15%): positive = greed
         - Gold as safe haven (10%): gold up = fear (flight to safety)
+        - WTI oil (5%): oil spike = inflation fear
         """
-        # VIX component: 40 at VIX=20, higher VIX = lower score
+        # VIX component: higher VIX = lower score
         vix_score = max(0, min(100, 100 - (vix - 12) * (100 / 28)))
 
         # S&P500 momentum
@@ -523,12 +544,16 @@ class MacroClient:
         # Gold: rising gold = flight to safety = fear
         gold_score = max(0, min(100, 50 - gold_change * 15))
 
+        # WTI: 유가 급등 = 인플레이션 공포 = fear (급락도 경기침체 신호 = fear)
+        wti_score = max(0, min(100, 50 - abs(wti_change) * 8))
+
         composite = (
-            vix_score * 0.40
+            vix_score * 0.35
             + spx_score * 0.20
             + krw_score * 0.15
             + btc_score * 0.15
             + gold_score * 0.10
+            + wti_score * 0.05
         )
         composite = round(max(0, min(100, composite)), 1)
 
@@ -547,7 +572,8 @@ class MacroClient:
 
     @staticmethod
     def _classify_regime(
-        spx_change_pct: float, vix: float, usdkrw_change_pct: float
+        spx_change_pct: float, vix: float, usdkrw_change_pct: float,
+        wti_change_pct: float = 0.0,
     ) -> str:
         """Classify macro regime."""
         risk_off_signals = 0
@@ -556,6 +582,9 @@ class MacroClient:
         if vix > 25:
             risk_off_signals += 1
         if usdkrw_change_pct > 0.5:
+            risk_off_signals += 1
+        # v10.2: 유가 급등(+3%) = 인플레/지정학 리스크 = risk_off 신호
+        if wti_change_pct > 3.0:
             risk_off_signals += 1
 
         if risk_off_signals >= 2:

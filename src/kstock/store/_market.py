@@ -1320,3 +1320,78 @@ class MarketMixin:
                 (prev_date,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- oil_analysis (v10.2) ---------------------------------------------------
+
+    def save_oil_analysis(self, data: dict) -> None:
+        """유가 분석 결과 저장 (UPSERT by date)."""
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO oil_analysis
+                    (date, wti_price, wti_change_pct, brent_price, brent_change_pct,
+                     brent_wti_spread, wti_ma20, wti_ma60, wti_volatility_20d,
+                     wti_position_52w, regime, regime_strength, geopolitical_risk,
+                     signals_json, sector_impacts_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    wti_price=excluded.wti_price,
+                    wti_change_pct=excluded.wti_change_pct,
+                    brent_price=excluded.brent_price,
+                    brent_change_pct=excluded.brent_change_pct,
+                    brent_wti_spread=excluded.brent_wti_spread,
+                    wti_ma20=excluded.wti_ma20,
+                    wti_ma60=excluded.wti_ma60,
+                    wti_volatility_20d=excluded.wti_volatility_20d,
+                    wti_position_52w=excluded.wti_position_52w,
+                    regime=excluded.regime,
+                    regime_strength=excluded.regime_strength,
+                    geopolitical_risk=excluded.geopolitical_risk,
+                    signals_json=excluded.signals_json,
+                    sector_impacts_json=excluded.sector_impacts_json
+                """,
+                (
+                    data["date"],
+                    data.get("wti_price", 0),
+                    data.get("wti_change_pct", 0),
+                    data.get("brent_price", 0),
+                    data.get("brent_change_pct", 0),
+                    data.get("brent_wti_spread", 0),
+                    data.get("wti_ma20", 0),
+                    data.get("wti_ma60", 0),
+                    data.get("wti_volatility_20d", 0),
+                    data.get("wti_position_52w", 0),
+                    data.get("regime", "neutral"),
+                    data.get("regime_strength", 0),
+                    data.get("geopolitical_risk", "낮음"),
+                    data.get("signals_json", "[]"),
+                    data.get("sector_impacts_json", "[]"),
+                    now,
+                ),
+            )
+
+    def get_oil_analysis(self, days: int = 30) -> list[dict]:
+        """최근 N일 유가 분석 데이터 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT date, wti_price, wti_change_pct, brent_price, brent_change_pct,
+                       brent_wti_spread, wti_ma20, wti_ma60, wti_volatility_20d,
+                       wti_position_52w, regime, regime_strength, geopolitical_risk,
+                       signals_json, sector_impacts_json
+                FROM oil_analysis
+                ORDER BY date DESC LIMIT ?
+                """,
+                (days,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_oil_prev_regime(self) -> str:
+        """직전 유가 레짐 조회 (레짐 변화 감지용)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT regime FROM oil_analysis ORDER BY date DESC LIMIT 1",
+            ).fetchone()
+        return row["regime"] if row else "neutral"

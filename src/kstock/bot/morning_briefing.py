@@ -87,6 +87,24 @@ def generate_morning_briefing(
         if "usdkrw" in market_data:
             chg = market_data.get("usdkrw_change", 0)
             lines.append(f"원/달러: {market_data['usdkrw']:,.0f}원 ({chg:+.0f}원)")
+        # v10.2: 유가/금리
+        wti = market_data.get("wti_price", 0)
+        wti_chg = market_data.get("wti_change_pct", 0)
+        if wti > 0:
+            wti_emoji = "🛢️🔴" if wti_chg > 2 else ("🛢️🟢" if wti_chg < -2 else "🛢️")
+            brent = market_data.get("brent_price", 0)
+            brent_chg = market_data.get("brent_change_pct", 0)
+            brent_str = f" / Brent ${brent:.1f}({brent_chg:+.1f}%)" if brent > 0 else ""
+            lines.append(f"{wti_emoji} WTI: ${wti:.1f} ({wti_chg:+.1f}%){brent_str}")
+            # 유가 레짐 (DB에서 전달된 경우)
+            oil_regime = market_data.get("oil_regime")
+            if oil_regime:
+                regime_kr = {"bull": "상승추세", "bear": "하락추세", "neutral": "횡보", "spike": "급등!", "crash": "급락!"}
+                lines.append(f"   유가 레짐: {regime_kr.get(oil_regime, oil_regime)}")
+        us10y = market_data.get("us10y", 0)
+        us10y_chg = market_data.get("us10y_change_pct", 0)
+        if us10y > 0:
+            lines.append(f"미국 10Y: {us10y:.2f}% ({us10y_chg:+.2f}%)")
     else:
         lines.append("데이터 수집 중...")
     lines.append("")

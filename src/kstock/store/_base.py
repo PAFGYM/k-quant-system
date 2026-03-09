@@ -1251,6 +1251,30 @@ CREATE TABLE IF NOT EXISTS sector_deep_dive (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sector_dive_key ON sector_deep_dive(sector_key, created_at);
+
+-- v10.2: 유가 분석 히스토리
+CREATE TABLE IF NOT EXISTS oil_analysis (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    date                TEXT    NOT NULL,
+    wti_price           REAL    DEFAULT 0,
+    wti_change_pct      REAL    DEFAULT 0,
+    brent_price         REAL    DEFAULT 0,
+    brent_change_pct    REAL    DEFAULT 0,
+    brent_wti_spread    REAL    DEFAULT 0,
+    wti_ma20            REAL    DEFAULT 0,
+    wti_ma60            REAL    DEFAULT 0,
+    wti_volatility_20d  REAL    DEFAULT 0,
+    wti_position_52w    REAL    DEFAULT 0,
+    regime              TEXT    DEFAULT 'neutral',
+    regime_strength     REAL    DEFAULT 0,
+    geopolitical_risk   TEXT    DEFAULT '낮음',
+    signals_json        TEXT    DEFAULT '[]',
+    sector_impacts_json TEXT    DEFAULT '[]',
+    created_at          TEXT    NOT NULL,
+    UNIQUE(date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_oil_date ON oil_analysis(date);
 """
 
 

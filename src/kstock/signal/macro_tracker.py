@@ -88,8 +88,93 @@ KNOWN_EVENT_IMPACTS: dict[str, dict] = {
         "magnitude": "보통",
         "description": "엔화 방향, 수출 경쟁력에 영향",
     },
+    # v10.2: 유가/지정학 이벤트
+    "OPEC 회의": {
+        "direction": "변동",
+        "sectors": ["정유", "화학", "항공", "해운"],
+        "magnitude": "높음",
+        "description": "감산/증산 결정 → 유가 방향. 정유(긍정)/항공(부정) 직접 영향",
+    },
+    "EIA 원유재고": {
+        "direction": "변동",
+        "sectors": ["정유", "화학"],
+        "magnitude": "보통",
+        "description": "주간 원유재고 증감 → 단기 유가 변동성",
+    },
+    "미국 ISM 제조업지수": {
+        "direction": "변동",
+        "sectors": ["산업재", "소재", "수출주"],
+        "magnitude": "보통",
+        "description": "미국 제조업 경기. 에너지/원자재 수요 선행지표",
+    },
+    "지정학적 리스크": {
+        "direction": "하락",
+        "sectors": ["항공", "여행", "소비재"],
+        "magnitude": "높음",
+        "description": "전쟁/분쟁 → 유가 급등 → 에너지 비용 증가 → 소비 위축",
+    },
 }
 """Known macro event impact profiles."""
+
+
+# v10.2: 유가 변화 → 한국 업종별 임팩트 테이블
+OIL_SECTOR_IMPACT: dict[str, dict] = {
+    "정유": {
+        "direction_on_oil_up": "positive",
+        "tickers": ["010950", "096770"],   # S-Oil, SK이노베이션
+        "note": "유가 상승 시 재고평가이익 + 마진 확대",
+    },
+    "화학": {
+        "direction_on_oil_up": "mixed",
+        "tickers": ["051910", "011170"],   # LG화학, 롯데케미칼
+        "note": "원재료 나프타 가격 연동. 마진 압박 가능",
+    },
+    "항공": {
+        "direction_on_oil_up": "negative",
+        "tickers": ["003490", "020560"],   # 대한항공, 아시아나
+        "note": "항공유 원가 급등. 유가+10% → 영업이익 -15~20% 추정",
+    },
+    "해운": {
+        "direction_on_oil_up": "negative",
+        "tickers": ["011200"],             # HMM
+        "note": "선박유 원가 증가. 단 운임 상승 시 상쇄 가능",
+    },
+    "조선": {
+        "direction_on_oil_up": "positive",
+        "tickers": ["009540", "010140"],   # HD한국조선해양, 삼성중공업
+        "note": "유가 상승 → 해양플랜트/LNG선 발주 증가",
+    },
+    "타이어/합성고무": {
+        "direction_on_oil_up": "negative",
+        "tickers": ["161390", "011780"],   # 한국타이어, 금호석유
+        "note": "원자재(나프타/합성고무) 원가 상승",
+    },
+}
+"""유가 급변 시 직접 영향받는 한국 업종 및 종목."""
+
+
+def get_oil_shock_sector_summary(wti_change_pct: float) -> str:
+    """유가 급변 시 업종별 임팩트 요약 문자열 생성 (텔레그램 전송용).
+
+    Args:
+        wti_change_pct: WTI 변화율 (%). 양수=상승, 음수=하락.
+
+    Returns:
+        업종별 영향 요약 텍스트.
+    """
+    if abs(wti_change_pct) < 2.0:
+        return ""
+
+    direction = "급등" if wti_change_pct > 0 else "급락"
+    lines = [f"유가 {direction} {wti_change_pct:+.1f}% 업종 영향:"]
+    for sector, info in OIL_SECTOR_IMPACT.items():
+        impact = info["direction_on_oil_up"]
+        if wti_change_pct > 0:
+            emoji = "📈" if impact == "positive" else ("📉" if impact == "negative" else "↔️")
+        else:
+            emoji = "📉" if impact == "positive" else ("📈" if impact == "negative" else "↔️")
+        lines.append(f"{emoji} {sector}: {info['note']}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

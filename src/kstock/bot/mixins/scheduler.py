@@ -1378,6 +1378,40 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("Morning briefing korea risk failed", exc_info=True)
 
+            # v10.2: 유가 분석 컨텍스트
+            oil_ctx = ""
+            try:
+                oil_rows = self.db.get_oil_analysis(days=1)
+                if oil_rows:
+                    o = oil_rows[0]
+                    regime_kr = {"bull": "상승", "bear": "하락", "neutral": "횡보", "spike": "급등", "crash": "급락"}
+                    oil_ctx = (
+                        f"\n[유가 분석]\n"
+                        f"WTI=${o.get('wti_price', 0):.2f}({o.get('wti_change_pct', 0):+.1f}%) "
+                        f"Brent=${o.get('brent_price', 0):.2f}({o.get('brent_change_pct', 0):+.1f}%)\n"
+                        f"레짐={regime_kr.get(o.get('regime', ''), '')} "
+                        f"변동성={o.get('wti_volatility_20d', 0):.0f}% "
+                        f"52주위치={o.get('wti_position_52w', 0):.0%}\n"
+                    )
+                    geo = o.get("geopolitical_risk", "낮음")
+                    if geo != "낮음":
+                        oil_ctx += f"지정학리스크={geo}\n"
+                    import json as _json2
+                    try:
+                        sigs = _json2.loads(o.get("signals_json", "[]"))
+                        for sig in sigs[:2]:
+                            oil_ctx += f"시그널: {sig.get('description', '')}\n"
+                    except Exception:
+                        pass
+                else:
+                    # DB에 없으면 매크로 스냅샷에서 기본 표시
+                    wti = getattr(macro, "wti_price", 0)
+                    if wti > 0:
+                        wti_chg = getattr(macro, "wti_change_pct", 0)
+                        oil_ctx = f"\n[유가] WTI=${wti:.2f}({wti_chg:+.1f}%)\n"
+            except Exception:
+                logger.debug("Morning briefing oil context failed", exc_info=True)
+
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
                 f"[시장 데이터]\n"
@@ -1393,7 +1427,8 @@ class SchedulerMixin:
                 f"{prog_ctx}"
                 f"{credit_ctx}"
                 f"{etf_ctx}"
-                f"{korea_risk_ctx}\n"
+                f"{korea_risk_ctx}"
+                f"{oil_ctx}\n"
                 f"{news_ctx}"
                 f"{yt_intel_ctx}"
                 f"{special_ctx}"
@@ -2651,7 +2686,9 @@ class SchedulerMixin:
                 f"DXY: {macro.dxy:.1f}\n"
                 f"BTC: ${macro.btc_price:,.0f} ({macro.btc_change_pct:+.1f}%)\n"
                 f"금: ${macro.gold_price:,.0f} ({macro.gold_change_pct:+.1f}%)\n"
-                f"유가: ${getattr(macro, 'wti_price', 0):.1f}\n"
+                f"WTI유가: ${getattr(macro, 'wti_price', 0):.1f} ({getattr(macro, 'wti_change_pct', 0):+.1f}%)\n"
+                f"Brent유가: ${getattr(macro, 'brent_price', 0):.1f} ({getattr(macro, 'brent_change_pct', 0):+.1f}%)\n"
+                f"천연가스: ${getattr(macro, 'natural_gas_price', 0):.2f} ({getattr(macro, 'natural_gas_change_pct', 0):+.1f}%)\n"
                 f"시장체제: {macro.regime}\n"
                 f"한국시장 전망 신호등: {signal_emoji} {signal_label}\n"
                 f"한국시장 개장여부: {'개장' if market_open else '휴장'}\n"
@@ -2668,9 +2705,10 @@ class SchedulerMixin:
                 f"   - 코스피/코스닥 예상 방향\n"
                 f"   - 반도체/2차전지/바이오 등 주도 섹터 영향\n"
                 f"   - 외국인 수급 방향 예상\n\n"
-                f"4. 환율/금리/원자재 시그널\n"
+                f"4. 환율/금리/유가 시그널\n"
                 f"   - 원화 방향 + 수출주 영향\n"
-                f"   - 국채 금리 → 성장주/가치주 영향\n\n"
+                f"   - 국채 금리 → 성장주/가치주 영향\n"
+                f"   - 유가 변동 → 정유/화학/항공/해운 업종 영향 (WTI ±2% 이상 시 반드시 언급)\n\n"
                 f"5. 오늘 주호님 참고 포인트\n"
                 f"   - 장 시작 전 확인할 지표/이벤트\n"
                 f"   - 보유종목 관련 섹터 영향 (매도 지시 금지, 정보만 제공)\n"
@@ -3283,6 +3321,98 @@ class SchedulerMixin:
             logger.error("ETF flow collect failed: %s", e)
             self.db.upsert_job_run(
                 "etf_flow_collect", today_str, status="error", message=str(e),
+            )
+
+    # -- v10.2: 유가 분석 -------------------------------------------------------
+
+    async def job_oil_analysis(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """07:10 매일: 유가 분석 + DB 저장 + 급변 시 알림."""
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.signal.oil_analysis import (
+                fetch_oil_data,
+                compute_oil_analysis,
+                format_oil_report,
+                format_oil_summary_line,
+            )
+            import json as _json
+
+            # 1. 데이터 수집
+            wti_series, brent_series = await asyncio.to_thread(fetch_oil_data)
+            if wti_series.empty:
+                logger.warning("Oil data fetch returned empty")
+                self.db.upsert_job_run("oil_analysis", today_str, status="error", message="empty data")
+                return
+
+            # 2. 이전 레짐 조회
+            prev_regime = self.db.get_oil_prev_regime()
+
+            # 3. 분석 실행
+            report = compute_oil_analysis(wti_series, brent_series, prev_regime)
+
+            # 4. DB 저장
+            signals_data = [
+                {"signal_type": s.signal_type, "description": s.description,
+                 "strength": s.strength, "recommendation": s.recommendation}
+                for s in report.signals
+            ]
+            impacts_data = [
+                {"sector": si.sector, "direction": si.direction,
+                 "magnitude": si.magnitude, "description": si.description}
+                for si in report.sector_impacts
+            ]
+            self.db.save_oil_analysis({
+                "date": today_str,
+                "wti_price": report.price_data.wti_price,
+                "wti_change_pct": report.price_data.wti_change_pct,
+                "brent_price": report.price_data.brent_price,
+                "brent_change_pct": report.price_data.brent_change_pct,
+                "brent_wti_spread": report.price_data.brent_wti_spread,
+                "wti_ma20": report.price_data.wti_ma20,
+                "wti_ma60": report.price_data.wti_ma60,
+                "wti_volatility_20d": report.price_data.wti_volatility_20d,
+                "wti_position_52w": report.price_data.wti_position_52w,
+                "regime": report.regime.regime,
+                "regime_strength": report.regime.strength,
+                "geopolitical_risk": report.geopolitical_risk,
+                "signals_json": _json.dumps(signals_data, ensure_ascii=False),
+                "sector_impacts_json": _json.dumps(impacts_data, ensure_ascii=False),
+            })
+
+            self.db.upsert_job_run("oil_analysis", today_str, status="success")
+            logger.info(
+                "Oil analysis: WTI=$%.2f (%+.1f%%), regime=%s",
+                report.price_data.wti_price,
+                report.price_data.wti_change_pct,
+                report.regime.regime,
+            )
+
+            # 5. 급변동 알림 (±3% 이상 또는 레짐 변화)
+            should_alert = (
+                abs(report.price_data.wti_change_pct) >= 3.0
+                or report.regime.regime in ("spike", "crash")
+                or (report.regime.regime != prev_regime and prev_regime != "neutral")
+            )
+            if should_alert and self.chat_id:
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                alert_msg = format_oil_report(report)
+                buttons = [[
+                    InlineKeyboardButton("📊 상세 분석", callback_data="menu:oil_detail"),
+                    InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+                ]]
+                try:
+                    await context.bot.send_message(
+                        chat_id=self.chat_id,
+                        text=alert_msg,
+                        reply_markup=InlineKeyboardMarkup(buttons),
+                    )
+                except Exception as e:
+                    logger.debug("Oil alert send failed: %s", e)
+
+        except Exception as e:
+            logger.error("Oil analysis job failed: %s", e)
+            self.db.upsert_job_run(
+                "oil_analysis", today_str, status="error", message=str(e),
             )
 
     async def job_weekly_learning(self, context: ContextTypes.DEFAULT_TYPE) -> None:

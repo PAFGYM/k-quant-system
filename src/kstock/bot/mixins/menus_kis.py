@@ -582,6 +582,42 @@ class MenusKisMixin:
         except Exception:
             pass
 
+        # v10.2: 유가 분석
+        try:
+            oil_data = self.db.get_oil_analysis(days=1)
+            if oil_data:
+                from kstock.signal.oil_analysis import format_oil_summary_line, OilAnalysisReport, OilPriceData, OilRegime
+                od = oil_data[0]
+                regime_kr = {"bull": "상승", "bear": "하락", "neutral": "횡보", "spike": "급등", "crash": "급락"}
+                regime_emoji = {"bull": "📈", "bear": "📉", "neutral": "➡️", "spike": "🔥", "crash": "💥"}
+                r = od.get("regime", "neutral")
+                oil_msg = (
+                    f"\n\n🛢 유가 현황\n"
+                    f"WTI: ${od.get('wti_price', 0):.2f} ({od.get('wti_change_pct', 0):+.1f}%) "
+                    f"{regime_emoji.get(r, '📊')}\n"
+                    f"Brent: ${od.get('brent_price', 0):.2f} ({od.get('brent_change_pct', 0):+.1f}%)\n"
+                    f"레짐: {regime_kr.get(r, r)} | 변동성: {od.get('wti_volatility_20d', 0):.0f}% | "
+                    f"52주위치: {od.get('wti_position_52w', 0):.0%}"
+                )
+                geo = od.get("geopolitical_risk", "낮음")
+                if geo != "낮음":
+                    oil_msg += f"\n지정학 리스크: {geo}"
+                msg += oil_msg
+            else:
+                # DB에 없으면 매크로 스냅샷에서 기본 표시
+                wti = getattr(macro, "wti_price", 0) if macro else 0
+                if wti > 0:
+                    wti_chg = getattr(macro, "wti_change_pct", 0)
+                    brent = getattr(macro, "brent_price", 0)
+                    brent_chg = getattr(macro, "brent_change_pct", 0)
+                    msg += (
+                        f"\n\n🛢 유가\n"
+                        f"WTI: ${wti:.2f} ({wti_chg:+.1f}%)\n"
+                        f"Brent: ${brent:.2f} ({brent_chg:+.1f}%)"
+                    )
+        except Exception:
+            pass
+
         # v9.0: 한국형 리스크 종합
         try:
             from kstock.signal.korea_risk import assess_korea_risk, format_korea_risk
@@ -1597,6 +1633,129 @@ class MenusKisMixin:
                 f"재시도 버튼을 눌러보세요.",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
+
+    # == v10.2: 유가 상세 분석 메뉴 =============================================
+
+    async def _menu_oil_detail(self, update_or_query, context) -> None:
+        """유가 상세 분석 화면."""
+        import asyncio
+        import json as _json
+
+        try:
+            # DB에서 분석 결과 조회
+            oil_data = self.db.get_oil_analysis(days=5)
+
+            if oil_data:
+                od = oil_data[0]
+                regime_kr = {
+                    "bull": "상승 📈", "bear": "하락 📉", "neutral": "횡보 ➡️",
+                    "spike": "급등 🔥", "crash": "급락 💥",
+                }
+                r = od.get("regime", "neutral")
+
+                lines = [
+                    "🛢 유가 상세 분석",
+                    "",
+                    "[가격 현황]",
+                    f"WTI: ${od.get('wti_price', 0):.2f} ({od.get('wti_change_pct', 0):+.1f}%)",
+                    f"Brent: ${od.get('brent_price', 0):.2f} ({od.get('brent_change_pct', 0):+.1f}%)",
+                    f"Brent-WTI 스프레드: ${od.get('brent_wti_spread', 0):.2f}",
+                    "",
+                    "[기술적 지표]",
+                    f"MA20: ${od.get('wti_ma20', 0):.1f} / MA60: ${od.get('wti_ma60', 0):.1f}",
+                    f"변동성(20일): {od.get('wti_volatility_20d', 0):.1f}%",
+                    f"52주 위치: {od.get('wti_position_52w', 0):.0%}",
+                    "",
+                    f"[레짐] {regime_kr.get(r, r)} (강도 {od.get('regime_strength', 0):.0%})",
+                ]
+
+                # 시그널
+                try:
+                    sigs = _json.loads(od.get("signals_json", "[]"))
+                    if sigs:
+                        lines.append("")
+                        lines.append("[시그널]")
+                        for s in sigs[:4]:
+                            lines.append(f"  -> {s.get('description', '')}")
+                            lines.append(f"     {s.get('recommendation', '')}")
+                except Exception:
+                    pass
+
+                # 섹터 영향
+                try:
+                    impacts = _json.loads(od.get("sector_impacts_json", "[]"))
+                    if impacts:
+                        dir_emoji = {
+                            "수혜": "🟢", "피해": "🔴", "혼재": "🟡",
+                            "중립": "⚪", "간접 수혜": "🔵", "간접 피해": "🟠",
+                        }
+                        lines.append("")
+                        lines.append("[한국 섹터 영향]")
+                        for imp in impacts:
+                            d = imp.get("direction", "중립")
+                            emoji = dir_emoji.get(d, "⚪")
+                            lines.append(
+                                f"{emoji} {imp.get('sector', '')}: "
+                                f"{d}({imp.get('magnitude', '')}) - {imp.get('description', '')}"
+                            )
+                except Exception:
+                    pass
+
+                geo = od.get("geopolitical_risk", "낮음")
+                geo_emoji = {"낮음": "🟢", "보통": "🟡", "높음": "🔴"}
+                lines.append("")
+                lines.append(f"지정학 리스크: {geo_emoji.get(geo, '⚪')} {geo}")
+
+                # 최근 5일 추이
+                if len(oil_data) > 1:
+                    lines.append("")
+                    lines.append("[최근 추이]")
+                    for d in oil_data[:5]:
+                        lines.append(
+                            f"  {d['date']}: WTI ${d['wti_price']:.2f} "
+                            f"({d['wti_change_pct']:+.1f}%) [{d['regime']}]"
+                        )
+
+                msg = "\n".join(lines)
+            else:
+                # DB에 없으면 실시간 수집 시도
+                try:
+                    from kstock.signal.oil_analysis import (
+                        fetch_oil_data, compute_oil_analysis, format_oil_report,
+                    )
+                    wti_s, brent_s = await asyncio.to_thread(fetch_oil_data)
+                    if not wti_s.empty:
+                        report = compute_oil_analysis(wti_s, brent_s)
+                        msg = format_oil_report(report)
+                    else:
+                        msg = "🛢 유가 데이터를 가져올 수 없습니다."
+                except Exception as e:
+                    msg = f"🛢 유가 분석 실패: {str(e)[:80]}"
+
+            buttons = [[
+                InlineKeyboardButton("🔄 새로고침", callback_data="menu:oil_detail"),
+                InlineKeyboardButton("🔙 시황", callback_data="goto:market"),
+                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+            ]]
+
+            # support both callback query and update
+            if hasattr(update_or_query, 'message') and hasattr(update_or_query, 'callback_query'):
+                # This is an Update object
+                await update_or_query.message.reply_text(
+                    msg, reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            else:
+                # This is a callback query
+                await safe_edit_or_reply(
+                    update_or_query, msg, InlineKeyboardMarkup(buttons),
+                )
+        except Exception as e:
+            logger.error("Oil detail menu error: %s", e, exc_info=True)
+            err_msg = f"⚠️ 유가 분석 오류: {str(e)[:80]}"
+            if hasattr(update_or_query, 'message') and hasattr(update_or_query, 'callback_query'):
+                await update_or_query.message.reply_text(err_msg)
+            else:
+                await safe_edit_or_reply(update_or_query, err_msg)
 
     # == 최적화 인터랙티브 플로우 ================================================
 

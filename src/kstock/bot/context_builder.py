@@ -558,6 +558,26 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
                 f"인버스={inv_cap/10000:.1f}조"
             )
 
+    # [v10.2] 유가 (WTI, Brent)
+    wti = macro_snapshot.get("wti_price")
+    wti_chg = macro_snapshot.get("wti_change_pct")
+    brent = macro_snapshot.get("brent_price")
+    brent_chg = macro_snapshot.get("brent_change_pct")
+    if wti is not None and wti > 0:
+        lines.append(f"WTI: ${wti:.2f} ({wti_chg:+.2f}%)")
+    if brent is not None and brent > 0:
+        lines.append(f"Brent: ${brent:.2f} ({brent_chg:+.2f}%)")
+    ng = macro_snapshot.get("natural_gas_price")
+    ng_chg = macro_snapshot.get("natural_gas_change_pct")
+    if ng is not None and ng > 0:
+        lines.append(f"천연가스: ${ng:.3f} ({ng_chg:+.2f}%)")
+
+    # [v10.2] 유가 분석 컨텍스트 (DB에서 조회)
+    oil_ctx = macro_snapshot.get("oil_analysis_context")
+    if oil_ctx:
+        lines.append(f"--- 유가 분석 ---")
+        lines.append(oil_ctx)
+
     # [v9.0] 선물만기 경고
     expiry_warn = get_futures_expiry_warning()
     if expiry_warn:
@@ -785,6 +805,13 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                 # v9.0: 변동성 레짐
                 "korean_vol": getattr(snap, "korean_vol", 0),
                 "vol_regime": getattr(snap, "vol_regime", ""),
+                # v10.2: 유가/원자재
+                "wti_price": getattr(snap, "wti_price", 0),
+                "wti_change_pct": getattr(snap, "wti_change_pct", 0),
+                "brent_price": getattr(snap, "brent_price", 0),
+                "brent_change_pct": getattr(snap, "brent_change_pct", 0),
+                "natural_gas_price": getattr(snap, "natural_gas_price", 0),
+                "natural_gas_change_pct": getattr(snap, "natural_gas_change_pct", 0),
             }
             # v9.0: 프로그램 매매 데이터 추가
             try:
@@ -812,6 +839,31 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                     }
             except Exception:
                 logger.debug("etf_flow context failed", exc_info=True)
+            # v10.2: 유가 분석 컨텍스트 (DB에서 최신 분석 결과 조회)
+            try:
+                oil_rows = db.get_oil_analysis(days=1)
+                if oil_rows:
+                    oil = oil_rows[0]
+                    regime = oil.get("regime", "neutral")
+                    regime_kr = {"bull": "상승", "bear": "하락", "neutral": "횡보", "spike": "급등", "crash": "급락"}
+                    oil_lines = [
+                        f"유가 레짐: {regime_kr.get(regime, regime)} (강도 {oil.get('regime_strength', 0):.0%})",
+                        f"변동성(20일): {oil.get('wti_volatility_20d', 0):.1f}%",
+                        f"52주 위치: {oil.get('wti_position_52w', 0):.0%}",
+                    ]
+                    geo = oil.get("geopolitical_risk", "낮음")
+                    if geo != "낮음":
+                        oil_lines.append(f"지정학 리스크: {geo}")
+                    import json as _json
+                    try:
+                        sigs = _json.loads(oil.get("signals_json", "[]"))
+                        for sig in sigs[:2]:
+                            oil_lines.append(f"시그널: {sig.get('description', '')}")
+                    except Exception:
+                        pass
+                    macro_dict["oil_analysis_context"] = "\n".join(oil_lines)
+            except Exception:
+                logger.debug("oil_analysis context failed", exc_info=True)
         except Exception as e:
             logger.warning("Failed to get macro for AI context: %s", e)
 

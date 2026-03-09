@@ -301,6 +301,12 @@ class CoreHandlersMixin:
             days=(0, 1, 2, 3, 4),
             name="etf_flow_collect",
         )
+        # v10.2: 유가 분석 (07:10 매일 — 해외 원유시장은 평일/주말 무관)
+        jq.run_daily(
+            self.job_oil_analysis,
+            time=dt_time(hour=7, minute=10, tzinfo=KST),
+            name="oil_analysis",
+        )
         # KIS WebSocket: 장 시작 전 연결 (08:50), 장 종료 후 해제 (15:35)
         jq.run_daily(
             self.job_ws_connect,
@@ -2072,6 +2078,8 @@ class CoreHandlersMixin:
             "onboarding": self._menu_onboarding,
             # v9.6.1: AI 토론 바로가기
             "debate": self._menu_debate,
+            # v10.2: 유가 상세 분석
+            "oil_detail": self._menu_oil_detail,
         }
         # v6.2.1: 기능별 로딩 메시지
         _loading_msg = {
@@ -2093,6 +2101,7 @@ class CoreHandlersMixin:
             "daily_actions": "📋 오늘의 할 일 생성 중...",
             "onboarding": "📖 온보딩 가이드 로딩 중...",
             "debate": "🎙️ AI 토론 메뉴 로딩 중...",
+            "oil_detail": "🛢 유가 분석 로딩 중...",
         }
         handler = menu_map.get(payload)
         if not handler:
