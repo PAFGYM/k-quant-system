@@ -152,6 +152,43 @@ TASK_ROUTING: dict[str, dict[str, Any]] = {
         "fallback": "claude",
         "description": "주간 YouTube 인텔리전스 합성",
     },
+    # ─ v10.3: AI 매크로 쇼크 파이프라인 ─
+    "macro_shock_step1": {
+        "provider": "claude",
+        "model_tier": "fast",
+        "fallback": "gpt",
+        "description": "글로벌 충격 감지 (Step 1 Haiku)",
+    },
+    "macro_shock_step2": {
+        "provider": "claude",
+        "model_tier": "fast",
+        "fallback": "gpt",
+        "description": "한국 시장 영향 분석 (Step 2 Haiku)",
+    },
+    "macro_shock_combined": {
+        "provider": "claude",
+        "model_tier": "standard",
+        "fallback": "gpt",
+        "description": "매크로 쇼크 통합 분석 (Sonnet)",
+    },
+    "preopen_action": {
+        "provider": "claude",
+        "model_tier": "fast",
+        "fallback": "gpt",
+        "description": "08:20 장전 행동 지침 (Haiku)",
+    },
+    "opening_reality_check": {
+        "provider": "claude",
+        "model_tier": "fast",
+        "fallback": "gpt",
+        "description": "09:05 개장 검증 (Haiku)",
+    },
+    "shock_attribution": {
+        "provider": "claude",
+        "model_tier": "standard",
+        "fallback": "gpt",
+        "description": "15:50 충격 귀인 분석 (Sonnet)",
+    },
 }
 
 

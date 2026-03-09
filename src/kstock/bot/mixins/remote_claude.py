@@ -227,6 +227,7 @@ class RemoteClaudeMixin:
         context.user_data.pop("claude_mode", None)
         context.user_data.pop("claude_turn", None)
         context.user_data.pop("awaiting_claude_prompt", None)
+        context.user_data.pop("claude_chat_history", None)
         await update.message.reply_text(
             f"🤖 Claude 대화를 종료합니다.\n"
             f"총 {turns}회 대화하셨습니다.",
@@ -262,10 +263,12 @@ class RemoteClaudeMixin:
     async def _handle_claude_free_chat(
         self, update: Update, context, text: str
     ) -> None:
-        """클로드 자유 대화 — 모든 질문을 클로드가 직접 처리.
+        """클로드 자유 대화 — 작업/주식/일반 3단 분기.
 
-        v9.6.1: 투자 질문 강제 라우팅 제거 — 클로드 모드의 자유도 보장.
-        이미지 대기 중이면 이미지+텍스트 합쳐서 Vision 분석.
+        v10.3: 응답 속도 개선
+        - 작업 지시 → CLI subprocess (코드/시스템 제어)
+        - 주식 질문 → 데이터 수집 + Sonnet full pipeline
+        - 일반 대화 → Claude API 직접 호출 (2~3초)
         """
         # 대기 중인 이미지가 있으면 이미지+텍스트 합쳐서 분석
         pending_img = context.user_data.pop("pending_image", None)
@@ -282,8 +285,112 @@ class RemoteClaudeMixin:
                     "텍스트만으로 진행합니다.",
                 )
 
-        # v9.6.1: 모든 질문(투자 포함)을 클로드 CLI로 직접 처리
-        await self._execute_claude_prompt(update, text, context=context)
+        # 1) 작업 지시 → CLI subprocess (코드 수정, 시스템 제어)
+        if self._is_work_instruction(text):
+            await self._execute_claude_prompt(update, text, context=context)
+            return
+
+        # 2) 모든 대화(주식+일반) → API 직접 호출 + 대화 이력 유지
+        await self._claude_direct_chat(update, context, text)
+
+    async def _claude_direct_chat(
+        self, update: Update, context, text: str
+    ) -> None:
+        """Claude API 직접 호출 — 모든 대화를 하나의 이력으로 처리.
+
+        v10.3: 주식 질문 + 일반 대화 모두 여기서 처리.
+        종목 감지 시 실시간 가격 데이터 자동 추가.
+        대화 이력 10턴 유지 → 연속 질문 가능.
+        """
+        if not self.anthropic_key:
+            await update.message.reply_text(
+                "⚠️ ANTHROPIC_API_KEY 미설정",
+                reply_markup=get_reply_markup(context),
+            )
+            return
+
+        placeholder = await update.message.reply_text("💬 응답 중...")
+
+        try:
+            import httpx
+
+            system_text = await self._build_image_system_prompt()
+
+            # 종목 감지 시 실시간 데이터 추가
+            enriched = text
+            stock = self._detect_stock_query(text)
+            if stock:
+                try:
+                    code = stock.get("code", "")
+                    name = stock.get("name", code)
+                    price = await self._get_price(code)
+                    data_parts = [f"{name}({code})"]
+                    if price and price > 0:
+                        data_parts.append(f"현재가: {price:,.0f}원")
+                    enriched = f"{text}\n\n[실시간 데이터] {' / '.join(data_parts)}"
+                except Exception:
+                    pass
+
+            # 대화 이력 (최근 10턴 유지)
+            history = context.user_data.get("claude_chat_history", [])
+            messages = list(history)
+            messages.append({"role": "user", "content": enriched})
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": self.anthropic_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-sonnet-4-5-20250929",
+                        "max_tokens": 2000,
+                        "system": system_text,
+                        "messages": messages,
+                    },
+                )
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    answer = data["content"][0]["text"].strip().replace("**", "")
+                else:
+                    answer = f"API 오류: {resp.status_code}"
+
+            # 대화 이력 저장
+            history.append({"role": "user", "content": text})
+            history.append({"role": "assistant", "content": answer})
+            if len(history) > 20:
+                history = history[-20:]
+            context.user_data["claude_chat_history"] = history
+
+            # 턴 카운트 증가
+            turn = context.user_data.get("claude_turn", 0)
+            context.user_data["claude_turn"] = turn + 1
+
+            try:
+                await placeholder.delete()
+            except Exception:
+                pass
+
+            reply_markup = get_reply_markup(context)
+            chunks = self._split_message(answer)
+            for i, chunk in enumerate(chunks):
+                rm = reply_markup if i == len(chunks) - 1 else None
+                await update.message.reply_text(chunk, reply_markup=rm)
+
+        except Exception as e:
+            logger.error("Claude direct chat error: %s", e)
+            try:
+                await placeholder.edit_text(
+                    "⚠️ 응답 중 오류가 발생했어요. 다시 시도해주세요."
+                )
+            except Exception:
+                await update.message.reply_text(
+                    "⚠️ 응답 중 오류가 발생했어요. 다시 시도해주세요.",
+                    reply_markup=get_reply_markup(context),
+                )
 
     async def _execute_claude_prompt(
         self, update: Update, prompt: str, *, context=None

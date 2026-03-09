@@ -2684,6 +2684,405 @@ class SchedulerMixin:
                 status="error", message=str(e),
             )
 
+    # ── v10.2: Overnight Macro Shock Note ─────────────────────
+
+    async def job_overnight_shock_note(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매일 05:50 Overnight 매크로 쇼크 노트.
+
+        v10.2: 밤사이 글로벌 매크로 변동을 감지하고, 등급별 정책 브리핑.
+        WATCH 이상이면 텔레그램 발송, NONE이면 로그만.
+        """
+        if not self.chat_id:
+            return
+        try:
+            # 매크로 데이터 강제 갱신
+            macro = await self.macro_client.refresh_now()
+            if macro is None:
+                macro = await self.macro_client.get_snapshot()
+
+            from kstock.core.macro_shock import detect_shock, format_shock_briefing, ShockGrade
+
+            assessment = detect_shock(macro)
+
+            # 봇 인스턴스에 쇼크 상태 저장 (다른 모듈에서 참조)
+            self._current_shock = assessment
+
+            if assessment.overall_grade >= ShockGrade.WATCH:
+                msg = format_shock_briefing(assessment)
+                try:
+                    await context.bot.send_message(chat_id=self.chat_id, text=msg)
+                except Exception:
+                    logger.warning("Shock note send failed", exc_info=True)
+
+            # DB에 브리핑 저장
+            try:
+                self.db.save_briefing("shock_note", format_shock_briefing(assessment)[:4000])
+            except Exception:
+                pass
+
+            self.db.upsert_job_run(
+                "overnight_shock_note", _today(), status="success",
+                message=f"grade={assessment.overall_grade.name}",
+            )
+            logger.info(
+                "Overnight shock note: %s (global=%.0f, korea=%.0f, foreign=%.0f)",
+                assessment.overall_grade.name,
+                assessment.global_shock_score,
+                assessment.korea_open_risk_score,
+                assessment.foreign_outflow_risk_score,
+            )
+        except Exception as e:
+            logger.error("Overnight shock note failed: %s", e)
+            self.db.upsert_job_run(
+                "overnight_shock_note", _today(),
+                status="error", message=str(e),
+            )
+
+    # ── v10.3: AI Macro Shock Briefing ────────────────────────
+
+    async def job_macro_ai_briefing(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매일 06:00 AI 매크로 쇼크 분석 브리핑.
+
+        v10.3: 3-Step AI 파이프라인 (통합 Sonnet 모드)
+        - Step 1: 글로벌 충격 감지
+        - Step 2: 한국 시장 영향 분석
+        - Step 3: 최종 운영 지침 + 텔레그램 브리핑
+
+        결과를 self._macro_ai_result에 저장하여 모닝 브리핑에서 참조.
+        """
+        if not self.chat_id:
+            return
+        try:
+            from kstock.core.macro_shock_ai import (
+                build_macro_context,
+                build_combined_prompt,
+                build_portfolio_context,
+                parse_combined_response,
+                format_ai_shock_briefing,
+                COMBINED_SYSTEM,
+            )
+
+            # 1. 매크로 데이터 (05:50에 이미 갱신됨 → 캐시 사용)
+            macro = await self.macro_client.get_snapshot()
+
+            # 2. 포트폴리오 컨텍스트
+            portfolio_ctx = build_portfolio_context(self.db)
+
+            # 3. 프롬프트 생성
+            ctx = build_macro_context(macro, portfolio_ctx)
+            prompt = build_combined_prompt(ctx)
+
+            # 4. AI 호출 (Sonnet)
+            if not hasattr(self, 'ai') or not self.ai:
+                logger.warning("AI router not available for macro AI briefing")
+                self.db.upsert_job_run(
+                    "macro_ai_briefing", _today(),
+                    status="skip", message="AI router unavailable",
+                )
+                return
+
+            raw = await self.ai.analyze(
+                "macro_shock_combined", prompt,
+                system=COMBINED_SYSTEM,
+                max_tokens=3000, temperature=0.2,
+            )
+
+            if not raw or raw.startswith("[AI 응답 불가]"):
+                logger.warning("Macro AI briefing: empty/error response")
+                self.db.upsert_job_run(
+                    "macro_ai_briefing", _today(),
+                    status="error", message="AI empty response",
+                )
+                return
+
+            # 5. 응답 파싱
+            result = parse_combined_response(raw)
+
+            # 6. 봇 인스턴스에 저장 (모닝 브리핑 등에서 참조)
+            self._macro_ai_result = result
+
+            # 7. 텔레그램 발송
+            briefing = format_ai_shock_briefing(result)
+            if briefing:
+                await context.bot.send_message(
+                    chat_id=self.chat_id, text=briefing,
+                )
+
+            # 8. DB 저장
+            try:
+                self.db.save_briefing("macro_ai", briefing[:4000])
+            except Exception:
+                pass
+
+            # 로그
+            s3 = result.step3_json
+            regime = s3.get("regime", "N/A") if s3 else "N/A"
+            alert = s3.get("alert_level", "N/A") if s3 else "N/A"
+            self.db.upsert_job_run(
+                "macro_ai_briefing", _today(), status="success",
+                message=f"regime={regime}, alert={alert}",
+            )
+            logger.info(
+                "Macro AI briefing sent: regime=%s, alert=%s", regime, alert,
+            )
+
+        except Exception as e:
+            logger.error("Macro AI briefing failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "macro_ai_briefing", _today(),
+                status="error", message=str(e),
+            )
+
+    # ── v10.3: 08:20 Pre-open Action Report ─────────────────
+
+    async def job_preopen_action_report(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매일 08:20 장전 행동 지침 리포트.
+
+        v10.3: 06:00 AI 분석 결과 + 최신 데이터 기반
+        개장 직전 구체적 행동 지침 발송.
+        """
+        if not self.chat_id:
+            return
+        if not is_kr_market_open(datetime.now(KST).date()):
+            return
+        try:
+            from kstock.core.macro_shock_ai import (
+                PREOPEN_ACTION_SYSTEM, PREOPEN_ACTION_TEMPLATE,
+            )
+
+            macro = await self.macro_client.get_snapshot()
+
+            # 06:00 AI 분석 결과 참조
+            ai_result = getattr(self, '_macro_ai_result', None)
+            s1 = ai_result.step1_json if ai_result else {}
+            s3 = ai_result.step3_json if ai_result else {}
+
+            # 보유종목
+            holdings = self.db.get_active_holdings()
+            h_lines = []
+            for h in (holdings or []):
+                name = h.get("name", h.get("ticker", "?"))
+                pnl = 0
+                buy = h.get("buy_price", 0)
+                cur = h.get("current_price", buy)
+                if buy > 0:
+                    pnl = (cur - buy) / buy * 100
+                ht = h.get("holding_type", "swing")
+                h_lines.append(f"  {name}: {pnl:+.1f}% ({ht})")
+
+            prompt = PREOPEN_ACTION_TEMPLATE.format(
+                date=datetime.now(KST).strftime("%Y-%m-%d"),
+                current_time=datetime.now(KST).strftime("%H:%M"),
+                shock_grade=s1.get("overall_grade", "N/A"),
+                regime=s3.get("regime", "N/A"),
+                new_buy_allowed="허용" if s3.get("new_buy_allowed", True) else "금지",
+                dominant_shock=s1.get("dominant_shock", "none"),
+                vix_value=f"{macro.vix:.1f}",
+                vix_change=f"{macro.vix_change_pct:+.1f}",
+                kospi_futures=f"{macro.kospi:.0f}",
+                usdkrw=f"{macro.usdkrw:,.0f}",
+                usdkrw_change=f"{macro.usdkrw_change_pct:+.2f}",
+                holdings_text="\n".join(h_lines) if h_lines else "보유종목 없음",
+            )
+
+            raw = await self.ai.analyze(
+                "preopen_action", prompt,
+                system=PREOPEN_ACTION_SYSTEM,
+                max_tokens=600, temperature=0.2,
+            )
+
+            if raw and not raw.startswith("[AI 응답 불가]"):
+                msg = f"📋 장전 행동 지침 (08:20)\n{'━' * 22}\n{raw}"
+                await context.bot.send_message(chat_id=self.chat_id, text=msg)
+                try:
+                    self.db.save_briefing("preopen_action", msg[:4000])
+                except Exception:
+                    pass
+
+            self.db.upsert_job_run("preopen_action", _today(), status="success")
+            logger.info("Pre-open action report sent")
+
+        except Exception as e:
+            logger.error("Pre-open action report failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "preopen_action", _today(),
+                status="error", message=str(e),
+            )
+
+    # ── v10.3: 09:05 Opening Reality Check ────────────────
+
+    async def job_opening_reality_check(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매일 09:05 개장 현실 점검 리포트.
+
+        v10.3: 06:00 예측 vs 실제 개장 결과 대조.
+        예측이 틀렸으면 즉시 수정 지침.
+        """
+        if not self.chat_id:
+            return
+        if not is_kr_market_open(datetime.now(KST).date()):
+            return
+        try:
+            from kstock.core.macro_shock_ai import (
+                OPENING_REALITY_SYSTEM, OPENING_REALITY_TEMPLATE,
+            )
+
+            macro = await self.macro_client.refresh_now()
+            if macro is None:
+                macro = await self.macro_client.get_snapshot()
+
+            # 06:00 AI 예측 참조
+            ai_result = getattr(self, '_macro_ai_result', None)
+            s2 = ai_result.step2_json if ai_result else {}
+            outlook = s2.get("market_outlook", {})
+
+            # 보유종목 현재가
+            holdings = self.db.get_active_holdings()
+            h_lines = []
+            for h in (holdings or []):
+                name = h.get("name", h.get("ticker", "?"))
+                buy = h.get("buy_price", 0)
+                cur = h.get("current_price", buy)
+                pnl = ((cur - buy) / buy * 100) if buy > 0 else 0
+                h_lines.append(f"  {name}: {cur:,.0f}원 ({pnl:+.1f}%)")
+
+            prompt = OPENING_REALITY_TEMPLATE.format(
+                date=datetime.now(KST).strftime("%Y-%m-%d"),
+                current_time=datetime.now(KST).strftime("%H:%M"),
+                predicted_direction=outlook.get("open_direction", "N/A"),
+                predicted_impact=outlook.get("estimated_kospi_impact", "N/A"),
+                predicted_foreign_risk=outlook.get("foreign_selloff_risk", "N/A"),
+                kospi_open=f"{macro.kospi:,.2f}",
+                kospi_change=f"{macro.kospi_change_pct:+.2f}",
+                kosdaq_open=f"{macro.kosdaq:,.2f}",
+                kosdaq_change=f"{macro.kosdaq_change_pct:+.2f}",
+                usdkrw_now=f"{macro.usdkrw:,.0f}",
+                foreign_net=f"{macro.foreign_total:,.0f}",
+                holdings_current="\n".join(h_lines) if h_lines else "보유종목 없음",
+            )
+
+            raw = await self.ai.analyze(
+                "opening_reality_check", prompt,
+                system=OPENING_REALITY_SYSTEM,
+                max_tokens=500, temperature=0.2,
+            )
+
+            if raw and not raw.startswith("[AI 응답 불가]"):
+                msg = f"🔍 개장 현실 점검 (09:05)\n{'━' * 22}\n{raw}"
+                await context.bot.send_message(chat_id=self.chat_id, text=msg)
+                try:
+                    self.db.save_briefing("opening_reality", msg[:4000])
+                except Exception:
+                    pass
+
+            self.db.upsert_job_run("opening_reality_check", _today(), status="success")
+            logger.info("Opening reality check sent")
+
+        except Exception as e:
+            logger.error("Opening reality check failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "opening_reality_check", _today(),
+                status="error", message=str(e),
+            )
+
+    # ── v10.3: 15:50 Shock Attribution Report ─────────────
+
+    async def job_shock_attribution_report(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """매일 15:50 충격 귀인 분석 리포트.
+
+        v10.3: 06:00 예측 vs 장 마감 실제 결과 대조.
+        충격 전이 경로 분석 + 정책 엔진 효과 평가 + 내일 예비 전망.
+        """
+        if not self.chat_id:
+            return
+        if not is_kr_market_open(datetime.now(KST).date()):
+            return
+        try:
+            from kstock.core.macro_shock_ai import (
+                SHOCK_ATTRIBUTION_SYSTEM, SHOCK_ATTRIBUTION_TEMPLATE,
+            )
+
+            macro = await self.macro_client.refresh_now()
+            if macro is None:
+                macro = await self.macro_client.get_snapshot()
+
+            # 06:00 AI 예측 참조
+            ai_result = getattr(self, '_macro_ai_result', None)
+            s1 = ai_result.step1_json if ai_result else {}
+            s3 = ai_result.step3_json if ai_result else {}
+
+            # 보유종목 오늘 성과
+            holdings = self.db.get_active_holdings()
+            h_lines = []
+            for h in (holdings or []):
+                name = h.get("name", h.get("ticker", "?"))
+                buy = h.get("buy_price", 0)
+                cur = h.get("current_price", buy)
+                pnl = ((cur - buy) / buy * 100) if buy > 0 else 0
+                ht = h.get("holding_type", "swing")
+                h_lines.append(f"  {name}: {pnl:+.1f}% ({ht})")
+
+            # 쇼크 정책 정보
+            shock = getattr(self, '_current_shock', None)
+            blocked = []
+            if shock and shock.policy:
+                blocked = shock.policy.blocked_strategies
+
+            prompt = SHOCK_ATTRIBUTION_TEMPLATE.format(
+                date=datetime.now(KST).strftime("%Y-%m-%d"),
+                predicted_grade=s1.get("overall_grade", "N/A"),
+                predicted_regime=s3.get("regime", "N/A"),
+                predicted_direction=ai_result.step2_json.get("market_outlook", {}).get(
+                    "open_direction", "N/A") if ai_result else "N/A",
+                blocked_strategies=", ".join(blocked) if blocked else "없음",
+                new_buy_allowed="허용" if s3.get("new_buy_allowed", True) else "금지",
+                kospi_close=f"{macro.kospi:,.2f}",
+                kospi_day_change=f"{macro.kospi_change_pct:+.2f}",
+                kosdaq_close=f"{macro.kosdaq:,.2f}",
+                kosdaq_day_change=f"{macro.kosdaq_change_pct:+.2f}",
+                foreign_net_total=f"{macro.foreign_total:,.0f}",
+                institution_net_total=f"{macro.institution_total:,.0f}",
+                holdings_performance="\n".join(h_lines) if h_lines else "보유종목 없음",
+                wti_eod=f"{macro.wti_change_pct:+.2f}",
+                usdkrw_eod=f"{macro.usdkrw:,.0f}",
+                usdkrw_day_change=f"{macro.usdkrw_change_pct:+.2f}",
+                vix_eod=f"{macro.vix:.1f}",
+                vix_day_change=f"{macro.vix_change_pct:+.1f}",
+            )
+
+            raw = await self.ai.analyze(
+                "shock_attribution", prompt,
+                system=SHOCK_ATTRIBUTION_SYSTEM,
+                max_tokens=800, temperature=0.3,
+            )
+
+            if raw and not raw.startswith("[AI 응답 불가]"):
+                msg = f"📊 충격 귀인 분석 (15:50)\n{'━' * 22}\n{raw}"
+                await context.bot.send_message(chat_id=self.chat_id, text=msg)
+                try:
+                    self.db.save_briefing("shock_attribution", msg[:4000])
+                except Exception:
+                    pass
+
+            self.db.upsert_job_run("shock_attribution", _today(), status="success")
+            logger.info("Shock attribution report sent")
+
+        except Exception as e:
+            logger.error("Shock attribution report failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "shock_attribution", _today(),
+                status="error", message=str(e),
+            )
+
     async def job_us_premarket_briefing(
         self, context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
@@ -2754,6 +3153,8 @@ class SchedulerMixin:
                 f"WTI유가: ${getattr(macro, 'wti_price', 0):.1f} ({getattr(macro, 'wti_change_pct', 0):+.1f}%)\n"
                 f"Brent유가: ${getattr(macro, 'brent_price', 0):.1f} ({getattr(macro, 'brent_change_pct', 0):+.1f}%)\n"
                 f"천연가스: ${getattr(macro, 'natural_gas_price', 0):.2f} ({getattr(macro, 'natural_gas_change_pct', 0):+.1f}%)\n"
+                f"EWY: ${getattr(macro, 'ewy_price', 0):.1f} ({getattr(macro, 'ewy_change_pct', 0):+.1f}%)\n"
+                f"KORU: ${getattr(macro, 'koru_price', 0):.1f} ({getattr(macro, 'koru_change_pct', 0):+.1f}%)\n"
                 f"시장체제: {macro.regime}\n"
                 f"한국시장 전망 신호등: {signal_emoji} {signal_label}\n"
                 f"한국시장 개장여부: {'개장' if market_open else '휴장'}\n"
@@ -4677,6 +5078,11 @@ class SchedulerMixin:
                 if buy_price <= 0 or current_price <= 0:
                     continue
 
+                # v10.2: 쇼크 시 스캘프 수준 손절 강제
+                _shock_scalp = getattr(
+                    getattr(getattr(self, "_current_shock", None), "policy", None),
+                    "atr_override_to_scalp", False,
+                )
                 alert = sizer.check_profit_taking(
                     ticker=ticker, name=name,
                     buy_price=buy_price,
@@ -4684,6 +5090,7 @@ class SchedulerMixin:
                     quantity=quantity,
                     holding_type=holding_type,
                     sold_pct=sold_pct / 100 if sold_pct > 1 else sold_pct,
+                    shock_override_to_scalp=_shock_scalp,
                 )
 
                 # 손절/트레일링 스탑만 즉시 발송
@@ -4923,6 +5330,11 @@ class SchedulerMixin:
                 if buy_price <= 0 or current_price <= 0:
                     continue
 
+                # v10.2: 쇼크 시 스캘프 수준 손절 강제
+                _shock_scalp2 = getattr(
+                    getattr(getattr(self, "_current_shock", None), "policy", None),
+                    "atr_override_to_scalp", False,
+                )
                 alert = sizer.check_profit_taking(
                     ticker=ticker, name=name,
                     buy_price=buy_price,
@@ -4930,6 +5342,7 @@ class SchedulerMixin:
                     quantity=quantity,
                     holding_type=holding_type,
                     sold_pct=sold_pct / 100 if sold_pct > 1 else sold_pct,
+                    shock_override_to_scalp=_shock_scalp2,
                 )
                 if alert and alert.alert_type.startswith("stage"):
                     pnl_pct = (current_price - buy_price) / buy_price * 100
@@ -6237,6 +6650,20 @@ class SchedulerMixin:
                         )
                         price_target_text = format_price_target_for_debate(pt)
 
+                    # v10.3: 쇼크 컨텍스트 주입
+                    _shock_ctx = ""
+                    _shock = getattr(self, '_current_shock', None)
+                    if _shock and _shock.overall_grade >= 1:  # WATCH 이상
+                        from kstock.core.macro_shock import GRADE_LABELS, ALERT_COLORS
+                        _shock_ctx = (
+                            f"쇼크 등급: {GRADE_LABELS[_shock.overall_grade]} ({ALERT_COLORS[_shock.overall_grade]})\n"
+                            f"Global Shock Score: {_shock.global_shock_score:.0f}/100\n"
+                            f"Korea Open Risk: {_shock.korea_open_risk_score:.0f}/100\n"
+                            f"외인 이탈 Risk: {_shock.foreign_outflow_risk_score:.0f}/100\n"
+                            f"운영 레짐: {_shock.policy.regime}\n"
+                            f"신규매수: {'금지' if not _shock.policy.new_buy_allowed else '허용'}"
+                        )
+
                     # 토론 실행
                     result = await engine.run_debate(
                         ticker=ticker,
@@ -6245,6 +6672,7 @@ class SchedulerMixin:
                         market_context=market_context,
                         pattern_summary=pattern_summary,
                         price_target_data=price_target_text,
+                        shock_context=_shock_ctx,
                     )
 
                     if result and not result.error:

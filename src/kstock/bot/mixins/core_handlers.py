@@ -64,9 +64,14 @@ class CoreHandlersMixin:
         self.ws = KISWebSocket()
 
     def build_app(self) -> Application:
+        from telegram.request import HTTPXRequest
+        # 기본 read_timeout=5s < long-poll timeout=10s → 409 Conflict 근본원인
+        # getUpdates 전용 httpx: read_timeout(20s) >> long-poll timeout(10s)
+        get_updates_req = HTTPXRequest(read_timeout=20.0)
         app = (
             Application.builder()
             .token(self.token)
+            .get_updates_request(get_updates_req)
             .post_init(self._post_init)
             .post_shutdown(self._post_shutdown)
             .build()
@@ -179,10 +184,22 @@ class CoreHandlersMixin:
             time=dt_time(hour=6, minute=30, tzinfo=KST),
             name="daily_auto_classify",
         )
-        # v5.9: 매일 06:00 일일 운영 지침 → AI 자율 판단
+        # v10.2: 매일 05:50 Overnight Macro Shock Note
+        jq.run_daily(
+            self.job_overnight_shock_note,
+            time=dt_time(hour=5, minute=50, tzinfo=KST),
+            name="overnight_shock_note",
+        )
+        # v10.3: 매일 06:00 AI 매크로 쇼크 분석 브리핑
+        jq.run_daily(
+            self.job_macro_ai_briefing,
+            time=dt_time(hour=6, minute=0, tzinfo=KST),
+            name="macro_ai_briefing",
+        )
+        # v5.9: 매일 06:10 일일 운영 지침 → AI 자율 판단
         jq.run_daily(
             self.job_daily_directive,
-            time=dt_time(hour=6, minute=0, tzinfo=KST),
+            time=dt_time(hour=6, minute=10, tzinfo=KST),
             name="daily_directive",
         )
         # 매수 플래너 (07:50 평일)
@@ -203,6 +220,27 @@ class CoreHandlersMixin:
             self.job_morning_briefing,
             time=dt_time(hour=7, minute=30, tzinfo=KST),
             name="morning_briefing",
+        )
+        # v10.3: 08:20 장전 행동 지침 리포트
+        jq.run_daily(
+            self.job_preopen_action_report,
+            time=dt_time(hour=8, minute=20, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="preopen_action_report",
+        )
+        # v10.3: 09:05 개장 현실 점검 리포트
+        jq.run_daily(
+            self.job_opening_reality_check,
+            time=dt_time(hour=9, minute=5, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="opening_reality_check",
+        )
+        # v10.3: 15:50 충격 귀인 분석 리포트
+        jq.run_daily(
+            self.job_shock_attribution_report,
+            time=dt_time(hour=15, minute=50, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="shock_attribution_report",
         )
         jq.run_repeating(
             self.job_intraday_monitor,

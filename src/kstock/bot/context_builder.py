@@ -298,6 +298,34 @@ CFA/CAIA 자격 보유, 한국+미국 시장 10년차 퀀트 트레이더.
 - [최종 경고] 위 데이터에 현재가가 없는 종목의 가격을 추측하여 제시하는 것은 거짓 정보 제공이다. 이것은 가장 심각한 규칙 위반이다. "현재가: XX원대" 같은 표현은 위 데이터에 해당 종목의 가격이 있을 때만 허용된다.'''
 
 
+def _format_shock_context(shock) -> str:
+    """v10.2: ShockAssessment를 위기 컨텍스트 문자열로 변환."""
+    if shock is None:
+        return ""
+    try:
+        from kstock.core.macro_shock import ShockGrade, GRADE_LABELS
+        if shock.overall_grade < ShockGrade.WATCH:
+            return ""
+        label = GRADE_LABELS.get(shock.overall_grade, "")
+        policy = shock.policy
+        lines = [
+            f"\n\n[v10.2 매크로 쇼크 경보: {label}]",
+            f"Global Shock Score: {shock.global_shock_score:.0f}/100",
+            f"Korea Open Risk: {shock.korea_open_risk_score:.0f}/100",
+            f"외인 이탈 Risk: {shock.foreign_outflow_risk_score:.0f}/100",
+            f"레짐: {policy.regime}",
+        ]
+        if not policy.new_buy_allowed:
+            lines.append("신규 매수 금지 상태")
+        if policy.blocked_strategies:
+            lines.append(f"차단 전략: {', '.join(policy.blocked_strategies)}")
+        if policy.atr_override_to_scalp:
+            lines.append("전 매니저 손절 스캘프 수준 강제")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def build_system_prompt(context: dict) -> str:
     """Build the system prompt by filling in context data.
 
@@ -354,7 +382,8 @@ def build_system_prompt(context: dict) -> str:
         recent_reports=context.get("reports", "최근 리포트 없음"),
         financial_summary=context.get("financials", "재무 데이터 없음"),
         trade_lessons=context.get("trade_lessons", "매매 교훈 없음"),
-        crisis_context=context.get("crisis_context", "현재 특별 위기 상황 없음"),
+        crisis_context=context.get("crisis_context", "현재 특별 위기 상황 없음")
+            + _format_shock_context(context.get("macro_shock")),
         recent_briefing=context.get("recent_briefing", "오늘 아직 브리핑 없음"),
         manager_stances=context.get("manager_stances", "매니저 의견 없음"),
         multi_agent_scores=context.get("multi_agent_scores", "멀티에이전트 분석 없음"),

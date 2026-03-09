@@ -288,6 +288,7 @@ class DebateEngine:
         market_context: str = "",
         pattern_summary: str = "",
         price_target_data: str = "",
+        shock_context: str = "",
     ) -> DebateResult:
         """3라운드 토론 실행.
 
@@ -298,6 +299,7 @@ class DebateEngine:
             market_context: 시장 상황 텍스트
             pattern_summary: 패턴 매칭 결과 (Phase 2)
             price_target_data: 가격 목표 데이터 (Phase 3)
+            shock_context: v10.3 매크로 쇼크 컨텍스트
         """
         result = DebateResult(ticker=ticker, name=name)
 
@@ -310,6 +312,7 @@ class DebateEngine:
             context = self._build_context(
                 ticker, name, stock_data, market_context,
                 pattern_summary, price_target_data,
+                shock_context,
             )
             r1 = await self._round1_independent(ticker, name, context)
             result.round1_opinions = r1
@@ -343,9 +346,12 @@ class DebateEngine:
         self, ticker: str, name: str,
         stock_data: str, market_context: str,
         pattern_summary: str, price_target_data: str,
+        shock_context: str = "",
     ) -> str:
         """토론용 통합 컨텍스트 구성."""
         parts = [f"종목: {name} ({ticker})"]
+        if shock_context:
+            parts.append(f"\n[글로벌 매크로 쇼크 상태]\n{shock_context}")
         if stock_data:
             parts.append(f"\n[주가/지표 데이터]\n{stock_data}")
         if market_context:

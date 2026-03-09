@@ -936,13 +936,19 @@ def evaluate_all_strategies(
     sector: str = "",
     rs_rank: int = 0,
     rs_total: int = 1,
+    blocked_strategies: list[str] | None = None,
 ) -> list[StrategySignal]:
-    """Run all applicable strategies for a ticker and return matching signals."""
+    """Run all applicable strategies for a ticker and return matching signals.
+
+    Args:
+        blocked_strategies: v10.2 매크로 쇼크 시 차단할 전략 ID 리스트 (e.g., ["A", "G"])
+    """
     signals = []
     info_dict = info_dict or {}
+    blocked = set(blocked_strategies or [])
 
     result_a = evaluate_strategy_a(ticker, name, score, tech, flow, macro)
-    if result_a:
+    if result_a and "A" not in blocked:
         signals.append(result_a)
 
     result_b = evaluate_strategy_b(ticker, name, tech, macro)
@@ -962,11 +968,11 @@ def evaluate_all_strategies(
         signals.append(result_e)
 
     result_f = evaluate_strategy_f(ticker, name, tech, macro, rs_rank, rs_total)
-    if result_f:
+    if result_f and "F" not in blocked:
         signals.append(result_f)
 
     result_g = evaluate_strategy_g(ticker, name, tech, macro)
-    if result_g:
+    if result_g and "G" not in blocked:
         signals.append(result_g)
 
     result_h = evaluate_strategy_h(ticker, name, tech, macro)
@@ -978,7 +984,7 @@ def evaluate_all_strategies(
         signals.append(result_i)
 
     result_j = evaluate_strategy_j(ticker, name, tech, macro)
-    if result_j:
+    if result_j and "J" not in blocked:
         signals.append(result_j)
 
     signals.sort(key=lambda s: s.score, reverse=True)

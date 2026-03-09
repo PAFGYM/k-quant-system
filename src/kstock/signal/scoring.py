@@ -309,11 +309,13 @@ def compute_composite_score(
     factor_bonus: int = 0,
     event_bonus: int = 0,
     ml_probability: float = 0.5,  # v10.0: ML 모델 raw 확률
+    shock_assessment=None,  # v10.2: ShockAssessment (optional)
 ) -> ScoreBreakdown:
     """Compute the 100-point composite score with ML blending.
 
     v10.0: ML 확률이 유효하면 전통적 스코어와 ML 스코어를 블렌딩.
     ML이 40%, 전통이 60% (config.ml_blend.ml_weight로 조절 가능).
+    v10.2: 매크로 쇼크 시 가중치 강제 오버라이드.
 
     Args:
         macro: Macro snapshot.
@@ -322,6 +324,7 @@ def compute_composite_score(
         tech: Technical indicators.
         config: Scoring config dict. Loaded from YAML if None.
         ml_probability: Raw ML model probability (0.0~1.0).
+        shock_assessment: ShockAssessment (v10.2, optional).
 
     Returns:
         ScoreBreakdown with individual and composite scores.
@@ -330,6 +333,17 @@ def compute_composite_score(
         config = load_scoring_config()
 
     weights = get_regime_weights(config, macro)
+
+    # v10.2: 매크로 쇼크 시 가중치 강제 오버라이드
+    if shock_assessment is not None:
+        try:
+            from kstock.core.macro_shock import SHOCK_WEIGHT_OVERRIDES
+            override = SHOCK_WEIGHT_OVERRIDES.get(shock_assessment.overall_grade)
+            if override is not None:
+                weights = override
+        except Exception:
+            pass
+
     thresholds = config["thresholds"]
     buy_threshold = config.get("buy_threshold", 70)
     watch_threshold = config.get("watch_threshold", 55)
@@ -354,6 +368,13 @@ def compute_composite_score(
     ml_enabled = ml_blend_cfg.get("enabled", False)
     ml_weight = ml_blend_cfg.get("ml_weight", 0.40)
     ml_min_conf = ml_blend_cfg.get("min_confidence", 0.55)
+
+    # v10.2: 쇼크 시 ML 비중 강제 조정
+    if shock_assessment is not None:
+        policy = getattr(shock_assessment, "policy", None)
+        ml_override = getattr(policy, "ml_blend_override", None) if policy else None
+        if ml_override and ml_override.get("active"):
+            ml_weight = ml_override.get("ml_weight", ml_weight)
 
     if ml_enabled and 0.05 < ml_probability < 0.95:
         # ML 확률 → 0~100 스케일 변환

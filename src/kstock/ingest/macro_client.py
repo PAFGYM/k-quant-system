@@ -80,13 +80,18 @@ class MacroSnapshot:
     # v9.0: 한국 실현변동성 (VKOSPI 프록시)
     korean_vol: float = 0.0       # 한국 실현변동성 (연환산 %)
     vol_regime: str = ""          # 변동성 레짐: low/normal/high/extreme
-    # v10.2: 유가/원자재 (WTI, Brent, 천연가스)
-    wti_price: float = 0.0        # WTI 원유 선물 (CL=F) 달러
+    # v10.2: 유가/원자재 + 글로벌 매크로 쇼크 피처
+    wti_price: float = 0.0        # WTI 원유 선물 (CL=F)
     wti_change_pct: float = 0.0
-    brent_price: float = 0.0      # Brent 원유 선물 (BZ=F) 달러
+    brent_price: float = 0.0      # Brent 원유 선물 (BZ=F)
     brent_change_pct: float = 0.0
-    natural_gas_price: float = 0.0  # 천연가스 선물 (NG=F) 달러
+    natural_gas_price: float = 0.0  # 천연가스 선물 (NG=F)
     natural_gas_change_pct: float = 0.0
+    ewy_price: float = 0.0        # iShares MSCI South Korea ETF
+    ewy_change_pct: float = 0.0
+    nikkei_change_pct: float = 0.0  # 닛케이225
+    hsi_change_pct: float = 0.0     # 항셍지수
+    us2y_change_pct: float = 0.0    # 미국 2년물 변화율
 
 
 def _snapshot_to_json(snap: MacroSnapshot) -> str:
@@ -277,7 +282,10 @@ class MacroClient:
             "BTC-USD", "GC=F", "^KS11", "^KQ11",
             "KORU", "SOXL", "TQQQ",  # v6.6: 미국 레버리지 ETF
             "ES=F", "NQ=F",  # v9.0: 미국 선물지수
-            "CL=F", "BZ=F", "NG=F",  # v10.2: 유가/원자재 (WTI, Brent, 천연가스)
+            "CL=F", "BZ=F", "NG=F",  # v10.2: 유가/원자재
+            "EWY",  # v10.2: 한국ETF
+            "^N225", "^HSI",  # v10.2: 아시아 지수
+            "^IRX",  # v10.2: 미국 2년물 프록시
         ]
         data = yf.download(symbols, period="5d", group_by="ticker", progress=False)
 
@@ -368,6 +376,23 @@ class MacroClient:
         brent_price, brent_change = _etf_data("BZ=F")
         ng_price, ng_change = _etf_data("NG=F")
 
+        # v10.2: 한국 ETF + 아시아 지수
+        ewy_price, ewy_change = _etf_data("EWY")
+        _, nikkei_change = _etf_data("^N225")
+        _, hsi_change = _etf_data("^HSI")
+
+        # v10.2: 미국 2년물 (^IRX = 13주 T-bill 프록시)
+        us2y_val = 0.0
+        us2y_chg = 0.0
+        try:
+            irx_hist = data["^IRX"]["Close"].dropna() if "^IRX" in data.columns.get_level_values(0) else None
+            if irx_hist is not None and len(irx_hist) >= 2:
+                us2y_val = float(irx_hist.iloc[-1])
+                irx_prev = float(irx_hist.iloc[-2])
+                us2y_chg = (us2y_val - irx_prev) / irx_prev * 100 if irx_prev > 0 else 0
+        except Exception:
+            pass
+
         # v9.0: 한국 실현변동성 (VKOSPI 프록시)
         kr_vol = 0.0
         vol_regime_str = ""
@@ -445,13 +470,19 @@ class MacroClient:
             # v9.0: 변동성 레짐
             korean_vol=round(kr_vol, 2),
             vol_regime=vol_regime_str,
-            # v10.2: 유가/원자재
+            # v10.2: 유가/원자재 + 글로벌 매크로
             wti_price=round(wti_price, 2),
             wti_change_pct=round(wti_change, 2),
             brent_price=round(brent_price, 2),
             brent_change_pct=round(brent_change, 2),
             natural_gas_price=round(ng_price, 3),
             natural_gas_change_pct=round(ng_change, 2),
+            ewy_price=round(ewy_price, 2),
+            ewy_change_pct=round(ewy_change, 2),
+            nikkei_change_pct=round(nikkei_change, 2),
+            hsi_change_pct=round(hsi_change, 2),
+            us2y=round(us2y_val, 2),
+            us2y_change_pct=round(us2y_chg, 2),
         )
 
     @staticmethod

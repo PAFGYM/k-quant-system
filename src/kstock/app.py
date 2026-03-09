@@ -38,6 +38,10 @@ def _kill_existing_bot() -> None:
         pass
 
     # 2) pgrep 기반 정리 (PID 파일 없이 떠있는 좀비 프로세스 대응)
+    #    자신(os.getpid())과 부모(os.getppid()) 모두 제외
+    #    → launchd bash 래퍼를 kill하면 KeepAlive 재생성 → 무한 중복 루프 발생
+    my_pid = os.getpid()
+    my_ppid = os.getppid()
     try:
         result = subprocess.run(
             ["pgrep", "-f", "kstock.app"],
@@ -47,7 +51,7 @@ def _kill_existing_bot() -> None:
             if not line:
                 continue
             pid = int(line)
-            if pid != os.getpid():
+            if pid != my_pid and pid != my_ppid:
                 try:
                     os.kill(pid, signal.SIGKILL)
                     logger.info("좀비 프로세스 (PID %d) 종료", pid)
@@ -80,7 +84,7 @@ def main() -> None:
     _kill_existing_bot()
 
     import time
-    time.sleep(5)  # 이전 프로세스의 Telegram long-poll 세션 만료 대기
+    time.sleep(15)  # 이전 프로세스의 Telegram long-poll 세션 만료 대기 (timeout=10 + 여유 5s)
 
     from kstock.bot.bot import KQuantBot
 
@@ -99,13 +103,15 @@ def main() -> None:
 
     from kstock import __version__
     logger.info("K-Quant System v%s started. Press Ctrl+C to stop.", __version__)
-    # 409 처리: run_polling 내부에서 deleteWebhook + 자동 재시도
-    # bootstrap_retries=5: 시작 시 409 발생하면 최대 5회 재시도
+    # 409 해결: short polling (timeout=0) + poll_interval=3s
+    # long-poll(timeout>0)은 httpx read_timeout(5s)보다 길어서 409 발생
+    # short polling은 즉시 응답 → 409 원천 차단
     app.run_polling(
-        poll_interval=1.0,
+        poll_interval=3.0,
+        timeout=0,
         drop_pending_updates=True,
         allowed_updates=["message", "callback_query"],
-        bootstrap_retries=5,
+        bootstrap_retries=0,
     )
 
 

@@ -67,6 +67,15 @@ class TradingMixin:
     # == Callback actions ====================================================
 
     async def _action_buy(self, query, context, ticker: str) -> None:
+        # v10.2: 매크로 쇼크 매수 차단 (SHOCK/CRISIS)
+        _shock = getattr(self, "_current_shock", None)
+        if _shock and not _shock.policy.new_buy_allowed:
+            await safe_edit_or_reply(query,
+                "⛔ 매크로 쇼크 매수 차단 중\n\n"
+                f"등급: {_shock.overall_grade.name}\n"
+                "신규 매수가 제한됩니다."
+            )
+            return
         result = self._find_cached_result(ticker)
         if not result:
             result = await self._scan_single_stock(ticker)
@@ -1759,6 +1768,16 @@ class TradingMixin:
         """Handle KIS auto-buy button."""
         if not self.kis_broker.connected:
             await safe_edit_or_reply(query,"\u26a0\ufe0f KIS 미연결. /setup_kis 로 설정하세요.")
+            return
+        # v10.2: 매크로 쇼크 매수 차단
+        _shock = getattr(self, "_current_shock", None)
+        if _shock and not _shock.policy.new_buy_allowed:
+            await safe_edit_or_reply(query,
+                "⛔ 매크로 쇼크 매수 차단 중\n\n"
+                f"등급: {_shock.overall_grade.name}\n"
+                "전략적 신규 매수가 제한됩니다.\n"
+                "장중 재평가 후 해제될 수 있습니다."
+            )
             return
         # 안전장치: 실전매매 환경변수 체크
         real_trade = os.getenv("REAL_TRADE_ENABLED", "false").lower() == "true"

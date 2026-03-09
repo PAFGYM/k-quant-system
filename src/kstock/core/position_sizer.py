@@ -84,6 +84,7 @@ ATR_STOP_MULTIPLIERS = {
 
 def compute_atr_stops(
     atr_pct: float, holding_type: str, buy_price: float,
+    shock_override_to_scalp: bool = False,
 ) -> dict:
     """ATR 기반 동적 손절/익절/트레일링 레벨 계산.
 
@@ -91,6 +92,7 @@ def compute_atr_stops(
         atr_pct: ATR(14) as % of price (예: 2.5 = 2.5%)
         holding_type: scalp/swing/position/long_term 등
         buy_price: 매수가 (원)
+        shock_override_to_scalp: v10.2 매크로 쇼크 시 전 매니저 스캘프 수준 강제
 
     Returns:
         dict: stop_pct, stop_price, target_1_pct, target_1_price,
@@ -101,7 +103,9 @@ def compute_atr_stops(
         ATR 5.0% 스윙 → stop=-10.0%, TP1=+15.0%, TP2=+25.0%
         ATR 1.0% 스캘핑 → stop=-2.0%(floor), TP1=+2.0%, TP2=+3.0%
     """
-    mults = ATR_STOP_MULTIPLIERS.get(holding_type, ATR_STOP_MULTIPLIERS["swing"])
+    # v10.2: 매크로 쇼크 시 모든 매니저를 스캘프 배수로 강제
+    effective_type = "scalp" if shock_override_to_scalp else holding_type
+    mults = ATR_STOP_MULTIPLIERS.get(effective_type, ATR_STOP_MULTIPLIERS["swing"])
     atr = max(atr_pct, 0.5)  # 최소 0.5%
 
     # 손절: ATR × 배수, floor -2%, ceiling -20%
@@ -503,6 +507,7 @@ class PositionSizer:
         sector_weight: float = 0.0,
         name: str = "",
         holding_type: str = "swing",
+        shock_override_to_scalp: bool = False,  # v10.2: 쇼크 시 스캘프 수준 손절
     ) -> PositionSize:
         """확신도 기반 포지션 사이징 — 점수가 높을수록 큰 비중.
 
@@ -533,7 +538,10 @@ class PositionSizer:
 
         # 6. ATR 기반 목표/손절 (Phase 2 연동)
         if atr_pct > 0:
-            stops = compute_atr_stops(atr_pct, holding_type, current_price)
+            stops = compute_atr_stops(
+                atr_pct, holding_type, current_price,
+                shock_override_to_scalp=shock_override_to_scalp,
+            )
             target_pct = stops["target_1_pct"]
             stop_pct = stops["stop_pct"]
         else:
@@ -771,6 +779,7 @@ class PositionSizer:
         holding_type: str = "auto",
         sold_pct: float = 0.0,
         atr_pct: float = 0.0,
+        shock_override_to_scalp: bool = False,  # v10.2
     ) -> ProfitAlert | None:
         """보유 종목의 차익실현 조건을 체크한다.
 
@@ -801,7 +810,10 @@ class PositionSizer:
             # 1. 손절 체크 (매수가 대비)
             # v9.6.0: ATR 기반 동적 손절 (atr_pct > 0이면 적용)
             if atr_pct > 0:
-                atr_stops = compute_atr_stops(atr_pct, holding_type, buy_price)
+                atr_stops = compute_atr_stops(
+                    atr_pct, holding_type, buy_price,
+                    shock_override_to_scalp=shock_override_to_scalp,
+                )
                 stop_limit = atr_stops["stop_pct"]
             else:
                 stop_configs = {

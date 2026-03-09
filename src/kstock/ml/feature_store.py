@@ -340,3 +340,32 @@ def get_features(ticker: str, date: str) -> dict:
     """
     fs = _get_store().get_features(ticker, date)
     return fs.features
+
+
+def store_macro_shock_features(ticker: str, date: str, macro, shock_assessment=None) -> None:
+    """v10.2: 매크로 쇼크 피처를 feature_store에 적재.
+
+    Args:
+        ticker: 종목 코드
+        date: 날짜 (YYYY-MM-DD)
+        macro: MacroSnapshot
+        shock_assessment: ShockAssessment (optional)
+    """
+    store = _get_store()
+    records = []
+    macro_features = {
+        "wti_change_pct": getattr(macro, "wti_change_pct", 0.0),
+        "brent_change_pct": getattr(macro, "brent_change_pct", 0.0),
+        "ewy_change_pct": getattr(macro, "ewy_change_pct", 0.0),
+        "koru_change_pct": getattr(macro, "koru_change_pct", 0.0),
+        "nq_futures_change_pct": getattr(macro, "nq_futures_change_pct", 0.0),
+        "dxy_change_pct": getattr(macro, "dxy_change_pct", 0.0),
+        "us10y_change_pct": getattr(macro, "us10y_change_pct", 0.0),
+        "shock_grade_encoded": float(int(shock_assessment.overall_grade)) if shock_assessment else 0.0,
+    }
+    for name, value in macro_features.items():
+        records.append(FeatureRecord(
+            ticker=ticker, date=date, feature_name=name,
+            value=float(value), category="macro_shock", source="macro_client",
+        ))
+    store.add_features_batch(records)

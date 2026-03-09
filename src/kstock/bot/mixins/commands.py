@@ -396,6 +396,9 @@ class CommandsMixin:
             except Exception:
                 logger.debug("event_bonus failed for %s", ticker, exc_info=True)
 
+            # v10.2: 매크로 쇼크 평가 가져오기
+            _shock = getattr(self, "_current_shock", None)
+
             score = compute_composite_score(
                 macro, flow, info, tech, self.scoring_config,
                 mtf_bonus=mtf_bonus, sector_adj=sector_adj,
@@ -407,13 +410,16 @@ class CommandsMixin:
                 factor_bonus=supply_demand_bonus,  # v9.3: 수급 보너스
                 event_bonus=event_bonus,  # v9.5.3: 이벤트 보너스
                 ml_probability=ml_probability,  # v10.0: ML 블렌딩
+                shock_assessment=_shock,  # v10.2: 매크로 쇼크
             )
 
             # Multi-strategy evaluation
+            _blocked = _shock.policy.blocked_strategies if _shock else None
             strat_signals = evaluate_all_strategies(
                 ticker, name, score, tech, flow, macro,
                 info_dict=yf_info, sector=sector,
                 rs_rank=rs_rank, rs_total=rs_total,
+                blocked_strategies=_blocked,  # v10.2: 쇼크 시 전략 차단
             )
             best_strategy = strat_signals[0].strategy if strat_signals else "A"
 
