@@ -3494,4 +3494,116 @@ class CommandsMixin:
             await update.message.reply_text(
                 "\u26a0\ufe0f 매집 탐지 중 오류가 발생했습니다.", reply_markup=get_reply_markup(context))
 
+    # ------------------------------------------------------------------
+    # /learning — 학습 투명성 대시보드
+    # ------------------------------------------------------------------
+    async def cmd_learning(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle /learning - 학습 현황 종합 보고."""
+        import json as _json
+        from pathlib import Path as _Path
+
+        try:
+            self._persist_chat_id(update)
+
+            sections: list[str] = []
+
+            # ── 1. ML 모델 현황 ──
+            ml_perf = self.db.get_ml_performance(limit=3)
+            train_hist_path = _Path("models/train_history.json")
+            train_hist: list[dict] = []
+            if train_hist_path.exists():
+                try:
+                    train_hist = _json.loads(train_hist_path.read_text())
+                    if isinstance(train_hist, dict):
+                        train_hist = [train_hist]
+                except Exception:
+                    pass
+
+            ml_lines = ["🧠 ML 모델 현황"]
+            if train_hist:
+                latest = train_hist[-1]
+                t_auc = latest.get("train_auc", 0)
+                v_auc = latest.get("val_auc", 0)
+                lgb_w = latest.get("lgb_weight", 0)
+                xgb_w = latest.get("xgb_weight", 0)
+                lstm_w = latest.get("lstm_weight", 0)
+                samples = latest.get("samples", 0)
+                t_date = latest.get("train_date", "?")
+                overfit = "⚠️과적합" if latest.get("overfitting") else "✅정상"
+                ml_lines.append(f"  마지막 학습: {t_date}")
+                ml_lines.append(f"  정확도: Train {t_auc:.3f} / Val {v_auc:.3f} {overfit}")
+                ml_lines.append(f"  앙상블: LGB {lgb_w:.0%} / XGB {xgb_w:.0%} / LSTM {lstm_w:.0%}")
+                ml_lines.append(f"  학습 샘플: {samples}개 | 피처: 58개")
+            elif ml_perf:
+                p = ml_perf[0]
+                ml_lines.append(f"  최근: {p.get('date', '?')} | Val AUC {p.get('val_score', 0):.3f}")
+            else:
+                ml_lines.append("  데이터 없음")
+
+            # 목적 & 피처 요약
+            ml_lines.append("  목적: 5일내 +3% 상승 확률 예측 (이진분류)")
+            ml_lines.append("  주요 피처: 기술적(12)+모멘텀(6)+매크로(4)+수급(6)+센티먼트(4)+크로스마켓(8)")
+            sections.append("\n".join(ml_lines))
+
+            # ── 2. YouTube 학습 현황 ──
+            yt_data = self.db.get_recent_youtube_intelligence(hours=168, limit=50)
+            yt_tickers = self.db.get_youtube_mentioned_tickers(hours=168)
+            yt_lines = ["📺 YouTube 학습 (7일)"]
+            yt_lines.append(f"  분석 영상: {len(yt_data)}건")
+            if yt_tickers:
+                top_tickers = sorted(yt_tickers, key=lambda x: x.get("mention_count", 0), reverse=True)[:5]
+                ticker_str = ", ".join(
+                    f"{t.get('ticker', '?')}({t.get('mention_count', 0)}회)" for t in top_tickers
+                )
+                yt_lines.append(f"  자주 언급: {ticker_str}")
+            else:
+                yt_lines.append("  언급 종목 데이터 없음")
+            sections.append("\n".join(yt_lines))
+
+            # ── 3. 학습 이벤트 타임라인 ──
+            events = self.db.get_learning_history(days=7)
+            ev_lines = ["📋 학습 이벤트 (7일)"]
+            if events:
+                type_counts: dict[str, int] = {}
+                for ev in events:
+                    et = ev.get("event_type", "unknown")
+                    type_counts[et] = type_counts.get(et, 0) + 1
+                for et, cnt in sorted(type_counts.items(), key=lambda x: -x[1]):
+                    label = {
+                        "ml_full_retrain": "🔄 전체 재학습",
+                        "ml_incremental": "📈 점진 학습",
+                        "ml_drift_triggered": "⚠️ 드리프트 감지",
+                        "youtube_deep_analysis": "📺 YouTube 심화",
+                        "youtube_intelligence": "📺 YouTube 분석",
+                        "cross_market_update": "🌍 크로스마켓",
+                    }.get(et, et)
+                    ev_lines.append(f"  {label}: {cnt}회")
+            else:
+                ev_lines.append("  이벤트 없음")
+            sections.append("\n".join(ev_lines))
+
+            # ── 4. 업데이트 스케줄 ──
+            sched_lines = [
+                "⏰ 업데이트 스케줄",
+                "  ML 점진학습: 평일 22:00",
+                "  ML 전체재학습: 일요일 03:00",
+                "  YouTube 심화: 매일 08:00, 20:00",
+                "  크로스마켓: 매일 07:15",
+                "  ETF 수집: 평일 16:25",
+                "  모닝브리핑: 평일 08:30",
+                "  EOD 학습: 평일 18:10",
+            ]
+            sections.append("\n".join(sched_lines))
+
+            msg = "\n\n".join(sections)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
+
+        except Exception as e:
+            logger.error("Learning command error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "⚠️ 학습 현황 조회 오류.", reply_markup=get_reply_markup(context),
+            )
+
 

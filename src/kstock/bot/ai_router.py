@@ -145,6 +145,13 @@ TASK_ROUTING: dict[str, dict[str, Any]] = {
         "fallback": "claude",
         "description": "미국 프리마켓 브리핑",
     },
+    # ─ v10.5 추가 ─
+    "youtube_synthesis": {
+        "provider": "gemini",
+        "model_tier": "standard",  # gemini-2.0-pro (2M context)
+        "fallback": "claude",
+        "description": "주간 YouTube 인텔리전스 합성",
+    },
 }
 
 

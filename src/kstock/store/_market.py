@@ -1583,3 +1583,105 @@ class MarketMixin:
                     (cutoff,),
                 ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- options_flow (v10.5) --------------------------------------------------
+
+    def save_options_flow(self, data: dict) -> None:
+        """옵션 PCR 데이터 저장 (UPSERT by date)."""
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        date = data.get("date", datetime.utcnow().strftime("%Y-%m-%d"))
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO options_flow
+                    (date, call_volume, put_volume, call_oi, put_oi,
+                     pcr_volume, pcr_oi, max_pain, call_iv_avg, put_iv_avg,
+                     data_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    call_volume=excluded.call_volume,
+                    put_volume=excluded.put_volume,
+                    call_oi=excluded.call_oi,
+                    put_oi=excluded.put_oi,
+                    pcr_volume=excluded.pcr_volume,
+                    pcr_oi=excluded.pcr_oi,
+                    max_pain=excluded.max_pain,
+                    call_iv_avg=excluded.call_iv_avg,
+                    put_iv_avg=excluded.put_iv_avg,
+                    data_json=excluded.data_json
+                """,
+                (
+                    date,
+                    data.get("call_volume", 0),
+                    data.get("put_volume", 0),
+                    data.get("call_oi", 0),
+                    data.get("put_oi", 0),
+                    data.get("pcr_volume", 0),
+                    data.get("pcr_oi", 0),
+                    data.get("max_pain", 0),
+                    data.get("call_iv_avg", 0),
+                    data.get("put_iv_avg", 0),
+                    data.get("data_json", "{}"),
+                    now,
+                ),
+            )
+
+    def get_latest_options_flow(self, days: int = 5) -> list[dict]:
+        """최근 옵션 PCR 데이터 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM options_flow ORDER BY date DESC LIMIT ?",
+                (days,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- eia_inventory (v10.5) -------------------------------------------------
+
+    def save_eia_inventory(self, data: dict) -> None:
+        """EIA 원유재고 + SPR 데이터 저장 (UPSERT by date)."""
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        date = data.get("date", datetime.utcnow().strftime("%Y-%m-%d"))
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO eia_inventory
+                    (date, report_date, crude_inventory, crude_change,
+                     spr_inventory, spr_change, five_year_avg,
+                     deviation_pct, signal, data_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    report_date=excluded.report_date,
+                    crude_inventory=excluded.crude_inventory,
+                    crude_change=excluded.crude_change,
+                    spr_inventory=excluded.spr_inventory,
+                    spr_change=excluded.spr_change,
+                    five_year_avg=excluded.five_year_avg,
+                    deviation_pct=excluded.deviation_pct,
+                    signal=excluded.signal,
+                    data_json=excluded.data_json
+                """,
+                (
+                    date,
+                    data.get("report_date", ""),
+                    data.get("crude_inventory", 0),
+                    data.get("crude_change", 0),
+                    data.get("spr_inventory", 0),
+                    data.get("spr_change", 0),
+                    data.get("five_year_avg", 0),
+                    data.get("deviation_pct", 0),
+                    data.get("signal", ""),
+                    data.get("data_json", "{}"),
+                    now,
+                ),
+            )
+
+    def get_latest_eia_inventory(self, days: int = 10) -> list[dict]:
+        """최근 EIA 원유재고 데이터 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM eia_inventory ORDER BY date DESC LIMIT ?",
+                (days,),
+            ).fetchall()
+        return [dict(r) for r in rows]

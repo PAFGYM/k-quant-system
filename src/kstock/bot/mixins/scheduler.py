@@ -3624,6 +3624,188 @@ class SchedulerMixin:
                 status="error", message=str(e)[:200],
             )
 
+    async def job_eia_inventory_collect(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """수요일 23:00: EIA 원유재고 + SPR 비축유 수집.
+
+        EIA 주간 보고서는 수요일 22:30(KST) 발표.
+        """
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.ingest.eia_inventory import (
+                fetch_eia_inventory,
+                analyze_eia_inventory,
+            )
+
+            data = fetch_eia_inventory()
+            if not data or not data.get("crude_inventory"):
+                self.db.upsert_job_run(
+                    "eia_inventory_collect", today_str,
+                    status="skip", message="no data",
+                )
+                return
+
+            # DB 저장
+            self.db.save_eia_inventory(data)
+
+            # 분석
+            analysis = analyze_eia_inventory(data)
+
+            self.db.upsert_job_run(
+                "eia_inventory_collect", today_str,
+                status="success",
+                message=f"crude={data.get('crude_inventory', 0)/1000:.1f}M SPR={data.get('spr_inventory', 0)/1000:.1f}M",
+            )
+
+            # 학습 이벤트 저장
+            import json as _json
+            self.db.save_learning_event(
+                event_type="eia_inventory_update",
+                description=f"EIA 재고: 상업 {data.get('crude_inventory', 0)/1000:.1f}M bbl, SPR {data.get('spr_inventory', 0)/1000:.1f}M bbl",
+                data_json=data.get("data_json", "{}"),
+                impact_summary=data.get("signal", ""),
+            )
+
+            # SPR 대규모 방출 시 긴급 알림
+            signal = data.get("signal", "")
+            if "SPR 대규모 방출" in signal and self.chat_id:
+                from kstock.ingest.eia_inventory import format_eia_inventory
+                msg = format_eia_inventory(analysis)
+                try:
+                    await context.bot.send_message(chat_id=self.chat_id, text=msg)
+                except Exception:
+                    pass
+
+            logger.info("EIA inventory collect: %s", signal[:100] if signal else "neutral")
+
+        except Exception as e:
+            logger.error("EIA inventory collect failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "eia_inventory_collect", today_str,
+                status="error", message=str(e)[:200],
+            )
+
+    async def job_options_flow_collect(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """평일 16:35: KRX KOSPI200 옵션 PCR 수집."""
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        trade_date = datetime.now(KST).strftime("%Y%m%d")
+        try:
+            from kstock.ingest.options_flow import (
+                fetch_krx_options_daily,
+                analyze_options_flow,
+            )
+
+            current = fetch_krx_options_daily(trade_date)
+            if not current:
+                self.db.upsert_job_run(
+                    "options_flow_collect", today_str,
+                    status="skip", message="no data",
+                )
+                return
+
+            # DB 저장
+            self.db.save_options_flow(current)
+
+            # 분석
+            previous = self.db.get_latest_options_flow(days=5)
+            analysis = analyze_options_flow(current, previous)
+
+            self.db.upsert_job_run(
+                "options_flow_collect", today_str,
+                status="success",
+                message=f"PCR(vol)={current.get('pcr_volume', 0):.3f}",
+            )
+
+            # 학습 이벤트 저장
+            import json as _json
+            self.db.save_learning_event(
+                event_type="options_flow_update",
+                description=f"옵션 PCR 수집: PCR(vol)={current.get('pcr_volume', 0):.3f}, PCR(oi)={current.get('pcr_oi', 0):.3f}",
+                data_json=_json.dumps(current, ensure_ascii=False, default=str),
+                impact_summary=analysis.get("signal", ""),
+            )
+
+            # 경고 시그널 알림
+            warning = analysis.get("warning", "")
+            if warning and self.chat_id:
+                from kstock.ingest.options_flow import format_options_flow
+                msg = format_options_flow(analysis)
+                try:
+                    await context.bot.send_message(chat_id=self.chat_id, text=msg)
+                except Exception:
+                    pass
+
+            logger.info("Options flow collect: %s", analysis.get("signal", ""))
+
+        except Exception as e:
+            logger.error("Options flow collect failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "options_flow_collect", today_str,
+                status="error", message=str(e)[:200],
+            )
+
+    async def job_youtube_weekly_synthesis(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """토요일 09:00: 주간 YouTube 인텔리전스 합성 (Gemini 2.0 Pro).
+
+        7일간 수집된 YouTube 분석 전체를 Gemini에 전달하여
+        크로스 패턴, 합의/갈등 의견, 핵심 종목/섹터 추출.
+        """
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.ingest.global_news import youtube_weekly_synthesis
+
+            result = await youtube_weekly_synthesis(
+                db=self.db,
+                ai_router=getattr(self, "ai_router", None),
+            )
+
+            synthesis = result.get("synthesis", "")
+            self.db.upsert_job_run(
+                "youtube_weekly_synthesis", today_str,
+                status="success" if synthesis else "skip",
+                message=f"videos:{result.get('video_count', 0)} themes:{len(result.get('consensus_themes', []))}",
+            )
+
+            # 텔레그램 알림
+            if self.chat_id and synthesis:
+                consensus = result.get("consensus_themes", [])
+                contrarian = result.get("contrarian_views", [])
+                market = result.get("market_consensus", "")
+
+                lines = ["📊 주간 YouTube 종합 분석\n"]
+                lines.append(synthesis[:500])
+                if consensus:
+                    lines.append("\n✅ 합의 주제:")
+                    for c in consensus[:5]:
+                        lines.append(f"  • {c}")
+                if contrarian:
+                    lines.append("\n⚡ 소수/반대 의견:")
+                    for v in contrarian[:3]:
+                        lines.append(f"  • {v}")
+                if market:
+                    lines.append(f"\n🎯 시장 센티먼트: {market}")
+
+                try:
+                    await context.bot.send_message(
+                        chat_id=self.chat_id, text="\n".join(lines),
+                    )
+                except Exception:
+                    pass
+
+            logger.info("YouTube weekly synthesis: %s", synthesis[:100] if synthesis else "empty")
+
+        except Exception as e:
+            logger.error("YouTube weekly synthesis job failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "youtube_weekly_synthesis", today_str,
+                status="error", message=str(e)[:200],
+            )
+
     async def job_weekly_learning(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Weekly learning report - runs Saturday 09:00 KST."""
         if not self.chat_id:

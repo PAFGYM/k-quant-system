@@ -1332,6 +1332,45 @@ CREATE TABLE IF NOT EXISTS learning_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_learning_history_date ON learning_history(date);
+
+-- v10.5: 옵션 PCR (Put/Call Ratio) 데이터
+CREATE TABLE IF NOT EXISTS options_flow (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    date                TEXT    NOT NULL,
+    call_volume         INTEGER DEFAULT 0,
+    put_volume          INTEGER DEFAULT 0,
+    call_oi             INTEGER DEFAULT 0,
+    put_oi              INTEGER DEFAULT 0,
+    pcr_volume          REAL    DEFAULT 0,
+    pcr_oi              REAL    DEFAULT 0,
+    max_pain            REAL    DEFAULT 0,
+    call_iv_avg         REAL    DEFAULT 0,
+    put_iv_avg          REAL    DEFAULT 0,
+    data_json           TEXT    DEFAULT '{}',
+    created_at          TEXT    DEFAULT (datetime('now')),
+    UNIQUE(date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_options_flow_date ON options_flow(date);
+
+-- v10.5: EIA 원유재고 + SPR 비축유
+CREATE TABLE IF NOT EXISTS eia_inventory (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    date                TEXT    NOT NULL,
+    report_date         TEXT    NOT NULL,
+    crude_inventory     REAL    DEFAULT 0,
+    crude_change        REAL    DEFAULT 0,
+    spr_inventory       REAL    DEFAULT 0,
+    spr_change          REAL    DEFAULT 0,
+    five_year_avg       REAL    DEFAULT 0,
+    deviation_pct       REAL    DEFAULT 0,
+    signal              TEXT    DEFAULT '',
+    data_json           TEXT    DEFAULT '{}',
+    created_at          TEXT    DEFAULT (datetime('now')),
+    UNIQUE(date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_eia_inventory_date ON eia_inventory(date);
 """
 
 

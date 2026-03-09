@@ -35,6 +35,14 @@ _TRACKED_ETFS = {
     "114800": {"name": "KODEX 인버스", "type": "inverse"},
     # 대표 ETF
     "069500": {"name": "KODEX 200", "type": "index"},
+    # --- KOSDAQ ---
+    # KOSDAQ 대표
+    "229200": {"name": "KODEX KOSDAQ150", "type": "kosdaq_index"},
+    # KOSDAQ 레버리지
+    "233740": {"name": "KODEX KOSDAQ150레버리지", "type": "kosdaq_leverage"},
+    # KOSDAQ 인버스
+    "251340": {"name": "KODEX KOSDAQ150인버스", "type": "kosdaq_inverse"},
+    "278530": {"name": "KODEX KOSDAQ150선물인버스2X", "type": "kosdaq_inverse"},
 }
 
 
@@ -137,13 +145,20 @@ def analyze_etf_flow(
     if not current:
         return {"signal": "데이터 없음", "summary": "ETF 데이터 없음"}
 
-    # 유형별 시총 합산
+    # 유형별 시총 합산 (KOSPI)
     leverage_total = sum(e.market_cap for e in current if e.etf_type == "leverage")
     inverse_total = sum(e.market_cap for e in current if e.etf_type == "inverse")
+
+    # KOSDAQ 유형별 시총 합산
+    kq_lev_total = sum(e.market_cap for e in current if e.etf_type == "kosdaq_leverage")
+    kq_inv_total = sum(e.market_cap for e in current if e.etf_type == "kosdaq_inverse")
 
     # 이전 데이터와 비교 (시총 변화 = 설정/해지 프록시)
     lev_change_pct = 0.0
     inv_change_pct = 0.0
+
+    kq_lev_change_pct = 0.0
+    kq_inv_change_pct = 0.0
 
     if previous:
         prev_map = {d["code"]: d for d in previous}
@@ -153,10 +168,20 @@ def analyze_etf_flow(
         prev_inv = sum(
             d.get("market_cap", 0) for d in previous if d.get("etf_type") == "inverse"
         )
+        prev_kq_lev = sum(
+            d.get("market_cap", 0) for d in previous if d.get("etf_type") == "kosdaq_leverage"
+        )
+        prev_kq_inv = sum(
+            d.get("market_cap", 0) for d in previous if d.get("etf_type") == "kosdaq_inverse"
+        )
         if prev_lev > 0:
             lev_change_pct = (leverage_total - prev_lev) / prev_lev * 100
         if prev_inv > 0:
             inv_change_pct = (inverse_total - prev_inv) / prev_inv * 100
+        if prev_kq_lev > 0:
+            kq_lev_change_pct = (kq_lev_total - prev_kq_lev) / prev_kq_lev * 100
+        if prev_kq_inv > 0:
+            kq_inv_change_pct = (kq_inv_total - prev_kq_inv) / prev_kq_inv * 100
 
     # 신호 판단
     signal = "중립"
@@ -180,8 +205,28 @@ def analyze_etf_flow(
             signal = "공포 증가"
         warning += (" | " if warning else "") + "인버스 ETF 증가 → 시장 불안 확대"
 
-    # 레버리지/인버스 비율
+    # KOSDAQ 시그널
+    kq_signal = "중립"
+    if kq_lev_change_pct >= 10:
+        kq_signal = "KOSDAQ 레버리지 과열"
+        warning += (" | " if warning else "") + "KOSDAQ 레버리지 ETF 급증! 개인 투기 과열"
+    elif kq_lev_change_pct >= 5:
+        kq_signal = "KOSDAQ 레버리지 주의"
+        warning += (" | " if warning else "") + "KOSDAQ 레버리지 ETF 증가 → 투기 징후"
+
+    if kq_inv_change_pct >= 15:
+        if kq_signal == "중립":
+            kq_signal = "KOSDAQ 극공포"
+        warning += (" | " if warning else "") + "KOSDAQ 인버스 급증 → 극공포 → 역발상 기회"
+    elif kq_inv_change_pct >= 8:
+        if kq_signal == "중립":
+            kq_signal = "KOSDAQ 공포 증가"
+        warning += (" | " if warning else "") + "KOSDAQ 인버스 증가 → 불안 확대"
+
+    # 레버리지/인버스 비율 (KOSPI)
     li_ratio = leverage_total / inverse_total if inverse_total > 0 else 0
+    # KOSDAQ 레버리지/인버스 비율
+    kq_li_ratio = kq_lev_total / kq_inv_total if kq_inv_total > 0 else 0
 
     details = []
     for e in current:
@@ -195,23 +240,30 @@ def analyze_etf_flow(
 
     lev_tril = leverage_total / 10000  # 억 → 조
     inv_tril = inverse_total / 10000
+    kq_lev_tril = kq_lev_total / 10000
+    kq_inv_tril = kq_inv_total / 10000
 
     summary_parts = [
-        f"레버리지 ETF: {lev_tril:.1f}조 ({lev_change_pct:+.1f}%)",
-        f"인버스 ETF: {inv_tril:.1f}조 ({inv_change_pct:+.1f}%)",
-        f"레버/인버스 비율: {li_ratio:.1f}",
+        f"[KOSPI] 레버리지: {lev_tril:.1f}조({lev_change_pct:+.1f}%) | 인버스: {inv_tril:.1f}조({inv_change_pct:+.1f}%) | 비율: {li_ratio:.1f}",
+        f"[KOSDAQ] 레버리지: {kq_lev_tril:.2f}조({kq_lev_change_pct:+.1f}%) | 인버스: {kq_inv_tril:.2f}조({kq_inv_change_pct:+.1f}%) | 비율: {kq_li_ratio:.1f}",
     ]
     if warning:
         summary_parts.append(f"⚠️ {warning}")
 
     return {
         "signal": signal,
+        "kosdaq_signal": kq_signal,
         "summary": "\n".join(summary_parts),
         "leverage_total": round(leverage_total, 0),
         "inverse_total": round(inverse_total, 0),
         "leverage_change_pct": round(lev_change_pct, 1),
         "inverse_change_pct": round(inv_change_pct, 1),
         "li_ratio": round(li_ratio, 1),
+        "kq_leverage_total": round(kq_lev_total, 0),
+        "kq_inverse_total": round(kq_inv_total, 0),
+        "kq_leverage_change_pct": round(kq_lev_change_pct, 1),
+        "kq_inverse_change_pct": round(kq_inv_change_pct, 1),
+        "kq_li_ratio": round(kq_li_ratio, 1),
         "warning": warning,
         "details": details,
     }
@@ -228,17 +280,34 @@ def format_etf_flow(analysis: dict) -> str:
         "극공포 (역발상 기회)": "💀",
     }.get(signal, "⚪")
 
+    kq_signal = analysis.get("kosdaq_signal", "중립")
+    kq_emoji = {
+        "중립": "⚪",
+        "KOSDAQ 레버리지 주의": "🟡",
+        "KOSDAQ 레버리지 과열": "🔴",
+        "KOSDAQ 공포 증가": "🟠",
+        "KOSDAQ 극공포": "💀",
+    }.get(kq_signal, "⚪")
+
     lev = analysis.get("leverage_total", 0) / 10000
     inv = analysis.get("inverse_total", 0) / 10000
     lev_chg = analysis.get("leverage_change_pct", 0)
     inv_chg = analysis.get("inverse_change_pct", 0)
     li_ratio = analysis.get("li_ratio", 0)
+
+    kq_lev = analysis.get("kq_leverage_total", 0) / 10000
+    kq_inv = analysis.get("kq_inverse_total", 0) / 10000
+    kq_lev_chg = analysis.get("kq_leverage_change_pct", 0)
+    kq_inv_chg = analysis.get("kq_inverse_change_pct", 0)
+    kq_li_ratio = analysis.get("kq_li_ratio", 0)
+
     warning = analysis.get("warning", "")
 
     lines = [
-        f"{signal_emoji} ETF 자금흐름: {signal}",
-        f"  레버리지: {lev:.1f}조({lev_chg:+.1f}%) | 인버스: {inv:.1f}조({inv_chg:+.1f}%)",
-        f"  레버/인버스 비율: {li_ratio:.1f}",
+        f"{signal_emoji} KOSPI ETF: {signal}",
+        f"  레버리지: {lev:.1f}조({lev_chg:+.1f}%) | 인버스: {inv:.1f}조({inv_chg:+.1f}%) | 비율: {li_ratio:.1f}",
+        f"{kq_emoji} KOSDAQ ETF: {kq_signal}",
+        f"  레버리지: {kq_lev:.2f}조({kq_lev_chg:+.1f}%) | 인버스: {kq_inv:.2f}조({kq_inv_chg:+.1f}%) | 비율: {kq_li_ratio:.1f}",
     ]
     if warning:
         lines.append(f"  ⚠️ {warning}")

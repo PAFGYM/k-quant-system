@@ -96,6 +96,7 @@ class CoreHandlersMixin:
         app.add_handler(CommandHandler("balance", self.cmd_balance))
         app.add_handler(CommandHandler("admin", self.cmd_admin))
         app.add_handler(CommandHandler("claude", self.cmd_claude))
+        app.add_handler(CommandHandler("learning", self.cmd_learning))
         # v3.0: screenshot image handler
         app.add_handler(
             MessageHandler(filters.PHOTO, self.handle_screenshot)
@@ -136,6 +137,7 @@ class CoreHandlersMixin:
             BotCommand("register", "매수 등록"),
             BotCommand("balance", "잔고 조회"),
             BotCommand("claude", "Claude Code 원격 실행"),
+            BotCommand("learning", "학습 현황 대시보드"),
         ])
 
     async def _post_shutdown(self, app: Application) -> None:
@@ -214,6 +216,13 @@ class CoreHandlersMixin:
             time=dt_time(hour=9, minute=0, tzinfo=KST),
             days=(5,),
             name="weekly_learning",
+        )
+        # v10.5: YouTube 주간 합성 (토요일 09:00, Gemini 2.0 Pro)
+        jq.run_daily(
+            self.job_youtube_weekly_synthesis,
+            time=dt_time(hour=9, minute=0, tzinfo=KST),
+            days=(5,),
+            name="youtube_weekly_synthesis",
         )
         # v3.0: screenshot reminder (Mon, Fri 08:00)
         jq.run_daily(
@@ -309,6 +318,20 @@ class CoreHandlersMixin:
             time=dt_time(hour=16, minute=25, tzinfo=KST),
             days=(0, 1, 2, 3, 4),
             name="etf_flow_collect",
+        )
+        # v10.5: EIA 원유재고 수집 (수요일 23:00)
+        jq.run_daily(
+            self.job_eia_inventory_collect,
+            time=dt_time(hour=23, minute=0, tzinfo=KST),
+            days=(2,),  # 수요일
+            name="eia_inventory_collect",
+        )
+        # v10.5: 옵션 PCR 수집 (16:35, 평일)
+        jq.run_daily(
+            self.job_options_flow_collect,
+            time=dt_time(hour=16, minute=35, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="options_flow_collect",
         )
         # v10.2: 유가 분석 (07:10 매일 — 해외 원유시장은 평일/주말 무관)
         jq.run_daily(

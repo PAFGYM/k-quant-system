@@ -1611,6 +1611,172 @@ async def summarize_transcript(
     return result.get("raw_summary", "") or result.get("full_summary", "")[:200]
 
 
+async def youtube_weekly_synthesis(db=None, ai_router=None) -> dict:
+    """7일간 YouTube 인텔리전스를 Gemini로 종합 합성.
+
+    NotebookLM 대체: 크로스 영상 패턴, 합의/갈등 의견, 핵심 인사이트 추출.
+
+    Returns:
+        dict with keys: synthesis, consensus_themes, contrarian_views,
+        top_tickers, top_sectors, market_consensus, created_at
+    """
+    import json as _json
+    from datetime import datetime
+
+    empty = {
+        "synthesis": "", "consensus_themes": [], "contrarian_views": [],
+        "top_tickers": [], "top_sectors": [], "market_consensus": "",
+        "created_at": datetime.now().isoformat(),
+    }
+
+    if not db:
+        logger.warning("youtube_weekly_synthesis: no DB provided")
+        return empty
+
+    # 7일간 YouTube 인텔리전스 수집
+    intel = db.get_recent_youtube_intelligence(hours=168, limit=100)
+    if not intel or len(intel) < 3:
+        logger.info("youtube_weekly_synthesis: insufficient data (%d items)", len(intel))
+        empty["synthesis"] = f"YouTube 인텔리전스 부족 ({len(intel)}건). 최소 3건 필요."
+        return empty
+
+    # 인텔리전스를 텍스트로 조합
+    intel_texts = []
+    for i, item in enumerate(intel, 1):
+        parts = [f"[영상 {i}] 채널: {item.get('source', '?')} | 제목: {item.get('title', '?')}"]
+        if item.get("mentioned_tickers"):
+            tickers = item["mentioned_tickers"]
+            if isinstance(tickers, str):
+                try:
+                    tickers = _json.loads(tickers)
+                except Exception:
+                    tickers = [tickers]
+            parts.append(f"  언급 종목: {', '.join(str(t) for t in tickers)}")
+        if item.get("mentioned_sectors"):
+            sectors = item["mentioned_sectors"]
+            if isinstance(sectors, str):
+                try:
+                    sectors = _json.loads(sectors)
+                except Exception:
+                    sectors = [sectors]
+            parts.append(f"  언급 섹터: {', '.join(str(s) for s in sectors)}")
+        if item.get("market_outlook"):
+            parts.append(f"  시장 전망: {item['market_outlook']}")
+        if item.get("investment_implications"):
+            impl = item["investment_implications"]
+            if len(impl) > 300:
+                impl = impl[:300] + "..."
+            parts.append(f"  투자 시사점: {impl}")
+        if item.get("key_numbers"):
+            nums = item["key_numbers"]
+            if isinstance(nums, str):
+                try:
+                    nums = _json.loads(nums)
+                except Exception:
+                    nums = [nums]
+            parts.append(f"  핵심 수치: {', '.join(str(n) for n in nums[:5])}")
+        intel_texts.append("\n".join(parts))
+
+    combined_text = "\n\n".join(intel_texts)
+
+    # Gemini에 합성 요청
+    system_prompt = (
+        "당신은 한국 주식시장 전문 애널리스트입니다. "
+        "여러 투자 유튜버의 분석을 종합하여 크로스 패턴을 추출합니다."
+    )
+    prompt = (
+        f"아래는 지난 7일간 한국 투자 유튜브 {len(intel)}개 영상의 분석 결과입니다.\n\n"
+        f"{combined_text}\n\n"
+        "위 영상들을 종합 분석하여 다음을 JSON으로 반환하세요:\n"
+        "{\n"
+        '  "synthesis": "전체 종합 분석 (3-5문장)",\n'
+        '  "consensus_themes": ["다수 유튜버가 동의하는 주제 (최대 5개)"],\n'
+        '  "contrarian_views": ["소수 의견이나 반대 시각 (최대 3개)"],\n'
+        '  "top_tickers": [{"ticker": "종목명", "sentiment": "긍정/부정/중립", "mentions": 횟수}],\n'
+        '  "top_sectors": [{"sector": "섹터명", "outlook": "긍정/부정/중립"}],\n'
+        '  "market_consensus": "전체 시장 센티먼트 요약 (1문장)"\n'
+        "}\n"
+        "JSON만 반환하세요."
+    )
+
+    try:
+        if ai_router:
+            result_text = await ai_router.analyze(
+                "youtube_synthesis",
+                prompt,
+                system=system_prompt,
+                max_tokens=2000,
+                temperature=0.3,
+            )
+        else:
+            # Direct Gemini call fallback
+            import httpx
+            gemini_key = os.getenv("GEMINI_API_KEY", "")
+            if not gemini_key:
+                logger.warning("youtube_weekly_synthesis: no GEMINI_API_KEY")
+                empty["synthesis"] = "Gemini API 키 없음"
+                return empty
+
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro"
+                f":generateContent?key={gemini_key}"
+            )
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": f"{system_prompt}\n\n{prompt}"}]}],
+                "generationConfig": {"maxOutputTokens": 2000, "temperature": 0.3},
+            }
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code != 200:
+                    logger.error("Gemini synthesis error: %s", resp.text[:300])
+                    empty["synthesis"] = f"Gemini API 오류 ({resp.status_code})"
+                    return empty
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                result_text = ""
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        result_text = parts[0].get("text", "")
+
+        if not result_text:
+            empty["synthesis"] = "AI 응답 없음"
+            return empty
+
+        # JSON 파싱
+        clean = result_text.strip()
+        if clean.startswith("```"):
+            clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+        parsed = _json.loads(clean)
+        parsed["created_at"] = datetime.now().isoformat()
+        parsed["video_count"] = len(intel)
+
+        # DB에 학습 이벤트 저장
+        db.save_learning_event(
+            event_type="youtube_weekly_synthesis",
+            description=f"주간 YouTube 합성: {len(intel)}건 영상 → Gemini 종합 분석",
+            data_json=_json.dumps(parsed, ensure_ascii=False, default=str),
+            impact_summary=parsed.get("market_consensus", ""),
+        )
+
+        logger.info(
+            "youtube_weekly_synthesis: %d videos → synthesis complete", len(intel)
+        )
+        return parsed
+
+    except _json.JSONDecodeError:
+        logger.warning("youtube_weekly_synthesis: JSON parse failed, using raw text")
+        result = dict(empty)
+        result["synthesis"] = result_text[:500] if result_text else "파싱 실패"
+        result["created_at"] = datetime.now().isoformat()
+        return result
+    except Exception as e:
+        logger.error("youtube_weekly_synthesis error: %s", e, exc_info=True)
+        empty["synthesis"] = f"합성 오류: {e}"
+        return empty
+
+
 async def enrich_youtube_summaries(
     items: list[NewsItem],
     max_summaries: int = 15,

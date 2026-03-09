@@ -68,6 +68,7 @@ SECTOR_BETA: Dict[str, Dict[str, float]] = {
         "nasdaq": 0.85,  # NASDAQ와 높은 상관
         "usdjpy": -0.3,  # 엔화 약세 → 일본 경쟁사 유리 → 한국 불리
         "dxy": -0.2,
+        "taiwan": 0.4,  # v10.5: 한국-대만 반도체 상관
     },
     "자동차": {
         "sp500": 0.5,
@@ -155,10 +156,16 @@ class CrossMarketSnapshot:
     gold: float = 2000.0
     gold_change_pct: float = 0.0
     copper_change_pct: float = 0.0
+    # FX extended
+    usdjpy: float = 150.0
+    usdjpy_change_pct: float = 0.0
     # Asian markets
     nikkei_change_pct: float = 0.0
     shanghai_change_pct: float = 0.0
     hsi_change_pct: float = 0.0
+    taiwan_change_pct: float = 0.0  # v10.5: TWII
+    # Options PCR (v10.5)
+    pcr_volume: float = 0.0
     # Korean (previous close)
     kospi_prev: float = 0.0
     kosdaq_prev: float = 0.0
@@ -328,10 +335,15 @@ def build_snapshot(
     snap.gold_change_pct = _safe_pct_change(data.get("gold"))
     snap.copper_change_pct = _safe_pct_change(data.get("copper"))
 
+    # FX extended (v10.5)
+    snap.usdjpy = _safe_last(data.get("usdjpy"), 150.0)
+    snap.usdjpy_change_pct = _safe_pct_change(data.get("usdjpy"))
+
     # Asian markets
     snap.nikkei_change_pct = _safe_pct_change(data.get("nikkei"))
     snap.shanghai_change_pct = _safe_pct_change(data.get("shanghai"))
     snap.hsi_change_pct = _safe_pct_change(data.get("hsi"))
+    snap.taiwan_change_pct = _safe_pct_change(data.get("taiwan"))  # v10.5
 
     # Korean (previous close)
     snap.kospi_prev = _safe_last(data.get("kospi"))
@@ -456,6 +468,10 @@ def _compute_asia_spillover(snap: CrossMarketSnapshot) -> float:
     if abs(china_avg) > 0.5:
         score += china_avg * 0.2
 
+    # v10.5: Taiwan TWII — 반도체 동조
+    if abs(snap.taiwan_change_pct) > 0.5:
+        score += snap.taiwan_change_pct * 0.15
+
     return max(-2, min(2, score))
 
 
@@ -471,8 +487,9 @@ def _compute_sector_impacts(snap: CrossMarketSnapshot) -> Dict[str, float]:
         "wti": snap.wti_change_pct,
         "gold": snap.gold_change_pct,
         "copper": snap.copper_change_pct,
-        "usdjpy": 0.0,  # Not tracked in snapshot, keep neutral
+        "usdjpy": snap.usdjpy_change_pct,  # v10.5: activated
         "shanghai": snap.shanghai_change_pct,
+        "taiwan": snap.taiwan_change_pct,  # v10.5: TWII
     }
 
     sector_scores: Dict[str, float] = {}
@@ -695,7 +712,7 @@ def format_impact_report(outlook: MarketOutlook) -> str:
     lines.append("[글로벌 시장]")
     lines.append(f"S&P500: {snap.sp500_change_pct:+.1f}% | NASDAQ: {snap.nasdaq_change_pct:+.1f}%")
     lines.append(f"VIX: {snap.vix:.1f} ({snap.vix_change_pct:+.1f}%) [{snap.vix_regime}]")
-    lines.append(f"USD/KRW: {snap.usdkrw:.0f} ({snap.usdkrw_change_pct:+.2f}%)")
+    lines.append(f"USD/KRW: {snap.usdkrw:.0f} ({snap.usdkrw_change_pct:+.2f}%) | USD/JPY: {snap.usdjpy:.1f} ({snap.usdjpy_change_pct:+.2f}%)")
     lines.append(f"WTI: ${snap.wti:.1f} ({snap.wti_change_pct:+.1f}%) | Gold: ${snap.gold:.0f} ({snap.gold_change_pct:+.1f}%)")
     lines.append(f"미국채 10Y: {snap.us10y_yield:.2f}% ({snap.us10y_change_bp:+.0f}bp)")
     lines.append("")
@@ -705,7 +722,8 @@ def format_impact_report(outlook: MarketOutlook) -> str:
     lines.append(
         f"닛케이: {snap.nikkei_change_pct:+.1f}% | "
         f"상해: {snap.shanghai_change_pct:+.1f}% | "
-        f"항셍: {snap.hsi_change_pct:+.1f}%"
+        f"항셍: {snap.hsi_change_pct:+.1f}% | "
+        f"대만: {snap.taiwan_change_pct:+.1f}%"
     )
     lines.append("")
 
@@ -749,7 +767,8 @@ def format_impact_context_for_ai(outlook: MarketOutlook) -> str:
         f"크로스마켓 종합점수: {imp.composite_score:+.1f}/10 ({imp.direction}, 신뢰도 {imp.confidence:.0%})",
         f"예상 KOSPI 시가 갭: {imp.expected_kospi_gap_pct:+.2f}%",
         f"S&P500: {snap.sp500_change_pct:+.1f}%, NASDAQ: {snap.nasdaq_change_pct:+.1f}%",
-        f"VIX: {snap.vix:.1f} ({snap.vix_regime}), USD/KRW: {snap.usdkrw:.0f} ({snap.usdkrw_change_pct:+.2f}%)",
+        f"VIX: {snap.vix:.1f} ({snap.vix_regime}), USD/KRW: {snap.usdkrw:.0f} ({snap.usdkrw_change_pct:+.2f}%), USD/JPY: {snap.usdjpy:.1f}",
+        f"대만TWII: {snap.taiwan_change_pct:+.1f}%, 닛케이: {snap.nikkei_change_pct:+.1f}%",
     ]
 
     if outlook.key_drivers:
