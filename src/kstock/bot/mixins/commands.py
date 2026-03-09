@@ -286,9 +286,11 @@ class CommandsMixin:
             ml_bonus_val = 0
             ml_probability = 0.5  # neutral default
             _mc = ml_market_cache or {}
-            if HAS_ML and self._ml_model:
+            # v10.3: 피처 빌드는 모델 유무와 무관하게 항상 실행 (학습 데이터 축적)
+            _features_built = None
+            if HAS_ML:
                 try:
-                    features = build_features(
+                    _features_built = build_features(
                         tech, info, macro, flow, policy_bonus=policy_bonus,
                         korea_flow=_mc,
                         sentiment_data={
@@ -303,20 +305,29 @@ class CommandsMixin:
                         short_cover_pressure=_short_cover_pressure,
                         foreign_flow_type_encoded=_foreign_flow_type,
                     )
-                    ml_pred = predict(features, self._ml_model)
-                    ml_bonus_val = get_ml_bonus(ml_pred.probability)
-                    ml_probability = ml_pred.probability
-
-                    # v10.1: 피처를 feature_store에 축적 (학습 데이터)
+                    # 피처를 feature_store에 축적 (학습 데이터)
                     try:
                         from kstock.ml.feature_store import FeatureStore
                         from kstock.ml.predictor import persist_features
                         _fs = FeatureStore()
-                        persist_features(_fs, ticker, _today(), features)
+                        persist_features(_fs, ticker, _today(), _features_built)
                     except Exception:
                         logger.debug("feature persist failed: %s", ticker, exc_info=True)
+
+                    # ML 예측 (학습된 모델이 있을 때만)
+                    if self._ml_model:
+                        ml_pred = predict(_features_built, self._ml_model)
+                        ml_bonus_val = get_ml_bonus(ml_pred.probability)
+                        ml_probability = ml_pred.probability
+                        # 예측 결과 DB 로깅
+                        try:
+                            import json as _json_ml
+                            shap_str = _json_ml.dumps(ml_pred.shap_top3)
+                            self.db.add_prediction(ticker, _today(), ml_pred.probability, shap_str)
+                        except Exception:
+                            logger.debug("ml prediction log failed: %s", ticker, exc_info=True)
                 except Exception:
-                    logger.debug("_run_scan_for_stock ML prediction failed for %s", ticker, exc_info=True)
+                    logger.debug("_run_scan_for_stock ML failed for %s", ticker, exc_info=True)
 
             # v3.0: sentiment bonus
             sentiment_bonus = 0

@@ -80,6 +80,7 @@ class AutoTrainResult:
     optimal_weights: tuple[float, float, float] = (0.35, 0.30, 0.35)
     duration_sec: float = 0.0
     message: str = ""
+    trained_model: dict | None = None  # v10.3: {"lgb": model, "xgb": model}
 
 
 # ── 성능 모니터링 ────────────────────────────────────────
@@ -444,16 +445,23 @@ class AutoTrainer:
             self._history.append(history)
             self._save_history()
 
+            # v10.3: 모델 디스크 저장
+            trained_model = {"lgb": lgb_model, "xgb": xgb_model}
+            try:
+                save_ensemble_model(trained_model)
+            except Exception as e:
+                logger.debug("Ensemble model save failed: %s", e)
+
             # DB에 성능 기록
             if self.db:
                 try:
                     self.db.add_ml_performance(
-                        model_name="ensemble_v4",
-                        train_date=date.today().isoformat(),
-                        train_auc=train_auc,
-                        val_auc=val_auc,
-                        samples=len(X),
-                        weights=json.dumps(list(optimal_weights)),
+                        date_str=date.today().isoformat(),
+                        model_version="ensemble_v4",
+                        train_score=train_auc,
+                        val_score=val_auc,
+                        overfit_gap=metrics.get("auc_gap", 0),
+                        features_used=len(FEATURE_NAMES),
                     )
                 except Exception as e:
                     logger.debug("run_auto_train DB ml_performance save failed: %s", e)
@@ -482,6 +490,7 @@ class AutoTrainer:
                 optimal_weights=optimal_weights,
                 duration_sec=round(duration, 1),
                 message=message,
+                trained_model=trained_model,
             )
 
         except Exception as e:
@@ -872,3 +881,59 @@ def _generate_synthetic_training_data(n: int) -> list[dict]:
         data.append(features)
 
     return data
+
+
+# ── v10.3: 모델 디스크 저장/로드 ──────────────────────────
+
+LGB_MODEL_PATH = MODEL_DIR / "lgb_model.txt"
+XGB_MODEL_PATH = MODEL_DIR / "xgb_model.json"
+
+
+def save_ensemble_model(model: dict) -> None:
+    """LGB/XGB 모델을 디스크에 저장."""
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+    lgb_model = model.get("lgb")
+    xgb_model = model.get("xgb")
+
+    if lgb_model is not None:
+        try:
+            lgb_model.save_model(str(LGB_MODEL_PATH))
+            logger.info("LGB model saved to %s", LGB_MODEL_PATH)
+        except Exception as e:
+            logger.debug("LGB save failed: %s", e)
+
+    if xgb_model is not None:
+        try:
+            xgb_model.save_model(str(XGB_MODEL_PATH))
+            logger.info("XGB model saved to %s", XGB_MODEL_PATH)
+        except Exception as e:
+            logger.debug("XGB save failed: %s", e)
+
+
+def load_ensemble_model() -> dict | None:
+    """디스크에서 LGB/XGB 모델 로드. 없으면 None."""
+    model: dict = {"lgb": None, "xgb": None}
+    loaded = False
+
+    if LGB_MODEL_PATH.exists():
+        try:
+            import lightgbm as _lgb
+            model["lgb"] = _lgb.Booster(model_file=str(LGB_MODEL_PATH))
+            loaded = True
+            logger.info("LGB model loaded from %s", LGB_MODEL_PATH)
+        except Exception as e:
+            logger.debug("LGB load failed: %s", e)
+
+    if XGB_MODEL_PATH.exists():
+        try:
+            from xgboost import XGBClassifier as _XGB
+            xgb = _XGB()
+            xgb.load_model(str(XGB_MODEL_PATH))
+            model["xgb"] = xgb
+            loaded = True
+            logger.info("XGB model loaded from %s", XGB_MODEL_PATH)
+        except Exception as e:
+            logger.debug("XGB load failed: %s", e)
+
+    return model if loaded else None

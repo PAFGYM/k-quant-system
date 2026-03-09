@@ -45,6 +45,15 @@ class CoreHandlersMixin:
             kis_broker=self.kis_broker, yf_client=self.yf_client, db=self.db,
         )
         self._ml_model: dict | None = None
+        # v10.3: 디스크에서 학습된 모델 로드
+        try:
+            from kstock.ml.auto_trainer import load_ensemble_model
+            loaded = load_ensemble_model()
+            if loaded:
+                self._ml_model = loaded
+                logger.info("ML model loaded from disk at startup")
+        except Exception:
+            logger.debug("ML model disk load skipped", exc_info=True)
         self._sentiment_cache: dict = {}
         # Phase 8: 실시간 시장 감지 + 매도 계획
         self.market_pulse = MarketPulse()

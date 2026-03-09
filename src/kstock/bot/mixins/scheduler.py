@@ -4096,6 +4096,11 @@ class SchedulerMixin:
             # 2. 자동 재학습 실행
             result = await trainer.run_auto_train(trigger=trigger)
 
+            # v10.3: 학습된 모델을 봇 인스턴스에 적용
+            if result.success and result.trained_model:
+                self._ml_model = result.trained_model
+                logger.info("ML model loaded into bot instance after training")
+
             # 3. 결과 알림
             if self.chat_id:
                 msg = result.message or (
