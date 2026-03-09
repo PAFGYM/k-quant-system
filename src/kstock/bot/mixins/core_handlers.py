@@ -316,6 +316,23 @@ class CoreHandlersMixin:
             time=dt_time(hour=7, minute=10, tzinfo=KST),
             name="oil_analysis",
         )
+        # v10.4: 크로스마켓 영향도 분석 (07:15 매일 — 유가 분석 직후)
+        jq.run_daily(
+            self.job_cross_market_analysis,
+            time=dt_time(hour=7, minute=15, tzinfo=KST),
+            name="cross_market_analysis",
+        )
+        # v10.4: YouTube 심화 학습 (08:00 + 20:00 매일 — Whisper 포함)
+        jq.run_daily(
+            self.job_youtube_deep_learning,
+            time=dt_time(hour=8, minute=0, tzinfo=KST),
+            name="youtube_deep_learn_am",
+        )
+        jq.run_daily(
+            self.job_youtube_deep_learning,
+            time=dt_time(hour=20, minute=0, tzinfo=KST),
+            name="youtube_deep_learn_pm",
+        )
         # KIS WebSocket: 장 시작 전 연결 (08:50), 장 종료 후 해제 (15:35)
         jq.run_daily(
             self.job_ws_connect,

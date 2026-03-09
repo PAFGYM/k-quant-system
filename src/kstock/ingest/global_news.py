@@ -7,6 +7,7 @@ v6.0: 초기 버전 — RSS 피드 기반
 v6.1: 위기 감지 + 매크로 선행지표 연동 + 적응형 빈도
 v6.2.2: 영문 뉴스 제목 한글 번역 자동화
 v8.2: YouTube 경제방송 확대 (10채널) + 자막 기반 내용 요약
+v10.4: Whisper 자막 추출 + 심화 YouTube 학습 파이프라인
 """
 from __future__ import annotations
 
@@ -1056,15 +1057,17 @@ def _extract_video_id(url: str) -> str:
 def fetch_transcript(video_id: str, max_chars: int = 8000) -> str:
     """YouTube 자막(transcript) 추출.
 
-    한국어 자막 우선, 영어 순으로 시도.
+    한국어 수동 → 한국어 자동생성 → 영어 수동 → 영어 자동생성 순으로 시도.
     youtube_transcript_api v1.2+ 인스턴스 API 사용.
+
+    v10.4: 자동생성 자막(auto-generated) 명시적 시도 추가.
     """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
 
         api = YouTubeTranscriptApi()
 
-        # 한국어 → 영어 순서로 시도
+        # 1단계: 수동 자막 (ko → en)
         for lang in [["ko"], ["en"]]:
             try:
                 result = api.fetch(video_id, languages=lang)
@@ -1075,11 +1078,350 @@ def fetch_transcript(video_id: str, max_chars: int = 8000) -> str:
             except Exception:
                 continue
 
+        # 2단계: 자동생성 자막 리스트 조회 후 시도
+        try:
+            transcript_list = api.list(video_id)
+            # 자동생성 한국어 → 영어 순
+            for lang_code in ["ko", "en"]:
+                for t in transcript_list:
+                    if hasattr(t, "language_code") and t.language_code == lang_code:
+                        try:
+                            result = t.fetch()
+                            texts = [seg.text for seg in result if hasattr(seg, "text")]
+                            if texts:
+                                full_text = " ".join(texts)
+                                logger.info("Auto-caption found for %s (lang=%s, %d chars)",
+                                            video_id, lang_code, len(full_text))
+                                return full_text[:max_chars]
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+
         return ""
 
     except Exception as e:
         logger.debug("Transcript fetch failed for %s: %s", video_id, e)
         return ""
+
+
+def fetch_video_metadata(video_id: str) -> dict:
+    """YouTube 영상 메타데이터 추출 (제목, 설명, 채널, 해시태그).
+
+    oEmbed API + 페이지 메타태그에서 수집.
+    자막 없는 영상의 폴백 분석에 사용.
+    """
+    import urllib.request
+
+    meta = {"title": "", "description": "", "channel": "", "hashtags": []}
+
+    try:
+        # oEmbed: 제목 + 채널명
+        oembed_url = (
+            f"https://www.youtube.com/oembed?"
+            f"url=https://www.youtube.com/watch?v={video_id}&format=json"
+        )
+        import json as _json
+        req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read())
+            meta["title"] = data.get("title", "")
+            meta["channel"] = data.get("author_name", "")
+    except Exception:
+        pass
+
+    try:
+        # 페이지 메타태그: 설명 + 해시태그
+        page_url = f"https://www.youtube.com/watch?v={video_id}"
+        req = urllib.request.Request(page_url, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept-Language": "ko",
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode("utf-8", errors="replace")[:50000]
+
+        # og:description (가장 풍부한 설명)
+        m = re.search(r'<meta property="og:description" content="([^"]+)"', html)
+        if m:
+            meta["description"] = m.group(1)
+
+        # 해시태그 추출
+        tags = re.findall(r"#(\w+)", meta.get("description", "") + " " + meta.get("title", ""))
+        meta["hashtags"] = list(dict.fromkeys(tags))[:15]
+
+    except Exception:
+        pass
+
+    return meta
+
+
+def fetch_transcript_whisper(video_id: str, max_chars: int = 8000) -> str:
+    """YouTube 음성을 Whisper API로 텍스트 변환 (자막 없는 영상용).
+
+    yt-dlp으로 오디오 추출 → OpenAI Whisper API로 전사.
+    비용: ~$0.006/분, 10분 영상 ≈ $0.06
+
+    Returns:
+        전사된 텍스트 (max_chars까지), 실패시 빈 문자열
+    """
+    import tempfile
+    import subprocess
+
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    if not openai_key:
+        logger.debug("Whisper: OPENAI_API_KEY not set")
+        return ""
+
+    tmp_dir = tempfile.mkdtemp(prefix="kq_whisper_")
+    audio_path = os.path.join(tmp_dir, f"{video_id}.m4a")
+
+    try:
+        # yt-dlp: 오디오 포함 영상 다운로드 (ffmpeg 없이도 동작)
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+        # yt-dlp PATH 설정
+        env = os.environ.copy()
+        yt_dlp_dir = os.path.expanduser("~/Library/Python/3.9/bin")
+        if yt_dlp_dir not in env.get("PATH", ""):
+            env["PATH"] = yt_dlp_dir + ":" + env.get("PATH", "")
+
+        # ffmpeg 유무에 따라 명령어 결정
+        has_ffmpeg = bool(subprocess.run(
+            ["which", "ffmpeg"], capture_output=True, env=env,
+        ).returncode == 0)
+
+        if has_ffmpeg:
+            cmd = [
+                "yt-dlp",
+                "--extract-audio",
+                "--audio-format", "m4a",
+                "--audio-quality", "9",
+                "--max-filesize", "25m",
+                "--download-sections", "*0:00-15:00",
+                "--no-playlist", "--quiet",
+                "-o", audio_path,
+                url,
+            ]
+        else:
+            # ffmpeg 없으면: 오디오+비디오 합본(format 18)을 그대로 다운
+            # Whisper API는 mp4도 지원
+            audio_path = audio_path.replace(".m4a", ".mp4")
+            cmd = [
+                "yt-dlp",
+                "-f", "18",  # 360p mp4 (audio+video, ~5MB/min)
+                "--max-filesize", "25m",
+                "--no-playlist", "--quiet",
+                "-o", audio_path,
+                url,
+            ]
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, env=env,
+        )
+
+        # yt-dlp은 실제 확장자를 바꿀 수 있음
+        actual_path = audio_path
+        if not os.path.exists(audio_path):
+            # .m4a.m4a 등 yt-dlp 확장자 중복 체크
+            for ext in [".m4a", ".webm", ".opus", ".mp3"]:
+                candidate = audio_path.replace(".m4a", ext)
+                if os.path.exists(candidate):
+                    actual_path = candidate
+                    break
+            else:
+                # glob으로 tmp_dir 내 파일 찾기
+                import glob as _glob
+                files = _glob.glob(os.path.join(tmp_dir, f"{video_id}*"))
+                if files:
+                    actual_path = files[0]
+                else:
+                    logger.info("Whisper: yt-dlp no output for %s: %s", video_id, result.stderr[:200])
+                    return ""
+
+        file_size = os.path.getsize(actual_path)
+        if file_size > 25 * 1024 * 1024:
+            logger.info("Whisper: audio too large (%d MB) for %s", file_size // (1024*1024), video_id)
+            return ""
+
+        logger.info("Whisper: transcribing %s (%.1f MB)", video_id, file_size / (1024*1024))
+
+        # OpenAI Whisper API 호출
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_key)
+
+        with open(actual_path, "rb") as f:
+            resp = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=f,
+                language="ko",
+                response_format="text",
+            )
+
+        transcript = str(resp).strip()
+        logger.info("Whisper: %s → %d chars", video_id, len(transcript))
+        return transcript[:max_chars] if transcript else ""
+
+    except subprocess.TimeoutExpired:
+        logger.info("Whisper: yt-dlp timeout for %s", video_id)
+        return ""
+    except Exception as e:
+        logger.info("Whisper transcription failed for %s: %s", video_id, e)
+        return ""
+    finally:
+        # 임시 파일 정리
+        import shutil
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+async def deep_analyze_youtube(
+    video_id: str,
+    title: str,
+    source: str,
+    db=None,
+) -> dict:
+    """YouTube 영상 심화 분석 — 자막 > Whisper > 제목/설명 폴백 체인.
+
+    v10.4: 자막이 없는 영상도 Whisper로 음성 전사하여 분석.
+
+    Returns:
+        structured dict (summarize_transcript_structured 형식)
+    """
+    loop = asyncio.get_event_loop()
+
+    # 1단계: 기존 자막 시도
+    transcript = await loop.run_in_executor(None, fetch_transcript, video_id)
+
+    # 2단계: 자막 없으면 Whisper API
+    whisper_used = False
+    if not transcript:
+        logger.info("Deep YouTube: no subtitle for %s, trying Whisper", video_id)
+        transcript = await loop.run_in_executor(None, fetch_transcript_whisper, video_id)
+        if transcript:
+            whisper_used = True
+            logger.info("Deep YouTube: Whisper success for %s (%d chars)", video_id, len(transcript))
+
+    # 3단계: Whisper도 실패하면 메타데이터 기반 풍부한 폴백
+    if not transcript:
+        logger.info("Deep YouTube: all transcript methods failed for %s, using metadata fallback", video_id)
+        meta = await loop.run_in_executor(None, fetch_video_metadata, video_id)
+        parts = [f"채널: {meta.get('channel', source)}"]
+        parts.append(f"제목: {meta.get('title', '') or title}")
+        if meta.get("description"):
+            parts.append(f"설명: {meta['description'][:1000]}")
+        if meta.get("hashtags"):
+            parts.append(f"해시태그: {', '.join(meta['hashtags'][:10])}")
+        transcript = "\n".join(parts)
+
+    # AI 구조화 분석
+    structured = await summarize_transcript_structured(transcript, title, source)
+
+    # 메타데이터 추가
+    structured["transcript_method"] = (
+        "whisper" if whisper_used else ("subtitle" if len(transcript) > 100 else "title_fallback")
+    )
+    structured["video_id"] = video_id
+
+    # DB 저장 (intelligence + learning event)
+    if db and (structured.get("full_summary") or structured.get("raw_summary")):
+        try:
+            db.save_youtube_intelligence({
+                "video_id": video_id,
+                "source": source,
+                "title": title,
+                "mentioned_tickers": structured.get("mentioned_tickers", []),
+                "mentioned_sectors": structured.get("mentioned_sectors", []),
+                "market_outlook": structured.get("market_outlook", ""),
+                "key_numbers": structured.get("key_numbers", []),
+                "investment_implications": structured.get("investment_implications", ""),
+                "full_summary": structured.get("full_summary", ""),
+                "raw_summary": structured.get("raw_summary", ""),
+                "confidence": structured.get("confidence", 0.0),
+            })
+        except Exception:
+            logger.debug("Deep YouTube: intelligence save failed", exc_info=True)
+
+        # 학습 이력 기록
+        try:
+            import json as _json
+            db.save_learning_event(
+                event_type="youtube_deep_analysis",
+                description=f"[{source}] {title[:60]}",
+                data_json=_json.dumps({
+                    "video_id": video_id,
+                    "method": structured["transcript_method"],
+                    "sectors": structured.get("mentioned_sectors", []),
+                    "outlook": structured.get("market_outlook", ""),
+                    "tickers_count": len(structured.get("mentioned_tickers", [])),
+                }, ensure_ascii=False),
+                impact_summary=structured.get("investment_implications", "")[:200],
+            )
+        except Exception:
+            logger.debug("Deep YouTube: learning event save failed", exc_info=True)
+
+    return structured
+
+
+async def batch_deep_youtube_analysis(
+    db=None,
+    max_videos: int = 10,
+    hours_lookback: int = 24,
+) -> list[dict]:
+    """최근 YouTube 영상들을 배치로 심화 분석.
+
+    스케줄러에서 호출. 이미 처리된 영상은 스킵.
+
+    Returns:
+        분석 결과 리스트
+    """
+    from kstock.ingest.global_news import fetch_global_news
+
+    # YouTube 영상만 수집
+    items = await fetch_global_news(max_per_feed=10)
+    yt_items = [it for it in items if it.video_id]
+
+    if not yt_items:
+        logger.info("batch_deep_youtube: no YouTube items found")
+        return []
+
+    results = []
+    processed = 0
+    skipped = 0
+
+    for item in yt_items:
+        if processed >= max_videos:
+            break
+
+        # 중복 스킵
+        if db:
+            try:
+                if db.check_youtube_processed(item.video_id):
+                    skipped += 1
+                    continue
+            except Exception:
+                pass
+
+        structured = await deep_analyze_youtube(
+            video_id=item.video_id,
+            title=item.title,
+            source=item.source.replace("\U0001f3ac", "").strip(),
+            db=db,
+        )
+
+        if structured.get("full_summary") or structured.get("raw_summary"):
+            results.append(structured)
+            processed += 1
+
+        # API 레이트 리밋 방지
+        await asyncio.sleep(2)
+
+    logger.info(
+        "batch_deep_youtube: analyzed %d videos, skipped %d (of %d total)",
+        processed, skipped, len(yt_items),
+    )
+    return results
 
 
 async def summarize_transcript_structured(
@@ -1112,23 +1454,45 @@ async def summarize_transcript_structured(
 
     text = transcript[:5000]
 
-    prompt = (
-        f"다음은 [{source}]의 경제/투자 유튜브 영상 '{title}'의 자막입니다.\n\n"
-        f"{text}\n\n"
-        "아래 JSON 형식으로 정확히 응답해줘. JSON만 출력하고 다른 텍스트는 넣지 마.\n"
-        '{\n'
-        '  "full_summary": "10-15줄 상세 요약 (시장 상황, 전문가 의견, 핵심 수치, 전망 포함. 불필요한 인사/광고 제외)",\n'
-        '  "mentioned_tickers": [\n'
-        '    {"name": "종목명", "ticker": "6자리코드(모르면 빈 문자열)", "sentiment": "긍정/부정/중립", "context": "왜 언급됐는지 1줄"}\n'
-        '  ],\n'
-        '  "mentioned_sectors": ["반도체", "2차전지"],\n'
-        '  "market_outlook": "bullish/bearish/neutral/mixed",\n'
-        '  "key_numbers": [\n'
-        '    {"label": "지표명", "value": "숫자값", "unit": "단위"}\n'
-        '  ],\n'
-        '  "investment_implications": "투자자가 오늘 취할 액션 2-3줄"\n'
-        '}\n'
-    )
+    # v10.4: 자막 vs 메타데이터 폴백 감지 → 프롬프트 분기
+    is_metadata_only = text.startswith("채널:") or text.startswith("제목:")
+
+    if is_metadata_only:
+        prompt = (
+            f"다음은 [{source}]의 경제/투자 유튜브 영상 정보입니다 (자막 미제공, 메타데이터 기반).\n\n"
+            f"{text}\n\n"
+            "위 제목, 설명, 해시태그를 분석하여 이 영상이 다루는 투자 관련 주제를 추론해줘.\n"
+            "한국 증시 전문가 관점에서 제목과 키워드로부터 최대한 투자 인사이트를 추출해.\n"
+            "아래 JSON 형식으로 정확히 응답해줘. JSON만 출력하고 다른 텍스트는 넣지 마.\n"
+            '{\n'
+            '  "full_summary": "제목/설명/해시태그 기반 3-5줄 추론 요약 (이 영상이 다루는 시장 주제, 관련 종목, 투자 시사점 추론)",\n'
+            '  "mentioned_tickers": [\n'
+            '    {"name": "종목명", "ticker": "6자리코드(모르면 빈 문자열)", "sentiment": "긍정/부정/중립", "context": "왜 관련 있는지 1줄"}\n'
+            '  ],\n'
+            '  "mentioned_sectors": ["반도체", "2차전지"],\n'
+            '  "market_outlook": "bullish/bearish/neutral/mixed",\n'
+            '  "key_numbers": [],\n'
+            '  "investment_implications": "투자자 관점에서의 시사점 1-2줄"\n'
+            '}\n'
+        )
+    else:
+        prompt = (
+            f"다음은 [{source}]의 경제/투자 유튜브 영상 '{title}'의 자막입니다.\n\n"
+            f"{text}\n\n"
+            "아래 JSON 형식으로 정확히 응답해줘. JSON만 출력하고 다른 텍스트는 넣지 마.\n"
+            '{\n'
+            '  "full_summary": "10-15줄 상세 요약 (시장 상황, 전문가 의견, 핵심 수치, 전망 포함. 불필요한 인사/광고 제외)",\n'
+            '  "mentioned_tickers": [\n'
+            '    {"name": "종목명", "ticker": "6자리코드(모르면 빈 문자열)", "sentiment": "긍정/부정/중립", "context": "왜 언급됐는지 1줄"}\n'
+            '  ],\n'
+            '  "mentioned_sectors": ["반도체", "2차전지"],\n'
+            '  "market_outlook": "bullish/bearish/neutral/mixed",\n'
+            '  "key_numbers": [\n'
+            '    {"label": "지표명", "value": "숫자값", "unit": "단위"}\n'
+            '  ],\n'
+            '  "investment_implications": "투자자가 오늘 취할 액션 2-3줄"\n'
+            '}\n'
+        )
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -1286,11 +1650,36 @@ async def enrich_youtube_summaries(
             None, fetch_transcript, item.video_id,
         )
 
-        # v10.0: 자막 없을 때 제목+설명 폴백
+        # v10.4: 자막 없으면 Whisper → 제목+설명 폴백 체인
         if not transcript:
-            fallback_text = f"제목: {item.title}\n설명: {item.content_summary[:500]}" if item.content_summary else ""
-            if len(fallback_text) > 50:
-                logger.info("YouTube transcript unavailable, using title+desc fallback: %s", item.title[:30])
+            # Whisper 시도 (음성 전사)
+            try:
+                transcript = await asyncio.get_event_loop().run_in_executor(
+                    None, fetch_transcript_whisper, item.video_id,
+                )
+                if transcript:
+                    logger.info("YouTube Whisper fallback success: %s (%d chars)", item.title[:30], len(transcript))
+            except Exception:
+                logger.debug("Whisper fallback failed for %s", item.video_id, exc_info=True)
+
+        if not transcript:
+            # v10.4: 메타데이터 기반 풍부한 폴백
+            try:
+                meta = await asyncio.get_event_loop().run_in_executor(
+                    None, fetch_video_metadata, item.video_id,
+                )
+                parts = [f"채널: {meta.get('channel', item.source)}"]
+                parts.append(f"제목: {meta.get('title', '') or item.title}")
+                if meta.get("description"):
+                    parts.append(f"설명: {meta['description'][:1000]}")
+                if meta.get("hashtags"):
+                    parts.append(f"해시태그: {', '.join(meta['hashtags'][:10])}")
+                fallback_text = "\n".join(parts)
+            except Exception:
+                fallback_text = f"제목: {item.title}"
+
+            if len(fallback_text) > 30:
+                logger.info("YouTube using metadata fallback: %s", item.title[:30])
                 structured = await summarize_transcript_structured(
                     fallback_text, item.title, item.source.replace("\U0001f3ac", "").strip(),
                 )

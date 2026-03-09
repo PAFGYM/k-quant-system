@@ -1275,6 +1275,63 @@ CREATE TABLE IF NOT EXISTS oil_analysis (
 );
 
 CREATE INDEX IF NOT EXISTS idx_oil_date ON oil_analysis(date);
+
+-- v10.4: 크로스마켓 영향도 분석
+CREATE TABLE IF NOT EXISTS cross_market_impact (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    date                TEXT    NOT NULL,
+    sp500_change_pct    REAL    DEFAULT 0,
+    nasdaq_change_pct   REAL    DEFAULT 0,
+    vix                 REAL    DEFAULT 20,
+    vix_change_pct      REAL    DEFAULT 0,
+    vix_regime          TEXT    DEFAULT 'normal',
+    usdkrw              REAL    DEFAULT 1300,
+    usdkrw_change_pct   REAL    DEFAULT 0,
+    us10y_yield         REAL    DEFAULT 4.0,
+    wti_change_pct      REAL    DEFAULT 0,
+    gold_change_pct     REAL    DEFAULT 0,
+    composite_score     REAL    DEFAULT 0,
+    direction           TEXT    DEFAULT 'neutral',
+    confidence          REAL    DEFAULT 0,
+    expected_gap_pct    REAL    DEFAULT 0,
+    sector_impacts_json TEXT    DEFAULT '{}',
+    risk_flags_json     TEXT    DEFAULT '[]',
+    created_at          TEXT    NOT NULL,
+    UNIQUE(date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cross_market_date ON cross_market_impact(date);
+
+-- v10.4: 증권사 리포트 요약
+CREATE TABLE IF NOT EXISTS broker_reports (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    date                TEXT    NOT NULL,
+    ticker              TEXT    DEFAULT '',
+    broker              TEXT    DEFAULT '',
+    title               TEXT    DEFAULT '',
+    report_type         TEXT    DEFAULT '',
+    target_price        REAL    DEFAULT 0,
+    rating              TEXT    DEFAULT '',
+    summary             TEXT    DEFAULT '',
+    source_url          TEXT    DEFAULT '',
+    scraped_at          TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_broker_reports_date ON broker_reports(date);
+CREATE INDEX IF NOT EXISTS idx_broker_reports_ticker ON broker_reports(ticker);
+
+-- v10.4: 학습 이력 (모델 버전별 행동 변화 추적)
+CREATE TABLE IF NOT EXISTS learning_history (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    date                TEXT    NOT NULL,
+    event_type          TEXT    NOT NULL,
+    description         TEXT    DEFAULT '',
+    data_json           TEXT    DEFAULT '{}',
+    impact_summary      TEXT    DEFAULT '',
+    created_at          TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_history_date ON learning_history(date);
 """
 
 

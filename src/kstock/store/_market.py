@@ -1395,3 +1395,191 @@ class MarketMixin:
                 "SELECT regime FROM oil_analysis ORDER BY date DESC LIMIT 1",
             ).fetchone()
         return row["regime"] if row else "neutral"
+
+    # -- cross_market_impact (v10.4) -------------------------------------------
+
+    def save_cross_market_impact(self, data: dict) -> None:
+        """크로스마켓 영향도 분석 결과 저장 (UPSERT by date)."""
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cross_market_impact
+                    (date, sp500_change_pct, nasdaq_change_pct, vix, vix_change_pct,
+                     vix_regime, usdkrw, usdkrw_change_pct, us10y_yield,
+                     wti_change_pct, gold_change_pct, composite_score, direction,
+                     confidence, expected_gap_pct, sector_impacts_json,
+                     risk_flags_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    sp500_change_pct=excluded.sp500_change_pct,
+                    nasdaq_change_pct=excluded.nasdaq_change_pct,
+                    vix=excluded.vix, vix_change_pct=excluded.vix_change_pct,
+                    vix_regime=excluded.vix_regime,
+                    usdkrw=excluded.usdkrw, usdkrw_change_pct=excluded.usdkrw_change_pct,
+                    us10y_yield=excluded.us10y_yield,
+                    wti_change_pct=excluded.wti_change_pct,
+                    gold_change_pct=excluded.gold_change_pct,
+                    composite_score=excluded.composite_score,
+                    direction=excluded.direction,
+                    confidence=excluded.confidence,
+                    expected_gap_pct=excluded.expected_gap_pct,
+                    sector_impacts_json=excluded.sector_impacts_json,
+                    risk_flags_json=excluded.risk_flags_json
+                """,
+                (
+                    data["date"],
+                    data.get("sp500_change_pct", 0),
+                    data.get("nasdaq_change_pct", 0),
+                    data.get("vix", 20),
+                    data.get("vix_change_pct", 0),
+                    data.get("vix_regime", "normal"),
+                    data.get("usdkrw", 1300),
+                    data.get("usdkrw_change_pct", 0),
+                    data.get("us10y_yield", 4.0),
+                    data.get("wti_change_pct", 0),
+                    data.get("gold_change_pct", 0),
+                    data.get("composite_score", 0),
+                    data.get("direction", "neutral"),
+                    data.get("confidence", 0),
+                    data.get("expected_gap_pct", 0),
+                    data.get("sector_impacts_json", "{}"),
+                    data.get("risk_flags_json", "[]"),
+                    now,
+                ),
+            )
+
+    def get_cross_market_impact(self, days: int = 30) -> list[dict]:
+        """최근 N일 크로스마켓 영향도 데이터 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT date, sp500_change_pct, nasdaq_change_pct, vix, vix_change_pct,
+                       vix_regime, usdkrw, usdkrw_change_pct, us10y_yield,
+                       wti_change_pct, gold_change_pct, composite_score, direction,
+                       confidence, expected_gap_pct, sector_impacts_json, risk_flags_json
+                FROM cross_market_impact
+                ORDER BY date DESC LIMIT ?
+                """,
+                (days,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_latest_cross_market(self) -> dict | None:
+        """최근 크로스마켓 영향도 1건."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM cross_market_impact ORDER BY date DESC LIMIT 1",
+            ).fetchone()
+        return dict(row) if row else None
+
+    # -- broker_reports (v10.4) ------------------------------------------------
+
+    def save_broker_report(self, data: dict) -> None:
+        """증권사 리포트 저장."""
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO broker_reports
+                    (date, ticker, broker, title, report_type,
+                     target_price, rating, summary, source_url, scraped_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    data.get("date", ""),
+                    data.get("ticker", ""),
+                    data.get("broker", ""),
+                    data.get("title", ""),
+                    data.get("report_type", ""),
+                    data.get("target_price", 0),
+                    data.get("rating", ""),
+                    data.get("summary", ""),
+                    data.get("source_url", ""),
+                    now,
+                ),
+            )
+
+    def save_broker_reports_batch(self, reports: list[dict]) -> int:
+        """증권사 리포트 배치 저장."""
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        count = 0
+        with self._connect() as conn:
+            for data in reports:
+                conn.execute(
+                    """
+                    INSERT INTO broker_reports
+                        (date, ticker, broker, title, report_type,
+                         target_price, rating, summary, source_url, scraped_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        data.get("date", ""),
+                        data.get("ticker", ""),
+                        data.get("broker", ""),
+                        data.get("title", ""),
+                        data.get("report_type", ""),
+                        data.get("target_price", 0),
+                        data.get("rating", ""),
+                        data.get("summary", ""),
+                        data.get("source_url", ""),
+                        now,
+                    ),
+                )
+                count += 1
+        return count
+
+    def get_broker_reports(self, days: int = 7, ticker: str = "") -> list[dict]:
+        """최근 증권사 리포트 조회."""
+        from datetime import datetime, timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            if ticker:
+                rows = conn.execute(
+                    "SELECT * FROM broker_reports WHERE date >= ? AND ticker = ? ORDER BY date DESC",
+                    (cutoff, ticker),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM broker_reports WHERE date >= ? ORDER BY date DESC LIMIT 100",
+                    (cutoff,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- learning_history (v10.4) ----------------------------------------------
+
+    def save_learning_event(self, event_type: str, description: str,
+                            data_json: str = "{}", impact_summary: str = "") -> None:
+        """학습 이력 기록."""
+        from datetime import datetime
+        now = datetime.utcnow().isoformat()
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO learning_history
+                    (date, event_type, description, data_json, impact_summary, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (today, event_type, description, data_json, impact_summary, now),
+            )
+
+    def get_learning_history(self, days: int = 30, event_type: str = "") -> list[dict]:
+        """학습 이력 조회."""
+        from datetime import datetime, timedelta
+        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            if event_type:
+                rows = conn.execute(
+                    "SELECT * FROM learning_history WHERE date >= ? AND event_type = ? ORDER BY date DESC",
+                    (cutoff, event_type),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM learning_history WHERE date >= ? ORDER BY date DESC LIMIT 100",
+                    (cutoff,),
+                ).fetchall()
+        return [dict(r) for r in rows]

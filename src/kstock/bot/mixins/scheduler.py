@@ -1412,6 +1412,69 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("Morning briefing oil context failed", exc_info=True)
 
+            # v10.4: 크로스마켓 영향도 컨텍스트
+            cross_market_ctx = ""
+            try:
+                cm_data = self.db.get_latest_cross_market()
+                if cm_data:
+                    import json as _json_cm
+                    dir_kr = {
+                        "strong_bearish": "강한 하방",
+                        "bearish": "하방",
+                        "neutral": "중립",
+                        "bullish": "상방",
+                        "strong_bullish": "강한 상방",
+                    }
+                    cross_market_ctx = (
+                        f"\n[크로스마켓 영향도]\n"
+                        f"종합점수={cm_data.get('composite_score', 0):+.1f}/10 "
+                        f"방향={dir_kr.get(cm_data.get('direction', ''), '')} "
+                        f"신뢰도={cm_data.get('confidence', 0):.0%}\n"
+                        f"예상KOSPI갭={cm_data.get('expected_gap_pct', 0):+.2f}%\n"
+                    )
+                    try:
+                        flags = _json_cm.loads(cm_data.get("risk_flags_json", "[]"))
+                        if flags:
+                            cross_market_ctx += f"리스크: {', '.join(flags[:3])}\n"
+                    except Exception:
+                        pass
+                    try:
+                        sectors = _json_cm.loads(cm_data.get("sector_impacts_json", "{}"))
+                        if sectors:
+                            top_sector = max(sectors.items(), key=lambda x: x[1])
+                            bot_sector = min(sectors.items(), key=lambda x: x[1])
+                            cross_market_ctx += f"수혜섹터: {top_sector[0]}({top_sector[1]:+.1f}) "
+                            cross_market_ctx += f"주의섹터: {bot_sector[0]}({bot_sector[1]:+.1f})\n"
+                    except Exception:
+                        pass
+            except Exception:
+                logger.debug("Morning briefing cross-market context failed", exc_info=True)
+
+            # v10.4: 학습 이력 컨텍스트 (최근 학습 결과가 행동에 반영되었음을 표시)
+            learning_ctx = ""
+            try:
+                learning_events = self.db.get_learning_history(days=7)
+                if learning_events:
+                    recent_types = set()
+                    for ev in learning_events[:10]:
+                        recent_types.add(ev.get("event_type", ""))
+                    learning_ctx = (
+                        f"\n[학습 상태]\n"
+                        f"최근 7일 학습: {len(learning_events)}건 "
+                        f"({', '.join(list(recent_types)[:4])})\n"
+                    )
+                    # ML 모델 정보
+                    ml_perf = self.db.get_ml_performance(limit=1)
+                    if ml_perf:
+                        mp = ml_perf[0]
+                        learning_ctx += (
+                            f"모델: {mp.get('model_version', '?')} "
+                            f"학습일={mp.get('date', '?')} "
+                            f"Val AUC={mp.get('val_score', 0):.3f}\n"
+                        )
+            except Exception:
+                logger.debug("Morning briefing learning context failed", exc_info=True)
+
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
                 f"[시장 데이터]\n"
@@ -1428,7 +1491,9 @@ class SchedulerMixin:
                 f"{credit_ctx}"
                 f"{etf_ctx}"
                 f"{korea_risk_ctx}"
-                f"{oil_ctx}\n"
+                f"{oil_ctx}"
+                f"{cross_market_ctx}"
+                f"{learning_ctx}\n"
                 f"{news_ctx}"
                 f"{yt_intel_ctx}"
                 f"{special_ctx}"
@@ -3415,6 +3480,150 @@ class SchedulerMixin:
                 "oil_analysis", today_str, status="error", message=str(e),
             )
 
+    # -- v10.4: 크로스마켓 영향도 분석 -------------------------------------------
+
+    async def job_cross_market_analysis(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """07:15 매일: 크로스마켓 영향도 분석 + DB 저장 + 급변 시 알림.
+
+        US futures, VIX, USD/KRW, oil, gold, treasury, Asian markets
+        → Korean market impact prediction.
+        """
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.signal.cross_market_impact import (
+                fetch_cross_market_data,
+                build_snapshot,
+                compute_cross_market_impact,
+                generate_outlook,
+                format_impact_report,
+                to_db_dict,
+            )
+
+            # 1. 글로벌 데이터 수집
+            data = await asyncio.to_thread(fetch_cross_market_data, "5d")
+            if not data:
+                logger.warning("Cross-market data fetch returned empty")
+                self.db.upsert_job_run("cross_market", today_str, status="error", message="empty data")
+                return
+
+            # 2. 스냅샷 + 영향도 계산
+            snap = build_snapshot(data, today_str)
+            impact = compute_cross_market_impact(snap)
+            outlook = generate_outlook(snap, impact)
+
+            # 3. DB 저장
+            self.db.save_cross_market_impact(to_db_dict(snap, impact))
+
+            # 4. 학습 이력 기록
+            import json as _json_cm
+            self.db.save_learning_event(
+                event_type="cross_market_analysis",
+                description=f"크로스마켓 분석: {impact.direction} (점수 {impact.composite_score:+.1f})",
+                data_json=_json_cm.dumps({
+                    "composite": impact.composite_score,
+                    "direction": impact.direction,
+                    "sp500": snap.sp500_change_pct,
+                    "vix": snap.vix,
+                    "usdkrw": snap.usdkrw,
+                }, ensure_ascii=False),
+            )
+
+            self.db.upsert_job_run("cross_market", today_str, status="success")
+            logger.info(
+                "Cross-market: composite=%.1f (%s), KOSPI gap=%.2f%%",
+                impact.composite_score, impact.direction, impact.expected_kospi_gap_pct,
+            )
+
+            # 5. 강한 방향성 시 알림 (composite ±3.0 이상)
+            if abs(impact.composite_score) >= 3.0 and self.chat_id:
+                alert_msg = format_impact_report(outlook)
+                try:
+                    await context.bot.send_message(
+                        chat_id=self.chat_id, text=alert_msg,
+                    )
+                except Exception as e:
+                    logger.debug("Cross-market alert send failed: %s", e)
+
+        except Exception as e:
+            logger.error("Cross-market analysis job failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "cross_market", today_str, status="error", message=str(e),
+            )
+
+    # -- v10.4: YouTube 심화 학습 파이프라인 ------------------------------------
+
+    async def job_youtube_deep_learning(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """08:00/20:00 매일: YouTube 경제방송 심화 분석 (Whisper 포함).
+
+        자막 > Whisper 음성전사 > 제목 폴백 체인으로
+        자막 없는 영상도 학습하여 시장 인사이트 추출.
+        """
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.ingest.global_news import batch_deep_youtube_analysis
+
+            results = await batch_deep_youtube_analysis(
+                db=self.db,
+                max_videos=8,
+                hours_lookback=12,
+            )
+
+            whisper_count = sum(
+                1 for r in results if r.get("transcript_method") == "whisper"
+            )
+            subtitle_count = sum(
+                1 for r in results if r.get("transcript_method") == "subtitle"
+            )
+
+            self.db.upsert_job_run(
+                "youtube_deep_learn", today_str,
+                status="success",
+                message=f"analyzed {len(results)} (subtitle:{subtitle_count}, whisper:{whisper_count})",
+            )
+            logger.info(
+                "YouTube deep learning: %d videos (subtitle:%d, whisper:%d)",
+                len(results), subtitle_count, whisper_count,
+            )
+
+            # 중요 인사이트 알림 (3개 이상 종목 언급 영상)
+            if self.chat_id:
+                for r in results:
+                    tickers = r.get("mentioned_tickers", [])
+                    if len(tickers) >= 3:
+                        src = r.get("video_id", "")
+                        method = r.get("transcript_method", "")
+                        summary = r.get("full_summary", "")[:300]
+                        sectors = ", ".join(r.get("mentioned_sectors", [])[:5])
+                        ticker_str = ", ".join(
+                            f"{t.get('name','')}({t.get('sentiment','')})"
+                            for t in tickers[:5]
+                        )
+                        msg = (
+                            f"📺 YouTube 심화 분석\n"
+                            f"방식: {method}\n"
+                            f"섹터: {sectors}\n"
+                            f"종목: {ticker_str}\n\n"
+                            f"{summary}"
+                        )
+                        try:
+                            await context.bot.send_message(
+                                chat_id=self.chat_id, text=msg,
+                            )
+                        except Exception:
+                            pass
+                        break  # 최대 1건만 알림
+
+        except Exception as e:
+            logger.error("YouTube deep learning job failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "youtube_deep_learn", today_str,
+                status="error", message=str(e)[:200],
+            )
+
     async def job_weekly_learning(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Weekly learning report - runs Saturday 09:00 KST."""
         if not self.chat_id:
@@ -4101,6 +4310,23 @@ class SchedulerMixin:
                 self._ml_model = result.trained_model
                 logger.info("ML model loaded into bot instance after training")
 
+            # v10.4: 학습 이력 기록
+            if result.success:
+                import json as _json_lr
+                self.db.save_learning_event(
+                    event_type="ml_full_retrain",
+                    description=f"ML 전체 재학습: {result.samples}샘플, "
+                                f"Train AUC={result.train_auc:.3f}, Val AUC={result.val_auc:.3f}",
+                    data_json=_json_lr.dumps({
+                        "trigger": trigger,
+                        "samples": result.samples,
+                        "train_auc": result.train_auc,
+                        "val_auc": result.val_auc,
+                        "features": 58,
+                    }),
+                    impact_summary=f"모델 업데이트 → 58개 피처 기반 예측 활성화",
+                )
+
             # 3. 결과 알림
             if self.chat_id:
                 msg = result.message or (
@@ -4186,6 +4412,15 @@ class SchedulerMixin:
                 "ml_daily_update", _today(),
                 status="success" if result.success else "skip",
             )
+
+            # v10.4: 학습 이력 기록
+            if result.success:
+                self.db.save_learning_event(
+                    event_type="ml_incremental",
+                    description=f"ML 점진 학습: {result.samples}샘플 추가",
+                    impact_summary="일일 시장 데이터 반영 완료",
+                )
+
             logger.info(
                 "ML daily update %s: %d samples",
                 "OK" if result.success else "skip", result.samples,

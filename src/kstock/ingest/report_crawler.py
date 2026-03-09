@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 COMPANY_LIST_URL = "https://finance.naver.com/research/company_list.naver?&page={page}"
 COMPANY_DETAIL_URL = "https://finance.naver.com/research/{path}"
 INDUSTRY_LIST_URL = "https://finance.naver.com/research/industry_list.naver?&page={page}"
+# v10.4: 시장전략 + 경제분석 리포트
+MARKET_LIST_URL = "https://finance.naver.com/research/market_list.naver?&page={page}"
+ECONOMY_LIST_URL = "https://finance.naver.com/research/economy_list.naver?&page={page}"
 
 HEADERS = {
     "User-Agent": (
@@ -294,6 +297,93 @@ def _parse_industry_list(html: str) -> list[dict]:
     return reports
 
 
+# ── v10.4: 시장전략/경제분석 리포트 ──────────────────────────────────────────
+
+async def crawl_market_economy_reports(pages: int = 2) -> list[dict[str, Any]]:
+    """네이버 증권 시장전략 + 경제분석 리포트 수집.
+
+    AI 브리핑과 크로스마켓 학습에 활용.
+    """
+    reports: list[dict] = []
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        for url_tpl, source_tag in [
+            (MARKET_LIST_URL, "naver_market"),
+            (ECONOMY_LIST_URL, "naver_economy"),
+        ]:
+            for page in range(1, pages + 1):
+                url = url_tpl.format(page=page)
+                try:
+                    resp = await client.get(url, headers=HEADERS)
+                    resp.raise_for_status()
+                    page_reports = _parse_market_economy_list(resp.text, source_tag)
+                    reports.extend(page_reports)
+                    logger.info("%s page %d: %d reports", source_tag, page, len(page_reports))
+                except Exception as e:
+                    logger.warning("%s page %d failed: %s", source_tag, page, e)
+                await asyncio.sleep(0.3)
+
+    logger.info("Total market/economy reports: %d", len(reports))
+    return reports
+
+
+def _parse_market_economy_list(html: str, source_tag: str) -> list[dict]:
+    """시장전략/경제분석 목록 파싱.
+
+    테이블 컬럼: [제목] [증권사] [첨부] [작성일] [조회수]
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    reports = []
+
+    table = soup.find("table", class_="type_1")
+    if not table:
+        return reports
+
+    for row in table.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) < 4:
+            continue
+        try:
+            # [0] 제목
+            title_link = cells[0].find("a")
+            title = cells[0].get_text(strip=True)
+            if title_link:
+                title = title_link.get_text(strip=True)
+
+            # [1] 증권사
+            broker = cells[1].get_text(strip=True)
+
+            # [2] PDF
+            pdf_url = ""
+            pdf_link = cells[2].find("a")
+            if pdf_link and pdf_link.get("href"):
+                pdf_url = pdf_link["href"]
+
+            # [3] 작성일
+            date_text = cells[3].get_text(strip=True)
+            date = _parse_date(date_text)
+
+            if not title or not broker:
+                continue
+
+            reports.append({
+                "source": source_tag,
+                "title": title,
+                "broker": broker,
+                "ticker": "",
+                "stock_name": "",
+                "target_price": 0,
+                "opinion": "",
+                "date": date,
+                "pdf_url": pdf_url,
+                "report_type": "market" if "market" in source_tag else "economy",
+            })
+        except Exception as e:
+            logger.debug("Market/economy row parse: %s", e)
+
+    return reports
+
+
 # ── 통합 수집 → DB 저장 ──────────────────────────────────────────────────────
 
 async def crawl_all_reports(
@@ -357,9 +447,44 @@ async def crawl_all_reports(
     except Exception as e:
         logger.error("Industry report crawl failed: %s", e)
 
+    # 3. v10.4: 시장전략 + 경제분석 리포트
+    stats["market_economy"] = 0
+    try:
+        me_reports = await crawl_market_economy_reports(pages=2)
+        for r in me_reports:
+            result = db.add_report(
+                source=r["source"],
+                title=r["title"],
+                broker=r["broker"],
+                date=r["date"],
+                pdf_url=r.get("pdf_url", ""),
+                summary=r.get("report_type", ""),
+            )
+            if result:
+                stats["market_economy"] += 1
+                stats["total_new"] += 1
+            # v10.4: broker_reports 테이블에도 저장 (학습용)
+            try:
+                db.save_broker_report({
+                    "date": r["date"],
+                    "ticker": r.get("ticker", ""),
+                    "broker": r["broker"],
+                    "title": r["title"],
+                    "report_type": r.get("report_type", ""),
+                    "target_price": r.get("target_price", 0),
+                    "rating": r.get("opinion", ""),
+                    "summary": "",
+                    "source_url": r.get("pdf_url", ""),
+                })
+            except Exception:
+                pass
+        logger.info("Market/economy reports saved: %d new", stats["market_economy"])
+    except Exception as e:
+        logger.error("Market/economy report crawl failed: %s", e)
+
     logger.info(
-        "Report crawl done: %d company + %d industry = %d new",
-        stats["company"], stats["industry"], stats["total_new"],
+        "Report crawl done: %d company + %d industry + %d market/economy = %d new",
+        stats["company"], stats["industry"], stats["market_economy"], stats["total_new"],
     )
     return stats
 

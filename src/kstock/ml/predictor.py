@@ -134,13 +134,22 @@ FEATURE_NAMES: list[str] = [
     # ── v10.1.1: Short Cover + Foreign Flow (2) ──
     "short_cover_pressure",     # 공매도 상환 압박도 (0~100)
     "foreign_flow_type_encoded",  # 외인 매매 성격 (0=중립, 1=단기매매, 2=장기매집, 3=공매도)
+    # ── v10.4: Cross-Market Impact (8) ──
+    "us_overnight_impact",      # 미국 야간 종합 영향 점수 (-5~+5)
+    "vix_velocity",             # VIX 변화율 (%)
+    "usdkrw_change",            # USD/KRW 변화율 (%)
+    "us10y_change_bp",          # 미국채 10Y 변동 (bp)
+    "oil_change_pct",           # 유가 일간 변화율 (%)
+    "gold_change_pct",          # 금 일간 변화율 (%)
+    "asia_spillover",           # 아시아 시장 스필오버 점수
+    "cross_market_composite",   # 크로스마켓 종합 점수 (-10~+10)
 ]
 
-_NUM_FEATURES = 50
+_NUM_FEATURES = 58
 
 assert len(FEATURE_NAMES) == _NUM_FEATURES, (
     f"Expected {_NUM_FEATURES} features, got {len(FEATURE_NAMES)}"
-)  # v10.1.1: 50 features
+)  # v10.4: 58 features (50 + 8 cross-market)
 
 _REGIME_MAP: dict[str, int] = {
     "bubble_attack": 4,
@@ -341,8 +350,10 @@ def build_features(
     # v10.1.1: 공매도 상환 + 외인 성격
     short_cover_pressure: float = 0.0,
     foreign_flow_type_encoded: int = 0,
+    # v10.4: 크로스마켓 영향도 피처
+    cross_market_features: dict[str, float] | None = None,
 ) -> dict[str, float]:
-    """Build the 50-feature dict from K-Quant data objects.
+    """Build the 58-feature dict from K-Quant data objects.
 
     Args:
         tech: ``TechnicalIndicators`` instance.
@@ -359,9 +370,11 @@ def build_features(
         anomaly_type_encoded: 이상 유형 인코딩.
         short_cover_pressure: 공매도 상환 압박도 (0~100).
         foreign_flow_type_encoded: 외인 매매 성격 (0~3).
+        cross_market_features: Dict with 8 cross-market features from
+            ``cross_market_impact.build_cross_market_features()``.
 
     Returns:
-        Dict mapping each of the 50 feature names to a float value.
+        Dict mapping each of the 58 feature names to a float value.
     """
     current_price = getattr(info, "current_price", 0.0) or 1.0
     high_52w = getattr(tech, "high_52w", 0.0) or 1.0
@@ -432,6 +445,23 @@ def build_features(
     # v10.1.1: 공매도 상환 + 외인 성격
     features["short_cover_pressure"] = float(short_cover_pressure)
     features["foreign_flow_type_encoded"] = float(foreign_flow_type_encoded)
+
+    # v10.4: 크로스마켓 영향도 피처 (8개)
+    _cm_defaults = {
+        "us_overnight_impact": 0.0,
+        "vix_velocity": 0.0,
+        "usdkrw_change": 0.0,
+        "us10y_change_bp": 0.0,
+        "oil_change_pct": 0.0,
+        "gold_change_pct": 0.0,
+        "asia_spillover": 0.0,
+        "cross_market_composite": 0.0,
+    }
+    if cross_market_features:
+        for k, v in _cm_defaults.items():
+            features[k] = float(cross_market_features.get(k, v))
+    else:
+        features.update(_cm_defaults)
 
     return features
 
@@ -796,16 +826,29 @@ def _ensemble_predict(
 
     Falls back to a single model if only one is available, or to
     ``_NEUTRAL_PROB`` if neither is present.
+
+    Handles backward compatibility: if the model was trained on fewer
+    features than X has columns, truncates X to match.
     """
     probs: list[np.ndarray] = []
 
     if lgb_model is not None:
-        probs.append(lgb_model.predict(X))
+        try:
+            model_nf = lgb_model.num_feature()
+            X_lgb = X[:, :model_nf] if X.shape[1] > model_nf else X
+            probs.append(lgb_model.predict(X_lgb))
+        except Exception as e:
+            logger.warning("LGB predict failed: %s", e)
 
     if xgb_model is not None:
-        p = xgb_model.predict_proba(X)
-        # predict_proba returns (n, 2); take the positive class column
-        probs.append(p[:, 1] if p.ndim == 2 else p)
+        try:
+            model_nf = getattr(xgb_model, "n_features_in_", X.shape[1])
+            X_xgb = X[:, :model_nf] if X.shape[1] > model_nf else X
+            p = xgb_model.predict_proba(X_xgb)
+            # predict_proba returns (n, 2); take the positive class column
+            probs.append(p[:, 1] if p.ndim == 2 else p)
+        except Exception as e:
+            logger.warning("XGB predict failed: %s", e)
 
     if not probs:
         return np.full(len(X), _NEUTRAL_PROB)

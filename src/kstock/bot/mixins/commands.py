@@ -290,6 +290,25 @@ class CommandsMixin:
             _features_built = None
             if HAS_ML:
                 try:
+                    # v10.4: 크로스마켓 피처 로드
+                    _cm_feats = None
+                    try:
+                        _cm_latest = self.db.get_latest_cross_market()
+                        if _cm_latest:
+                            import json as _json_cm2
+                            _cm_feats = {
+                                "us_overnight_impact": 0.0,
+                                "vix_velocity": _cm_latest.get("vix_change_pct", 0),
+                                "usdkrw_change": _cm_latest.get("usdkrw_change_pct", 0),
+                                "us10y_change_bp": 0.0,
+                                "oil_change_pct": _cm_latest.get("wti_change_pct", 0),
+                                "gold_change_pct": _cm_latest.get("gold_change_pct", 0),
+                                "asia_spillover": 0.0,
+                                "cross_market_composite": _cm_latest.get("composite_score", 0),
+                            }
+                    except Exception:
+                        logger.debug("cross_market features load failed", exc_info=True)
+
                     _features_built = build_features(
                         tech, info, macro, flow, policy_bonus=policy_bonus,
                         korea_flow=_mc,
@@ -304,6 +323,7 @@ class CommandsMixin:
                         anomaly_type_encoded=_anomaly_type,
                         short_cover_pressure=_short_cover_pressure,
                         foreign_flow_type_encoded=_foreign_flow_type,
+                        cross_market_features=_cm_feats,
                     )
                     # 피처를 feature_store에 축적 (학습 데이터)
                     try:
