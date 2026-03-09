@@ -680,8 +680,9 @@ class RemoteClaudeMixin:
             return
 
         # Telegram 네트워크 오류는 자동 수정 대상 아님
-        skip_patterns = ["Timed out", "Network", "Connection"]
-        if any(p.lower() in error_str.lower() for p in skip_patterns):
+        skip_patterns = ["Timed out", "Network", "Connection", "ReadTimeout", "WriteTimeout"]
+        combined = f"{error_source} {error_str}".lower()
+        if any(p.lower() in combined for p in skip_patterns):
             return
 
         # 무한루프 방지: 최근 60초 내 같은 오류면 건너뛰기
