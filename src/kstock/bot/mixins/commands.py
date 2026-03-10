@@ -669,6 +669,12 @@ class CommandsMixin:
 
                 # v9.3: holding_type 반영 임계값 (장기보유 종목 보호)
                 ht = h.get("holding_type") or h.get("horizon") or "auto"
+
+                # v10.3.1: 장기주 매도 알림 완전 차단
+                from kstock.core.risk_manager import LEGACY_EXEMPT_TICKERS
+                if ht in ("long_term", "long") or ticker in LEGACY_EXEMPT_TICKERS:
+                    continue
+
                 from kstock.store._portfolio import HOLDING_THRESHOLDS
                 th = HOLDING_THRESHOLDS.get(ht, HOLDING_THRESHOLDS["auto"])
                 target_1 = h.get("target_1") or round(buy_price * (1 + th["t1"]), 0)

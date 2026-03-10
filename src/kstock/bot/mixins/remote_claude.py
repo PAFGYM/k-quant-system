@@ -10,6 +10,17 @@ import traceback
 
 logger = logging.getLogger(__name__)
 
+# v10.3.1: 공유 httpx 클라이언트 (FD leak 방지)
+_shared_api_client: httpx.AsyncClient | None = None
+
+
+def _get_api_client() -> httpx.AsyncClient:
+    global _shared_api_client
+    if _shared_api_client is None or _shared_api_client.is_closed:
+        _shared_api_client = httpx.AsyncClient(timeout=45)
+    return _shared_api_client
+
+
 # Claude CLI path (auto-detect)
 _CLAUDE_CLI_CANDIDATES = [
     "/Users/botddol/.local/bin/claude",
@@ -107,13 +118,15 @@ class RemoteClaudeMixin:
         return chunks
 
     async def _run_claude_cli(
-        self, prompt: str, *, continue_conversation: bool = False
+        self, prompt: str, *, continue_conversation: bool = False,
+        model: str = "sonnet",
     ) -> tuple[str, int, float]:
         """Execute Claude Code CLI asynchronously.
 
         Args:
             prompt: The prompt to send.
             continue_conversation: True면 --continue 플래그로 이전 대화 이어가기.
+            model: CLI 모델 (sonnet/opus). v10.3.1: 클대표=opus.
 
         Returns:
             Tuple of (output_text, return_code, elapsed_seconds).
@@ -129,7 +142,7 @@ class RemoteClaudeMixin:
                 CLAUDE_CLI, "-p", prompt,
                 "--output-format", "text",
                 "--dangerously-skip-permissions",
-                "--model", "sonnet",
+                "--model", model,
                 "--max-turns", "10",
             ]
             if continue_conversation:
@@ -193,30 +206,89 @@ class RemoteClaudeMixin:
         prompt = " ".join(args)
         await self._execute_claude_prompt(update, prompt, context=context)
 
+    # ── 클로드 3단계 모드 (v10.3.1) ─────────────────────────────
+    _CLAUDE_TIERS = {
+        "daeri": {
+            "name": "클대리",
+            "emoji": "💬",
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 1000,
+            "desc": "빠른 답변, 일반 대화, 간단한 질문",
+        },
+        "bujang": {
+            "name": "클부장",
+            "emoji": "📊",
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 2000,
+            "desc": "주식 분석, 투자 전략, 시황 해석",
+        },
+        "daepyo": {
+            "name": "클대표",
+            "emoji": "🧠",
+            "model": "claude-opus-4-6",
+            "max_tokens": 4000,
+            "desc": "오류 수정, 기능 개발, 심층 추론",
+            "use_cli": True,
+        },
+    }
+
     async def _menu_claude_code(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """💻 클로드 버튼 — 순수 Claude Code 에이전트.
-
-        v8.3: 모든 메시지를 Claude CLI로 라우팅.
-        투자 분석 + 맥미니 제어 + 코드 수정 + 범용 AI 모두 가능.
-        """
+        """💻 클로드 → 3단계 모드 선택 (v10.3.1)."""
         context.user_data["claude_mode"] = True
         context.user_data["claude_turn"] = 0
 
+        buttons = [
+            [InlineKeyboardButton(
+                "💬 클대리 — 빠른 답변",
+                callback_data="claude_tier:daeri",
+            )],
+            [InlineKeyboardButton(
+                "📊 클부장 — 주식 분석",
+                callback_data="claude_tier:bujang",
+            )],
+            [InlineKeyboardButton(
+                "🧠 클대표 — 오류수정/기능개발",
+                callback_data="claude_tier:daepyo",
+            )],
+        ]
+        # 이전 모드가 있으면 표시
+        prev = context.user_data.get("claude_tier", "")
+        prev_name = self._CLAUDE_TIERS.get(prev, {}).get("name", "")
+        status = f"\n현재: {prev_name}" if prev_name else ""
+
         await update.message.reply_text(
-            f"💻 Claude Code 에이전트\n"
+            f"💻 Claude 에이전트{status}\n"
             f"{'━' * 22}\n\n"
-            f"순수 Claude가 맥미니에서 직접 실행됩니다.\n"
-            f"투자 분석, 코드 수정, 시스템 제어 모두 가능.\n\n"
-            f"예시:\n"
-            f"  '삼성전자 분석해줘'\n"
-            f"  '봇 로그 확인해줘'\n"
-            f"  '파이썬 패키지 설치해줘'\n"
-            f"  '디스크 용량 확인'\n"
-            f"  '코드 수정해줘'\n\n"
-            f"🔙 종료하려면 다른 메뉴 버튼을 누르세요.",
-            reply_markup=get_reply_markup(context),
+            f"💬 클대리 (Haiku)\n"
+            f"  빠른 답변, 일상 대화\n\n"
+            f"📊 클부장 (Sonnet)\n"
+            f"  주식 분석, 투자 전략\n\n"
+            f"🧠 클대표 (Opus)\n"
+            f"  오류 수정, 기능 개발, 심층 추론\n\n"
+            f"모드를 선택하세요 👇",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _action_claude_tier(self, query, context, payload: str = "") -> None:
+        """claude_tier:{tier} 콜백 — 모드 전환."""
+        tier = self._CLAUDE_TIERS.get(payload)
+        if not tier:
+            return
+
+        context.user_data["claude_mode"] = True
+        context.user_data["claude_tier"] = payload
+        context.user_data["claude_chat_history"] = []
+        context.user_data["claude_turn"] = 0
+
+        await safe_edit_or_reply(query,
+            f"{tier['emoji']} {tier['name']} 모드 활성화\n"
+            f"{'━' * 22}\n\n"
+            f"{tier['desc']}\n\n"
+            f"자유롭게 대화하세요.\n"
+            f"모드 전환: 💻 클로드 다시 누르기\n"
+            f"종료: 다른 메뉴 버튼"
         )
 
     async def _exit_claude_mode(
@@ -224,12 +296,15 @@ class RemoteClaudeMixin:
     ) -> None:
         """클로드 대화 모드 종료."""
         turns = context.user_data.get("claude_turn", 0)
+        tier_key = context.user_data.get("claude_tier", "")
+        tier_name = self._CLAUDE_TIERS.get(tier_key, {}).get("name", "Claude")
         context.user_data.pop("claude_mode", None)
         context.user_data.pop("claude_turn", None)
+        context.user_data.pop("claude_tier", None)
         context.user_data.pop("awaiting_claude_prompt", None)
         context.user_data.pop("claude_chat_history", None)
         await update.message.reply_text(
-            f"🤖 Claude 대화를 종료합니다.\n"
+            f"🤖 {tier_name} 대화를 종료합니다.\n"
             f"총 {turns}회 대화하셨습니다.",
             reply_markup=get_reply_markup(context),
         )
@@ -242,10 +317,14 @@ class RemoteClaudeMixin:
         r"바꿔|변경해|개선해|최적화|마이그|merge|commit|push|pull)",
         re.IGNORECASE,
     )
-    # 제외 패턴: 주식 관련 질문은 코드 작업이 아님
+    # 주식/투자 관련 패턴 → Sonnet 라우팅 + 코드 작업 제외
     _STOCK_OVERRIDE = re.compile(
         r"(매수|매도|종목|주가|차트|시황|코스피|코스닥|배당|PER|PBR|"
-        r"포트폴리오.*분석|리스크|수익률|잔고)",
+        r"포트폴리오.*분석|리스크|수익률|잔고|"
+        r"분석해|투자|증시|금리|환율|원달러|테마|섹터|업종|실적|"
+        r"전망|매크로|지수|선물|옵션|공매도|외국인|기관|"
+        r"SK하이닉스|삼성전자|에코프로|현대차|LG|카카오|네이버|"
+        r"\d{6})",  # 6자리 종목코드
         re.IGNORECASE,
     )
 
@@ -263,13 +342,20 @@ class RemoteClaudeMixin:
     async def _handle_claude_free_chat(
         self, update: Update, context, text: str
     ) -> None:
-        """클로드 자유 대화 — 작업/주식/일반 3단 분기.
+        """클로드 자유 대화 — 선택된 모드별 라우팅 (v10.3.1).
 
-        v10.3: 응답 속도 개선
-        - 작업 지시 → CLI subprocess (코드/시스템 제어)
-        - 주식 질문 → 데이터 수집 + Sonnet full pipeline
-        - 일반 대화 → Claude API 직접 호출 (2~3초)
+        클대리(Haiku) → API 빠른 응답
+        클부장(Sonnet) → API 주식 분석
+        클대표(Opus)  → CLI 코드 수정/기능 개발, API 심층 분석
         """
+        # 모드 미선택 시 선택 화면 표시
+        tier_key = context.user_data.get("claude_tier", "")
+        if not tier_key:
+            await self._menu_claude_code(update, context)
+            return
+
+        tier = self._CLAUDE_TIERS.get(tier_key, self._CLAUDE_TIERS["daeri"])
+
         # 대기 중인 이미지가 있으면 이미지+텍스트 합쳐서 분석
         pending_img = context.user_data.pop("pending_image", None)
         pending_ts = context.user_data.pop("pending_image_ts", 0)
@@ -281,27 +367,30 @@ class RemoteClaudeMixin:
                 return
             else:
                 await update.message.reply_text(
-                    "⏰ 이전 이미지가 만료되었습니다. 필요하면 다시 첨부해주세요.\n"
+                    "⏰ 이전 이미지가 만료되었습니다.\n"
                     "텍스트만으로 진행합니다.",
                 )
 
-        # 1) 작업 지시 → CLI subprocess (코드 수정, 시스템 제어)
-        if self._is_work_instruction(text):
+        # 클대표: 작업 지시 → CLI subprocess (코드 수정, 시스템 제어)
+        if tier_key == "daepyo" and self._is_work_instruction(text):
             await self._execute_claude_prompt(update, text, context=context)
             return
 
-        # 2) 모든 대화(주식+일반) → API 직접 호출 + 대화 이력 유지
-        await self._claude_direct_chat(update, context, text)
+        # 공통: API 직접 호출 + 대화 이력
+        await self._claude_direct_chat(update, context, text, tier)
 
     async def _claude_direct_chat(
-        self, update: Update, context, text: str
+        self, update: Update, context, text: str, tier: dict | None = None,
     ) -> None:
-        """Claude API 직접 호출 — 모든 대화를 하나의 이력으로 처리.
+        """Claude API 직접 호출 — 선택된 모드의 모델 사용.
 
-        v10.3: 주식 질문 + 일반 대화 모두 여기서 처리.
-        종목 감지 시 실시간 가격 데이터 자동 추가.
+        v10.3.1: 클대리/클부장/클대표 모드별 모델 자동 적용.
         대화 이력 10턴 유지 → 연속 질문 가능.
         """
+        if tier is None:
+            tier_key = context.user_data.get("claude_tier", "daeri")
+            tier = self._CLAUDE_TIERS.get(tier_key, self._CLAUDE_TIERS["daeri"])
+
         if not self.anthropic_key:
             await update.message.reply_text(
                 "⚠️ ANTHROPIC_API_KEY 미설정",
@@ -309,7 +398,9 @@ class RemoteClaudeMixin:
             )
             return
 
-        placeholder = await update.message.reply_text("💬 응답 중...")
+        placeholder = await update.message.reply_text(
+            f"{tier['emoji']} {tier['name']} 응답 중..."
+        )
 
         try:
             import httpx
@@ -336,27 +427,27 @@ class RemoteClaudeMixin:
             messages = list(history)
             messages.append({"role": "user", "content": enriched})
 
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": self.anthropic_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-sonnet-4-5-20250929",
-                        "max_tokens": 2000,
-                        "system": system_text,
-                        "messages": messages,
-                    },
-                )
+            client = _get_api_client()
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self.anthropic_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": tier["model"],
+                    "max_tokens": tier["max_tokens"],
+                    "system": system_text,
+                    "messages": messages,
+                },
+            )
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    answer = data["content"][0]["text"].strip().replace("**", "")
-                else:
-                    answer = f"API 오류: {resp.status_code}"
+            if resp.status_code == 200:
+                data = resp.json()
+                answer = data["content"][0]["text"].strip().replace("**", "")
+            else:
+                answer = f"API 오류: {resp.status_code}"
 
             # 대화 이력 저장
             history.append({"role": "user", "content": text})
@@ -413,16 +504,22 @@ class RemoteClaudeMixin:
             turn = context.user_data.get("claude_turn", 0)
             context.user_data["claude_turn"] = turn + 1
 
+        tier_key = context.user_data.get("claude_tier", "") if context else ""
+        tier_name = self._CLAUDE_TIERS.get(tier_key, {}).get("name", "Claude Code")
         placeholder = await update.message.reply_text(
-            f"💻 Claude Code 실행 중...\n\n"
+            f"🧠 {tier_name} 실행 중...\n\n"
             f"📝 {prompt[:100]}{'...' if len(prompt) > 100 else ''}\n"
             f"⏳ 최대 {MAX_TIMEOUT // 60}분 소요될 수 있습니다."
         )
 
         # 첫 턴은 새 대화, 이후는 --continue
         continue_conv = in_claude_mode and turn > 0
+        # v10.3.1: 클대표 모드 → opus CLI
+        cli_model = "sonnet"
+        if context and context.user_data.get("claude_tier") == "daepyo":
+            cli_model = "opus"
         output, return_code, elapsed = await self._run_claude_cli(
-            prompt, continue_conversation=continue_conv,
+            prompt, continue_conversation=continue_conv, model=cli_model,
         )
 
         status = "✅" if return_code == 0 else "⚠️"
@@ -542,52 +639,52 @@ class RemoteClaudeMixin:
             # v9.5.1: 시스템 프롬프트 구축 (포트폴리오/브리핑 컨텍스트 포함)
             system_text = await self._build_image_system_prompt()
 
-            async with httpx.AsyncClient(timeout=45) as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": self.anthropic_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-sonnet-4-5-20250929",
-                        "max_tokens": 2000,
-                        "system": system_text,
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": "image/jpeg",
-                                        "data": img_b64,
-                                    },
+            client = _get_api_client()
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": self.anthropic_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-sonnet-4-5-20250929",
+                    "max_tokens": 2000,
+                    "system": system_text,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/jpeg",
+                                    "data": img_b64,
                                 },
-                                {
-                                    "type": "text",
-                                    "text": (
-                                        f"주호님의 이미지 분석 요청입니다.\n\n"
-                                        f"질문/요청: {prompt}\n\n"
-                                        f"이미지가 주식 차트/데이터/봇 스크린샷이라면 "
-                                        f"보유종목과 최근 브리핑을 참고하여 투자 관점에서 분석해주세요.\n"
-                                        f"K-Quant 봇이 보낸 메시지 스크린샷이면 "
-                                        f"해당 내용을 이미 알고 있는 시스템 컨텍스트와 연결하여 답변해주세요.\n"
-                                        f"코드나 에러 스크린샷이면 원인 분석 + 해결책을 제시해주세요.\n"
-                                        f"볼드(**) 사용 금지. 이모지로 가독성 확보."
-                                    ),
-                                },
-                            ],
-                        }],
-                    },
-                )
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"주호님의 이미지 분석 요청입니다.\n\n"
+                                    f"질문/요청: {prompt}\n\n"
+                                    f"이미지가 주식 차트/데이터/봇 스크린샷이라면 "
+                                    f"보유종목과 최근 브리핑을 참고하여 투자 관점에서 분석해주세요.\n"
+                                    f"K-Quant 봇이 보낸 메시지 스크린샷이면 "
+                                    f"해당 내용을 이미 알고 있는 시스템 컨텍스트와 연결하여 답변해주세요.\n"
+                                    f"코드나 에러 스크린샷이면 원인 분석 + 해결책을 제시해주세요.\n"
+                                    f"볼드(**) 사용 금지. 이모지로 가독성 확보."
+                                ),
+                            },
+                        ],
+                    }],
+                },
+            )
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    analysis = data["content"][0]["text"].strip().replace("**", "")
-                else:
-                    analysis = f"API 오류: {resp.status_code}"
+            if resp.status_code == 200:
+                data = resp.json()
+                analysis = data["content"][0]["text"].strip().replace("**", "")
+            else:
+                analysis = f"API 오류: {resp.status_code}"
 
             # 턴 카운트 증가
             turn = context.user_data.get("claude_turn", 0)

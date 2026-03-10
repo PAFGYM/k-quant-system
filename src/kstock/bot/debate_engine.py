@@ -23,6 +23,17 @@ from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_float(val, default: float = 0.0) -> float:
+    """AI 응답에서 숫자 파싱. '해당없음', 'N/A', None 등 안전 처리."""
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 # ── 데이터 클래스 ────────────────────────────────────────────
 
 @dataclass
@@ -160,6 +171,17 @@ _MANAGER_SUMMARY = {
 
 # ── AI API 호출 ──────────────────────────────────────────────
 
+# v10.3.1: 공유 httpx 클라이언트 (FD leak 방지)
+_shared_client: httpx.AsyncClient | None = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(timeout=25)
+    return _shared_client
+
+
 async def _call_ai(
     system: str,
     user: str,
@@ -167,42 +189,42 @@ async def _call_ai(
     max_tokens: int = 300,
     api_key: str = "",
 ) -> str:
-    """Anthropic API 호출 (v9.6.3: 지수 백오프 재시도)."""
+    """Anthropic API 호출 (v10.3.1: 공유 클라이언트 + 재시도)."""
     if not api_key:
         api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         return '{"error": "API 키 없음"}'
 
+    client = _get_client()
     max_retries = 2
     for attempt in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=25) as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "max_tokens": max_tokens,
-                        "system": system,
-                        "messages": [{"role": "user", "content": user}],
-                    },
-                )
-                if resp.status_code == 200:
-                    return resp.json()["content"][0]["text"].strip()
-                # 5xx/429 → 재시도, 4xx → 즉시 실패
-                if resp.status_code >= 500 or resp.status_code == 429:
-                    if attempt < max_retries - 1:
-                        delay = 1.5 * (attempt + 1)
-                        logger.info("AI call retry %d/%d (status=%d), wait %.1fs",
-                                    attempt + 1, max_retries, resp.status_code, delay)
-                        await asyncio.sleep(delay)
-                        continue
-                logger.warning("AI call failed: status=%d body=%s", resp.status_code, resp.text[:200])
-                return '{"error": "API 호출 실패"}'
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "system": system,
+                    "messages": [{"role": "user", "content": user}],
+                },
+            )
+            if resp.status_code == 200:
+                return resp.json()["content"][0]["text"].strip()
+            # 5xx/429 → 재시도, 4xx → 즉시 실패
+            if resp.status_code >= 500 or resp.status_code == 429:
+                if attempt < max_retries - 1:
+                    delay = 1.5 * (attempt + 1)
+                    logger.info("AI call retry %d/%d (status=%d), wait %.1fs",
+                                attempt + 1, max_retries, resp.status_code, delay)
+                    await asyncio.sleep(delay)
+                    continue
+            logger.warning("AI call failed: status=%d body=%s", resp.status_code, resp.text[:200])
+            return '{"error": "API 호출 실패"}'
         except (httpx.TimeoutException, httpx.ConnectError) as e:
             if attempt < max_retries - 1:
                 delay = 1.5 * (attempt + 1)
@@ -384,10 +406,10 @@ class DebateEngine:
                 manager_name=mgr["name"],
                 emoji=mgr["emoji"],
                 action=data.get("action", "관망"),
-                confidence=float(data.get("confidence", 0.5)),
+                confidence=_safe_float(data.get("confidence", 0.5), 0.5),
                 reasoning=data.get("reasoning", raw[:200]),
-                price_target=float(data.get("price_target", 0)),
-                stop_loss=float(data.get("stop_loss", 0)),
+                price_target=_safe_float(data.get("price_target", 0)),
+                stop_loss=_safe_float(data.get("stop_loss", 0)),
             )
 
         opinions = await asyncio.gather(
@@ -450,7 +472,7 @@ class DebateEngine:
                 manager_name=my_opinion.manager_name,
                 emoji=my_opinion.emoji,
                 action=new_action,
-                confidence=float(data.get("confidence", my_opinion.confidence)),
+                confidence=_safe_float(data.get("confidence", my_opinion.confidence), my_opinion.confidence),
                 reasoning=data.get("reasoning", ""),
                 price_target=my_opinion.price_target,
                 stop_loss=my_opinion.stop_loss,

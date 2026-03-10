@@ -2727,50 +2727,32 @@ class AdminExtrasMixin:
     async def _menu_agent_chat(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """🤖 에이전트 — 오류 신고/기능 요청을 Claude Code에 전달."""
-        context.user_data["agent_mode"] = True
-        buttons = [
-            [InlineKeyboardButton("🐛 오류 신고", callback_data="agent:bug")],
-            [InlineKeyboardButton("💡 기능 요청", callback_data="agent:feature")],
-            [InlineKeyboardButton("❓ 질문하기", callback_data="agent:question")],
-            [InlineKeyboardButton("📋 v9.6 기능 설명서", callback_data="agent:v8doc")],
-            [InlineKeyboardButton("🔙 나가기", callback_data="agent:exit")],
-        ]
+        """🤖 에이전트 → 클로드 모드로 통합 (v10.3.1)."""
+        context.user_data.pop("agent_mode", None)
+        context.user_data["claude_mode"] = True
+        context.user_data["claude_turn"] = 0
         await update.message.reply_text(
-            "🤖 K-Quant 에이전트\n\n"
-            "무엇을 도와드릴까요?\n"
-            "아래 버튼을 선택하거나, 직접 메시지를 입력하세요.\n\n"
-            "입력한 내용은 로그에 기록되어 다음 업데이트에 반영됩니다.",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            "🤖 AI 에이전트 (Claude)\n"
+            f"{'━' * 22}\n\n"
+            "주식 질문 → Sonnet (정밀 분석)\n"
+            "일반 대화 → Haiku (빠른 응답)\n\n"
+            "자유롭게 대화하세요.\n"
+            "🔙 종료하려면 다른 메뉴 버튼을 누르세요.",
+            reply_markup=get_reply_markup(context),
         )
 
     async def _action_agent(self, query, context, payload: str = "") -> None:
-        """에이전트 콜백: agent:bug/feature/question/exit."""
-        if payload == "bug":
-            context.user_data["agent_mode"] = True
-            context.user_data["agent_type"] = "bug"
+        """에이전트 콜백 → 클로드 모드로 통합 (v10.3.1)."""
+        if payload in ("bug", "feature", "question"):
+            context.user_data.pop("agent_mode", None)
+            context.user_data.pop("agent_type", None)
+            context.user_data["claude_mode"] = True
+            context.user_data["claude_turn"] = 0
+            labels = {"bug": "🐛 오류/버그", "feature": "💡 기능 요청", "question": "❓ 질문"}
             await safe_edit_or_reply(query,
-                "🐛 오류 신고\n\n"
-                "어떤 오류가 발생했나요?\n"
-                "스크린샷을 보내거나, 메시지로 설명해주세요.\n\n"
-                "예: '잔고에서 가격이 이상해요', '버튼이 안 눌려요'"
-            )
-        elif payload == "feature":
-            context.user_data["agent_mode"] = True
-            context.user_data["agent_type"] = "feature"
-            await safe_edit_or_reply(query,
-                "💡 기능 요청\n\n"
-                "어떤 기능이 필요하신가요?\n"
-                "자유롭게 설명해주세요.\n\n"
-                "예: '알림을 카카오톡으로도 받고 싶어요'"
-            )
-        elif payload == "question":
-            context.user_data["agent_mode"] = True
-            context.user_data["agent_type"] = "question"
-            await safe_edit_or_reply(query,
-                "❓ 질문하기\n\n"
-                "궁금한 점을 물어보세요.\n\n"
-                "예: '모멘텀 전략이 뭔가요?', '자동매매는 언제 되나요?'"
+                f"{labels.get(payload, '')} → Claude 모드 전환\n\n"
+                "자유롭게 메시지를 입력하세요.\n"
+                "스크린샷도 보낼 수 있습니다."
             )
         elif payload == "v8doc":
             # v9.6: 버전 설명서 PDF 생성 및 전송

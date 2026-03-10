@@ -23,6 +23,16 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# v10.3.1: 공유 httpx 클라이언트 (FD leak 방지)
+_shared_router_client: httpx.AsyncClient | None = None
+
+
+def _get_router_client() -> httpx.AsyncClient:
+    global _shared_router_client
+    if _shared_router_client is None or _shared_router_client.is_closed:
+        _shared_router_client = httpx.AsyncClient(timeout=60)
+    return _shared_router_client
+
 
 # ── AI Provider Configs ──────────────────────────────────────────────────────
 
@@ -401,29 +411,29 @@ class AIRouter:
                 "cache_control": {"type": "ephemeral"},
             }]
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json=payload,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"Claude API error {resp.status_code}: {resp.text[:200]}")
-            data = resp.json()
-            usage = data.get("usage", {})
-            self.stats["claude"].tokens_in += usage.get("input_tokens", 0)
-            self.stats["claude"].tokens_out += usage.get("output_tokens", 0)
-            # 캐시 히트 통계 추적
-            cache_read = usage.get("cache_read_input_tokens", 0)
-            cache_write = usage.get("cache_creation_input_tokens", 0)
-            if cache_read > 0:
-                self._cache_hits += 1
-                self._cache_tokens_saved += cache_read
-            return data["content"][0]["text"]
+        client = _get_router_client()
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Claude API error {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        usage = data.get("usage", {})
+        self.stats["claude"].tokens_in += usage.get("input_tokens", 0)
+        self.stats["claude"].tokens_out += usage.get("output_tokens", 0)
+        # 캐시 히트 통계 추적
+        cache_read = usage.get("cache_read_input_tokens", 0)
+        cache_write = usage.get("cache_creation_input_tokens", 0)
+        if cache_read > 0:
+            self._cache_hits += 1
+            self._cache_tokens_saved += cache_read
+        return data["content"][0]["text"]
 
     async def _call_gpt(
         self, api_key: str, model: str, prompt: str, *,
@@ -445,22 +455,22 @@ class AIRouter:
         if response_format == "json":
             payload["response_format"] = {"type": "json_object"}
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"GPT API error {resp.status_code}: {resp.text[:200]}")
-            data = resp.json()
-            usage = data.get("usage", {})
-            self.stats["gpt"].tokens_in += usage.get("prompt_tokens", 0)
-            self.stats["gpt"].tokens_out += usage.get("completion_tokens", 0)
-            return data["choices"][0]["message"]["content"]
+        client = _get_router_client()
+        resp = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"GPT API error {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        usage = data.get("usage", {})
+        self.stats["gpt"].tokens_in += usage.get("prompt_tokens", 0)
+        self.stats["gpt"].tokens_out += usage.get("completion_tokens", 0)
+        return data["choices"][0]["message"]["content"]
 
     async def _call_gemini(
         self, api_key: str, model: str, prompt: str, *,
@@ -486,21 +496,21 @@ class AIRouter:
             f":generateContent?key={api_key}"
         )
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code != 200:
-                raise RuntimeError(f"Gemini API error {resp.status_code}: {resp.text[:200]}")
-            data = resp.json()
-            # Gemini usage tracking
-            usage = data.get("usageMetadata", {})
-            self.stats["gemini"].tokens_in += usage.get("promptTokenCount", 0)
-            self.stats["gemini"].tokens_out += usage.get("candidatesTokenCount", 0)
-            candidates = data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    return parts[0].get("text", "")
-            return ""
+        client = _get_router_client()
+        resp = await client.post(url, json=payload)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Gemini API error {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        # Gemini usage tracking
+        usage = data.get("usageMetadata", {})
+        self.stats["gemini"].tokens_in += usage.get("promptTokenCount", 0)
+        self.stats["gemini"].tokens_out += usage.get("candidatesTokenCount", 0)
+        candidates = data.get("candidates", [])
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            if parts:
+                return parts[0].get("text", "")
+        return ""
 
     # ── Vision (Claude Only) ────────────────────────────────────────────────
 
@@ -539,26 +549,26 @@ class AIRouter:
         }
 
         start = time.monotonic()
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": provider.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json=payload,
-            )
-            elapsed = (time.monotonic() - start) * 1000
-            self.stats["claude"].calls += 1
-            self.stats["claude"].total_latency_ms += elapsed
+        client = _get_router_client()
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": provider.api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json=payload,
+        )
+        elapsed = (time.monotonic() - start) * 1000
+        self.stats["claude"].calls += 1
+        self.stats["claude"].total_latency_ms += elapsed
 
-            if resp.status_code != 200:
-                raise RuntimeError(f"Vision API error: {resp.status_code}")
-            data = resp.json()
-            self.stats["claude"].tokens_in += data.get("usage", {}).get("input_tokens", 0)
-            self.stats["claude"].tokens_out += data.get("usage", {}).get("output_tokens", 0)
-            return data["content"][0]["text"]
+        if resp.status_code != 200:
+            raise RuntimeError(f"Vision API error: {resp.status_code}")
+        data = resp.json()
+        self.stats["claude"].tokens_in += data.get("usage", {}).get("input_tokens", 0)
+        self.stats["claude"].tokens_out += data.get("usage", {}).get("output_tokens", 0)
+        return data["content"][0]["text"]
 
     # ── Status & Monitoring ──────────────────────────────────────────────────
 

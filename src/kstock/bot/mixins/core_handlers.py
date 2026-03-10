@@ -1127,6 +1127,8 @@ class CoreHandlersMixin:
             if text not in _claude_safe_buttons:
                 context.user_data.pop("claude_mode", None)
                 context.user_data.pop("claude_turn", None)
+                context.user_data.pop("claude_tier", None)
+                context.user_data.pop("claude_chat_history", None)
             # v8.5: 메뉴 컨텍스트 팁 (세션당 1회)
             _tip_map = {
                 "📊 분석": "analysis", "📈 시황": "market",
@@ -1145,6 +1147,7 @@ class CoreHandlersMixin:
                     "\u26a0\ufe0f 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
                     reply_markup=get_reply_markup(context),
                 )
+            return  # v10.3.1: 메뉴 핸들러 실행 후 즉시 리턴 (중복 실행 방지)
         else:
             # 매수 플래너: 금액 입력 대기 → 장바구니 모드 진입
             if context.user_data.get("awaiting_buy_amount"):
@@ -1221,29 +1224,13 @@ class CoreHandlersMixin:
                 await self._run_optimize_from_text(update, context, text)
                 return
 
-            # 0-3. 에이전트 모드: 사용자 피드백 수집
+            # 0-3. 에이전트 모드 → 클로드 모드로 통합 (v10.3.1)
             if context.user_data.get("agent_mode"):
-                agent_type = context.user_data.get("agent_type", "feedback")
-                logger.info(
-                    "AGENT_FEEDBACK [%s]: %s", agent_type, text,
-                )
-                # 로그 파일에 피드백 기록
-                try:
-                    feedback_path = Path("data/agent_feedback.log")
-                    feedback_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(feedback_path, "a", encoding="utf-8") as f:
-                        ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-                        f.write(f"[{ts}] [{agent_type}] {text}\n")
-                except Exception:
-                    logger.debug("handle_message agent feedback log write failed", exc_info=True)
                 context.user_data.pop("agent_mode", None)
                 context.user_data.pop("agent_type", None)
-                await update.message.reply_text(
-                    f"✅ 접수 완료!\n\n"
-                    f"📝 [{agent_type}] {text[:60]}{'...' if len(text) > 60 else ''}\n\n"
-                    f"다음 업데이트에 반영하겠습니다. 감사합니다! 🙏",
-                    reply_markup=get_reply_markup(context),
-                )
+                context.user_data["claude_mode"] = True
+                # 클로드 모드로 바로 전달
+                await self._handle_claude_free_chat(update, context, text)
                 return
 
             # 0-4. 클로드 대화 모드: "💻 클로드" 누른 후 자유 대화 (Claude API)
@@ -2034,6 +2021,7 @@ class CoreHandlersMixin:
             "opt_run": self._action_opt_run,
             "fav": self._action_favorites,
             "agent": self._action_agent,
+            "claude_tier": self._action_claude_tier,
             "goto": self._action_goto,
             "adm": self._handle_admin_callback,
             # v3.6 신규

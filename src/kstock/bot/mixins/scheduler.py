@@ -4675,6 +4675,11 @@ class SchedulerMixin:
         holding_type = h.get("holding_type", "auto")
         name = h.get("name", ticker)
 
+        # v10.3.1: 장기주 매도 알림 완전 차단
+        from kstock.core.risk_manager import LEGACY_EXEMPT_TICKERS
+        if holding_type in ("long_term", "long") or ticker in LEGACY_EXEMPT_TICKERS:
+            return
+
         # 쿨다운 (24시간)
         alert_key = f"sell:{ticker}"
         if now - self._surge_cooldown.get(alert_key, 0) < self._SELL_TARGET_COOLDOWN_SEC:
