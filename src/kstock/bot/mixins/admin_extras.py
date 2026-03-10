@@ -1103,19 +1103,19 @@ class AdminExtrasMixin:
         """v9.5.5 사용설명서 — 텍스트 메뉴에서 진입."""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         text = (
-            "📖 K-Quant 사용설명서\n"
+            "📖 K-Quant v11.0 사용설명서\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "AI 투자 비서가 24시간 서포트합니다.\n\n"
+            "AI 투자 비서 + ML 예측 + 24채널 학습\n\n"
             "🔹 기본 사용법\n"
-            "  종목명 입력 → 즉시 AI 분석\n"
+            "  종목명 입력 → AI 분석 + ML 예측\n"
             "  예: '삼성전자', 'SK하이닉스'\n\n"
-            "🔹 하단 메뉴 (항상 표시)\n"
-            "  💬 자유롭게 대화하면 AI가 응답\n\n"
+            "🔹 학습 현황\n"
+            "  /learning → 예산, YouTube, ML, 합성\n\n"
             "🔹 자동 알림 (매일)\n"
-            "  07:30 모닝브리핑\n"
+            "  07:30 모닝브리핑 (크로스마켓+유가)\n"
             "  09:30 AI 토론 (장 시작)\n"
             "  16:00 장마감 리포트 + PDF\n"
-            "  21:00 일일 자가진단\n\n"
+            "  21:30 일일 학습 합성\n\n"
             "아래에서 상세 기능을 확인하세요 👇"
         )
         buttons = [
@@ -2755,19 +2755,19 @@ class AdminExtrasMixin:
                 "스크린샷도 보낼 수 있습니다."
             )
         elif payload == "v8doc":
-            # v9.6: 버전 설명서 PDF 생성 및 전송
-            await safe_edit_or_reply(query, "📋 v9.6 기능 설명서 PDF 생성 중...")
+            # v11.0: 버전 설명서 PDF 생성 및 전송
+            await safe_edit_or_reply(query, "📋 v11.0 기능 설명서 PDF 생성 중...")
             try:
                 import subprocess as _sp
                 _here = os.path.abspath(__file__)
                 proj = os.path.dirname(os.path.dirname(os.path.dirname(
                     os.path.dirname(os.path.dirname(_here)))))
-                script = os.path.join(proj, "scripts", "gen_v96_doc.py")
+                script = os.path.join(proj, "scripts", "gen_v110_doc.py")
                 if not os.path.exists(script):
                     proj = os.environ.get("PROJECT_DIR", "/Users/botddol/k-quant-system")
-                    script = os.path.join(proj, "scripts", "gen_v96_doc.py")
+                    script = os.path.join(proj, "scripts", "gen_v110_doc.py")
                 if not os.path.exists(script):
-                    await query.message.reply_text("⚠️ gen_v96_doc.py 스크립트를 찾을 수 없습니다.")
+                    await query.message.reply_text("⚠️ gen_v110_doc.py 스크립트를 찾을 수 없습니다.")
                     return
                 import sys as _sys
                 result = _sp.run(
@@ -2776,20 +2776,20 @@ class AdminExtrasMixin:
                     cwd=proj, env={**os.environ, "PYTHONPATH": os.path.join(proj, "src")},
                 )
                 from datetime import datetime as _dt
-                pdf_name = f"K-Quant_v96_Features_{_dt.now().strftime('%Y%m%d')}.pdf"
+                pdf_name = f"K-Quant_v110_Features_{_dt.now().strftime('%Y%m%d')}.pdf"
                 pdf_path = os.path.join(proj, "reports", pdf_name)
                 if os.path.exists(pdf_path):
                     with open(pdf_path, "rb") as f:
                         await query.message.reply_document(
                             document=f,
-                            filename="K-Quant_v96_Features.pdf",
-                            caption="📋 K-Quant System v9.6 기능 설명서",
+                            filename="K-Quant_v110_Features.pdf",
+                            caption="📋 K-Quant System v11.0 기능 설명서",
                         )
                 else:
                     await query.message.reply_text(
                         f"⚠️ PDF 생성 실패\n{result.stderr[:500] if result.stderr else '알 수 없는 오류'}")
             except Exception as e:
-                logger.error("v96doc generation failed: %s", e, exc_info=True)
+                logger.error("v110doc generation failed: %s", e, exc_info=True)
                 await query.message.reply_text(f"⚠️ 설명서 생성 실패: {e}")
             return
         elif payload == "exit":

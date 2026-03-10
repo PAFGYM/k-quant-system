@@ -383,16 +383,47 @@ class CoreHandlersMixin:
             time=dt_time(hour=7, minute=15, tzinfo=KST),
             name="cross_market_analysis",
         )
-        # v10.4: YouTube 심화 학습 (08:00 + 20:00 매일 — Whisper 포함)
+        # v11.0: 액티브 ETF 구성종목 추적 (09:05 매일)
         jq.run_daily(
-            self.job_youtube_deep_learning,
-            time=dt_time(hour=8, minute=0, tzinfo=KST),
-            name="youtube_deep_learn_am",
+            self.job_active_etf_tracking,
+            time=dt_time(hour=9, minute=5, tzinfo=KST),
+            name="active_etf_tracking",
+        )
+        # v11.0: 5x/일 YouTube 배치 학습 (Gemini Flash)
+        for batch_name, hour, minute in [
+            ("youtube_batch_1", 6, 30),
+            ("youtube_batch_2", 8, 0),
+            ("youtube_batch_3", 12, 0),
+            ("youtube_batch_4", 17, 0),
+            ("youtube_batch_5", 21, 0),
+        ]:
+            jq.run_daily(
+                self.job_youtube_batch_tiered,
+                time=dt_time(hour=hour, minute=minute, tzinfo=KST),
+                name=batch_name,
+            )
+        # v11.0: 칼럼 크롤링 (08:10, 17:10)
+        jq.run_daily(
+            self.job_column_crawl,
+            time=dt_time(hour=8, minute=10, tzinfo=KST),
+            name="column_crawl_am",
         )
         jq.run_daily(
+            self.job_column_crawl,
+            time=dt_time(hour=17, minute=10, tzinfo=KST),
+            name="column_crawl_pm",
+        )
+        # v11.0: 일일 합성 (21:30)
+        jq.run_daily(
+            self.job_daily_synthesis,
+            time=dt_time(hour=21, minute=30, tzinfo=KST),
+            name="daily_synthesis",
+        )
+        # v11.0: Tier2 심화 (22:00, Haiku + Whisper)
+        jq.run_daily(
             self.job_youtube_deep_learning,
-            time=dt_time(hour=20, minute=0, tzinfo=KST),
-            name="youtube_deep_learn_pm",
+            time=dt_time(hour=22, minute=0, tzinfo=KST),
+            name="youtube_tier2_deep",
         )
         # KIS WebSocket: 장 시작 전 연결 (08:50), 장 종료 후 해제 (15:35)
         jq.run_daily(

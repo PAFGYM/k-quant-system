@@ -1,4 +1,4 @@
-"""Telegram message formatting - K-Quant v9.1 with ML, sentiment, KIS, screenshot.
+"""Telegram message formatting - K-Quant v11.0 with ML, sentiment, KIS, screenshot.
 
 Rules:
 - No ** bold, no Markdown parse_mode
@@ -129,7 +129,7 @@ def generate_one_liner(tech, flow, macro) -> str:
 
 def format_welcome() -> str:
     return (
-        f"🚀 {USER_NAME}, K-Quant v9.1\n\n"
+        f"🚀 {USER_NAME}, K-Quant v11.0\n\n"
         "AI 투자 매니저 시스템\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "👨‍💼 4명의 전담 매니저가 종목을 관리합니다\n"
@@ -1015,13 +1015,13 @@ def format_system_status(last_runs: list, job_infos: list = None) -> str:
             lines.append(f"  {icon} {run.get('job_name', 'N/A')} @ {ended}")
     else:
         lines.append("아직 실행된 작업이 없습니다.")
-    lines.extend(["", "\u2500" * 25, f"\U0001f551 {_now_kst()}", "K-Quant v9.1"])
+    lines.extend(["", "\u2500" * 25, f"\U0001f551 {_now_kst()}", "K-Quant v11.0"])
     return "\n".join(lines)
 
 
 def format_help() -> str:
     return (
-        f"❓ {USER_NAME}, K-Quant v9.1 도움말\n"
+        f"❓ {USER_NAME}, K-Quant v11.0 도움말\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 분석 — 종목명 입력 → AI 즉시 분석\n"
         "📈 시황 — 🟢🟡🔴 신호등 시장 판단\n"
@@ -1032,26 +1032,37 @@ def format_help() -> str:
         "🤖 에이전트 — 4매니저 동시 분석\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "📌 자동 일과표\n"
-        "  06:30 🤖 미분류 종목 자동분류\n"
+        "  06:30 📺 YouTube 학습 (1/5)\n"
         "  07:00 🇺🇸 미국 프리마켓 브리핑\n"
+        "  07:10 🛢 유가 분석 + 🌍 크로스마켓\n"
         "  07:30 ☀️ 모닝 브리핑\n"
-        "       → 매니저 보유종목 분석\n"
-        "       → 매니저 매수 스캔\n"
-        "       → 📋 오늘의 할 일\n"
-        "  07:50 🛒 매수 플래너\n"
+        "  08:00 📺 YouTube (2/5) + 📰 칼럼 수집\n"
+        "  08:20 📋 증권사 리포트\n"
         "  09:00~ 장중 실시간 모니터링\n"
-        "  14:30 ⚡ 단타 청산 리마인더\n"
-        "  16:00 📊 장마감 PDF 보고서\n"
-        "  21:00 🔧 자가진단 리포트\n\n"
+        "  12:00 📺 YouTube (3/5)\n"
+        "  16:00 📊 장마감 PDF + 수급/공매도 수집\n"
+        "  17:00 📺 YouTube (4/5) + 📰 칼럼\n"
+        "  21:00 📺 YouTube (5/5) + 자가진단\n"
+        "  21:30 📊 일일 학습 합성\n"
+        "  22:00 🔬 Tier2 심화 + ML 점진학습\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "👨‍💼 4인 투자 매니저\n"
         "  ⚡ 리버모어 — 단타 (손절-3%, 익절+5%)\n"
         "  🔥 오닐 — 스윙 (손절-7%, 익절+10%)\n"
         "  📊 린치 — 포지션 (손절-12%, 익절+20%)\n"
         "  💎 버핏 — 장기 (손절-20%, 익절+30%)\n\n"
-        "💡 '온보딩' 입력 → 기능 체험 투어\n"
-        "⚙️ 더보기 → 고급 기능 (급등주/스윙/매집탐지)\n\n"
-        "K-Quant System v9.1"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🧠 AI 학습 (v11.0)\n"
+        "  📺 YouTube 24채널 × 5회/일\n"
+        "  ⚡ Tier1: Gemini Flash 벌크 스크리닝\n"
+        "  🔬 Tier2: Claude Haiku 심화 분석\n"
+        "  👤 19명 애널리스트 자동 추적\n"
+        "  📰 네이버 칼럼/투자전략 수집\n"
+        "  🧠 ML 앙상블 (LGB+XGB+LSTM, 58피처)\n"
+        "  /learning — 학습 현황 대시보드\n\n"
+        "💡 '온보딩' → 기능 체험 투어\n"
+        "⚙️ 더보기 → 고급 기능\n\n"
+        "K-Quant System v11.0"
     )
 
 
@@ -1624,12 +1635,13 @@ def format_onboarding_complete() -> str:
     return (
         f"\U0001f389 {USER_NAME}, 온보딩 완료!\n"
         f"{'━' * 22}\n\n"
-        "K-Quant v9.2의 핵심 기능을 모두 둘러보셨습니다.\n\n"
-        "\U0001f4cc 매일 07:30 모닝 브리핑 + 4매니저 분석으로 하루 시작\n"
-        "\U0001f4cc 장중 실시간 알림 (급등/매도타겟/매니저 경고)\n"
-        "\U0001f4cc 10종 차트로 기술적·밸류에이션 분석\n"
-        "\U0001f4cc VIX 레짐별 매니저 가중치 자동 조절\n"
-        "\U0001f4cc 궁금한 건 아무때나 AI에게 물어보세요\n\n"
+        "K-Quant v11.0의 핵심 기능을 모두 둘러보셨습니다.\n\n"
+        "\U0001f4cc 매일 07:30 모닝 브리핑 + 4매니저 분석\n"
+        "\U0001f4cc 장중 실시간 알림 (급등/매도타겟/경고)\n"
+        "\U0001f4cc YouTube 24채널 자동 학습 (5회/일)\n"
+        "\U0001f4cc ML 앙상블 예측 (58피처, LGB+XGB+LSTM)\n"
+        "\U0001f4cc 19명 애널리스트 추적 + 일일 합성\n"
+        "\U0001f4cc /learning → 학습 현황 대시보드\n\n"
         "이제 메인 메뉴에서 자유롭게 사용해보세요! \U0001f447"
     )
 

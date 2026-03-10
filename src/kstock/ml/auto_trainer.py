@@ -626,12 +626,11 @@ class AutoTrainer:
 
         OHLCV 데이터에서 base_date의 종가와 D+days 종가 비교.
         """
-        try:
-            if not self.db:
-                return None
+        if not self.db:
+            return None
 
-            # DB에서 OHLCV 조회 (supply_demand에 price 정보가 없으므로 yfinance 캐시 활용)
-            # 간단한 접근: recommendation_results에서 해당 종목의 actual return 검색
+        # 1) recommendation_results에서 검색 (빠름)
+        try:
             recs = self.db.get_recommendation_results(limit=500)
             for r in recs:
                 if r.get("ticker") == ticker:
@@ -640,29 +639,29 @@ class AutoTrainer:
                         ret = r.get("day5_return")
                         if ret is not None:
                             return float(ret)
-
-            # 대안: pykrx로 직접 조회
-            try:
-                from pykrx import stock as pykrx_stock
-                base_dt = datetime.strptime(base_date, "%Y-%m-%d")
-                end_dt = base_dt + timedelta(days=days + 5)  # 여유
-
-                df = pykrx_stock.get_market_ohlcv(
-                    base_dt.strftime("%Y%m%d"),
-                    end_dt.strftime("%Y%m%d"),
-                    ticker,
-                )
-                if df is not None and len(df) > days:
-                    base_price = float(df.iloc[0]["종가"])
-                    target_price = float(df.iloc[days]["종가"])
-                    if base_price > 0:
-                        return (target_price - base_price) / base_price * 100
-            except Exception:
-                pass
-
-            return None
         except Exception:
-            return None
+            pass
+
+        # 2) pykrx로 직접 조회 (fallback)
+        try:
+            from pykrx import stock as pykrx_stock
+            base_dt = datetime.strptime(base_date, "%Y-%m-%d")
+            end_dt = base_dt + timedelta(days=days + 5)
+
+            df = pykrx_stock.get_market_ohlcv(
+                base_dt.strftime("%Y%m%d"),
+                end_dt.strftime("%Y%m%d"),
+                ticker,
+            )
+            if df is not None and len(df) > days:
+                base_price = float(df.iloc[0]["종가"])
+                target_price = float(df.iloc[days]["종가"])
+                if base_price > 0:
+                    return (target_price - base_price) / base_price * 100
+        except Exception:
+            pass
+
+        return None
 
     async def daily_incremental_update(self) -> AutoTrainResult:
         """매일 22:00 실행 — D-5 확정 데이터로 점진 학습.

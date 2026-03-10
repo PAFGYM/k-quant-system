@@ -56,6 +56,8 @@ CROSS_MARKET_TICKERS: Dict[str, str] = {
     # Korean indices
     "kospi": "^KS11",
     "kosdaq": "^KQ11",
+    # v11.0: Korea-linked US ETF (overnight predictor)
+    "koru": "KORU",  # Direxion 3x South Korea Bull — overnight return predicts next-day KOSPI
 }
 
 # ---------------------------------------------------------------------------
@@ -166,6 +168,10 @@ class CrossMarketSnapshot:
     taiwan_change_pct: float = 0.0  # v10.5: TWII
     # Options PCR (v10.5)
     pcr_volume: float = 0.0
+    # v11.0: KORU (Direxion 3x Korea Bull) — overnight predictor
+    koru_close: float = 0.0
+    koru_change_pct: float = 0.0  # KORU daily return (3x leveraged)
+    koru_implied_kospi_pct: float = 0.0  # KORU/3 ≈ implied KOSPI return
     # Korean (previous close)
     kospi_prev: float = 0.0
     kosdaq_prev: float = 0.0
@@ -344,6 +350,12 @@ def build_snapshot(
     snap.shanghai_change_pct = _safe_pct_change(data.get("shanghai"))
     snap.hsi_change_pct = _safe_pct_change(data.get("hsi"))
     snap.taiwan_change_pct = _safe_pct_change(data.get("taiwan"))  # v10.5
+
+    # v11.0: KORU (overnight predictor)
+    snap.koru_close = _safe_last(data.get("koru"))
+    snap.koru_change_pct = _safe_pct_change(data.get("koru"))
+    # KORU is 3x leveraged → implied KOSPI return = KORU_return / 3
+    snap.koru_implied_kospi_pct = snap.koru_change_pct / 3.0 if snap.koru_change_pct else 0.0
 
     # Korean (previous close)
     snap.kospi_prev = _safe_last(data.get("kospi"))
@@ -525,6 +537,10 @@ def _detect_risk_flags(snap: CrossMarketSnapshot) -> List[str]:
         flags.append(f"유가 급변동 ({snap.wti_change_pct:+.1f}%)")
     if snap.us10y_change_bp > 15:
         flags.append(f"미국채 10Y 급등 (+{snap.us10y_change_bp:.0f}bp)")
+    # v11.0: KORU signal
+    if abs(snap.koru_change_pct) > 5:
+        direction = "급등" if snap.koru_change_pct > 0 else "급락"
+        flags.append(f"KORU 3X {direction} ({snap.koru_change_pct:+.1f}%, 내재 KOSPI {snap.koru_implied_kospi_pct:+.1f}%)")
 
     return flags
 
@@ -543,15 +559,33 @@ def compute_cross_market_impact(
     commodity_imp = _compute_commodity_impact(snap)
     asia_imp = _compute_asia_spillover(snap)
 
-    # Weighted composite
-    composite = (
-        us_eq * 0.35
-        + vix_imp * 0.20
-        + fx_imp * 0.20
-        + bond_imp * 0.05
-        + commodity_imp * 0.10
-        + asia_imp * 0.10
-    )
+    # v11.0: KORU overnight signal — direct Korea predictor
+    koru_signal = 0.0
+    if abs(snap.koru_implied_kospi_pct) > 0.1:
+        # KORU implied return is a direct bet on Korean market
+        koru_signal = max(-3, min(3, snap.koru_implied_kospi_pct * 0.8))
+
+    # Weighted composite (v11.0: KORU added at 10%, others adjusted)
+    if abs(koru_signal) > 0.1:
+        composite = (
+            us_eq * 0.30
+            + vix_imp * 0.18
+            + fx_imp * 0.17
+            + bond_imp * 0.05
+            + commodity_imp * 0.08
+            + asia_imp * 0.08
+            + koru_signal * 0.14  # KORU direct predictor
+        )
+    else:
+        # KORU unavailable → original weights
+        composite = (
+            us_eq * 0.35
+            + vix_imp * 0.20
+            + fx_imp * 0.20
+            + bond_imp * 0.05
+            + commodity_imp * 0.10
+            + asia_imp * 0.10
+        )
 
     # Direction classification
     if composite <= -2.5:
@@ -717,6 +751,11 @@ def format_impact_report(outlook: MarketOutlook) -> str:
     lines.append(f"미국채 10Y: {snap.us10y_yield:.2f}% ({snap.us10y_change_bp:+.0f}bp)")
     lines.append("")
 
+    # v11.0: KORU signal
+    if snap.koru_close > 0:
+        lines.append(f"KORU 3X: ${snap.koru_close:.2f} ({snap.koru_change_pct:+.1f}%) → 내재 KOSPI {snap.koru_implied_kospi_pct:+.2f}%")
+    lines.append("")
+
     # Asian markets
     lines.append("[아시아]")
     lines.append(
@@ -769,6 +808,7 @@ def format_impact_context_for_ai(outlook: MarketOutlook) -> str:
         f"S&P500: {snap.sp500_change_pct:+.1f}%, NASDAQ: {snap.nasdaq_change_pct:+.1f}%",
         f"VIX: {snap.vix:.1f} ({snap.vix_regime}), USD/KRW: {snap.usdkrw:.0f} ({snap.usdkrw_change_pct:+.2f}%), USD/JPY: {snap.usdjpy:.1f}",
         f"대만TWII: {snap.taiwan_change_pct:+.1f}%, 닛케이: {snap.nikkei_change_pct:+.1f}%",
+        f"KORU 3X: {snap.koru_change_pct:+.1f}% (내재 KOSPI {snap.koru_implied_kospi_pct:+.2f}%)" if snap.koru_close > 0 else "",
     ]
 
     if outlook.key_drivers:

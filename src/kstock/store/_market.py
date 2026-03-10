@@ -1685,3 +1685,87 @@ class MarketMixin:
                 (days,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── v11.0: 전문가 칼럼 ───────────────────────────────────────────────────
+
+    def save_financial_column(self, data: dict) -> bool:
+        """전문가 칼럼 저장. 중복이면 False 반환."""
+        with self._connect() as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO financial_columns "
+                    "(source, title, author, broker, date, is_tracked_analyst, "
+                    "ai_summary, mentioned_tickers, mentioned_sectors) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        data.get("source", ""),
+                        data.get("title", ""),
+                        data.get("author", ""),
+                        data.get("broker", ""),
+                        data.get("date", ""),
+                        1 if data.get("is_tracked_analyst") else 0,
+                        data.get("ai_summary", ""),
+                        data.get("mentioned_tickers", ""),
+                        data.get("mentioned_sectors", ""),
+                    ),
+                )
+                return True
+            except Exception:
+                return False
+
+    def update_column_summary(
+        self, source: str, title: str, date: str,
+        ai_summary: str, tickers: str, sectors: str,
+    ) -> None:
+        """칼럼 AI 요약 업데이트."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE financial_columns SET ai_summary=?, mentioned_tickers=?, "
+                "mentioned_sectors=? WHERE source=? AND title=? AND date=?",
+                (ai_summary, tickers, sectors, source, title, date),
+            )
+
+    def get_recent_columns(self, limit: int = 30, days: int = 7) -> list[dict]:
+        """최근 칼럼 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM financial_columns "
+                "WHERE date >= date('now', ? || ' days') "
+                "ORDER BY date DESC LIMIT ?",
+                (f"-{days}", limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── v11.0: 일일 합성 ────────────────────────────────────────────────────
+
+    def save_daily_synthesis(self, data: dict) -> None:
+        """일일 학습 합성 저장."""
+        import json as _json
+        today = data.get("date", "") or __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO daily_synthesis "
+                "(date, synthesis_text, top_themes, ticker_consensus, "
+                "sector_outlook, analyst_highlights, market_consensus, "
+                "total_items, data_json) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    today,
+                    data.get("synthesis", ""),
+                    _json.dumps(data.get("top_themes", []), ensure_ascii=False),
+                    _json.dumps(data.get("ticker_consensus", []), ensure_ascii=False),
+                    _json.dumps(data.get("sector_outlook", []), ensure_ascii=False),
+                    _json.dumps(data.get("analyst_highlights", []), ensure_ascii=False),
+                    data.get("market_consensus", ""),
+                    data.get("total_items", 0),
+                    _json.dumps(data, ensure_ascii=False, default=str),
+                ),
+            )
+
+    def get_latest_synthesis(self, days: int = 3) -> list[dict]:
+        """최근 일일 합성 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM daily_synthesis ORDER BY date DESC LIMIT ?",
+                (days,),
+            ).fetchall()
+        return [dict(r) for r in rows]

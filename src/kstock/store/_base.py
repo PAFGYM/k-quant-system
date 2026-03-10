@@ -1371,6 +1371,41 @@ CREATE TABLE IF NOT EXISTS eia_inventory (
 );
 
 CREATE INDEX IF NOT EXISTS idx_eia_inventory_date ON eia_inventory(date);
+
+-- v11.0: 네이버 전문가 칼럼
+CREATE TABLE IF NOT EXISTS financial_columns (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    source              TEXT    NOT NULL,
+    title               TEXT    NOT NULL,
+    author              TEXT    DEFAULT '',
+    broker              TEXT    DEFAULT '',
+    date                TEXT    NOT NULL,
+    is_tracked_analyst  INTEGER DEFAULT 0,
+    ai_summary          TEXT    DEFAULT '',
+    mentioned_tickers   TEXT    DEFAULT '',
+    mentioned_sectors   TEXT    DEFAULT '',
+    created_at          TEXT    DEFAULT (datetime('now')),
+    UNIQUE(source, title, date)
+);
+CREATE INDEX IF NOT EXISTS idx_columns_date ON financial_columns(date);
+CREATE INDEX IF NOT EXISTS idx_columns_author ON financial_columns(author);
+
+-- v11.0: 일일 학습 합성
+CREATE TABLE IF NOT EXISTS daily_synthesis (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    date            TEXT    NOT NULL,
+    synthesis_text  TEXT    DEFAULT '',
+    top_themes      TEXT    DEFAULT '[]',
+    ticker_consensus TEXT   DEFAULT '[]',
+    sector_outlook  TEXT    DEFAULT '[]',
+    analyst_highlights TEXT DEFAULT '[]',
+    market_consensus TEXT   DEFAULT '',
+    total_items     INTEGER DEFAULT 0,
+    total_cost_usd  REAL    DEFAULT 0,
+    data_json       TEXT    DEFAULT '{}',
+    created_at      TEXT    DEFAULT (datetime('now')),
+    UNIQUE(date)
+);
 """
 
 

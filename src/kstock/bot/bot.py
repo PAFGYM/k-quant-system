@@ -35,12 +35,12 @@ class KQuantBot(
     ControlMixin,
     RemoteClaudeMixin,
 ):
-    """K-Quant v9.1 Telegram Bot — Multi-AI + Real-time + Modular + Control."""
+    """K-Quant v11.0 Telegram Bot — Multi-AI + Real-time + Modular + Control."""
     pass
 
 
 def main() -> None:
-    """Entry point: build and run the K-Quant v9.1 Telegram bot with auto-restart."""
+    """Entry point: build and run the K-Quant v11.0 Telegram bot with auto-restart."""
     load_dotenv(override=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -66,7 +66,7 @@ def main() -> None:
 
             app = bot.build_app()
             bot.schedule_jobs(app)
-            logger.info("K-Quant v9.1 bot starting (polling)...")
+            logger.info("K-Quant v11.0 bot starting (polling)...")
             app.run_polling(drop_pending_updates=True)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")

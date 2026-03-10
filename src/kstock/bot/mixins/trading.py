@@ -819,7 +819,13 @@ class TradingMixin:
                 name = s["name"]
                 break
 
-        await safe_edit_or_reply(query,f"🎙️ {name} 3라운드 토론 중... (약 15초)")
+        # v11.0: 재토론 시 이전 결과 보존 — 기존 메시지 버튼을 제거하고 새 메시지로 진행
+        try:
+            from telegram import InlineKeyboardMarkup
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([]))
+        except Exception:
+            pass
+        await query.message.reply_text(f"🎙️ {name} 3라운드 토론 중... (약 15초)")
 
         # 차트+재무 데이터 수집
         stock_data = ""
@@ -908,7 +914,7 @@ class TradingMixin:
             if extras:
                 text += "\n" + "\n".join(extras)
 
-            # v9.6.2: 후속 액션 버튼 강화 (4→6개)
+            # v11.0: 후속 액션 버튼 (재토론 시 이전 결과 보존)
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             kb = InlineKeyboardMarkup([
                 [
@@ -916,12 +922,12 @@ class TradingMixin:
                     InlineKeyboardButton("📜 토론 이력", callback_data=f"debhist:{ticker}"),
                 ],
                 [
-                    InlineKeyboardButton("🔍 다른종목", callback_data="menu:debate"),
                     InlineKeyboardButton("📊 종목상세", callback_data=f"fav:stock:{ticker}"),
+                    InlineKeyboardButton("📊 차트", callback_data=f"fav:chtm:{ticker}"),
                 ],
                 [
-                    InlineKeyboardButton("📊 차트", callback_data=f"fav:chtm:{ticker}"),
-                    InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+                    InlineKeyboardButton("🔍 다른종목", callback_data="menu:debate"),
+                    InlineKeyboardButton("🔙 메인메뉴", callback_data="back:main"),
                 ],
             ])
             await query.message.reply_text(text[:4000], reply_markup=kb)
@@ -964,10 +970,14 @@ class TradingMixin:
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🎙️ 새 토론", callback_data=f"mgr_debate:{ticker}"),
-                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+                InlineKeyboardButton("📊 종목상세", callback_data=f"fav:stock:{ticker}"),
+            ],
+            [
+                InlineKeyboardButton("🔍 다른종목", callback_data="menu:debate"),
+                InlineKeyboardButton("🔙 메인메뉴", callback_data="back:main"),
             ],
         ])
-        await safe_edit_or_reply(query,"\n".join(lines), reply_markup=kb)
+        await safe_edit_or_reply(query, "\n".join(lines), reply_markup=kb)
 
     async def _action_ai_accuracy(
         self, query, context, payload: str,

@@ -3953,6 +3953,79 @@ class SchedulerMixin:
                 "cross_market", today_str, status="error", message=str(e),
             )
 
+    # -- v11.0: 액티브 ETF 구성종목 추적 ----------------------------------------
+
+    async def job_active_etf_tracking(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """09:05 매일: 액티브 ETF 구성종목 조회 → 수급 시그널 생성."""
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.signal.active_etf_tracker import (
+                fetch_all_active_etfs,
+                compute_flow_signals,
+                format_active_etf_report,
+            )
+
+            # 1. 모든 추적 ETF의 구성종목 조회
+            snapshots = await asyncio.to_thread(fetch_all_active_etfs)
+            if not snapshots:
+                logger.info("Active ETF tracking: no data (ETFs may not be listed yet)")
+                self.db.upsert_job_run("active_etf", today_str, status="skip", message="no data")
+                return
+
+            # 2. 보유종목과 교차 수급 시그널
+            holdings = self.db.get_active_holdings()
+            watched = [h.get("ticker") for h in holdings if h.get("ticker")]
+            signals = compute_flow_signals(snapshots, watched_tickers=None)
+            watched_signals = [s for s in signals if s.ticker in watched]
+
+            # 3. 학습 이력 기록
+            import json as _json_etf
+            total_holdings = sum(len(s.holdings) for s in snapshots)
+            strong_signals = [s for s in signals if s.signal in ("strong_inflow", "inflow")]
+            self.db.save_learning_event(
+                event_type="active_etf_tracking",
+                description=(
+                    f"액티브ETF {len(snapshots)}개 추적, "
+                    f"구성종목 {total_holdings}개, "
+                    f"수급시그널 {len(strong_signals)}건"
+                ),
+                data_json=_json_etf.dumps({
+                    "etf_count": len(snapshots),
+                    "total_holdings": total_holdings,
+                    "strong_signals": len(strong_signals),
+                    "watched_overlap": len(watched_signals),
+                }, ensure_ascii=False),
+            )
+
+            self.db.upsert_job_run("active_etf", today_str, status="success")
+            logger.info(
+                "Active ETF: %d ETFs, %d holdings, %d signals",
+                len(snapshots), total_holdings, len(strong_signals),
+            )
+
+            # 4. 보유종목 중 수급 시그널 있으면 알림
+            if watched_signals and self.chat_id:
+                alert_lines = ["📊 보유종목 액티브ETF 수급 시그널\n"]
+                for s in watched_signals[:5]:
+                    emoji = "🔥" if s.signal == "strong_inflow" else "📈"
+                    alert_lines.append(
+                        f"{emoji} {s.name}: 비중 {s.total_weight:.1f}% "
+                        f"({', '.join(s.etf_names)})"
+                    )
+                try:
+                    await context.bot.send_message(
+                        chat_id=self.chat_id,
+                        text="\n".join(alert_lines),
+                    )
+                except Exception as e:
+                    logger.debug("Active ETF alert failed: %s", e)
+
+        except Exception as e:
+            logger.error("Active ETF tracking failed: %s", e, exc_info=True)
+            self.db.upsert_job_run("active_etf", today_str, status="error", message=str(e))
+
     # -- v10.4: YouTube 심화 학습 파이프라인 ------------------------------------
 
     async def job_youtube_deep_learning(
@@ -6845,3 +6918,148 @@ class SchedulerMixin:
 
         except Exception as e:
             logger.error("job_weekly_ai_report failed: %s", e, exc_info=True)
+
+    # ── v11.0: 티어드 YouTube 배치 학습 ──────────────────────────────────────
+
+    async def job_youtube_batch_tiered(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """v11.0: Gemini Flash 기반 YouTube 배치 학습 (5x/일).
+
+        06:30, 08:00, 12:00, 17:00, 21:00 실행.
+        예산 인식, 애널리스트 이름 감지, Tier2 자동 승격.
+        """
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.ingest.global_news import batch_youtube_tiered
+            from kstock.core.budget_manager import should_alert, get_budget_pct
+
+            # 예산 초과 시 스킵
+            if get_budget_pct(self.db) >= 100:
+                logger.info("youtube_batch_tiered: budget exhausted, skipping")
+                self.db.upsert_job_run(
+                    "youtube_batch_tiered", today_str,
+                    status="skipped", message="budget exhausted",
+                )
+                return
+
+            result = await batch_youtube_tiered(
+                db=self.db,
+                max_videos=20,
+                hours_lookback=8,
+            )
+
+            self.db.upsert_job_run(
+                "youtube_batch_tiered", today_str,
+                status="success",
+                message=(
+                    f"processed={result['processed']} tier1={result['tier1']} "
+                    f"tier2_flagged={result['tier2_flagged']} ~${result['cost_usd']:.4f}"
+                ),
+            )
+
+            # 예산 경고
+            alert = should_alert(self.db)
+            if alert:
+                admin_id = getattr(self, "admin_chat_id", None) or getattr(self, "ADMIN_CHAT_ID", None)
+                if admin_id:
+                    await context.bot.send_message(chat_id=admin_id, text=alert)
+
+            logger.info(
+                "job_youtube_batch_tiered: %d items processed",
+                result["processed"],
+            )
+        except Exception as e:
+            logger.error("job_youtube_batch_tiered failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "youtube_batch_tiered", today_str,
+                status="error", message=str(e)[:100],
+            )
+
+    # ── v11.0: 칼럼 크롤링 ──────────────────────────────────────────────────
+
+    async def job_column_crawl(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """v11.0: 네이버 전문가 칼럼 수집 + Gemini Flash 요약."""
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.ingest.column_crawler import crawl_all_columns
+
+            stats = await crawl_all_columns(db=self.db, max_ai_summaries=30)
+
+            self.db.upsert_job_run(
+                "column_crawl", today_str,
+                status="success",
+                message=(
+                    f"total={stats['total']} new={stats['new']} "
+                    f"ai={stats['ai_summarized']} tracked={stats['tracked_analyst']}"
+                ),
+            )
+
+            # 추적 애널리스트 칼럼 알림
+            if stats["tracked_analyst"] > 0:
+                admin_id = getattr(self, "admin_chat_id", None) or getattr(self, "ADMIN_CHAT_ID", None)
+                if admin_id:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=f"📝 추적 애널리스트 칼럼 {stats['tracked_analyst']}건 발견!",
+                    )
+
+        except Exception as e:
+            logger.error("job_column_crawl failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "column_crawl", today_str,
+                status="error", message=str(e)[:100],
+            )
+
+    # ── v11.0: 일일 학습 합성 ────────────────────────────────────────────────
+
+    async def job_daily_synthesis(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """v11.0: 21:30 일일 학습 합성 — YouTube + 리포트 + 칼럼 통합."""
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        try:
+            from kstock.ingest.global_news import daily_learning_synthesis
+            from kstock.core.budget_manager import format_budget_status
+
+            result = await daily_learning_synthesis(
+                db=self.db,
+                ai_router=getattr(self, "ai_router", None),
+            )
+
+            synthesis = result.get("synthesis", "")
+            total = result.get("total_items", 0)
+
+            self.db.upsert_job_run(
+                "daily_synthesis", today_str,
+                status="success",
+                message=f"items={total}",
+            )
+
+            # 텔레그램 전송
+            admin_id = getattr(self, "admin_chat_id", None) or getattr(self, "ADMIN_CHAT_ID", None)
+            if admin_id and synthesis:
+                budget = format_budget_status(self.db)
+                themes = result.get("top_themes", [])
+                consensus = result.get("market_consensus", "")
+
+                text = (
+                    f"📊 일일 학습 합성 ({total}건 분석)\n"
+                    f"{'━' * 24}\n"
+                )
+                if themes:
+                    text += f"🔑 주요 테마: {', '.join(themes[:5])}\n"
+                if consensus:
+                    text += f"📈 컨센서스: {consensus}\n"
+                text += f"\n{synthesis[:800]}\n\n{budget}"
+
+                await context.bot.send_message(chat_id=admin_id, text=text[:4000])
+
+        except Exception as e:
+            logger.error("job_daily_synthesis failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "daily_synthesis", today_str,
+                status="error", message=str(e)[:100],
+            )

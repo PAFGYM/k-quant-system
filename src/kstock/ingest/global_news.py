@@ -74,6 +74,20 @@ RSS_FEEDS: list[dict] = [
 ]
 
 # ── 유튜브 경제방송 채널 RSS 피드 (v8.2 확대) ──────────────
+# ── v11.0: 추적 애널리스트 20명 ───────────────────────────────────────────────
+TRACKED_ANALYSTS: dict[str, str] = {
+    "이선엽": "신한투자증권", "김선우": "메리츠증권",
+    "이은택": "KB증권", "이재만": "하나증권",
+    "박석중": "신한투자증권", "김록호": "하나증권",
+    "박유악": "키움증권", "성종화": "이베스트투자증권",
+    "이문종": "신한투자증권", "김동희": "메리츠증권",
+    "강동진": "현대차증권", "김현수": "하나증권",
+    "정원석": "하이투자증권", "김진우": "한국투자증권",
+    "최광식": "다올투자증권", "이달미": "SK증권",
+    "이승규": "한국바이오협회", "조진표": "투자전문가",
+    "이영훈": "투자이사",
+}
+
 YOUTUBE_FEEDS: list[dict] = [
     # 경제 전문 방송
     {
@@ -143,6 +157,88 @@ YOUTUBE_FEEDS: list[dict] = [
         "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCsJ6RuBiTVWRX156FVbeaGg",
         "lang": "ko",
         "category": "youtube_finance",
+    },
+    # ── v11.0: 시황 전문 ──
+    {
+        "name": "증시각도기TV",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCdOjVxkj5JA0iDu3_xcsTyQ",
+        "lang": "ko",
+        "category": "youtube_finance",
+    },
+    {
+        "name": "주식단테",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC6ij59Gy_HnqO4pFu9A_zgQ",
+        "lang": "ko",
+        "category": "youtube_finance",
+    },
+    {
+        "name": "시윤주식",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCv-spDeZBGYVUI9eGXGaLSg",
+        "lang": "ko",
+        "category": "youtube_finance",
+    },
+    {
+        "name": "경제원탑",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCDjaj6eENGMvgIXfeRErPmA",
+        "lang": "ko",
+        "category": "youtube_finance",
+    },
+    # ── v11.0: 증권사 공식 ──
+    {
+        "name": "키움증권 채널K",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCZW1d7B2nYqQUiTiOnkirrQ",
+        "lang": "ko",
+        "category": "youtube_broker",
+    },
+    {
+        "name": "삼성증권 POP",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCq7h8qFlHN5FL_T6waKZllw",
+        "lang": "ko",
+        "category": "youtube_broker",
+    },
+    {
+        "name": "KB증권 깨비마블TV",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCD0k4Kq7SJROxxV-9N5v8IA",
+        "lang": "ko",
+        "category": "youtube_broker",
+    },
+    {
+        "name": "한국투자증권 BanKIS",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCU6f21g_qaJk6rkX-IF6X2g",
+        "lang": "ko",
+        "category": "youtube_broker",
+    },
+    {
+        "name": "하나증권 하나TV",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCP8KMauNQ5YhTL8fzoSYcfQ",
+        "lang": "ko",
+        "category": "youtube_broker",
+    },
+    # ── v11.0: 매크로/투자 ──
+    {
+        "name": "부읽남",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC2QeHNJFfuQWB4cy3M-745g",
+        "lang": "ko",
+        "category": "youtube_finance",
+    },
+    {
+        "name": "신사임당",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UCaJdckl6MBdDPDf75Ec_bJA",
+        "lang": "ko",
+        "category": "youtube_finance",
+    },
+    # ── v11.0: 뉴스/미국 ──
+    {
+        "name": "연합뉴스경제TV",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC_xNTnsFIpKUhM8sWCQN6Zw",
+        "lang": "ko",
+        "category": "youtube_news",
+    },
+    {
+        "name": "오선의 미국 증시 라이브",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC_JJ_NhRqPKcIOj5Ko3W_3w",
+        "lang": "ko",
+        "category": "youtube_us_market",
     },
 ]
 
@@ -353,6 +449,11 @@ _YOUTUBE_COMMENTARY_SOURCES = {
     # 추가 채널 방어
     "슈카월드", "신사임당", "월급쟁이부자들",
     "체인지그라운드", "언더스탠딩",
+    # v11.0 신규 채널
+    "증시각도기TV", "주식단테", "시윤주식", "경제원탑",
+    "키움증권 채널K", "삼성증권 POP", "KB증권 깨비마블TV",
+    "한국투자증권 BanKIS", "하나증권 하나TV",
+    "부읽남", "연합뉴스경제TV", "오선의 미국 증시 라이브",
 }
 
 
@@ -1893,3 +1994,362 @@ async def enrich_youtube_summaries(
         count, len(yt_items), skipped,
     )
     return items
+
+
+# ── v11.0: Gemini Flash 벌크 분석 + 티어드 배치 ─────────────────────────────
+
+async def summarize_transcript_gemini_flash(
+    transcript: str,
+    title: str,
+    source: str,
+) -> dict:
+    """Gemini Flash로 저비용 YouTube 자막 분석 (Tier1).
+
+    비용: ~$0.0004/호출 (Flash, ~2000 토큰 입력 + 500 출력)
+    Haiku 대비 ~7.5배 저렴.
+    """
+    import httpx
+    import json as _json
+
+    empty = {
+        "full_summary": "", "mentioned_tickers": [], "mentioned_sectors": [],
+        "market_outlook": "", "key_numbers": [], "investment_implications": "",
+        "raw_summary": "", "confidence": 0.0,
+    }
+    if not transcript or len(transcript) < 50:
+        return empty
+
+    gemini_key = os.getenv("GEMINI_API_KEY", "")
+    if not gemini_key:
+        return empty
+
+    text = transcript[:5000]
+
+    is_metadata_only = text.startswith("채널:") or text.startswith("제목:")
+    if is_metadata_only:
+        prompt = (
+            f"[{source}] 영상 메타데이터 분석:\n{text}\n\n"
+            "제목/설명에서 투자 인사이트 추출. JSON만 출력:\n"
+            '{"full_summary":"3줄 요약","mentioned_tickers":[{"name":"종목","ticker":"코드","sentiment":"긍정/부정/중립"}],'
+            '"mentioned_sectors":["섹터"],"market_outlook":"bullish/bearish/neutral","key_numbers":[],'
+            '"investment_implications":"시사점 1줄"}'
+        )
+    else:
+        prompt = (
+            f"[{source}] '{title}' 자막 분석:\n{text}\n\n"
+            "핵심 투자 인사이트를 JSON으로 추출:\n"
+            '{"full_summary":"5-8줄 상세요약","mentioned_tickers":[{"name":"종목","ticker":"6자리코드","sentiment":"긍정/부정/중립","context":"이유1줄"}],'
+            '"mentioned_sectors":["섹터"],"market_outlook":"bullish/bearish/neutral/mixed",'
+            '"key_numbers":[{"label":"지표","value":"값","unit":"단위"}],'
+            '"investment_implications":"액션 1-2줄"}'
+        )
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash"
+        f":generateContent?key={gemini_key}"
+    )
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"maxOutputTokens": 600, "temperature": 0.2},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code != 200:
+                logger.warning("Gemini Flash error %d: %s", resp.status_code, resp.text[:200])
+                return empty
+
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return empty
+            parts = candidates[0].get("content", {}).get("parts", [])
+            raw_text = parts[0].get("text", "") if parts else ""
+
+        # 토큰 추적
+        try:
+            from kstock.core.token_tracker import track_usage_global
+            usage_meta = data.get("usageMetadata", {})
+            track_usage_global(
+                provider="gemini",
+                model="gemini-2.0-flash",
+                function_name="youtube_summary_flash",
+                input_tokens=usage_meta.get("promptTokenCount", 0),
+                output_tokens=usage_meta.get("candidatesTokenCount", 0),
+            )
+        except Exception:
+            pass
+
+        # JSON 파싱
+        json_text = raw_text.strip()
+        if "```" in json_text:
+            m = re.search(r"```(?:json)?\s*(.*?)```", json_text, re.DOTALL)
+            if m:
+                json_text = m.group(1)
+        if json_text.startswith("{"):
+            parsed = _json.loads(json_text)
+            parsed["confidence"] = 0.6 if is_metadata_only else 0.8
+            parsed["raw_summary"] = parsed.get("full_summary", "")[:200]
+            return parsed
+
+        return empty
+
+    except Exception as e:
+        logger.debug("Gemini Flash summary error: %s", e)
+        return empty
+
+
+def _detect_tracked_analysts(title: str, description: str = "") -> list[str]:
+    """제목/설명에서 추적 대상 애널리스트 이름 감지."""
+    text = f"{title} {description}"
+    return [name for name in TRACKED_ANALYSTS if name in text]
+
+
+async def batch_youtube_tiered(
+    db,
+    max_videos: int = 20,
+    hours_lookback: int = 8,
+    budget_remaining: float = 1.0,
+) -> dict:
+    """v11.0: 예산 인식 티어드 YouTube 배치 학습.
+
+    Tier1 (Gemini Flash): 모든 영상 → $0.0004/건
+    제목에 TRACKED_ANALYSTS 포함 시 → Tier2 자동 승격 플래그
+
+    Returns:
+        {"processed": N, "tier1": N, "tier2_flagged": N, "cost_usd": X}
+    """
+    from kstock.core.budget_manager import can_spend
+
+    result = {"processed": 0, "tier1": 0, "tier2_flagged": 0, "cost_usd": 0.0, "skipped": 0}
+
+    # RSS에서 최근 영상 수집
+    items = await fetch_global_news(max_per_feed=5, hours_lookback=hours_lookback)
+    yt_items = [it for it in items if it.video_id]
+
+    if not yt_items:
+        logger.info("batch_youtube_tiered: no YouTube items found")
+        return result
+
+    count = 0
+    for item in yt_items:
+        if count >= max_videos:
+            break
+
+        # 예산 체크 ($0.0004/건 예상)
+        if not can_spend(db, 0.001):
+            logger.warning("batch_youtube_tiered: budget exhausted after %d items", count)
+            break
+
+        # 중복 체크
+        try:
+            if db.check_youtube_processed(item.video_id):
+                result["skipped"] += 1
+                continue
+        except Exception:
+            pass
+
+        # 자막 추출 (자동자막 포함)
+        transcript = await asyncio.get_event_loop().run_in_executor(
+            None, fetch_transcript, item.video_id, 8000,
+        )
+
+        # 자막 없으면 메타데이터 폴백
+        if not transcript:
+            try:
+                meta = await asyncio.get_event_loop().run_in_executor(
+                    None, fetch_video_metadata, item.video_id,
+                )
+                parts = [f"채널: {meta.get('channel', item.source)}"]
+                parts.append(f"제목: {meta.get('title', '') or item.title}")
+                if meta.get("description"):
+                    parts.append(f"설명: {meta['description'][:1000]}")
+                transcript = "\n".join(parts)
+            except Exception:
+                transcript = f"제목: {item.title}"
+
+        if len(transcript) < 30:
+            continue
+
+        # Tier1: Gemini Flash 분석
+        structured = await summarize_transcript_gemini_flash(
+            transcript, item.title, item.source,
+        )
+
+        if structured.get("full_summary"):
+            count += 1
+            result["tier1"] += 1
+            result["cost_usd"] += 0.0004
+
+            # 애널리스트 이름 감지
+            analysts = _detect_tracked_analysts(item.title)
+            if analysts:
+                result["tier2_flagged"] += 1
+                structured["tracked_analysts"] = analysts
+
+            # DB 저장
+            try:
+                db.save_youtube_intelligence({
+                    "video_id": item.video_id,
+                    "source": item.source,
+                    "title": item.title,
+                    "mentioned_tickers": structured.get("mentioned_tickers", []),
+                    "mentioned_sectors": structured.get("mentioned_sectors", []),
+                    "market_outlook": structured.get("market_outlook", ""),
+                    "key_numbers": structured.get("key_numbers", []),
+                    "investment_implications": structured.get("investment_implications", ""),
+                    "full_summary": structured.get("full_summary", ""),
+                    "raw_summary": structured.get("raw_summary", ""),
+                    "confidence": structured.get("confidence", 0.0),
+                })
+            except Exception:
+                logger.debug("YouTube intelligence save failed", exc_info=True)
+
+    result["processed"] = count
+    logger.info(
+        "batch_youtube_tiered: %d processed (%d tier1, %d tier2_flagged, %d skipped), ~$%.4f",
+        count, result["tier1"], result["tier2_flagged"], result["skipped"], result["cost_usd"],
+    )
+    return result
+
+
+async def daily_learning_synthesis(db=None, ai_router=None) -> dict:
+    """v11.0: 일일 학습 합성 — 24시간 YouTube + 리포트 + 칼럼 통합.
+
+    Gemini Flash 1차 합성 → 텔레그램 전송 + DB 저장.
+    """
+    import json as _json
+
+    empty = {
+        "synthesis": "", "top_themes": [], "ticker_consensus": [],
+        "sector_outlook": [], "analyst_highlights": [], "total_items": 0,
+    }
+
+    if not db:
+        return empty
+
+    # 24시간 학습 데이터 수집
+    intel = db.get_recent_youtube_intelligence(hours=24) or []
+    reports = []
+    try:
+        reports = db.get_recent_reports(limit=30)
+    except Exception:
+        pass
+
+    columns = []
+    try:
+        columns = db.get_recent_columns(limit=30)
+    except Exception:
+        pass
+
+    if not intel and not reports:
+        logger.info("daily_synthesis: no data for today")
+        return empty
+
+    # 콘텐츠 조합
+    content_parts = []
+    for item in intel[:60]:
+        summary = item.get("full_summary", "") or item.get("raw_summary", "")
+        if summary:
+            source = item.get("source", "")
+            title = item.get("title", "")[:50]
+            content_parts.append(f"[{source}] {title}: {summary[:300]}")
+
+    for r in reports[:20]:
+        content_parts.append(
+            f"[리포트 {r.get('broker','')}] {r.get('title','')[:60]}"
+        )
+
+    for c in columns[:20]:
+        content_parts.append(
+            f"[칼럼 {c.get('author','')}] {c.get('title','')[:60]}: {c.get('ai_summary','')[:200]}"
+        )
+
+    combined = "\n".join(content_parts)[:12000]
+
+    system_prompt = (
+        "당신은 한국 증시 전문 애널리스트입니다. "
+        "오늘 하루 수집된 YouTube 분석, 증권사 리포트, 전문가 칼럼을 종합하여 "
+        "투자자에게 가장 중요한 인사이트를 정리해주세요."
+    )
+    prompt = (
+        f"오늘 수집된 {len(intel)}건 영상 + {len(reports)}건 리포트 + {len(columns)}건 칼럼:\n\n"
+        f"{combined}\n\n"
+        "JSON 형식으로 일일 합성 분석을 작성해줘:\n"
+        '{"synthesis":"오늘 시장 종합 5-10줄",'
+        '"top_themes":["주요 테마1","테마2","테마3"],'
+        '"ticker_consensus":[{"ticker":"종목명","sentiment":"강세/약세/중립","count":N}],'
+        '"sector_outlook":[{"sector":"섹터","outlook":"긍정/부정/중립"}],'
+        '"analyst_highlights":["주요 애널리스트 발언 요약"],'
+        '"market_consensus":"전체 시장 컨센서스 1줄"}'
+    )
+
+    try:
+        if ai_router:
+            result_text = await ai_router.analyze(
+                "daily_synthesis", prompt, system=system_prompt,
+                max_tokens=1500, temperature=0.3,
+            )
+        else:
+            import httpx
+            gemini_key = os.getenv("GEMINI_API_KEY", "")
+            if not gemini_key:
+                return empty
+
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash"
+                f":generateContent?key={gemini_key}"
+            )
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": f"{system_prompt}\n\n{prompt}"}]}],
+                "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.3},
+            }
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(url, json=payload)
+                if resp.status_code != 200:
+                    return empty
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                result_text = ""
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    result_text = parts[0].get("text", "") if parts else ""
+
+        if not result_text:
+            return empty
+
+        clean = result_text.strip()
+        if "```" in clean:
+            clean = clean.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+        parsed = _json.loads(clean)
+        parsed["total_items"] = len(intel) + len(reports) + len(columns)
+        parsed["created_at"] = datetime.now().isoformat()
+
+        # DB 저장
+        try:
+            db.save_daily_synthesis(parsed)
+        except Exception:
+            logger.debug("daily_synthesis DB save failed", exc_info=True)
+
+        # 학습 이벤트
+        try:
+            db.save_learning_event(
+                event_type="daily_synthesis",
+                description=f"일일 합성: {len(intel)}영상+{len(reports)}리포트+{len(columns)}칼럼",
+                data_json=_json.dumps(parsed, ensure_ascii=False, default=str),
+                impact_summary=parsed.get("market_consensus", ""),
+            )
+        except Exception:
+            pass
+
+        logger.info("daily_synthesis: %d items → synthesis complete", parsed["total_items"])
+        return parsed
+
+    except _json.JSONDecodeError:
+        logger.warning("daily_synthesis: JSON parse failed")
+        return {"synthesis": result_text[:500] if result_text else "", **empty}
+    except Exception as e:
+        logger.error("daily_synthesis error: %s", e, exc_info=True)
+        return empty

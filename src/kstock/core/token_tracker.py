@@ -49,6 +49,30 @@ _PRICING: dict[str, dict[str, float]] = {
         "input": 0.80, "output": 4.0,
         "cache_read": 0.08, "cache_write": 1.0,
     },
+    # Gemini 2.0 Flash (v11.0 벌크 학습용)
+    "gemini-2.0-flash": {
+        "input": 0.10, "output": 0.40,
+        "cache_read": 0.0, "cache_write": 0.0,
+    },
+    # Gemini 2.0 Pro
+    "gemini-2.0-pro": {
+        "input": 1.25, "output": 10.0,
+        "cache_read": 0.0, "cache_write": 0.0,
+    },
+    # GPT-4o / GPT-4o-mini
+    "gpt-4o": {
+        "input": 2.50, "output": 10.0,
+        "cache_read": 0.0, "cache_write": 0.0,
+    },
+    "gpt-4o-mini": {
+        "input": 0.15, "output": 0.60,
+        "cache_read": 0.0, "cache_write": 0.0,
+    },
+    # Whisper (OpenAI, $0.006/minute → 분당 비용, 토큰 기반 아님)
+    "whisper-1": {
+        "input": 0.0, "output": 0.0,
+        "cache_read": 0.0, "cache_write": 0.0,
+    },
 }
 
 # 기본 가격 (알 수 없는 모델용)

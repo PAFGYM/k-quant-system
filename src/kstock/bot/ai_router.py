@@ -199,6 +199,31 @@ TASK_ROUTING: dict[str, dict[str, Any]] = {
         "fallback": "gpt",
         "description": "15:50 충격 귀인 분석 (Sonnet)",
     },
+    # ─ v11.0: 학습 파이프라인 ─
+    "youtube_screening": {
+        "provider": "gemini",
+        "model_tier": "fast",  # gemini-2.0-flash
+        "fallback": "gpt",
+        "description": "YouTube 벌크 스크리닝 (Tier1)",
+    },
+    "column_summary": {
+        "provider": "gemini",
+        "model_tier": "fast",
+        "fallback": "claude",
+        "description": "칼럼/리포트 AI 요약",
+    },
+    "daily_synthesis": {
+        "provider": "gemini",
+        "model_tier": "fast",
+        "fallback": "claude",
+        "description": "일일 학습 합성",
+    },
+    "daily_synthesis_quality": {
+        "provider": "claude",
+        "model_tier": "fast",  # haiku
+        "fallback": "gemini",
+        "description": "일일 합성 품질 보정",
+    },
 }
 
 

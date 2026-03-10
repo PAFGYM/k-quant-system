@@ -3521,6 +3521,14 @@ class CommandsMixin:
 
             sections: list[str] = []
 
+            # ── 0. 학습 예산 현황 ──
+            try:
+                from kstock.core.budget_manager import format_budget_status, get_daily_summary
+                budget_text = format_budget_status(self.db)
+                sections.append(budget_text)
+            except Exception:
+                pass
+
             # ── 1. ML 모델 현황 ──
             ml_perf = self.db.get_ml_performance(limit=3)
             train_hist_path = _Path("models/train_history.json")
@@ -3553,28 +3561,71 @@ class CommandsMixin:
                 ml_lines.append(f"  최근: {p.get('date', '?')} | Val AUC {p.get('val_score', 0):.3f}")
             else:
                 ml_lines.append("  데이터 없음")
-
-            # 목적 & 피처 요약
             ml_lines.append("  목적: 5일내 +3% 상승 확률 예측 (이진분류)")
-            ml_lines.append("  주요 피처: 기술적(12)+모멘텀(6)+매크로(4)+수급(6)+센티먼트(4)+크로스마켓(8)")
             sections.append("\n".join(ml_lines))
 
             # ── 2. YouTube 학습 현황 ──
-            yt_data = self.db.get_recent_youtube_intelligence(hours=168, limit=50)
+            yt_data = self.db.get_recent_youtube_intelligence(hours=168, limit=200)
             yt_tickers = self.db.get_youtube_mentioned_tickers(hours=168)
-            yt_lines = ["📺 YouTube 학습 (7일)"]
-            yt_lines.append(f"  분석 영상: {len(yt_data)}건")
+            today_yt = self.db.get_recent_youtube_intelligence(hours=24, limit=200)
+            yt_lines = ["📺 YouTube 학습 (24채널)"]
+            yt_lines.append(f"  오늘: {len(today_yt)}건 | 7일: {len(yt_data)}건")
             if yt_tickers:
                 top_tickers = sorted(yt_tickers, key=lambda x: x.get("mention_count", 0), reverse=True)[:5]
                 ticker_str = ", ".join(
-                    f"{t.get('ticker', '?')}({t.get('mention_count', 0)}회)" for t in top_tickers
+                    f"{t.get('ticker', '?')}({t.get('mention_count', 0)})" for t in top_tickers
                 )
                 yt_lines.append(f"  자주 언급: {ticker_str}")
-            else:
-                yt_lines.append("  언급 종목 데이터 없음")
             sections.append("\n".join(yt_lines))
 
-            # ── 3. 학습 이벤트 타임라인 ──
+            # ── 3. 칼럼/리포트 ──
+            try:
+                columns = self.db.get_recent_columns(limit=50, days=7)
+                tracked = [c for c in columns if c.get("is_tracked_analyst")]
+                col_lines = ["📰 칼럼/리포트 (7일)"]
+                col_lines.append(f"  수집: {len(columns)}건 | 추적 애널리스트: {len(tracked)}건")
+                if tracked:
+                    names = list({c.get("author", "?") for c in tracked[:10]})
+                    col_lines.append(f"  감지: {', '.join(names[:5])}")
+                sections.append("\n".join(col_lines))
+            except Exception:
+                pass
+
+            # ── 4. 일일 합성 ──
+            try:
+                synth_list = self.db.get_latest_synthesis(days=3)
+                if synth_list:
+                    s = synth_list[0]
+                    syn_lines = ["📊 일일 학습 합성"]
+                    syn_lines.append(f"  날짜: {s.get('date', '?')} ({s.get('total_items', 0)}건 통합)")
+                    if s.get("market_consensus"):
+                        consensus = s["market_consensus"][:60]
+                        syn_lines.append(f"  시장: {consensus}")
+                    if s.get("top_themes"):
+                        try:
+                            themes = _json.loads(s["top_themes"]) if isinstance(s["top_themes"], str) else s["top_themes"]
+                            if themes:
+                                syn_lines.append(f"  테마: {', '.join(str(t) for t in themes[:4])}")
+                        except Exception:
+                            pass
+                    sections.append("\n".join(syn_lines))
+            except Exception:
+                pass
+
+            # ── 5. 추적 애널리스트 ──
+            try:
+                from kstock.ingest.global_news import TRACKED_ANALYSTS
+                analyst_lines = [f"👤 추적 애널리스트 ({len(TRACKED_ANALYSTS)}명)"]
+                grouped: dict[str, list[str]] = {}
+                for name, firm in TRACKED_ANALYSTS.items():
+                    grouped.setdefault(firm, []).append(name)
+                for firm, names in sorted(grouped.items()):
+                    analyst_lines.append(f"  {firm}: {', '.join(names)}")
+                sections.append("\n".join(analyst_lines))
+            except Exception:
+                pass
+
+            # ── 6. 학습 이벤트 ──
             events = self.db.get_learning_history(days=7)
             ev_lines = ["📋 학습 이벤트 (7일)"]
             if events:
@@ -3589,6 +3640,10 @@ class CommandsMixin:
                         "ml_drift_triggered": "⚠️ 드리프트 감지",
                         "youtube_deep_analysis": "📺 YouTube 심화",
                         "youtube_intelligence": "📺 YouTube 분석",
+                        "youtube_tier1_flash": "⚡ YouTube Tier1",
+                        "youtube_tier2_deep": "🔬 YouTube Tier2",
+                        "column_crawl": "📰 칼럼 수집",
+                        "daily_synthesis": "📊 일일 합성",
                         "cross_market_update": "🌍 크로스마켓",
                     }.get(et, et)
                     ev_lines.append(f"  {label}: {cnt}회")
@@ -3596,16 +3651,15 @@ class CommandsMixin:
                 ev_lines.append("  이벤트 없음")
             sections.append("\n".join(ev_lines))
 
-            # ── 4. 업데이트 스케줄 ──
+            # ── 7. 업데이트 스케줄 ──
             sched_lines = [
-                "⏰ 업데이트 스케줄",
-                "  ML 점진학습: 평일 22:00",
-                "  ML 전체재학습: 일요일 03:00",
-                "  YouTube 심화: 매일 08:00, 20:00",
-                "  크로스마켓: 매일 07:15",
-                "  ETF 수집: 평일 16:25",
-                "  모닝브리핑: 평일 08:30",
-                "  EOD 학습: 평일 18:10",
+                "⏰ 학습 스케줄 (v11.0)",
+                "  YouTube 5회: 06:30/08:00/12:00/17:00/21:00",
+                "  칼럼 수집: 08:10, 17:10",
+                "  일일 합성: 21:30 (Flash+Haiku)",
+                "  Tier2 심화: 22:00 (Haiku+Whisper)",
+                "  크로스마켓: 07:15 | 모닝: 08:30",
+                "  ML 점진: 평일 22:00 | 전체: 일 03:00",
             ]
             sections.append("\n".join(sched_lines))
 
