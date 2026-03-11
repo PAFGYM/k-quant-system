@@ -415,3 +415,20 @@ def wartime_check_buy_signal(confidence: float) -> tuple[bool, str]:
         f"전시 모드 매수 차단: 신뢰도 {confidence:.0%} < "
         f"최소 요구 {adj.min_buy_confidence:.0%}"
     )
+
+
+def wartime_check_buy_signal_rd(confidence: float):
+    """전시 모드 BUY 시그널 판단 → RiskDecision 반환 (v12.4).
+
+    기존 wartime_check_buy_signal() 래핑.
+    호출자가 준비되면 이 버전으로 전환.
+    """
+    from kstock.core.domain_types import RiskDecision
+    ok, msg = wartime_check_buy_signal(confidence)
+    return RiskDecision(
+        allowed=ok,
+        reason=msg,
+        source="wartime",
+        risk_level="normal" if ok else "blocked",
+        block_new_buy=not ok,
+    )

@@ -491,7 +491,11 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
     if nasdaq is not None:
         lines.append(f"나스닥: {nasdaq:+.2f}%")
     if vix is not None:
-        status = "안정" if vix < 20 else "주의" if vix < 25 else "공포"
+        try:
+            from kstock.core.risk_config import get_risk_thresholds
+            status = get_risk_thresholds().vix.status_label(vix)
+        except Exception:
+            status = "안정" if vix < 20 else "주의" if vix < 25 else "공포"
         lines.append(f"VIX: {vix:.1f} ({status})")
     if usdkrw is not None and usdkrw > 0:
         lines.append(f"원/달러: {usdkrw:,.0f}원")
@@ -1560,9 +1564,16 @@ def _get_crisis_context(macro_snapshot: dict | None = None) -> str:
             fg = macro_snapshot.get("fear_greed", 50)
 
             risk_level = "보통"
-            if vix >= 30 or fg < 25 or usdkrw >= 1450:
+            try:
+                from kstock.core.risk_config import get_risk_thresholds
+                _rt = get_risk_thresholds()
+                _vf, _vh = _rt.vix.fear, _rt.vix.normal_high
+                _uc, _ud = _rt.usdkrw.crisis, _rt.usdkrw.danger
+            except Exception:
+                _vf, _vh, _uc, _ud = 30, 25, 1450, 1400
+            if vix >= _vf or fg < 25 or usdkrw >= _uc:
                 risk_level = "심각"
-            elif vix >= 25 or fg < 40 or usdkrw >= 1400:
+            elif vix >= _vh or fg < 40 or usdkrw >= _ud:
                 risk_level = "경계"
             elif vix >= 20 or fg < 50:
                 risk_level = "주의"

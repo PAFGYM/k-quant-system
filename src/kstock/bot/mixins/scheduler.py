@@ -2553,15 +2553,21 @@ class SchedulerMixin:
             score -= 2
         else:
             score -= 3
-        # VIX
+        # VIX (v12.4: risk_config 중앙화)
         vix = macro.vix
-        if vix < 15:
+        try:
+            from kstock.core.risk_config import get_risk_thresholds
+            _vt = get_risk_thresholds().vix
+            _vc, _vl, _vh, _vf = _vt.calm, _vt.normal_low, _vt.normal_high, _vt.fear
+        except Exception:
+            _vc, _vl, _vh, _vf = 15, 18, 25, 30
+        if vix < _vc:
             score += 2
-        elif vix < 20:
+        elif vix < _vl:
             score += 1
-        elif vix < 25:
+        elif vix < _vh:
             score -= 1
-        elif vix < 30:
+        elif vix < _vf:
             score -= 2
         else:
             score -= 3
@@ -5360,15 +5366,12 @@ class SchedulerMixin:
                         smart_msg = None
                         try:
                             from kstock.bot.smart_alerts import build_holding_alert
-                            # 시장 레짐 확인
+                            # 시장 레짐 확인 (v12.4: risk_config 중앙화)
                             _regime = ""
                             try:
                                 _macro = await self.macro_client.get_snapshot()
                                 if _macro and hasattr(_macro, "vix"):
-                                    if _macro.vix >= 30: _regime = "panic"
-                                    elif _macro.vix >= 25: _regime = "fear"
-                                    elif _macro.vix >= 18: _regime = "normal"
-                                    else: _regime = "calm"
+                                    _regime = _get_vix_regime(_macro.vix)
                             except Exception:
                                 logger.debug("Failed to get macro snapshot for market regime in holdings check", exc_info=True)
 
@@ -7618,13 +7621,18 @@ class SchedulerMixin:
                 if 8 <= day <= 14:
                     no_buy_reasons.append("📅 선물옵션 만기일 — 변동성 극대, 매수 자제")
 
-            # 2) VIX / Fear & Greed 체크
+            # 2) VIX / Fear & Greed 체크 (v12.4: risk_config 중앙화)
             try:
                 macro = self.db.get_macro_snapshot()
                 if macro:
                     fear_greed = macro.get("fear_greed", 50)
                     vix = macro.get("vix", 20)
-                    if vix and vix > 30:
+                    try:
+                        from kstock.core.risk_config import get_risk_thresholds
+                        _vix_fear = get_risk_thresholds().vix.fear
+                    except Exception:
+                        _vix_fear = 30
+                    if vix and vix > _vix_fear:
                         no_buy_reasons.append(f"⚠️ VIX {vix:.1f} — 공포 과열, 침착하게 대기")
                     if fear_greed and fear_greed < 20:
                         no_buy_reasons.append(

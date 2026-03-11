@@ -25,7 +25,12 @@ class TestGetVixRegime:
 
     def test_panic(self):
         assert _get_vix_regime(30.0) == "panic"
-        assert _get_vix_regime(80.0) == "panic"
+        assert _get_vix_regime(39.9) == "panic"
+
+    def test_crisis(self):
+        """v12.3: risk_config에서 crisis 레짐 추가 (VIX >= 40)."""
+        assert _get_vix_regime(40.0) == "crisis"
+        assert _get_vix_regime(80.0) == "crisis"
 
 
 class TestAdaptiveIntervals:
