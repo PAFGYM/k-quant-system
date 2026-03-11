@@ -1769,3 +1769,69 @@ class MarketMixin:
                 (days,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    # ── market_regime (v12.2) ─────────────────────────────────
+
+    def save_market_regime(self, data: dict) -> None:
+        """시장 레짐 분석 결과 저장 (UPSERT by date)."""
+        from datetime import datetime as _dt
+        now = _dt.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO market_regime
+                    (date, regime, confidence, duration_days, transition_prob,
+                     raw_score, description, signals_json, sector_rotation_json,
+                     portfolio_guide_json, input_summary_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    regime=excluded.regime,
+                    confidence=excluded.confidence,
+                    duration_days=excluded.duration_days,
+                    transition_prob=excluded.transition_prob,
+                    raw_score=excluded.raw_score,
+                    description=excluded.description,
+                    signals_json=excluded.signals_json,
+                    sector_rotation_json=excluded.sector_rotation_json,
+                    portfolio_guide_json=excluded.portfolio_guide_json,
+                    input_summary_json=excluded.input_summary_json
+                """,
+                (
+                    data["date"],
+                    data.get("regime", "neutral"),
+                    data.get("confidence", 0),
+                    data.get("duration_days", 1),
+                    data.get("transition_prob", 0),
+                    data.get("raw_score", 0),
+                    data.get("description", ""),
+                    data.get("signals_json", "[]"),
+                    data.get("sector_rotation_json", "{}"),
+                    data.get("portfolio_guide_json", "{}"),
+                    data.get("input_summary_json", "{}"),
+                    now,
+                ),
+            )
+
+    def get_market_regime(self, days: int = 30) -> list[dict]:
+        """최근 N일 시장 레짐 데이터 조회."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT date, regime, confidence, duration_days, transition_prob,
+                       raw_score, description, signals_json, sector_rotation_json,
+                       portfolio_guide_json, input_summary_json
+                FROM market_regime ORDER BY date DESC LIMIT ?
+                """,
+                (days,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_prev_market_regime(self) -> tuple:
+        """직전 시장 레짐 + 지속일수 조회. Returns (regime, duration_days)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT regime, duration_days FROM market_regime ORDER BY date DESC LIMIT 1",
+            ).fetchone()
+        if row:
+            return row["regime"], row["duration_days"]
+        return "neutral", 0

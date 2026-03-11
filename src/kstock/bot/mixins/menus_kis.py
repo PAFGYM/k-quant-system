@@ -605,6 +605,28 @@ class MenusKisMixin:
         except Exception:
             pass
 
+        # v12.2: 시장 레짐
+        try:
+            regime_data = self.db.get_market_regime(days=1)
+            if regime_data:
+                rd = regime_data[0]
+                _regime_kr = {
+                    "strong_bull": "🟢🟢 강세장", "bull": "🟢 상승장",
+                    "neutral": "⚪ 횡보장", "bear": "🔴 하락장", "crash": "🔴🔴 위기",
+                }
+                r = rd.get("regime", "neutral")
+                regime_msg = (
+                    f"\n\n📊 시장 레짐: {_regime_kr.get(r, r)}\n"
+                    f"점수: {rd.get('raw_score', 0):+.1f} | "
+                    f"신뢰도: {rd.get('confidence', 0):.0%} | "
+                    f"지속: {rd.get('duration_days', 1)}일"
+                )
+                if rd.get("description"):
+                    regime_msg += f"\n{rd['description']}"
+                msg += regime_msg
+        except Exception:
+            pass
+
         # v3.0: policy events
         policy_text = get_policy_summary()
         if policy_text:
@@ -628,6 +650,12 @@ class MenusKisMixin:
                 ),
                 InlineKeyboardButton(
                     "🎙️ AI토론", callback_data="menu:debate",
+                )],
+                [InlineKeyboardButton(
+                    "🛢 유가 상세", callback_data="menu:oil_detail",
+                ),
+                InlineKeyboardButton(
+                    "📊 레짐 상세", callback_data="menu:regime_detail",
                 )],
                 make_feedback_row("시황"),
             ]
@@ -1702,6 +1730,152 @@ class MenusKisMixin:
         except Exception as e:
             logger.error("Oil detail menu error: %s", e, exc_info=True)
             err_msg = f"⚠️ 유가 분석 오류: {str(e)[:80]}"
+            if hasattr(update_or_query, 'message') and hasattr(update_or_query, 'callback_query'):
+                await update_or_query.message.reply_text(err_msg)
+            else:
+                await safe_edit_or_reply(update_or_query, err_msg)
+
+    # ── [v12.2] 시장 레짐 상세 메뉴 ──────────────────────────────────────────
+    async def _menu_regime_detail(self, update_or_query, context) -> None:
+        """시장 레짐 상세 분석 화면."""
+        import json as _json
+
+        try:
+            regime_data = self.db.get_market_regime(days=5)
+
+            if regime_data:
+                rd = regime_data[0]
+                regime_kr = {
+                    "strong_bull": "🟢🟢 강세장",
+                    "bull": "🟢 상승장",
+                    "neutral": "⚪ 횡보장",
+                    "bear": "🔴 하락장",
+                    "crash": "🔴🔴 위기",
+                }
+                r = rd.get("regime", "neutral")
+
+                lines = [
+                    "📊 시장 레짐 분석",
+                    "",
+                    f"[현재 레짐] {regime_kr.get(r, r)}",
+                    f"레짐 점수: {rd.get('raw_score', 0):.1f} / 100",
+                    f"신뢰도: {rd.get('confidence', 0):.0%}",
+                    f"지속일수: {rd.get('duration_days', 1)}일",
+                    f"전환확률: {rd.get('transition_prob', 0):.0%}",
+                ]
+
+                if rd.get("description"):
+                    lines.append(f"설명: {rd['description']}")
+
+                # 시그널
+                try:
+                    sigs = _json.loads(rd.get("signals_json", "[]"))
+                    if sigs:
+                        lines.append("")
+                        lines.append("[활성 시그널]")
+                        for s in sigs[:5]:
+                            _type_emoji = {
+                                "regime_change": "🔄", "volatility_expansion": "⚡",
+                                "risk_escalation": "⚠️", "recovery_early": "🌱",
+                                "crash_warning": "🚨", "momentum_surge": "🚀",
+                                "fx_stress": "💱",
+                            }
+                            st = s.get("signal_type", "")
+                            em = _type_emoji.get(st, "📌")
+                            lines.append(f"  {em} {s.get('description', '')}")
+                            rec = s.get("recommendation", "")
+                            if rec:
+                                lines.append(f"     → {rec}")
+                except Exception:
+                    pass
+
+                # 섹터 로테이션
+                try:
+                    sectors = _json.loads(rd.get("sector_rotation_json", "{}"))
+                    if sectors:
+                        lines.append("")
+                        lines.append("[섹터 로테이션]")
+                        overweight = sectors.get("overweight", [])
+                        underweight = sectors.get("underweight", [])
+                        if overweight:
+                            lines.append(f"  비중확대: {', '.join(overweight[:5])}")
+                        if underweight:
+                            lines.append(f"  비중축소: {', '.join(underweight[:5])}")
+                except Exception:
+                    pass
+
+                # 포트폴리오 가이드
+                try:
+                    guide = _json.loads(rd.get("portfolio_guide_json", "{}"))
+                    if guide:
+                        lines.append("")
+                        lines.append("[포트폴리오 가이드]")
+                        if guide.get("position_size"):
+                            lines.append(f"  포지션: {guide['position_size']}")
+                        if guide.get("hedge"):
+                            lines.append(f"  헤지: {guide['hedge']}")
+                        if guide.get("buy_strategy"):
+                            lines.append(f"  매수전략: {guide['buy_strategy']}")
+                        if guide.get("stop_loss"):
+                            lines.append(f"  손절: {guide['stop_loss']}")
+                        if guide.get("take_profit"):
+                            lines.append(f"  익절: {guide['take_profit']}")
+                except Exception:
+                    pass
+
+                # 최근 5일 추이
+                if len(regime_data) > 1:
+                    lines.append("")
+                    lines.append("[최근 레짐 추이]")
+                    _bar = {
+                        "strong_bull": "████", "bull": "███░",
+                        "neutral": "██░░", "bear": "█░░░", "crash": "░░░░",
+                    }
+                    for d in regime_data[:5]:
+                        dr = d.get("regime", "neutral")
+                        lines.append(
+                            f"  {d['date']}: {_bar.get(dr, '██░░')} "
+                            f"{dr} ({d.get('raw_score', 0):+.0f})"
+                        )
+
+                # 입력 요약
+                try:
+                    inp = _json.loads(rd.get("input_summary_json", "{}"))
+                    if inp:
+                        lines.append("")
+                        lines.append("[팩터 입력]")
+                        if inp.get("vix"):
+                            lines.append(f"  VIX: {inp['vix']:.1f}")
+                        if inp.get("spx_change_pct"):
+                            lines.append(f"  S&P500: {inp['spx_change_pct']:+.2f}%")
+                        if inp.get("usdkrw"):
+                            lines.append(f"  USD/KRW: {inp['usdkrw']:.0f}")
+                        if inp.get("korea_risk"):
+                            lines.append(f"  한국리스크: {inp['korea_risk']:.0f}")
+                except Exception:
+                    pass
+
+                msg = "\n".join(lines)
+            else:
+                msg = "📊 시장 레짐 데이터가 없습니다.\n07:20 자동 실행 후 표시됩니다."
+
+            buttons = [[
+                InlineKeyboardButton("🔄 새로고침", callback_data="menu:regime_detail"),
+                InlineKeyboardButton("🔙 시황", callback_data="goto:market"),
+                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+            ]]
+
+            if hasattr(update_or_query, 'message') and hasattr(update_or_query, 'callback_query'):
+                await update_or_query.message.reply_text(
+                    msg, reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            else:
+                await safe_edit_or_reply(
+                    update_or_query, msg, InlineKeyboardMarkup(buttons),
+                )
+        except Exception as e:
+            logger.error("Regime detail menu error: %s", e, exc_info=True)
+            err_msg = f"⚠️ 레짐 분석 오류: {str(e)[:80]}"
             if hasattr(update_or_query, 'message') and hasattr(update_or_query, 'callback_query'):
                 await update_or_query.message.reply_text(err_msg)
             else:

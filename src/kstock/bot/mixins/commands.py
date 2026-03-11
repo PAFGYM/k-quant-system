@@ -309,6 +309,22 @@ class CommandsMixin:
                     except Exception:
                         logger.debug("cross_market features load failed", exc_info=True)
 
+                    # v12.2: 시장 레짐 피처 로드
+                    _mr_feats = None
+                    try:
+                        _mr_rows = self.db.get_market_regime(days=1)
+                        if _mr_rows:
+                            _mr_r = _mr_rows[0]
+                            _regime_enc_map = {"crash": 0, "bear": 1, "neutral": 2, "bull": 3, "strong_bull": 4}
+                            _mr_feats = {
+                                "market_regime_encoded": float(_regime_enc_map.get(_mr_r.get("regime", "neutral"), 2)),
+                                "regime_confidence": float(_mr_r.get("confidence", 0)),
+                                "regime_duration": min(float(_mr_r.get("duration_days", 1)) / 60.0, 1.0),
+                                "regime_transition_prob": float(_mr_r.get("transition_prob", 0)),
+                            }
+                    except Exception:
+                        logger.debug("market_regime features load failed", exc_info=True)
+
                     _features_built = build_features(
                         tech, info, macro, flow, policy_bonus=policy_bonus,
                         korea_flow=_mc,
@@ -324,6 +340,7 @@ class CommandsMixin:
                         short_cover_pressure=_short_cover_pressure,
                         foreign_flow_type_encoded=_foreign_flow_type,
                         cross_market_features=_cm_feats,
+                        market_regime_features=_mr_feats,
                     )
                     # 피처를 feature_store에 축적 (학습 데이터)
                     try:

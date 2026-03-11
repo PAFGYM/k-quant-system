@@ -143,13 +143,18 @@ FEATURE_NAMES: list[str] = [
     "gold_change_pct",          # 금 일간 변화율 (%)
     "asia_spillover",           # 아시아 시장 스필오버 점수
     "cross_market_composite",   # 크로스마켓 종합 점수 (-10~+10)
+    # ── v12.2: Market Regime (4) ──
+    "market_regime_encoded",    # 레짐 인코딩 (0=crash ~ 4=strong_bull)
+    "regime_confidence",        # 레짐 신뢰도 (0~1)
+    "regime_duration",          # 레짐 지속일수 (정규화 0~1, 60일 cap)
+    "regime_transition_prob",   # 레짐 전환 확률 (0~1)
 ]
 
-_NUM_FEATURES = 58
+_NUM_FEATURES = 62
 
 assert len(FEATURE_NAMES) == _NUM_FEATURES, (
     f"Expected {_NUM_FEATURES} features, got {len(FEATURE_NAMES)}"
-)  # v10.4: 58 features (50 + 8 cross-market)
+)  # v12.2: 62 features (50 + 8 cross-market + 4 market-regime)
 
 _REGIME_MAP: dict[str, int] = {
     "bubble_attack": 4,
@@ -352,8 +357,10 @@ def build_features(
     foreign_flow_type_encoded: int = 0,
     # v10.4: 크로스마켓 영향도 피처
     cross_market_features: dict[str, float] | None = None,
+    # v12.2: 시장 레짐 피처
+    market_regime_features: dict[str, float] | None = None,
 ) -> dict[str, float]:
-    """Build the 58-feature dict from K-Quant data objects.
+    """Build the 62-feature dict from K-Quant data objects.
 
     Args:
         tech: ``TechnicalIndicators`` instance.
@@ -462,6 +469,19 @@ def build_features(
             features[k] = float(cross_market_features.get(k, v))
     else:
         features.update(_cm_defaults)
+
+    # ── v12.2: Market Regime features (4) ──
+    _mr_defaults = {
+        "market_regime_encoded": 0.0,
+        "regime_confidence": 0.0,
+        "regime_duration": 0.0,
+        "regime_transition_prob": 0.0,
+    }
+    if market_regime_features:
+        for k, v in _mr_defaults.items():
+            features[k] = float(market_regime_features.get(k, v))
+    else:
+        features.update(_mr_defaults)
 
     return features
 

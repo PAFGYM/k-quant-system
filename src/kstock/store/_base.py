@@ -1471,6 +1471,27 @@ CREATE TABLE IF NOT EXISTS tenbagger_score_history (
     created_at      TEXT    NOT NULL,
     UNIQUE(ticker, score_date)
 );
+
+-- v12.2: Market Regime Detection
+CREATE TABLE IF NOT EXISTS market_regime (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    date                  TEXT    NOT NULL,
+    regime                TEXT    DEFAULT 'neutral',
+    confidence            REAL    DEFAULT 0,
+    duration_days         INTEGER DEFAULT 1,
+    transition_prob       REAL    DEFAULT 0,
+    raw_score             REAL    DEFAULT 0,
+    description           TEXT    DEFAULT '',
+    signals_json          TEXT    DEFAULT '[]',
+    sector_rotation_json  TEXT    DEFAULT '{}',
+    portfolio_guide_json  TEXT    DEFAULT '{}',
+    input_summary_json    TEXT    DEFAULT '{}',
+    created_at            TEXT    NOT NULL,
+    UNIQUE(date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_regime_date
+    ON market_regime(date);
 """
 
 

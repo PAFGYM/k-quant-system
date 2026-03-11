@@ -3996,6 +3996,119 @@ class SchedulerMixin:
                 "cross_market", today_str, status="error", message=str(e),
             )
 
+    # -- v12.2: 시장 레짐 감지 --------------------------------------------------
+
+    async def job_market_regime(
+        self, context: "ContextTypes.DEFAULT_TYPE",
+    ) -> None:
+        """07:20 매일: 시장 레짐 감지 (oil+cross_market+korea_risk 통합)."""
+        from datetime import datetime as _dt
+        today_str = _today()
+        try:
+            from kstock.signal.market_regime_v2 import (
+                RegimeInput, compute_market_regime, format_regime_report, to_db_dict,
+            )
+            import json as _json
+
+            # 1. 이전 레짐 조회
+            prev_regime, prev_duration = self.db.get_prev_market_regime()
+
+            # 2. 크로스마켓 데이터
+            cm = self.db.get_latest_cross_market() or {}
+
+            # 3. 유가 데이터
+            oil_rows = self.db.get_oil_analysis(days=1)
+            oil = oil_rows[0] if oil_rows else {}
+
+            # 4. 한국 리스크 (캐시 또는 기본값)
+            kr_risk = getattr(self, "_korea_risk_score", 0)
+            kr_level = getattr(self, "_korea_risk_level", "안전")
+
+            # 5. KOSPI/KOSDAQ (매크로 스냅샷)
+            macro = getattr(self, "macro_client", None)
+            kospi_chg = 0.0
+            kosdaq_chg = 0.0
+            if macro:
+                try:
+                    snap = await macro.get_snapshot()
+                    kospi_chg = getattr(snap, "kospi_change_pct", 0) or 0
+                    kosdaq_chg = getattr(snap, "kosdaq_change_pct", 0) or 0
+                except Exception:
+                    pass
+
+            # 6. RegimeInput 구성
+            inp = RegimeInput(
+                cross_market_composite=cm.get("composite_score", 0),
+                cross_market_direction=cm.get("direction", "neutral"),
+                vix=cm.get("vix", 20),
+                vix_change_pct=cm.get("vix_change_pct", 0),
+                vix_regime=cm.get("vix_regime", "normal"),
+                sp500_change_pct=cm.get("sp500_change_pct", 0),
+                nasdaq_change_pct=cm.get("nasdaq_change_pct", 0),
+                usdkrw=cm.get("usdkrw", 1300),
+                usdkrw_change_pct=cm.get("usdkrw_change_pct", 0),
+                us10y_yield=cm.get("us10y_yield", 4.0),
+                us10y_change_bp=0,
+                oil_regime=oil.get("regime", "neutral"),
+                oil_regime_strength=oil.get("regime_strength", 0),
+                korea_risk_score=kr_risk,
+                korea_risk_level=kr_level,
+                kospi_change_pct=kospi_chg,
+                kosdaq_change_pct=kosdaq_chg,
+                prev_regime=prev_regime,
+                prev_regime_duration=prev_duration,
+            )
+
+            # 7. 레짐 계산
+            report = compute_market_regime(inp)
+
+            # 8. DB 저장
+            self.db.save_market_regime(to_db_dict(report, today_str))
+
+            # 9. 학습 이력
+            try:
+                self.db.save_learning_event(
+                    event_type="market_regime",
+                    description=(
+                        f"시장 레짐: {report.regime.regime} "
+                        f"(점수 {report.regime.raw_score:+.0f}, "
+                        f"신뢰도 {report.regime.confidence:.0%})"
+                    ),
+                    data_json=_json.dumps({
+                        "regime": report.regime.regime,
+                        "raw_score": report.regime.raw_score,
+                        "confidence": report.regime.confidence,
+                        "duration": report.regime.duration_days,
+                    }, ensure_ascii=False),
+                )
+            except Exception:
+                pass
+
+            self.db.upsert_job_run("market_regime", today_str, status="success")
+            logger.info(
+                "Market regime: %s (score=%.1f, conf=%.0f%%, dur=%dd)",
+                report.regime.regime, report.regime.raw_score,
+                report.regime.confidence * 100, report.regime.duration_days,
+            )
+
+            # 10. 레짐 전환 or crash 알림
+            changed = report.regime.regime != prev_regime and prev_regime != "neutral"
+            is_crash = report.regime.regime == "crash"
+            if (changed or is_crash) and self.chat_id:
+                try:
+                    alert_msg = format_regime_report(report)
+                    await context.bot.send_message(
+                        chat_id=self.chat_id, text=alert_msg[:4000],
+                    )
+                except Exception:
+                    logger.debug("Regime alert send failed", exc_info=True)
+
+        except Exception as e:
+            logger.error("Market regime job failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "market_regime", today_str, status="error", message=str(e)[:100],
+            )
+
     # -- v11.0: 액티브 ETF 구성종목 추적 ----------------------------------------
 
     async def job_active_etf_tracking(

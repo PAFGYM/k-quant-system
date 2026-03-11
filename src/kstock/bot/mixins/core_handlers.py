@@ -391,6 +391,12 @@ class CoreHandlersMixin:
             time=dt_time(hour=7, minute=15, tzinfo=KST),
             name="cross_market_analysis",
         )
+        # v12.2: 시장 레짐 감지 (07:20 매일 — 유가/크로스마켓 직후, 브리핑 전)
+        jq.run_daily(
+            self.job_market_regime,
+            time=dt_time(hour=7, minute=20, tzinfo=KST),
+            name="market_regime",
+        )
         # v11.0: 액티브 ETF 구성종목 추적 (09:05 매일)
         jq.run_daily(
             self.job_active_etf_tracking,
@@ -2233,6 +2239,8 @@ class CoreHandlersMixin:
             "oil_detail": self._menu_oil_detail,
             # v12.1: 텐베거 스캔
             "tenbagger_scan": self._menu_tenbagger_scan,
+            # v12.2: 시장 레짐 상세
+            "regime_detail": self._menu_regime_detail,
         }
         # v6.2.1: 기능별 로딩 메시지
         _loading_msg = {
@@ -2255,6 +2263,7 @@ class CoreHandlersMixin:
             "onboarding": "📖 온보딩 가이드 로딩 중...",
             "debate": "🎙️ AI 토론 메뉴 로딩 중...",
             "oil_detail": "🛢 유가 분석 로딩 중...",
+            "regime_detail": "📊 시장 레짐 분석 로딩 중...",
         }
         handler = menu_map.get(payload)
         if not handler:

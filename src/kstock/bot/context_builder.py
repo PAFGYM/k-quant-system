@@ -607,6 +607,12 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
         lines.append(f"--- 유가 분석 ---")
         lines.append(oil_ctx)
 
+    # [v12.2] 시장 레짐 컨텍스트 (DB에서 조회)
+    regime_ctx = macro_snapshot.get("market_regime_context")
+    if regime_ctx:
+        lines.append("--- 시장 레짐 ---")
+        lines.append(regime_ctx)
+
     # [v9.0] 선물만기 경고
     expiry_warn = get_futures_expiry_warning()
     if expiry_warn:
@@ -893,6 +899,37 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
                     macro_dict["oil_analysis_context"] = "\n".join(oil_lines)
             except Exception:
                 logger.debug("oil_analysis context failed", exc_info=True)
+
+            # ── [v12.2] 시장 레짐 컨텍스트 ──
+            try:
+                regime_rows = db.get_market_regime(days=1)
+                if regime_rows:
+                    rr = regime_rows[0]
+                    import json as _rjson
+                    regime_lines = []
+                    _regime_emoji = {"strong_bull": "🟢🟢", "bull": "🟢", "neutral": "⚪",
+                                     "bear": "🔴", "crash": "🔴🔴"}
+                    regime_lines.append(f"현재 레짐: {_regime_emoji.get(rr.get('regime', ''), '')} {rr.get('regime', 'neutral')}")
+                    regime_lines.append(f"레짐 점수: {rr.get('raw_score', 0):.1f} / 신뢰도: {rr.get('confidence', 0):.0%}")
+                    regime_lines.append(f"지속일수: {rr.get('duration_days', 1)}일 / 전환확률: {rr.get('transition_prob', 0):.0%}")
+                    if rr.get("description"):
+                        regime_lines.append(f"설명: {rr['description']}")
+                    try:
+                        sigs = _rjson.loads(rr.get("signals_json", "[]"))
+                        for sig in sigs[:3]:
+                            regime_lines.append(f"시그널: {sig.get('description', '')}")
+                    except Exception:
+                        pass
+                    try:
+                        guide = _rjson.loads(rr.get("portfolio_guide_json", "{}"))
+                        if guide:
+                            regime_lines.append(f"포지션: {guide.get('position_size', '')}")
+                            regime_lines.append(f"전략: {guide.get('buy_strategy', '')}")
+                    except Exception:
+                        pass
+                    macro_dict["market_regime_context"] = "\n".join(regime_lines)
+            except Exception:
+                logger.debug("market_regime context failed", exc_info=True)
         except Exception as e:
             logger.warning("Failed to get macro for AI context: %s", e)
 
