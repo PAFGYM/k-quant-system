@@ -8,26 +8,42 @@ from kstock.bot.bot_imports import *  # noqa: F403
 from kstock.core.market_calendar import is_kr_market_open, market_status_text, next_market_day
 
 # ── 적응형 모니터링: VIX 레짐별 체크 주기 (초) ─────────────────────
-ADAPTIVE_INTERVALS = {
-    "calm":   {"intraday_monitor": 120, "market_pulse": 180},  # VIX < 18
-    "normal": {"intraday_monitor": 60,  "market_pulse": 60},   # VIX 18-25
-    "fear":   {"intraday_monitor": 30,  "market_pulse": 30},   # VIX 25-30
-    "panic":  {"intraday_monitor": 15,  "market_pulse": 15},   # VIX > 30
-}
+# v12.3: risk_thresholds.yaml에서 로드 (없으면 기본값 fallback)
+try:
+    from kstock.core.risk_config import get_risk_thresholds as _get_rt
+    _rt = _get_rt()
+    ADAPTIVE_INTERVALS = _rt.adaptive_intervals or {
+        "calm":   {"intraday_monitor": 120, "market_pulse": 180},
+        "normal": {"intraday_monitor": 60,  "market_pulse": 60},
+        "fear":   {"intraday_monitor": 30,  "market_pulse": 30},
+        "panic":  {"intraday_monitor": 15,  "market_pulse": 15},
+    }
+except Exception:
+    ADAPTIVE_INTERVALS = {
+        "calm":   {"intraday_monitor": 120, "market_pulse": 180},
+        "normal": {"intraday_monitor": 60,  "market_pulse": 60},
+        "fear":   {"intraday_monitor": 30,  "market_pulse": 30},
+        "panic":  {"intraday_monitor": 15,  "market_pulse": 15},
+    }
 
 # 레짐 변경 쿨다운 (초)
 _RESCHEDULE_COOLDOWN = 300  # 5분
 
 
 def _get_vix_regime(vix: float) -> str:
-    """VIX 값으로 시장 레짐 산출."""
-    if vix >= 30:
-        return "panic"
-    if vix >= 25:
-        return "fear"
-    if vix >= 18:
-        return "normal"
-    return "calm"
+    """VIX 값으로 시장 레짐 산출 (v12.3: 중앙화된 임계값 사용)."""
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        return get_risk_thresholds().vix.regime_for(vix)
+    except Exception:
+        # fallback: 기존 하드코딩
+        if vix >= 30:
+            return "panic"
+        if vix >= 25:
+            return "fear"
+        if vix >= 18:
+            return "normal"
+        return "calm"
 
 
 class SchedulerMixin:

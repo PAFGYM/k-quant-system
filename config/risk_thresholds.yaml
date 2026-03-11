@@ -1,0 +1,71 @@
+# K-Quant Risk Thresholds — Single Source of Truth (v12.3)
+# 리스크 관련 숫자 상수를 한 곳에서 관리.
+# 로더: core/risk_config.py → get_risk_thresholds()
+
+vix:
+  calm: 15            # 이하: 완화 레짐 (scoring.yaml risk_on)
+  normal_low: 18      # risk_policy.py 완화 경계
+  normal_high: 25     # risk_policy.py 긴축 시작
+  fear: 30            # 매수 차단, 극긴축
+  panic: 35           # scoring.yaml panic 레짐
+  crisis: 40          # cross_market_impact crisis
+
+usdkrw:
+  favorable: 1200     # 강세 원화
+  normal_low: 1250    # scoring.yaml usdkrw_low
+  normal_high: 1300   # 중립 경계
+  warning: 1350       # korea_risk.py, scoring.yaml usdkrw_high
+  danger: 1400        # korea_risk.py 차단 레벨
+  crisis: 1450        # context_builder.py 위기 레벨
+
+# macro_shock.py 쇼크 카테고리별 임계값 (일간 변동률 %)
+oil:
+  watch_pct: 2.0
+  alert_pct: 3.0
+  shock_pct: 5.0
+
+us_futures:
+  watch_pct: 1.0
+  alert_pct: 1.5
+  shock_pct: 2.5
+
+vix_change:
+  watch_pct: 15.0
+  alert_pct: 25.0
+  shock_pct: 40.0
+
+dollar:
+  watch_pct: 0.5
+  alert_pct: 1.0
+  shock_pct: 1.5
+
+korea_etf:
+  watch_pct: 1.5
+  alert_pct: 2.5
+  shock_pct: 4.0
+
+usdkrw_change:
+  watch_pct: 0.5
+  alert_pct: 1.0
+  shock_pct: 1.5
+
+position_limits:
+  max_single_weight: 0.30
+  max_sector_weight: 0.50
+  max_kelly_fraction: 0.25
+  min_cash_pct: 0.05
+
+# VIX 레짐별 적응형 모니터링 주기 (초)
+adaptive_intervals:
+  calm:
+    intraday_monitor: 120
+    market_pulse: 180
+  normal:
+    intraday_monitor: 60
+    market_pulse: 60
+  fear:
+    intraday_monitor: 30
+    market_pulse: 30
+  panic:
+    intraday_monitor: 15
+    market_pulse: 15

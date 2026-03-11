@@ -17,8 +17,12 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 from kstock.core.tz import KST
+
+if TYPE_CHECKING:
+    from kstock.core.protocols import BrokerProtocol, MarketDataProvider
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +58,12 @@ class DataRouter:
     v5.0: PIT 소스 태깅 + SourceRegistry 연동.
     """
 
-    def __init__(self, kis_broker=None, yf_client=None, db=None) -> None:
+    def __init__(
+        self,
+        kis_broker: "BrokerProtocol | None" = None,
+        yf_client: "MarketDataProvider | None" = None,
+        db: Any = None,
+    ) -> None:
         self.kis = kis_broker
         self.yf = yf_client
         self.db = db
@@ -186,6 +195,14 @@ class DataRouter:
                 }
 
         return None
+
+    async def get_portfolio_typed(self) -> "PortfolioSnapshot | None":
+        """v12.3: 타입화된 포트폴리오 조회 (기존 get_portfolio() 래핑)."""
+        from kstock.core.domain_types import PortfolioSnapshot
+        raw = await self.get_portfolio()
+        if raw is None:
+            return None
+        return PortfolioSnapshot.from_legacy_dict(raw)
 
     async def get_price(self, ticker: str, market: str = "KOSPI") -> float:
         """Get current price from best source (3-tier fallback).

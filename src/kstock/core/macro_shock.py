@@ -49,40 +49,57 @@ ALERT_COLORS = {
 
 
 # ── 임계값 ─────────────────────────────────────────────────
+# v12.3: risk_thresholds.yaml에서 로드 (없으면 기본값 fallback)
 # {category: [(grade, threshold)]}  — 절대값 기준 (양/음 모두 감지)
 
-THRESHOLDS = {
-    "oil": [            # WTI 일간 변동률 %
-        (ShockGrade.WATCH, 2.0),
-        (ShockGrade.ALERT, 3.0),
-        (ShockGrade.SHOCK, 5.0),
-    ],
-    "us_futures": [     # 나스닥 선물 변동률 %
-        (ShockGrade.WATCH, 1.0),
-        (ShockGrade.ALERT, 1.5),
-        (ShockGrade.SHOCK, 2.5),
-    ],
-    "vix": [            # VIX 일간 변화율 %
-        (ShockGrade.WATCH, 15.0),
-        (ShockGrade.ALERT, 25.0),
-        (ShockGrade.SHOCK, 40.0),
-    ],
-    "dollar": [         # DXY 변동률 %
-        (ShockGrade.WATCH, 0.5),
-        (ShockGrade.ALERT, 1.0),
-        (ShockGrade.SHOCK, 1.5),
-    ],
-    "korea_etf": [      # EWY 변동률 %
-        (ShockGrade.WATCH, 1.5),
-        (ShockGrade.ALERT, 2.5),
-        (ShockGrade.SHOCK, 4.0),
-    ],
-    "usdkrw": [         # 원달러 변동률 %
-        (ShockGrade.WATCH, 0.5),
-        (ShockGrade.ALERT, 1.0),
-        (ShockGrade.SHOCK, 1.5),
-    ],
-}
+def _build_thresholds() -> dict:
+    """risk_config에서 쇼크 임계값 로드, 실패 시 하드코딩 기본값."""
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        rt = get_risk_thresholds()
+        return {
+            "oil": [
+                (ShockGrade.WATCH, rt.oil.watch_pct),
+                (ShockGrade.ALERT, rt.oil.alert_pct),
+                (ShockGrade.SHOCK, rt.oil.shock_pct),
+            ],
+            "us_futures": [
+                (ShockGrade.WATCH, rt.us_futures.watch_pct),
+                (ShockGrade.ALERT, rt.us_futures.alert_pct),
+                (ShockGrade.SHOCK, rt.us_futures.shock_pct),
+            ],
+            "vix": [
+                (ShockGrade.WATCH, rt.vix_change.watch_pct),
+                (ShockGrade.ALERT, rt.vix_change.alert_pct),
+                (ShockGrade.SHOCK, rt.vix_change.shock_pct),
+            ],
+            "dollar": [
+                (ShockGrade.WATCH, rt.dollar.watch_pct),
+                (ShockGrade.ALERT, rt.dollar.alert_pct),
+                (ShockGrade.SHOCK, rt.dollar.shock_pct),
+            ],
+            "korea_etf": [
+                (ShockGrade.WATCH, rt.korea_etf.watch_pct),
+                (ShockGrade.ALERT, rt.korea_etf.alert_pct),
+                (ShockGrade.SHOCK, rt.korea_etf.shock_pct),
+            ],
+            "usdkrw": [
+                (ShockGrade.WATCH, rt.usdkrw_change.watch_pct),
+                (ShockGrade.ALERT, rt.usdkrw_change.alert_pct),
+                (ShockGrade.SHOCK, rt.usdkrw_change.shock_pct),
+            ],
+        }
+    except Exception:
+        return {
+            "oil": [(ShockGrade.WATCH, 2.0), (ShockGrade.ALERT, 3.0), (ShockGrade.SHOCK, 5.0)],
+            "us_futures": [(ShockGrade.WATCH, 1.0), (ShockGrade.ALERT, 1.5), (ShockGrade.SHOCK, 2.5)],
+            "vix": [(ShockGrade.WATCH, 15.0), (ShockGrade.ALERT, 25.0), (ShockGrade.SHOCK, 40.0)],
+            "dollar": [(ShockGrade.WATCH, 0.5), (ShockGrade.ALERT, 1.0), (ShockGrade.SHOCK, 1.5)],
+            "korea_etf": [(ShockGrade.WATCH, 1.5), (ShockGrade.ALERT, 2.5), (ShockGrade.SHOCK, 4.0)],
+            "usdkrw": [(ShockGrade.WATCH, 0.5), (ShockGrade.ALERT, 1.0), (ShockGrade.SHOCK, 1.5)],
+        }
+
+THRESHOLDS = _build_thresholds()
 
 # 섹터 민감도 분류
 SECTOR_SENSITIVITY = {
