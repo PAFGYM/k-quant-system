@@ -255,6 +255,94 @@ class TestFromMarketStateUsdkrw:
 
 
 # =====================================================================
+# v12.6: 환율 모멘텀 + 복합 심각도
+# =====================================================================
+
+class TestUsdkrwMomentum:
+
+    def test_no_change_no_momentum(self):
+        rd = RiskDecision.from_market_state(usdkrw=1350)
+        assert rd.usdkrw_momentum == ""
+        assert rd.usdkrw_change_pct == 0.0
+
+    def test_surge(self):
+        """usdkrw +1.2% → 급등."""
+        rd = RiskDecision.from_market_state(usdkrw=1350, usdkrw_change_pct=1.2)
+        assert rd.usdkrw_momentum == "급등"
+        assert any("급등" in r for r in rd.reasons)
+
+    def test_plunge(self):
+        """usdkrw -1.2% → 급락."""
+        rd = RiskDecision.from_market_state(usdkrw=1350, usdkrw_change_pct=-1.2)
+        assert rd.usdkrw_momentum == "급락"
+
+    def test_rise(self):
+        rd = RiskDecision.from_market_state(usdkrw=1300, usdkrw_change_pct=0.6)
+        assert rd.usdkrw_momentum == "상승"
+
+    def test_fall(self):
+        rd = RiskDecision.from_market_state(usdkrw=1300, usdkrw_change_pct=-0.7)
+        assert rd.usdkrw_momentum == "하락"
+
+    def test_extreme_both_directions(self):
+        """±1.5% → 급변."""
+        rd1 = RiskDecision.from_market_state(usdkrw=1300, usdkrw_change_pct=1.8)
+        assert rd1.usdkrw_momentum == "급변"
+        rd2 = RiskDecision.from_market_state(usdkrw=1300, usdkrw_change_pct=-1.6)
+        assert rd2.usdkrw_momentum == "급변"
+
+    def test_composite_escalation_danger_plus_surge(self):
+        """위험(1400) + 2% → composite >= 0.8 → 매수 차단."""
+        rd = RiskDecision.from_market_state(usdkrw=1400, usdkrw_change_pct=2.0)
+        assert rd.usdkrw_composite >= 0.8
+        assert rd.block_new_buy is True
+        assert any("복합 위험" in r for r in rd.reasons)
+
+    def test_composite_no_escalation_warning_moderate(self):
+        """경고(1350) + 0.8% → composite < 0.8 → 차단 안 됨."""
+        rd = RiskDecision.from_market_state(usdkrw=1350, usdkrw_change_pct=0.8)
+        assert rd.usdkrw_composite < 0.8
+        assert rd.block_new_buy is False
+
+    def test_composite_zero_when_favorable(self):
+        """강세(1180) + 0% → composite ~0."""
+        rd = RiskDecision.from_market_state(usdkrw=1180)
+        assert rd.usdkrw_composite < 0.05
+
+    def test_backward_compat_no_change_pct(self):
+        """usdkrw_change_pct 미제공 → 기존 동작 유지."""
+        rd = RiskDecision.from_market_state(usdkrw=1400)
+        assert rd.usdkrw_status == "위험"
+        assert rd.usdkrw_momentum == ""
+        assert rd.block_new_buy is False  # 절대값만으로는 danger, 차단 아님
+
+
+class TestVixUsdkrwCross:
+
+    def test_foreign_outflow_pattern(self):
+        """VIX 28 + USDKRW +0.7% → 외인 이탈."""
+        rd = RiskDecision.from_market_state(vix=28, usdkrw=1300, usdkrw_change_pct=0.7)
+        assert "foreign_outflow_pattern" in rd.source_flags
+        assert rd.cash_floor_pct >= 20.0
+        assert any("외인 이탈" in r for r in rd.reasons)
+
+    def test_no_cross_when_vix_low(self):
+        """VIX 20 + USDKRW +0.7% → 교차 안 됨."""
+        rd = RiskDecision.from_market_state(vix=20, usdkrw=1300, usdkrw_change_pct=0.7)
+        assert "foreign_outflow_pattern" not in rd.source_flags
+
+    def test_no_cross_when_krw_stable(self):
+        """VIX 28 + USDKRW +0.3% → 교차 안 됨."""
+        rd = RiskDecision.from_market_state(vix=28, usdkrw=1300, usdkrw_change_pct=0.3)
+        assert "foreign_outflow_pattern" not in rd.source_flags
+
+    def test_cross_stacks_with_fear_cash(self):
+        """VIX fear(28) + 교차 → cash_floor = max(25, 20) = 25."""
+        rd = RiskDecision.from_market_state(vix=28, usdkrw=1300, usdkrw_change_pct=0.6)
+        assert rd.cash_floor_pct >= 25.0  # fear 25% > 교차 20%
+
+
+# =====================================================================
 # RiskDecision.from_market_state — 만기일 + 쇼크
 # =====================================================================
 

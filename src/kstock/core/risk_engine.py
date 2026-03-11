@@ -684,6 +684,10 @@ class ManagerAction:
     stop_tighten_pct: float = 0.0
     wartime_action: str = ""
     recommendations: list = field(default_factory=list)
+    # v12.6: 보유 관리
+    holding_action: str = "hold"        # hold / reduce / accumulate
+    holding_reduce_pct: float = 0.0     # reduce 시 축소 비율 (%)
+    holding_override_stop: bool = False  # True = 리스크 기반 손절 강화 안 함
 
     def __bool__(self) -> bool:
         return self.can_enter
@@ -716,6 +720,7 @@ class RiskEngine:
         rd = RiskDecision.from_market_state(
             vix=ctx.vix,
             usdkrw=ctx.usdkrw,
+            usdkrw_change_pct=ctx.usdkrw_change_pct,
             days_to_expiry=ctx.days_to_expiry,
             shock_grade=ctx.shock_grade,
             korea_risk_score=ctx.korea_risk_score,
@@ -782,11 +787,16 @@ class ManagerRiskPolicy:
             manager_key, vix=rd.vix, shock_grade=rd.shock_grade,
         )
 
-        # RiskDecision 매수 차단 → long_term 제외 모든 매니저 차단
-        if rd.block_new_buy and manager_key != "long_term":
-            can_enter = False
-            if not block_reason:
-                block_reason = rd.reason
+        # RiskDecision 매수 차단 → long_term / tenbagger(panic) 제외 차단
+        _regime = getattr(rd, "regime", "")
+        if rd.block_new_buy and manager_key not in ("long_term",):
+            # tenbagger: panic에서는 VIX 한도(40) 이내면 매수 허용
+            if manager_key == "tenbagger" and _regime == "panic":
+                pass  # should_manager_enter()의 max_vix(40)로 자연 제어
+            else:
+                can_enter = False
+                if not block_reason:
+                    block_reason = rd.reason
 
         # wartime + 매니저 정책
         wartime_action = policy.get("wartime_action", "")
@@ -797,6 +807,9 @@ class ManagerRiskPolicy:
             elif wartime_action == "restrict":
                 can_enter = False
                 block_reason = block_reason or "전시 모드: 신규 매수 제한"
+            elif wartime_action == "event_hold":
+                can_enter = False
+                block_reason = block_reason or "전시 모드: 보유만 유지"
 
         # 손절 강화
         stop_tighten = 0.0
@@ -814,6 +827,35 @@ class ManagerRiskPolicy:
         if rd.cash_floor_pct > 0:
             recs.append(f"현금 {rd.cash_floor_pct:.0f}%+ 확보")
 
+        # v12.6: 보유 관리 결정
+        holding_action = "hold"
+        holding_reduce_pct = 0.0
+        holding_override_stop = False
+
+        if manager_key == "tenbagger":
+            # 텐배거: 가설 기반 -25% 손절, 시장 공포와 무관 → 손절 강화 안 함
+            holding_override_stop = True
+            stop_tighten = 0.0
+
+            if rd.risk_level == "blocked" and _regime == "crisis":
+                # crisis: C등급 축소 권고, A등급 코어 유지
+                holding_action = "reduce"
+                holding_reduce_pct = 50.0
+                recs.append("C등급 옵션 50% 축소, A등급 코어 유지")
+            elif rd.risk_level in ("danger", "blocked"):
+                recs.append("텐배거 전량 보유 유지 (투자 논리 건재 전제)")
+
+            # 환율 수혜 감지 (수출형 텐배거)
+            _usdkrw = getattr(rd, "usdkrw", 0)
+            _flags = getattr(rd, "source_flags", [])
+            if _usdkrw >= 1350 and "foreign_outflow_pattern" not in _flags:
+                recs.append("원화 약세 → 수출형 텐배거 수혜 가능")
+
+        elif manager_key == "long_term":
+            # 장기: panic/crisis에서 손절 강화 안 함
+            if rd.risk_level in ("danger", "blocked"):
+                holding_override_stop = True
+
         return ManagerAction(
             manager_key=manager_key,
             can_enter=can_enter,
@@ -822,6 +864,9 @@ class ManagerRiskPolicy:
             stop_tighten_pct=stop_tighten,
             wartime_action=wartime_action,
             recommendations=recs,
+            holding_action=holding_action,
+            holding_reduce_pct=holding_reduce_pct,
+            holding_override_stop=holding_override_stop,
         )
 
     @staticmethod

@@ -343,15 +343,21 @@ class TestManagerPolicyApply:
         action = ManagerRiskPolicy.apply("swing", rd)
         assert action.can_enter is True
 
-    def test_panic_blocks_most(self, engine):
+    def test_panic_blocks_scalp_swing(self, engine):
         rd = engine.evaluate(RiskContext(vix=36))
-        for mgr in ["scalp", "swing", "tenbagger"]:
+        for mgr in ["scalp", "swing"]:
             action = ManagerRiskPolicy.apply(mgr, rd)
             assert action.can_enter is False, f"{mgr} should be blocked"
 
     def test_panic_long_term_allowed(self, engine):
         rd = engine.evaluate(RiskContext(vix=36))
         action = ManagerRiskPolicy.apply("long_term", rd)
+        assert action.can_enter is True
+
+    def test_panic_tenbagger_allowed(self, engine):
+        """v12.6: 텐배거 panic에서 VIX 한도(40) 이내면 매수 허용."""
+        rd = engine.evaluate(RiskContext(vix=36))
+        action = ManagerRiskPolicy.apply("tenbagger", rd)
         assert action.can_enter is True
 
     def test_regime_weight_calm_scalp(self, engine):
@@ -467,3 +473,119 @@ class TestIntegration:
         aa = ManagerRiskPolicy.apply_all(rd)
         assert isinstance(rd.regime, str)
         assert len(aa) == 5
+
+
+# ── v12.6: USDKRW 모멘텀 전달 ─────────────────────────────────
+
+class TestUsdkrwMomentumEngine:
+
+    def test_evaluate_passes_change_pct(self, engine):
+        ctx = RiskContext(vix=20, usdkrw=1400, usdkrw_change_pct=1.2)
+        rd = engine.evaluate(ctx)
+        assert rd.usdkrw_momentum == "급등"
+        assert rd.usdkrw_change_pct == 1.2
+
+    def test_evaluate_cross_pattern(self, engine):
+        ctx = RiskContext(vix=28, usdkrw=1300, usdkrw_change_pct=0.7)
+        rd = engine.evaluate(ctx)
+        assert "foreign_outflow_pattern" in rd.source_flags
+
+    def test_evaluate_no_change_backward_compat(self, engine):
+        ctx = RiskContext(vix=20, usdkrw=1350)
+        rd = engine.evaluate(ctx)
+        assert rd.usdkrw_momentum == ""
+
+
+# ── v12.6: 텐배거 보유 관리 ────────────────────────────────────
+
+class TestTenbaggerHolding:
+
+    def test_panic_can_enter(self, engine):
+        """텐배거: panic(VIX 36) + VIX < 40 → 매수 허용."""
+        rd = engine.evaluate(RiskContext(vix=36))
+        a = ManagerRiskPolicy.apply("tenbagger", rd)
+        assert a.can_enter is True
+        assert a.holding_override_stop is True
+        assert a.stop_tighten_pct == 0.0
+
+    def test_crisis_blocked_with_reduce(self, engine):
+        """텐배거: crisis(VIX 45) → 매수 차단 + C등급 축소."""
+        rd = engine.evaluate(RiskContext(vix=45))
+        a = ManagerRiskPolicy.apply("tenbagger", rd)
+        assert a.can_enter is False
+        assert a.holding_action == "reduce"
+        assert a.holding_reduce_pct == 50.0
+        assert any("C등급" in r for r in a.recommendations)
+
+    def test_fear_no_stop_tighten(self, engine):
+        """텐배거: fear → 손절 강화 안 함."""
+        rd = engine.evaluate(RiskContext(vix=28))
+        a = ManagerRiskPolicy.apply("tenbagger", rd)
+        assert a.stop_tighten_pct == 0.0
+        assert a.holding_override_stop is True
+
+    def test_calm_normal_hold(self, engine):
+        """텐배거: calm → 정상 보유."""
+        rd = engine.evaluate(RiskContext(vix=14))
+        a = ManagerRiskPolicy.apply("tenbagger", rd)
+        assert a.can_enter is True
+        assert a.holding_action == "hold"
+        assert a.holding_override_stop is True
+
+    def test_panic_blocked_above_vix_40(self, engine):
+        """텐배거: VIX 42 (crisis) → 매수 차단."""
+        rd = engine.evaluate(RiskContext(vix=42))
+        a = ManagerRiskPolicy.apply("tenbagger", rd)
+        assert a.can_enter is False
+
+    def test_krw_weakness_benefit(self, engine):
+        """텐배거: USDKRW 1380 + 외인이탈 아님 → 수출 수혜."""
+        rd = engine.evaluate(RiskContext(vix=20, usdkrw=1380))
+        a = ManagerRiskPolicy.apply("tenbagger", rd)
+        assert any("수출형" in r for r in a.recommendations)
+
+    def test_krw_weakness_with_outflow_no_benefit(self, engine):
+        """VIX 28 + USDKRW +0.7% → 외인이탈 패턴 → 수혜 안 뜸."""
+        rd = engine.evaluate(RiskContext(vix=28, usdkrw=1380, usdkrw_change_pct=0.7))
+        a = ManagerRiskPolicy.apply("tenbagger", rd)
+        assert not any("수출형" in r for r in a.recommendations)
+
+    def test_wartime_tenbagger_blocked(self, engine):
+        """텐배거: wartime → event_hold → 매수 차단."""
+        rd = engine.evaluate(RiskContext(vix=20, alert_mode="wartime"))
+        a = ManagerRiskPolicy.apply("tenbagger", rd)
+        assert a.can_enter is False
+
+
+# ── v12.6: long_term 보유 관리 ──────────────────────────────────
+
+class TestLongTermHolding:
+
+    def test_panic_override_stop(self, engine):
+        """long_term: panic → 손절 강화 안 함."""
+        rd = engine.evaluate(RiskContext(vix=36))
+        a = ManagerRiskPolicy.apply("long_term", rd)
+        assert a.holding_override_stop is True
+
+    def test_calm_no_override(self, engine):
+        """long_term: calm → 기본 동작."""
+        rd = engine.evaluate(RiskContext(vix=14))
+        a = ManagerRiskPolicy.apply("long_term", rd)
+        assert a.holding_override_stop is False
+
+
+# ── v12.6: scalp/swing 기존 동작 유지 ──────────────────────────
+
+class TestOtherManagersHolding:
+
+    def test_scalp_default_holding(self, engine):
+        rd = engine.evaluate(RiskContext(vix=28))
+        a = ManagerRiskPolicy.apply("scalp", rd)
+        assert a.holding_action == "hold"
+        assert a.holding_override_stop is False
+
+    def test_swing_default_holding(self, engine):
+        rd = engine.evaluate(RiskContext(vix=28))
+        a = ManagerRiskPolicy.apply("swing", rd)
+        assert a.holding_action == "hold"
+        assert a.holding_override_stop is False

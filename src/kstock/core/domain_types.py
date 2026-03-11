@@ -110,6 +110,9 @@ class RiskDecision:
     vix_status: str = ""        # 한글 라벨: 안정/주의/경계/공포
     usdkrw: float = 0.0
     usdkrw_status: str = ""     # 강세/안정/주의/경고/위험/위기
+    usdkrw_change_pct: float = 0.0   # v12.6: 일간 변화율
+    usdkrw_momentum: str = ""        # v12.6: 급등/급락/상승/하락/급변
+    usdkrw_composite: float = 0.0    # v12.6: 복합 심각도 (0.0~1.0)
 
     # ── v12.4: 액션 가이드 ──────────────────────────────────
     block_new_buy: bool = False      # 신규 매수 차단 여부
@@ -145,6 +148,7 @@ class RiskDecision:
         cls,
         vix: float = 0.0,
         usdkrw: float = 0.0,
+        usdkrw_change_pct: float = 0.0,
         days_to_expiry: int = 999,
         shock_grade: str = "NONE",
         korea_risk_score: float = 0.0,
@@ -203,6 +207,41 @@ class RiskDecision:
             if usdkrw_label:
                 reasons.append(f"환율 {usdkrw_label}({usdkrw:,.0f})")
 
+        # v12.6: 환율 모멘텀 (일간 변화율 기반)
+        usdkrw_momentum = ""
+        if abs(usdkrw_change_pct) >= 1.5:
+            usdkrw_momentum = "급변"
+        elif usdkrw_change_pct >= 1.0:
+            usdkrw_momentum = "급등"
+        elif usdkrw_change_pct <= -1.0:
+            usdkrw_momentum = "급락"
+        elif usdkrw_change_pct >= 0.5:
+            usdkrw_momentum = "상승"
+        elif usdkrw_change_pct <= -0.5:
+            usdkrw_momentum = "하락"
+
+        if usdkrw_momentum in ("급등", "급변") and usdkrw > 0:
+            reasons.append(f"환율 {usdkrw_momentum}({usdkrw_change_pct:+.1f}%)")
+
+        # v12.6: 복합 심각도 — level(60%) + momentum(40%)
+        _level_scores = {"강세": 0, "안정": 0.1, "주의": 0.3,
+                         "경고": 0.5, "위험": 0.7, "위기": 1.0}
+        _lv = _level_scores.get(usdkrw_label, 0)
+        _mo = min(1.0, max(0, usdkrw_change_pct) / 2.0)
+        usdkrw_composite = min(1.0, _lv * 0.6 + _mo * 0.4)
+
+        # 복합 에스컬레이션: danger + 급등 → 매수 차단
+        if usdkrw_composite >= 0.8 and not block_buy and usdkrw > 0:
+            block_buy = True
+            reduce_pos = True
+            reasons.append(f"환율 복합 위험({usdkrw:,.0f} {usdkrw_momentum})")
+
+        # v12.6: VIX × USDKRW 교차 — 외인 이탈 패턴
+        if vix >= 25 and usdkrw_change_pct >= 0.5:
+            source_flags.append("foreign_outflow_pattern")
+            cash_floor = max(cash_floor, 20.0)
+            reasons.append("외인 이탈 패턴(VIX↑+원화↓)")
+
         # 만기일
         if days_to_expiry <= 1:
             source_flags.append("expiry_day")
@@ -248,6 +287,9 @@ class RiskDecision:
             vix_status=vix_label,
             usdkrw=usdkrw,
             usdkrw_status=usdkrw_label,
+            usdkrw_change_pct=usdkrw_change_pct,
+            usdkrw_momentum=usdkrw_momentum,
+            usdkrw_composite=usdkrw_composite,
             block_new_buy=block_buy,
             reduce_position=reduce_pos,
             max_position_pct=60.0 if reduce_pos else (80.0 if cash_floor > 0 else 100.0),
