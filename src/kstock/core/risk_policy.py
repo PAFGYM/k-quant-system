@@ -275,9 +275,9 @@ class RiskConstraintSet:
 
         # If previous VIX available, dampen transitions (mean of current and previous)
         if prev_vix is not None:
-            prev_tight_25 = _sigmoid(prev_vix, center=25, width=3)
+            prev_tight_25 = _sigmoid(prev_vix, center=vix_high, width=3)
             tight_25 = 0.7 * tight_25 + 0.3 * prev_tight_25  # 70% current, 30% previous
-            prev_tight_30 = _sigmoid(prev_vix, center=30, width=2)
+            prev_tight_30 = _sigmoid(prev_vix, center=vix_fear, width=2)
             tight_30 = 0.7 * tight_30 + 0.3 * prev_tight_30
 
         # Interpolate constraints
