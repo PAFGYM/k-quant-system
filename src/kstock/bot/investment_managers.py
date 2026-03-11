@@ -1581,24 +1581,100 @@ def format_consensus(consensus_list: list[dict]) -> str:
 # ── #5 레짐별 매니저 가중치 ──────────────────────────────────
 
 REGIME_WEIGHTS: dict[str, dict[str, float]] = {
-    "calm": {"scalp": 1.2, "swing": 1.1, "position": 1.0, "long_term": 0.8, "tenbagger": 1.0},
+    "calm":   {"scalp": 1.2, "swing": 1.1, "position": 1.0, "long_term": 0.8, "tenbagger": 1.0},
     "normal": {"scalp": 1.0, "swing": 1.0, "position": 1.0, "long_term": 1.0, "tenbagger": 1.0},
-    "fear": {"scalp": 0.6, "swing": 0.8, "position": 1.1, "long_term": 1.3, "tenbagger": 1.4},
-    "panic": {"scalp": 0.3, "swing": 0.5, "position": 1.0, "long_term": 1.5, "tenbagger": 1.6},
+    "fear":   {"scalp": 0.6, "swing": 0.8, "position": 1.1, "long_term": 1.3, "tenbagger": 1.4},
+    "panic":  {"scalp": 0.3, "swing": 0.5, "position": 1.0, "long_term": 1.5, "tenbagger": 1.6},
+    "crisis": {"scalp": 0.0, "swing": 0.2, "position": 0.8, "long_term": 1.5, "tenbagger": 0.5},
+}
+
+
+# ── v12.4: 매니저별 리스크 정책 ────────────────────────────────
+
+MANAGER_RISK_POLICY: dict[str, dict] = {
+    "scalp": {
+        "label": "즉각회피",
+        "description": "위험 감지 즉시 전 포지션 청산, 현금 확보 최우선",
+        "max_vix_for_entry": 25,       # VIX 25 이상 진입 금지
+        "wartime_action": "disable",   # 전시 모드: 완전 비활성
+        "stop_tighten_pct": 50,        # 위기 시 손절 50% 강화 (-3% → -1.5%)
+    },
+    "swing": {
+        "label": "진입제한",
+        "description": "신규 진입만 제한, 보유 종목은 CAN SLIM 기준으로 관리",
+        "max_vix_for_entry": 30,       # VIX 30 이상 진입 금지
+        "wartime_action": "restrict",  # 전시 모드: 신규 매수만 차단
+        "stop_tighten_pct": 30,        # 위기 시 손절 30% 강화 (-7% → -4.9%)
+    },
+    "position": {
+        "label": "보수감시",
+        "description": "분할매수 허용, 경기민감 섹터만 축소",
+        "max_vix_for_entry": 35,       # VIX 35 이상 진입 금지
+        "wartime_action": "defensive", # 전시 모드: 방어섹터만 매수
+        "stop_tighten_pct": 20,        # 위기 시 손절 20% 강화 (-12% → -9.6%)
+    },
+    "long_term": {
+        "label": "과도차단금지",
+        "description": "공포 시 오히려 매수 기회, 과도한 차단은 수익 기회 상실",
+        "max_vix_for_entry": 50,       # 거의 제한 없음
+        "wartime_action": "buy_panic", # 전시 모드: 패닉 매수 기회 활용
+        "stop_tighten_pct": 0,         # 위기 시 손절 강화 없음 (펀더멘털 기반)
+    },
+    "tenbagger": {
+        "label": "이벤트시매수금지",
+        "description": "매크로 쇼크/만기일 등 이벤트 시 신규 매수 금지",
+        "max_vix_for_entry": 40,       # VIX 40 이상 진입 금지
+        "wartime_action": "event_hold", # 전시 모드: 보유만, 신규 금지
+        "stop_tighten_pct": 10,        # 위기 시 손절 10% 강화 (-25% → -22.5%)
+    },
 }
 
 
 def get_regime_weight(manager_key: str, vix: float = 20.0) -> float:
-    """VIX 기반 레짐에서 매니저의 가중치 반환."""
-    if vix >= 30:
-        regime = "panic"
-    elif vix >= 25:
-        regime = "fear"
-    elif vix >= 18:
-        regime = "normal"
-    else:
-        regime = "calm"
+    """VIX 기반 레짐에서 매니저의 가중치 반환 (v12.4: risk_config 중앙화)."""
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        regime = get_risk_thresholds().vix.regime_for(vix)
+    except Exception:
+        if vix >= 30:
+            regime = "panic"
+        elif vix >= 25:
+            regime = "fear"
+        elif vix >= 18:
+            regime = "normal"
+        else:
+            regime = "calm"
     return REGIME_WEIGHTS.get(regime, {}).get(manager_key, 1.0)
+
+
+def get_manager_risk_policy(manager_key: str) -> dict:
+    """매니저별 리스크 정책 반환 (v12.4)."""
+    return MANAGER_RISK_POLICY.get(manager_key, MANAGER_RISK_POLICY["swing"])
+
+
+def should_manager_enter(manager_key: str, vix: float = 20.0,
+                         shock_grade: str = "NONE") -> tuple[bool, str]:
+    """매니저별 진입 가능 여부 판단 (v12.4).
+
+    Returns:
+        (진입 가능 여부, 사유)
+    """
+    policy = get_manager_risk_policy(manager_key)
+    max_vix = policy.get("max_vix_for_entry", 30)
+    label = policy.get("label", "")
+
+    if vix > max_vix:
+        return False, f"{label}: VIX {vix:.1f} > 진입 한도 {max_vix}"
+
+    # 이벤트 차단: tenbagger는 SHOCK 시 매수 금지
+    if manager_key == "tenbagger" and shock_grade == "SHOCK":
+        return False, f"{label}: 매크로 쇼크 — 신규 매수 금지"
+
+    # scalp: ALERT 이상이면 차단
+    if manager_key == "scalp" and shock_grade in ("ALERT", "SHOCK"):
+        return False, f"{label}: 쇼크 경보 — 스캘핑 위험"
+
+    return True, ""
 
 
 # ── #8 포트폴리오 밸런스 조언 ────────────────────────────────
