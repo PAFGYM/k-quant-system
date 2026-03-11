@@ -984,17 +984,164 @@ class CommandsMixin:
         )
         await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
 
-    async def _menu_swing(
+    # ── v12.1: 텐베거 스캔 메뉴 ──────────────────────────────────
+
+    async def _menu_tenbagger_scan(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """스윙 트레이딩 기회 조회 — 관심종목 기술적 스캔."""
+        """텐베거 유니버스 스캔 — YAML 유니버스 + 기술적 분석 + 세력 필터."""
         import asyncio as _aio
 
         placeholder = await update.message.reply_text(
-            "\u26a1 스윙 기회 스캔 중... (약 15초)"
+            "\U0001f48e 텐베거 유니버스 스캔 중... (약 20초)"
         )
         try:
-            # 관심종목 중 swing/scalp 카테고리
+            import yaml
+            try:
+                with open("config/tenbagger.yaml", "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f)
+            except Exception:
+                await placeholder.edit_text("\u26a0\ufe0f tenbagger.yaml 로드 실패")
+                return
+
+            kr_universe = cfg.get("korea_universe", [])
+            from kstock.features.technical import compute_indicators
+            from kstock.signal.herd_detector import detect_herd_pattern
+
+            async def _scan_tb(item):
+                try:
+                    code = item.get("code", "")
+                    name = item.get("name", code)
+                    market = item.get("market", "KOSPI")
+                    grade = item.get("grade", "C")
+                    sector = item.get("sector", "")
+                    ohlcv = await self.yf_client.get_ohlcv(code, market, period="3mo")
+                    if ohlcv is None or ohlcv.empty or len(ohlcv) < 20:
+                        return None
+                    tech = compute_indicators(ohlcv)
+                    close_s = ohlcv["close"].astype(float)
+                    vol_s = ohlcv["volume"].astype(float)
+                    close = float(close_s.iloc[-1])
+                    prev = float(close_s.iloc[-2]) if len(close_s) >= 2 else close
+                    dc = ((close - prev) / prev * 100) if prev > 0 else 0
+
+                    # 세력 탐지
+                    avg_vol = float(vol_s.tail(20).mean()) if len(vol_s) >= 20 else 1
+                    daily_inst, daily_foreign = [], []
+                    for j in range(-min(20, len(vol_s)), 0):
+                        v = float(vol_s.iloc[j])
+                        r = v / avg_vol if avg_vol > 0 else 1
+                        daily_inst.append(v * 0.3 if r > 1.5 else -v * 0.1)
+                        daily_foreign.append(v * 0.2 if r > 1.3 else -v * 0.1)
+
+                    herd = detect_herd_pattern(
+                        code, name,
+                        vol_s.tail(20).tolist(), close_s.tail(20).tolist(),
+                        daily_inst, daily_foreign,
+                    )
+                    herd_label = ""
+                    herd_danger = ""
+                    if herd:
+                        emoji = {"안전": "🟢", "주의": "🟡", "위험": "🔴"}.get(herd.danger_level, "")
+                        herd_label = f"{emoji} {herd.pattern}"
+                        herd_danger = herd.danger_level
+
+                    return {
+                        "code": code, "name": name[:8], "grade": grade,
+                        "sector": sector, "price": close, "dc": dc,
+                        "rsi": tech.rsi, "bb": tech.bb_pctb,
+                        "vr": tech.volume_ratio,
+                        "herd": herd_label, "herd_danger": herd_danger,
+                    }
+                except Exception:
+                    return None
+
+            results = []
+            for i in range(0, len(kr_universe), 10):
+                batch = kr_universe[i:i + 10]
+                batch_r = await _aio.gather(*[_scan_tb(it) for it in batch], return_exceptions=True)
+                for r in batch_r:
+                    if isinstance(r, dict):
+                        results.append(r)
+
+            # 등급순 정렬 (A→B→C), 위험 종목은 하단
+            grade_order = {"A": 0, "B": 1, "C": 2}
+            danger_order = {"위험": 10, "": 0, "주의": 1, "안전": -1}
+            results.sort(key=lambda x: (
+                grade_order.get(x["grade"], 9) + danger_order.get(x["herd_danger"], 0)
+            ))
+
+            if not results:
+                try:
+                    await placeholder.edit_text("\U0001f48e 텐베거 데이터 로드 실패")
+                except Exception:
+                    pass
+                return
+
+            sectors_cfg = cfg.get("sectors", {})
+            lines = [f"\U0001f48e 텐베거 유니버스 ({len(results)}종목)\n"]
+            for i, r in enumerate(results, 1):
+                grade_emoji = {"A": "🅰️", "B": "🅱️", "C": "🆑"}.get(r["grade"], "")
+                sec_info = sectors_cfg.get(r["sector"], {})
+                sec_emoji = sec_info.get("emoji", "")
+                ds = "+" if r["dc"] > 0 else ""
+                herd_info = f"\n   🕵 {r['herd']}" if r.get("herd") else ""
+                danger_mark = " [진입주의]" if r["herd_danger"] == "위험" else ""
+                lines.append(
+                    f"{i}. {grade_emoji} {r['name']} ({r['code']}){danger_mark}\n"
+                    f"   {sec_emoji} {r['price']:,.0f}원({ds}{r['dc']:.1f}%) "
+                    f"RSI:{r['rsi']:.0f} BB:{r['bb']:.2f} VR:{r['vr']:.1f}"
+                    f"{herd_info}"
+                )
+
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            buttons = []
+            btn_row = []
+            for r in results[:9]:
+                cb = f"fav:diag:{r['code']}"
+                if len(cb) <= 64:
+                    btn_row.append(InlineKeyboardButton(
+                        f"{'🅰️' if r['grade'] == 'A' else '🅱️' if r['grade'] == 'B' else '🆑'} {r['name'][:4]}",
+                        callback_data=cb))
+                if len(btn_row) == 3:
+                    buttons.append(btn_row)
+                    btn_row = []
+            if btn_row:
+                buttons.append(btn_row)
+            buttons.append([
+                InlineKeyboardButton("🛒 장바구니", callback_data="cart:show"),
+                InlineKeyboardButton("⚡ 스윙", callback_data="menu:swing"),
+                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+            ])
+
+            try:
+                await placeholder.edit_text(
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            except Exception:
+                await update.message.reply_text(
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+        except Exception as e:
+            logger.error("Tenbagger scan error: %s", e, exc_info=True)
+            try:
+                await placeholder.edit_text("\u26a0\ufe0f 텐베거 스캔 오류가 발생했습니다.")
+            except Exception:
+                pass
+
+    async def _menu_swing(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """스윙 트레이딩 기회 조회 — 관심종목 + 유니버스 기술적 스캔 + 세력 필터."""
+        import asyncio as _aio
+
+        placeholder = await update.message.reply_text(
+            "\u26a1 스윙 기회 스캔 중... (약 20초)"
+        )
+        try:
+            # 관심종목 + 유니버스 상위 종목 결합 (최대 50개)
             watchlist = self.db.get_watchlist()
             holdings = self.db.get_active_holdings()
             held = {h["ticker"] for h in holdings}
@@ -1007,7 +1154,17 @@ class CommandsMixin:
             if not candidates:
                 candidates = [w for w in watchlist if w["ticker"] not in held][:20]
 
+            # 유니버스에서 추가 (관심종목에 없는 것)
+            seen = {w["ticker"] for w in candidates}
+            for item in self.all_tickers:
+                if len(candidates) >= 50:
+                    break
+                if item["code"] not in seen and item["code"] not in held:
+                    candidates.append({"ticker": item["code"], "name": item["name"]})
+                    seen.add(item["code"])
+
             from kstock.features.technical import compute_indicators
+            from kstock.signal.herd_detector import detect_herd_pattern
 
             async def _scan(w):
                 try:
@@ -1021,8 +1178,10 @@ class CommandsMixin:
                     if ohlcv is None or ohlcv.empty or len(ohlcv) < 20:
                         return None
                     tech = compute_indicators(ohlcv)
-                    close = float(ohlcv["close"].iloc[-1])
-                    prev = float(ohlcv["close"].iloc[-2])
+                    close_s = ohlcv["close"].astype(float)
+                    vol_s = ohlcv["volume"].astype(float)
+                    close = float(close_s.iloc[-1])
+                    prev = float(close_s.iloc[-2])
                     dc = ((close - prev) / prev * 100) if prev > 0 else 0
                     # 스윙 매수 조건: RSI 과매도 + BB 하단 + MACD 골든크로스 가점
                     score = 0
@@ -1040,12 +1199,37 @@ class CommandsMixin:
                         score += 15
                     elif tech.volume_ratio >= 1.2:
                         score += 5
+
+                    # v12.1: 세력 탐지 통합
+                    herd_label = ""
+                    avg_vol = float(vol_s.tail(20).mean()) if len(vol_s) >= 20 else 1
+                    daily_inst, daily_foreign = [], []
+                    for j in range(-20, 0):
+                        if abs(j) <= len(vol_s):
+                            v = float(vol_s.iloc[j])
+                            r = v / avg_vol if avg_vol > 0 else 1
+                            daily_inst.append(v * 0.3 if r > 1.5 else -v * 0.1)
+                            daily_foreign.append(v * 0.2 if r > 1.3 else -v * 0.1)
+                    herd = detect_herd_pattern(
+                        ticker, (w.get("name") or ticker),
+                        vol_s.tail(20).tolist(), close_s.tail(20).tolist(),
+                        daily_inst, daily_foreign,
+                    )
+                    if herd:
+                        score += herd.score_adj
+                        emoji = {"안전": "🟢", "주의": "🟡", "위험": "🔴"}.get(herd.danger_level, "")
+                        herd_label = f"{emoji} {herd.pattern}"
+                        # 위험 종목 자동 제외
+                        if herd.danger_level == "위험":
+                            return None
+
                     if score >= 25:
                         return {
                             "ticker": ticker, "name": (w.get("name") or ticker)[:8],
                             "price": close, "dc": dc, "score": score,
                             "rsi": tech.rsi, "bb": tech.bb_pctb,
                             "macd_x": tech.macd_signal_cross, "vr": tech.volume_ratio,
+                            "herd": herd_label,
                         }
                 except Exception:
                     pass
@@ -1060,13 +1244,12 @@ class CommandsMixin:
                         results.append(r)
 
             results.sort(key=lambda x: x["score"], reverse=True)
-            top = results[:8]
+            top = results[:10]
 
             if not top:
                 try:
                     await placeholder.edit_text(
-                        "\u26a1 현재 스윙 매수 조건(RSI 과매도 + BB 하단)을 "
-                        "충족하는 관심종목이 없습니다.\n\n"
+                        "\u26a1 현재 스윙 매수 조건을 충족하는 종목이 없습니다.\n\n"
                         "즐겨찾기에 종목을 추가하면 더 많은 기회를 스캔합니다."
                     )
                 except Exception:
@@ -1078,10 +1261,12 @@ class CommandsMixin:
                 sig = "🟢" if r["score"] >= 50 else "🟡"
                 mc = "↑" if r["macd_x"] > 0 else ("↓" if r["macd_x"] < 0 else "-")
                 ds = "+" if r["dc"] > 0 else ""
+                herd_info = f"\n   {r['herd']}" if r.get("herd") else ""
                 lines.append(
                     f"{i}. {sig} {r['name']} ({r['score']}점)\n"
                     f"   {r['price']:,.0f}원({ds}{r['dc']:.1f}%) "
                     f"RSI:{r['rsi']:.0f} BB:{r['bb']:.2f} MACD:{mc}"
+                    f"{herd_info}"
                 )
 
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -1097,6 +1282,7 @@ class CommandsMixin:
             if btn_row:
                 buttons.append(btn_row)
             buttons.append([
+                InlineKeyboardButton("🛒 장바구니", callback_data="cart:show"),
                 InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
                 InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
             ])
@@ -3435,6 +3621,8 @@ class CommandsMixin:
                         "ticker": item["code"], "name": item["name"],
                         "daily_inst": daily_inst, "daily_foreign": daily_foreign,
                         "price_change_20d": prc_chg, "disclosure_text": "",
+                        "daily_volumes": volume.tail(20).tolist(),
+                        "daily_closes": close.tail(20).tolist(),
                     }
                 except Exception:
                     return None
@@ -3456,22 +3644,49 @@ class CommandsMixin:
                 return
 
             detections = scan_accumulations(stocks_data)
-            if not detections:
+
+            # v12.1: 세력/개미떼 탐지 통합
+            from kstock.signal.herd_detector import scan_herd_all
+            herd_data = [
+                d for d in stocks_data
+                if "daily_volumes" in d and "daily_closes" in d
+            ]
+            herd_signals = scan_herd_all(herd_data)
+            herd_map = {s.ticker: s for s in herd_signals}
+
+            if not detections and not herd_signals:
                 try:
                     await placeholder.edit_text(
-                        f"\U0001f575\ufe0f 현재 매집 패턴이 감지되지 않았습니다.\n"
+                        f"\U0001f575\ufe0f 현재 매집/세력 패턴이 감지되지 않았습니다.\n"
                         f"({len(stocks_data)}종목 스캔 완료)")
                 except Exception:
                     pass
                 return
 
-            lines = [f"\U0001f575\ufe0f 스텔스 매집 감지 ({len(detections)}종목)\n"]
+            lines = [f"\U0001f575\ufe0f 매집 + 세력 탐지 ({len(detections)}+{len(herd_signals)}종목)\n"]
             for i, d in enumerate(detections[:10], 1):
+                herd = herd_map.get(d.ticker)
+                herd_label = ""
+                if herd:
+                    herd_label = f"\n   {herd.message.split(chr(10))[0]}"
                 lines.append(
                     f"{i}. {d.name} ({d.ticker}) 스코어 {d.total_score}\n"
                     f"   기관: {d.inst_total / 1e8:.0f}억 "
                     f"외인: {d.foreign_total / 1e8:.0f}억 "
-                    f"20일: {d.price_change_20d:+.1f}%")
+                    f"20일: {d.price_change_20d:+.1f}%"
+                    f"{herd_label}")
+
+            # 세력 탐지만 된 종목 (매집은 안 됨) 추가 표시
+            accum_tickers = {d.ticker for d in detections}
+            herd_only = [s for s in herd_signals if s.ticker not in accum_tickers]
+            if herd_only:
+                lines.append(f"\n🕵 세력 패턴만 감지 ({len(herd_only)}종목)")
+                for s in herd_only[:5]:
+                    emoji = {"안전": "🟢", "주의": "🟡", "위험": "🔴"}.get(s.danger_level, "⚪")
+                    lines.append(
+                        f"  {emoji} {s.name} ({s.ticker}) {s.pattern}\n"
+                        f"     거래량 {s.volume_ratio:.1f}배 "
+                        f"기관 {s.inst_flow:+.0f}억 외인 {s.foreign_flow:+.0f}억")
                 import json
                 pj = json.dumps(
                     [{"type": p.pattern_type, "days": p.streak_days, "score": p.score}

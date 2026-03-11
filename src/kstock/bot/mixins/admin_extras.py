@@ -1069,9 +1069,9 @@ class AdminExtrasMixin:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         # v9.6.2: 22→12개로 정리 (중복/실험적 기능 제거)
         buttons = [
-            [InlineKeyboardButton("🔥 급등주", callback_data="menu:surge"),
+            [InlineKeyboardButton("💎 텐베거", callback_data="menu:tenbagger_scan"),
              InlineKeyboardButton("⚡ 스윙 기회", callback_data="menu:swing")],
-            [InlineKeyboardButton("📊 멀티분석", callback_data="menu:multi_agent"),
+            [InlineKeyboardButton("🔥 급등주", callback_data="menu:surge"),
              InlineKeyboardButton("🕵️ 매집탐지", callback_data="menu:accumulation")],
             [InlineKeyboardButton("📅 주간 보고서", callback_data="menu:weekly_report"),
              InlineKeyboardButton("📊 공매도", callback_data="menu:short")],

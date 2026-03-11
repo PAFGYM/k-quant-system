@@ -1149,6 +1149,7 @@ class CoreHandlersMixin:
             # ── 더보기 서브메뉴 ──
             "📸 계좌분석": self._menu_account_analysis,
             "🎯 전략별 보기": self._menu_strategy_view,
+            "💎 텐베거": self._menu_tenbagger_scan,
             "🔥 급등주": self._menu_surge,
             "⚡ 스윙 기회": self._menu_swing,
             "📊 멀티분석": self._menu_multi_agent,
@@ -2195,6 +2196,7 @@ class CoreHandlersMixin:
         menu_map = {
             "account_analysis": self._menu_account_analysis,
             "strategy_view": self._menu_strategy_view,
+            "tenbagger_scan": self._menu_tenbagger_scan,
             "surge": self._menu_surge,
             "swing": self._menu_swing,
             "multi_agent": self._menu_multi_agent,
@@ -2215,6 +2217,8 @@ class CoreHandlersMixin:
             "debate": self._menu_debate,
             # v10.2: 유가 상세 분석
             "oil_detail": self._menu_oil_detail,
+            # v12.1: 텐베거 스캔
+            "tenbagger_scan": self._menu_tenbagger_scan,
         }
         # v6.2.1: 기능별 로딩 메시지
         _loading_msg = {
