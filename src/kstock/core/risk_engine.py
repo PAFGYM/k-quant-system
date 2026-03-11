@@ -1,6 +1,7 @@
-"""고급 리스크 엔진: VaR, Monte Carlo, 스트레스 테스트.
+"""고급 리스크 엔진: VaR, Monte Carlo, 스트레스 테스트 + 통합 리스크 평가.
 
 기존 risk_manager.py의 기본 리스크 체크를 보완하는 고급 분석 모듈.
+v12.5: RiskEngine.evaluate() 단일 진입점 + ManagerRiskPolicy.apply() 추가.
 """
 from __future__ import annotations
 
@@ -592,3 +593,239 @@ def format_advanced_risk_report(report: AdvancedRiskReport) -> str:
         lines.append(f"🔗 고상관 종목: {pairs_text}")
 
     return "\n".join(lines)
+
+
+# =====================================================================
+# v12.5: 통합 리스크 평가 진입점
+# =====================================================================
+
+@dataclass
+class RiskContext:
+    """RiskEngine에 전달하는 평가 컨텍스트.
+
+    MacroSnapshot에서 필요한 필드만 추출.
+    dict로도 생성 가능 (from_dict / from_macro_snapshot).
+    """
+    vix: float = 0.0
+    vix_change_pct: float = 0.0
+    usdkrw: float = 0.0
+    usdkrw_change_pct: float = 0.0
+    fear_greed: float = 50.0
+    days_to_expiry: int = 999
+
+    # 쇼크 (이미 계산된 경우)
+    shock_grade: str = "NONE"
+    global_shock_score: float = 0.0
+    korea_open_risk_score: float = 0.0
+
+    # 한국 리스크 (이미 계산된 경우)
+    korea_risk_score: float = 0.0
+
+    # 레짐 (이미 계산된 경우)
+    regime_mode: str = ""  # bubble_attack/attack/balanced/defense
+
+    # alert mode
+    alert_mode: str = "normal"  # normal/elevated/wartime
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RiskContext":
+        """dict → RiskContext. 미지 키 무시."""
+        return cls(
+            vix=_safe_get(d, "vix", 0.0),
+            vix_change_pct=_safe_get(d, "vix_change_pct", 0.0),
+            usdkrw=_safe_get(d, "usdkrw", 0.0),
+            usdkrw_change_pct=_safe_get(d, "usdkrw_change_pct", 0.0),
+            fear_greed=_safe_get(d, "fear_greed", _safe_get(d, "fear_greed_score", 50.0)),
+            days_to_expiry=int(_safe_get(d, "days_to_expiry", 999)),
+            shock_grade=str(_safe_get(d, "shock_grade", "NONE")),
+            global_shock_score=_safe_get(d, "global_shock_score", 0.0),
+            korea_open_risk_score=_safe_get(d, "korea_open_risk_score", 0.0),
+            korea_risk_score=_safe_get(d, "korea_risk_score", 0.0),
+            regime_mode=str(_safe_get(d, "regime_mode", "")),
+            alert_mode=str(_safe_get(d, "alert_mode", "normal")),
+        )
+
+    @classmethod
+    def from_macro_snapshot(cls, snap) -> "RiskContext":
+        """MacroSnapshot 객체 → RiskContext."""
+        return cls(
+            vix=getattr(snap, "vix", 0.0) or 0.0,
+            vix_change_pct=getattr(snap, "vix_change_pct", 0.0) or 0.0,
+            usdkrw=getattr(snap, "usdkrw", 0.0) or 0.0,
+            usdkrw_change_pct=getattr(snap, "usdkrw_change_pct", 0.0) or 0.0,
+            fear_greed=getattr(snap, "fear_greed_score", 50.0) or 50.0,
+        )
+
+
+def _safe_get(d, key, default=0.0):
+    """dict 또는 object에서 안전하게 값 추출."""
+    if isinstance(d, dict):
+        v = d.get(key, default)
+    else:
+        v = getattr(d, key, default)
+    return v if v is not None else default
+
+
+# ── 매니저 액션 ────────────────────────────────────────────────
+
+@dataclass
+class ManagerAction:
+    """매니저별 리스크 정책 적용 결과.
+
+    Usage:
+        action = ManagerRiskPolicy.apply("scalp", risk_decision)
+        if not action.can_enter:
+            print(action.block_reason)
+    """
+    manager_key: str = ""
+    can_enter: bool = True
+    block_reason: str = ""
+    regime_weight: float = 1.0
+    stop_tighten_pct: float = 0.0
+    wartime_action: str = ""
+    recommendations: list = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return self.can_enter
+
+
+# ── RiskEngine ─────────────────────────────────────────────────
+
+class RiskEngine:
+    """단일 리스크 평가 진입점.
+
+    Usage:
+        engine = RiskEngine()
+        rd = engine.evaluate(ctx)
+        action = ManagerRiskPolicy.apply("scalp", rd)
+    """
+
+    def evaluate(self, ctx: RiskContext) -> "RiskDecision":
+        """RiskContext → RiskDecision.
+
+        위임 체인:
+        1. RiskDecision.from_market_state() — VIX/USDKRW/만기/쇼크
+        2. Fear & Greed 보강
+        3. 글로벌 쇼크 스코어 반영
+        4. alert_mode 반영
+        5. regime_mode 반영
+        """
+        from kstock.core.domain_types import RiskDecision
+
+        # 1) 핵심 매크로 리스크
+        rd = RiskDecision.from_market_state(
+            vix=ctx.vix,
+            usdkrw=ctx.usdkrw,
+            days_to_expiry=ctx.days_to_expiry,
+            shock_grade=ctx.shock_grade,
+            korea_risk_score=ctx.korea_risk_score,
+            source="risk_engine",
+        )
+
+        # 2) Fear & Greed 보강
+        if ctx.fear_greed < 20:
+            rd.reasons.append(f"극단 공포(F&G {ctx.fear_greed:.0f})")
+            rd.source_flags.append("extreme_fear")
+        elif ctx.fear_greed < 35:
+            rd.reasons.append(f"공포(F&G {ctx.fear_greed:.0f})")
+
+        # 3) 글로벌 쇼크 스코어
+        if ctx.global_shock_score >= 70:
+            rd.risk_score = max(rd.risk_score, ctx.global_shock_score)
+            rd.source_flags.append("global_shock_high")
+        if ctx.korea_open_risk_score >= 70:
+            rd.source_flags.append("korea_open_risk_high")
+
+        # 4) alert_mode 반영
+        if ctx.alert_mode == "wartime":
+            if not rd.block_new_buy:
+                rd.reduce_position = True
+                rd.cash_floor_pct = max(rd.cash_floor_pct, 30.0)
+                rd.max_position_pct = min(rd.max_position_pct, 60.0)
+            rd.source_flags.append("wartime")
+        elif ctx.alert_mode == "elevated":
+            rd.cash_floor_pct = max(rd.cash_floor_pct, 15.0)
+            rd.source_flags.append("elevated")
+
+        # 5) regime_mode 반영
+        if ctx.regime_mode == "defense":
+            rd.source_flags.append("defense_regime")
+        elif ctx.regime_mode in ("attack", "bubble_attack"):
+            rd.source_flags.append("attack_regime")
+
+        return rd
+
+
+# ── ManagerRiskPolicy ──────────────────────────────────────────
+
+class ManagerRiskPolicy:
+    """매니저별 리스크 정책 적용기.
+
+    Usage:
+        rd = RiskEngine().evaluate(ctx)
+        action = ManagerRiskPolicy.apply("scalp", rd)
+    """
+
+    @staticmethod
+    def apply(manager_key: str, rd) -> ManagerAction:
+        """RiskDecision + 매니저 정책 → ManagerAction."""
+        from kstock.bot.investment_managers import (
+            get_manager_risk_policy,
+            get_regime_weight,
+            should_manager_enter,
+        )
+
+        policy = get_manager_risk_policy(manager_key)
+        weight = get_regime_weight(manager_key, vix=rd.vix)
+
+        can_enter, block_reason = should_manager_enter(
+            manager_key, vix=rd.vix, shock_grade=rd.shock_grade,
+        )
+
+        # RiskDecision 매수 차단 → long_term 제외 모든 매니저 차단
+        if rd.block_new_buy and manager_key != "long_term":
+            can_enter = False
+            if not block_reason:
+                block_reason = rd.reason
+
+        # wartime + 매니저 정책
+        wartime_action = policy.get("wartime_action", "")
+        if "wartime" in getattr(rd, "source_flags", []):
+            if wartime_action == "disable":
+                can_enter = False
+                block_reason = block_reason or "전시 모드: 매니저 비활성"
+            elif wartime_action == "restrict":
+                can_enter = False
+                block_reason = block_reason or "전시 모드: 신규 매수 제한"
+
+        # 손절 강화
+        stop_tighten = 0.0
+        if rd.risk_level in ("danger", "blocked", "warning"):
+            stop_tighten = policy.get("stop_tighten_pct", 0)
+
+        # 추천 사항
+        recs = []
+        if weight <= 0.3:
+            recs.append("추천 보류 (레짐 가중치 극단)")
+        elif weight < 0.7:
+            recs.append("보수적 접근 권고")
+        if rd.reduce_position:
+            recs.append(f"포지션 축소 권고 (최대 {rd.max_position_pct:.0f}%)")
+        if rd.cash_floor_pct > 0:
+            recs.append(f"현금 {rd.cash_floor_pct:.0f}%+ 확보")
+
+        return ManagerAction(
+            manager_key=manager_key,
+            can_enter=can_enter,
+            block_reason=block_reason,
+            regime_weight=weight,
+            stop_tighten_pct=stop_tighten,
+            wartime_action=wartime_action,
+            recommendations=recs,
+        )
+
+    @staticmethod
+    def apply_all(rd) -> dict[str, ManagerAction]:
+        """모든 매니저에 대해 일괄 적용."""
+        managers = ["scalp", "swing", "position", "long_term", "tenbagger"]
+        return {m: ManagerRiskPolicy.apply(m, rd) for m in managers}
