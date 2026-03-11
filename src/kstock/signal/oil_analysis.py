@@ -184,32 +184,46 @@ def _compute_oil_price_data(
             wti_volatility_20d=0,
         )
 
-    wti = float(wti_series.iloc[-1])
-    wti_prev = float(wti_series.iloc[-2])
+    # v12.1: 안전한 float 변환 — pandas Series/0-d array 방어
+    def _safe_float(val):
+        try:
+            if hasattr(val, "item"):
+                return float(val.item())
+            if hasattr(val, "iloc"):
+                return float(val.iloc[0])
+            return float(val)
+        except Exception:
+            try:
+                return float(val)
+            except Exception:
+                return 0.0
+
+    wti = _safe_float(wti_series.iloc[-1])
+    wti_prev = _safe_float(wti_series.iloc[-2])
     wti_chg = (wti - wti_prev) / wti_prev * 100 if wti_prev > 0 else 0
 
     # Moving averages
-    ma5 = float(wti_series.iloc[-5:].mean()) if len(wti_series) >= 5 else wti
-    ma20 = float(wti_series.iloc[-20:].mean()) if len(wti_series) >= 20 else wti
-    ma60 = float(wti_series.iloc[-60:].mean()) if len(wti_series) >= 60 else wti
+    ma5 = _safe_float(wti_series.iloc[-5:].mean()) if len(wti_series) >= 5 else wti
+    ma20 = _safe_float(wti_series.iloc[-20:].mean()) if len(wti_series) >= 20 else wti
+    ma60 = _safe_float(wti_series.iloc[-60:].mean()) if len(wti_series) >= 60 else wti
 
     # 52-week range
     lookback = min(len(wti_series), 252)
     recent = wti_series.iloc[-lookback:]
-    high_52w = float(recent.max())
-    low_52w = float(recent.min())
+    high_52w = _safe_float(recent.max())
+    low_52w = _safe_float(recent.min())
     pos_52w = (wti - low_52w) / (high_52w - low_52w) if high_52w > low_52w else 0.5
 
     # 20-day realized volatility (annualized)
     if len(wti_series) >= 21:
         log_returns = np.log(wti_series.iloc[-21:] / wti_series.iloc[-21:].shift(1)).dropna()
-        vol_20d = float(log_returns.std() * np.sqrt(252) * 100)
+        vol_20d = _safe_float(log_returns.std() * np.sqrt(252) * 100)
     else:
         vol_20d = 0.0
 
     # Brent
-    brent = float(brent_series.iloc[-1]) if not brent_series.empty else 0
-    brent_prev = float(brent_series.iloc[-2]) if len(brent_series) >= 2 else brent
+    brent = _safe_float(brent_series.iloc[-1]) if not brent_series.empty else 0
+    brent_prev = _safe_float(brent_series.iloc[-2]) if len(brent_series) >= 2 else brent
     brent_chg = (brent - brent_prev) / brent_prev * 100 if brent_prev > 0 else 0
     spread = brent - wti if brent > 0 else 0
 
@@ -547,16 +561,29 @@ def fetch_oil_data() -> tuple[pd.Series, pd.Series]:
     brent = pd.Series(dtype=float)
 
     try:
-        if "CL=F" in data.columns.get_level_values(0):
-            wti = data["CL=F"]["Close"].dropna()
+        if data.columns.nlevels >= 2:
+            # yfinance MultiIndex: (Price, Ticker) or (Ticker, Price)
+            lvl0 = data.columns.get_level_values(0).unique().tolist()
+            lvl1 = data.columns.get_level_values(1).unique().tolist()
+            if "CL=F" in lvl1:
+                # (Price, Ticker) 구조 — 최신 yfinance
+                wti = data[("Close", "CL=F")].dropna()
+            elif "CL=F" in lvl0:
+                # (Ticker, Price) 구조 — 구버전
+                wti = data[("CL=F", "Close")].dropna()
         elif "Close" in data.columns:
             wti = data["Close"].dropna()
     except Exception as e:
         logger.warning("WTI data extraction failed: %s", e)
 
     try:
-        if "BZ=F" in data.columns.get_level_values(0):
-            brent = data["BZ=F"]["Close"].dropna()
+        if data.columns.nlevels >= 2:
+            lvl0 = data.columns.get_level_values(0).unique().tolist()
+            lvl1 = data.columns.get_level_values(1).unique().tolist()
+            if "BZ=F" in lvl1:
+                brent = data[("Close", "BZ=F")].dropna()
+            elif "BZ=F" in lvl0:
+                brent = data[("BZ=F", "Close")].dropna()
     except Exception as e:
         logger.warning("Brent data extraction failed: %s", e)
 

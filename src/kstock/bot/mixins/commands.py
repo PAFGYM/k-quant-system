@@ -3887,4 +3887,17 @@ class CommandsMixin:
                 "⚠️ 학습 현황 조회 오류.", reply_markup=get_reply_markup(context),
             )
 
-
+    # ── /expiry: 선물 만기일 대시보드 ──────────────────────
+    async def cmd_expiry(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """만기일 대시보드 (4대 지표 통합 조회)."""
+        try:
+            from kstock.signal.expiry_dashboard import build_expiry_dashboard
+            msg = await build_expiry_dashboard(self.macro_client, self.db)
+            await update.message.reply_text(msg, reply_markup=get_reply_markup(context))
+        except Exception as e:
+            logger.error("cmd_expiry error: %s", e, exc_info=True)
+            await update.message.reply_text(
+                "⚠️ 만기일 대시보드 조회 오류.", reply_markup=get_reply_markup(context),
+            )

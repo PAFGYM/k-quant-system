@@ -71,6 +71,62 @@ RSS_FEEDS: list[dict] = [
         "lang": "en",
         "category": "market",
     },
+    # v12.2: 해외 증권사/투자은행/매크로 뉴스 강화
+    {
+        "name": "Bloomberg Markets",
+        "url": "https://feeds.bloomberg.com/markets/news.rss",
+        "lang": "en",
+        "category": "market",
+    },
+    {
+        "name": "FT Markets",
+        "url": "https://www.ft.com/markets?format=rss",
+        "lang": "en",
+        "category": "market",
+    },
+    {
+        "name": "CNBC Economy",
+        "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258",
+        "lang": "en",
+        "category": "economy",
+    },
+    {
+        "name": "CNBC Energy",
+        "url": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=19836768",
+        "lang": "en",
+        "category": "economy",
+    },
+    {
+        "name": "MarketWatch",
+        "url": "https://feeds.marketwatch.com/marketwatch/topstories/",
+        "lang": "en",
+        "category": "market",
+    },
+    # 한국 경제 추가 (유가/환율/정책 비중 높은 매체)
+    {
+        "name": "한경 국제경제",
+        "url": "https://www.hankyung.com/feed/international",
+        "lang": "ko",
+        "category": "geopolitics",
+    },
+    {
+        "name": "연합인포맥스 증권",
+        "url": "https://news.einfomax.co.kr/rss/S1N10.xml",
+        "lang": "ko",
+        "category": "market",
+    },
+    {
+        "name": "연합인포맥스 경제",
+        "url": "https://news.einfomax.co.kr/rss/S1N2.xml",
+        "lang": "ko",
+        "category": "economy",
+    },
+    {
+        "name": "WSJ Markets",
+        "url": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+        "lang": "en",
+        "category": "market",
+    },
 ]
 
 # ── 유튜브 경제방송 채널 RSS 피드 (v8.2 확대) ──────────────
@@ -251,7 +307,8 @@ URGENT_KEYWORDS_KO = [
     "긴급", "계엄", "쿠데타", "테러",
     "금리 인상", "금리 인하", "양적완화", "양적긴축",
     "관세", "무역전쟁", "수출규제",
-    "유가 급등", "유가 폭등", "호르무즈",
+    "유가 급등", "유가 폭등", "유가 급락", "호르무즈", "OPEC 감산",
+    "환율 급등", "원달러 급등", "달러 급등",
 ]
 
 URGENT_KEYWORDS_EN = [
@@ -259,22 +316,38 @@ URGENT_KEYWORDS_EN = [
     "recession", "depression", "crisis", "default", "bankrupt",
     "crash", "plunge", "circuit breaker", "panic", "black monday",
     "emergency", "martial law", "coup", "terror",
-    "rate hike", "rate cut", "QE", "QT",
+    "rate hike", "rate cut", "QE", "QT", "FOMC",
     "tariff", "trade war", "export ban",
-    "oil surge", "oil spike", "hormuz",
+    "oil surge", "oil spike", "oil crash", "hormuz", "OPEC",
+    "dollar surge", "FX intervention",
 ]
 
 # 시장 영향도 키워드 (가중치)
 IMPACT_KEYWORDS = {
+    # 지정학/전쟁
     "전쟁": 10, "war": 10, "공습": 9, "strike": 8,
     "핵": 10, "nuclear": 10, "미사일": 8, "missile": 8,
+    "봉쇄": 8, "blockade": 8, "호르무즈": 9, "hormuz": 9,
+    "제재": 7, "sanction": 7,
+    # 경제위기
     "폭락": 9, "crash": 9, "대공황": 10, "depression": 10,
     "경기침체": 8, "recession": 8, "금융위기": 9, "crisis": 9,
     "서킷브레이커": 9, "circuit breaker": 9,
-    "봉쇄": 8, "blockade": 8, "호르무즈": 9, "hormuz": 9,
     "디폴트": 9, "default": 8, "파산": 7, "bankrupt": 7,
-    "관세": 6, "tariff": 6, "제재": 7, "sanction": 7,
     "급락": 7, "plunge": 7, "급등": 6, "surge": 5,
+    # 관세/무역
+    "관세": 6, "tariff": 6,
+    # v12.2: 유가/환율/정책 (매매 직결 지표)
+    "유가 급등": 7, "유가 폭등": 8, "유가 급락": 7, "oil spike": 7,
+    "OPEC": 6, "감산": 7, "증산": 6, "원유": 5,
+    "환율": 5, "원달러": 6, "달러 급등": 7, "원화 약세": 6,
+    "금리 인상": 7, "금리 인하": 7, "rate hike": 7, "rate cut": 7,
+    "FOMC": 6, "연준": 6, "Fed": 5, "기준금리": 6,
+    "양적긴축": 7, "양적완화": 7, "QT": 6, "QE": 6,
+    "CPI": 5, "고용": 5, "실업률": 5, "PCE": 5,
+    # 해외 증권사/투자은행 리포트 키워드
+    "upgrade": 5, "downgrade": 6, "목표가": 5, "투자의견": 5,
+    "Goldman Sachs": 5, "JP Morgan": 5, "Morgan Stanley": 5,
 }
 
 
@@ -399,10 +472,12 @@ async def fetch_global_news(
     max_per_feed: int = 5,
     feeds: list[dict] | None = None,
     include_youtube: bool = True,
+    hours_lookback: int = 0,
 ) -> list[NewsItem]:
     """글로벌 뉴스 RSS 피드에서 헤드라인 수집 (병렬).
 
     v6.6: YouTube 금융 채널 RSS도 함께 수집.
+    v12.1: hours_lookback > 0이면 해당 시간 이내 뉴스만 반환.
 
     Returns:
         NewsItem 리스트 (impact_score 내림차순 정렬)
@@ -434,6 +509,34 @@ async def fetch_global_news(
         for result in results:
             if isinstance(result, list):
                 all_items.extend(result)
+
+    # v12.1: hours_lookback 시간 필터링
+    if hours_lookback > 0:
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_lookback)
+        filtered = []
+        for item in all_items:
+            try:
+                pub = item.published
+                if isinstance(pub, str):
+                    # 다양한 날짜 포맷 시도
+                    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%a, %d %b %Y %H:%M:%S %z",
+                                "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+                        try:
+                            pub = datetime.strptime(pub, fmt)
+                            break
+                        except ValueError:
+                            continue
+                if hasattr(pub, "timestamp"):
+                    if pub.tzinfo is None:
+                        pub = pub.replace(tzinfo=timezone.utc)
+                    if pub >= cutoff:
+                        filtered.append(item)
+                else:
+                    filtered.append(item)  # 날짜 파싱 실패 시 포함
+            except Exception:
+                filtered.append(item)
+        all_items = filtered
 
     # impact_score 내림차순 정렬
     all_items.sort(key=lambda x: (-x.impact_score, x.published), reverse=False)
@@ -623,6 +726,17 @@ def format_urgent_alert(items: list[NewsItem]) -> str:
 
 # ── v9.5.3: 뉴스 유사도 그룹핑 + AI 분석 ─────────────────
 
+# v12.2: 주제 키워드 클러스터 — 같은 클러스터 내 키워드가 겹치면 동일 주제로 묶음
+_TOPIC_CLUSTERS = [
+    {"이란", "iran", "공습", "전쟁", "war", "미사일", "missile", "중동", "호르무즈", "hormuz", "테헤란"},
+    {"러시아", "우크라이나", "russia", "ukraine", "NATO", "나토"},
+    {"북한", "미사일", "핵", "nuclear", "north korea", "ICBM"},
+    {"관세", "tariff", "무역전쟁", "trade war", "수출규제", "export ban"},
+    {"금리", "rate", "FOMC", "연준", "Fed", "기준금리", "인상", "인하"},
+    {"유가", "oil", "OPEC", "원유", "WTI", "Brent", "석유"},
+]
+
+
 def _normalize_title(title: str) -> str:
     """제목에서 핵심 단어만 추출 (중복 판별용)."""
     # 특수문자, 따옴표, 괄호 등 제거
@@ -642,11 +756,27 @@ def _title_similarity(t1: str, t2: str) -> float:
     return len(intersection) / len(union) if union else 0.0
 
 
+def _same_topic_cluster(t1: str, t2: str) -> bool:
+    """두 제목이 같은 주제 클러스터에 속하는지 확인.
+
+    '이란 전쟁 확대'와 '미국 공습 이란'처럼 단어가 달라도
+    같은 주제 클러스터 키워드가 2개 이상 겹치면 True.
+    """
+    combined1 = t1.lower()
+    combined2 = t2.lower()
+    for cluster in _TOPIC_CLUSTERS:
+        hits1 = sum(1 for kw in cluster if kw.lower() in combined1)
+        hits2 = sum(1 for kw in cluster if kw.lower() in combined2)
+        if hits1 >= 1 and hits2 >= 1:
+            return True
+    return False
+
+
 def group_similar_news(items: list[NewsItem], threshold: float = 0.4) -> list[list[NewsItem]]:
     """유사한 뉴스를 그룹으로 묶기.
 
     같은 이벤트에 대한 여러 헤드라인을 하나로 통합.
-    threshold=0.4 → 단어 40% 이상 겹치면 같은 이벤트.
+    v12.2: Jaccard 유사도 + 주제 클러스터 기반 이중 그룹핑.
     """
     if not items:
         return []
@@ -662,7 +792,9 @@ def group_similar_news(items: list[NewsItem], threshold: float = 0.4) -> list[li
         for j, other in enumerate(items):
             if j in used:
                 continue
-            if _title_similarity(item.title, other.title) >= threshold:
+            # Jaccard 유사도 OR 같은 주제 클러스터면 그룹핑
+            if (_title_similarity(item.title, other.title) >= threshold
+                    or _same_topic_cluster(item.title, other.title)):
                 group.append(other)
                 used.add(j)
         groups.append(group)

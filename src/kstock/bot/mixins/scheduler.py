@@ -581,7 +581,7 @@ class SchedulerMixin:
                 ],
             ])
             await context.bot.send_message(
-                chat_id=self.chat_id, text=msg,
+                chat_id=self.chat_id, text=msg[:4000],
                 reply_markup=morning_buttons,
             )
 
@@ -597,7 +597,7 @@ class SchedulerMixin:
                 unified = await build_unified_state(self.db, macro_client=self.macro_client)
                 header = format_unified_header(unified)
                 if header and len(header) > 20:
-                    await context.bot.send_message(chat_id=self.chat_id, text=header)
+                    await context.bot.send_message(chat_id=self.chat_id, text=header[:4000])
             except Exception:
                 logger.debug("Unified state header failed", exc_info=True)
 
@@ -7187,7 +7187,7 @@ class SchedulerMixin:
                     )
 
             if alerts:
-                admin_id = self._get_admin_chat_id()
+                admin_id = self.chat_id
                 if admin_id:
                     msg = (
                         f"🔟 텐배거 모니터 ({today_str})\n"
@@ -7317,7 +7317,7 @@ class SchedulerMixin:
                     )
 
             # 결과 전송
-            admin_id = self._get_admin_chat_id()
+            admin_id = self.chat_id
             if admin_id:
                 # 섹터 요약 생성
                 updated_universe = self.db.get_tenbagger_universe()
@@ -7420,7 +7420,7 @@ class SchedulerMixin:
             if removed:
                 report_lines.append(f"\n⚠️ 제거 검토: {', '.join(removed)}")
 
-            admin_id = self._get_admin_chat_id()
+            admin_id = self.chat_id
             if admin_id:
                 await context.bot.send_message(
                     chat_id=admin_id,
@@ -7472,7 +7472,8 @@ class SchedulerMixin:
                 return
 
             # 보유 종목 확인 — 이미 보유한 건 매수 대상 아님
-            holdings = self.db.get_holdings(holding_type="tenbagger")
+            all_holdings = self.db.get_active_holdings()
+            holdings = [h for h in (all_holdings or []) if h.get("holding_type") == "tenbagger"]
             held_tickers = {h["ticker"] for h in holdings} if holdings else set()
 
             # 한국 / 미국 분리
@@ -7639,7 +7640,7 @@ class SchedulerMixin:
             else:
                 msg_lines.append("📋 신규 진입 대상 없음. 기존 모니터링 유지.")
 
-            admin_id = self._get_admin_chat_id()
+            admin_id = self.chat_id
             if admin_id:
                 await context.bot.send_message(
                     chat_id=admin_id,
@@ -7658,3 +7659,17 @@ class SchedulerMixin:
                 "tenbagger_daily_coaching", today_str,
                 status="error", message=str(e)[:100],
             )
+
+    # ── 만기일 대시보드 (07:45 KST, 만기일만 발송) ──────────
+    async def job_expiry_dashboard(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """만기일 아침 자동 대시보드."""
+        from kstock.signal.expiry_dashboard import is_expiry_day, build_expiry_dashboard
+        if not is_expiry_day():
+            return
+        if not self.chat_id:
+            return
+        try:
+            msg = await build_expiry_dashboard(self.macro_client, self.db)
+            await context.bot.send_message(chat_id=self.chat_id, text=msg)
+        except Exception as e:
+            logger.error("job_expiry_dashboard failed: %s", e, exc_info=True)

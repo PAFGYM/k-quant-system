@@ -86,6 +86,7 @@ class CoreHandlersMixin:
         app.add_handler(CommandHandler("consensus", self.cmd_consensus))
         app.add_handler(CommandHandler("short", self.cmd_short))
         app.add_handler(CommandHandler("future", self.cmd_future))
+        app.add_handler(CommandHandler("expiry", self.cmd_expiry))
         app.add_handler(CommandHandler("history", self.cmd_history))
         app.add_handler(CommandHandler("risk", self.cmd_risk))
         app.add_handler(CommandHandler("health", self.cmd_health))
@@ -201,6 +202,13 @@ class CoreHandlersMixin:
             self.job_daily_directive,
             time=dt_time(hour=6, minute=10, tzinfo=KST),
             name="daily_directive",
+        )
+        # v12.2: 만기일 대시보드 (07:45 평일, 만기일만 발송)
+        jq.run_daily(
+            self.job_expiry_dashboard,
+            time=dt_time(hour=7, minute=45, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="expiry_dashboard",
         )
         # 매수 플래너 (07:50 평일)
         jq.run_daily(
@@ -449,6 +457,12 @@ class CoreHandlersMixin:
             time=dt_time(hour=8, minute=0, tzinfo=KST),
             days=(0, 1, 2, 3, 4),
             name="tenbagger_daily_coaching",
+        )
+        # v12.1: 봇 시작 시 텐배거 유니버스 초기화 (비어있으면 config에서 로드)
+        jq.run_once(
+            self.job_tenbagger_rescore,
+            when=15,
+            name="startup_tenbagger_universe_init",
         )
         # KIS WebSocket: 장 시작 전 연결 (08:50), 장 종료 후 해제 (15:35)
         jq.run_daily(
