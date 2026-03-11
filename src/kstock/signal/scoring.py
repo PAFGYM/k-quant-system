@@ -63,17 +63,24 @@ def load_scoring_config(config_path: Path | None = None) -> dict:
 def get_regime_weights(config: dict, macro: MacroSnapshot) -> dict:
     """VIX 레짐에 따른 동적 가중치 반환.
 
-    risk_on (VIX<15): 기술적 분석 가중, 리스크 중시
-    risk_off (VIX>25): 매크로/리스크 가중, 기술적 축소
-    panic (VIX>35): 리스크 최우선
+    risk_on (VIX<calm): 기술적 분석 가중, 리스크 중시
+    risk_off (VIX>normal_high): 매크로/리스크 가중, 기술적 축소
+    panic (VIX>panic): 리스크 최우선
     """
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        vt = get_risk_thresholds().vix
+        vix_panic, vix_high, vix_low = vt.panic, vt.normal_high, vt.calm
+    except Exception:
+        vix_panic, vix_high, vix_low = 35, 25, 15
+
     regime_weights = config.get("regime_weights", {})
 
-    if macro.vix > 35:
+    if macro.vix > vix_panic:
         regime = "panic"
-    elif macro.vix > 25 or macro.regime == "risk_off":
+    elif macro.vix > vix_high or macro.regime == "risk_off":
         regime = "risk_off"
-    elif macro.vix < 15 or macro.regime == "risk_on":
+    elif macro.vix < vix_low or macro.regime == "risk_on":
         regime = "risk_on"
     else:
         regime = "neutral"
@@ -96,10 +103,19 @@ def score_macro(macro: MacroSnapshot, thresholds: dict, historical: dict | None 
     """
     score = 0.5  # neutral baseline
 
-    vix_high = thresholds.get("vix_high", 25)
-    vix_low = thresholds.get("vix_low", 15)
-    usdkrw_high = thresholds.get("usdkrw_high", 1350)
-    usdkrw_low = thresholds.get("usdkrw_low", 1250)
+    # v12.3: risk_config 중앙화 (YAML fallback → 기존 default)
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        _rt = get_risk_thresholds()
+        _vix_defaults = (_rt.vix.normal_high, _rt.vix.calm)
+        _krw_defaults = (_rt.usdkrw.warning, _rt.usdkrw.normal_low)
+    except Exception:
+        _vix_defaults = (25, 15)
+        _krw_defaults = (1350, 1250)
+    vix_high = thresholds.get("vix_high", _vix_defaults[0])
+    vix_low = thresholds.get("vix_low", _vix_defaults[1])
+    usdkrw_high = thresholds.get("usdkrw_high", _krw_defaults[0])
+    usdkrw_low = thresholds.get("usdkrw_low", _krw_defaults[1])
 
     # VIX scoring: quantile-based if historical available
     vix_hist = (historical or {}).get("vix_history")

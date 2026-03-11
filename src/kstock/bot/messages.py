@@ -623,7 +623,11 @@ def format_market_status(
     }
     regime_text = regime_map.get(macro.regime, "\u26aa 판단 중")
 
-    vix_status = "안정" if macro.vix < 20 else "주의" if macro.vix < 25 else "공포"
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        vix_status = get_risk_thresholds().vix.status_label(macro.vix)
+    except Exception:
+        vix_status = "안정" if macro.vix < 20 else "주의" if macro.vix < 25 else "공포"
     krw_status = "강세" if macro.usdkrw_change_pct < -0.3 else "보합" if abs(macro.usdkrw_change_pct) <= 0.3 else "약세"
     btc_status = "강세" if macro.btc_change_pct > 1 else "보합" if abs(macro.btc_change_pct) <= 1 else "약세"
 

@@ -127,6 +127,16 @@ def set_risk_policy(policy: RiskPolicy) -> None:
 # ── VIX 기반 동적 리스크 정책 ─────────────────────────────────
 
 
+def _vix_bounds() -> tuple[float, float, float]:
+    """v12.3: risk_config에서 VIX 임계값 로드."""
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        v = get_risk_thresholds().vix
+        return v.fear, v.normal_high, v.normal_low  # 30, 25, 18
+    except Exception:
+        return 30.0, 25.0, 18.0
+
+
 def vix_adjusted_policy(
     vix: float,
     base_max_single: float = 0.30,
@@ -135,27 +145,29 @@ def vix_adjusted_policy(
 ) -> dict:
     """VIX 기반 동적 리스크 정책.
 
-    VIX < 18: 완화 (+15% 비중 한도 확대)
-    VIX 18-25: 기본값 유지
-    VIX 25-30: 긴축 (비중 한도 -20%, 신규 매수 제한)
-    VIX > 30: 극긴축 (신규 매수 차단, 비중 한도 -40%)
+    VIX < normal_low: 완화 (+15% 비중 한도 확대)
+    VIX normal_low~normal_high: 기본값 유지
+    VIX normal_high~fear: 긴축 (비중 한도 -20%, 신규 매수 제한)
+    VIX > fear: 극긴축 (신규 매수 차단, 비중 한도 -40%)
 
     Returns:
         dict with: max_single_weight, max_sector_weight,
         new_buy_allowed, leverage_allowed, cash_floor_pct,
         stop_loss_tighten_pct, regime_label
     """
-    if vix > 30:
+    vix_fear, vix_high, vix_low = _vix_bounds()
+
+    if vix > vix_fear:
         return {
             "max_single_weight": base_max_single * 0.6,
             "max_sector_weight": base_max_sector * 0.6,
             "new_buy_allowed": False,
             "leverage_allowed": False,
             "cash_floor_pct": 40,
-            "stop_loss_tighten_pct": 30,  # 손절 30% 타이트
+            "stop_loss_tighten_pct": 30,
             "regime_label": "🔴 극긴축",
         }
-    elif vix > 25:
+    elif vix > vix_high:
         return {
             "max_single_weight": base_max_single * 0.8,
             "max_sector_weight": base_max_sector * 0.8,
@@ -165,7 +177,7 @@ def vix_adjusted_policy(
             "stop_loss_tighten_pct": 15,
             "regime_label": "🟡 긴축",
         }
-    elif vix < 18:
+    elif vix < vix_low:
         return {
             "max_single_weight": min(base_max_single * 1.15, 0.35),
             "max_sector_weight": min(base_max_sector * 1.15, 0.55),
@@ -206,9 +218,10 @@ class RiskConstraintSet:
     min_cash_pct: float = 0.05
 
     def for_regime(self, vix: float) -> "RiskConstraintSet":
-        """VIX 레짐에 따라 동적 조정된 제약 조건 반환."""
+        """VIX 레짐에 따라 동적 조정된 제약 조건 반환 (v12.3: risk_config)."""
         try:
-            if vix > 30:
+            vix_fear, vix_high, vix_calm = _vix_bounds()
+            if vix > vix_fear:
                 return RiskConstraintSet(
                     max_single_weight=self.max_single_weight * 0.6,
                     max_sector_weight=self.max_sector_weight * 0.6,
@@ -217,7 +230,7 @@ class RiskConstraintSet:
                     max_leverage=0.0,
                     max_portfolio_turnover=0.10,
                 )
-            elif vix > 25:
+            elif vix > vix_high:
                 return RiskConstraintSet(
                     max_single_weight=self.max_single_weight * 0.8,
                     max_sector_weight=self.max_sector_weight * 0.8,
@@ -226,7 +239,7 @@ class RiskConstraintSet:
                     max_leverage=0.0,
                     max_portfolio_turnover=0.20,
                 )
-            elif vix < 15:
+            elif vix < vix_calm:
                 return RiskConstraintSet(
                     max_single_weight=min(self.max_single_weight * 1.15, 0.35),
                     max_sector_weight=min(self.max_sector_weight * 1.15, 0.55),
@@ -254,10 +267,11 @@ class RiskConstraintSet:
             except OverflowError:
                 return 0.0 if x < center else 1.0
 
-        # Blend factors: how much to tighten (0=relaxed, 1=max tight)
-        tight_25 = _sigmoid(vix, center=25, width=3)   # starts tightening around VIX 22
-        tight_30 = _sigmoid(vix, center=30, width=2)   # extreme tightening around VIX 28
-        relax_15 = 1.0 - _sigmoid(vix, center=15, width=3)  # relaxation below VIX 18
+        # Blend factors: risk_config 중앙 임계값 (v12.3)
+        vix_fear, vix_high, vix_low = _vix_bounds()
+        tight_25 = _sigmoid(vix, center=vix_high, width=3)   # starts tightening
+        tight_30 = _sigmoid(vix, center=vix_fear, width=2)   # extreme tightening
+        relax_15 = 1.0 - _sigmoid(vix, center=vix_low - 3, width=3)  # relaxation
 
         # If previous VIX available, dampen transitions (mean of current and previous)
         if prev_vix is not None:

@@ -131,15 +131,22 @@ def assess_korea_risk(
                 "detail": f"프로그램 순매도 {total_net:,.0f}억",
             })
 
-    # 4. 환율 위험 (max 10)
-    if usdkrw >= 1400:
+    # 4. 환율 위험 (max 10) — v12.3: risk_config 중앙화
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        _krw = get_risk_thresholds().usdkrw
+        _krw_danger, _krw_warn = _krw.danger, _krw.warning
+    except Exception:
+        _krw_danger, _krw_warn = 1400, 1350
+
+    if usdkrw >= _krw_danger:
         risk += 10
         result.factors.append({
             "name": "환율 고위험",
             "score": 10,
-            "detail": f"USD/KRW {usdkrw:,.0f}원 (1,400원+ 자본유출 위험)",
+            "detail": f"USD/KRW {usdkrw:,.0f}원 ({_krw_danger:,.0f}원+ 자본유출 위험)",
         })
-    elif usdkrw >= 1350:
+    elif usdkrw >= _krw_warn:
         risk += 5
         result.factors.append({
             "name": "환율 주의",
@@ -155,20 +162,27 @@ def assess_korea_risk(
             "detail": f"환율 {usdkrw_change_pct:+.1f}% 급등",
         })
 
-    # 5. VIX 위험 (max 15)
-    if vix >= 30:
+    # 5. VIX 위험 (max 15) — v12.3: risk_config 중앙화
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        _vt = get_risk_thresholds().vix
+        _vix_fear, _vix_high = _vt.fear, _vt.normal_high
+    except Exception:
+        _vix_fear, _vix_high = 30, 25
+
+    if vix >= _vix_fear:
         risk += 15
         result.factors.append({
             "name": "VIX 패닉",
             "score": 15,
-            "detail": f"VIX {vix:.1f} (30+ 패닉)",
+            "detail": f"VIX {vix:.1f} ({_vix_fear}+ 패닉)",
         })
-    elif vix >= 25:
+    elif vix >= _vix_high:
         risk += 8
         result.factors.append({
             "name": "VIX 공포",
             "score": 8,
-            "detail": f"VIX {vix:.1f} (25+ 공포)",
+            "detail": f"VIX {vix:.1f} ({_vix_high}+ 공포)",
         })
 
     # 6. 만기일 효과 (max 10)

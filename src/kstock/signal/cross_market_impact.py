@@ -387,7 +387,14 @@ def _compute_us_equity_impact(snap: CrossMarketSnapshot) -> float:
 
 
 def _compute_vix_impact(snap: CrossMarketSnapshot) -> float:
-    """VIX level and change → KOSPI impact score (-3 ~ +1)."""
+    """VIX level and change → KOSPI impact score (-3 ~ +1). (v12.3: risk_config)"""
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        vt = get_risk_thresholds().vix
+        vix_crisis, vix_fear, vix_high, vix_calm = vt.crisis, vt.fear, vt.normal_high, vt.calm
+    except Exception:
+        vix_crisis, vix_fear, vix_high, vix_calm = 40, 30, 25, 15
+
     score = 0.0
 
     # VIX spike velocity (change rate matters more than absolute level)
@@ -399,13 +406,13 @@ def _compute_vix_impact(snap: CrossMarketSnapshot) -> float:
         score += 0.5
 
     # VIX absolute level
-    if snap.vix >= 40:
+    if snap.vix >= vix_crisis:
         score -= 1.5
-    elif snap.vix >= 30:
+    elif snap.vix >= vix_fear:
         score -= 0.8
-    elif snap.vix >= 25:
+    elif snap.vix >= vix_high:
         score -= 0.3
-    elif snap.vix < 15:
+    elif snap.vix < vix_calm:
         score += 0.3
 
     return max(-3, min(1, score))
@@ -461,8 +468,13 @@ def _compute_commodity_impact(snap: CrossMarketSnapshot) -> float:
     elif snap.copper_change_pct < -2:
         score -= 0.3
 
-    # Gold: 안전자산 수요 proxy
-    if snap.gold_change_pct > 2 and snap.vix > 25:
+    # Gold: 안전자산 수요 proxy (v12.3: risk_config)
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        _vix_high = get_risk_thresholds().vix.normal_high
+    except Exception:
+        _vix_high = 25
+    if snap.gold_change_pct > 2 and snap.vix > _vix_high:
         score -= 0.3  # risk-off 확인
 
     return max(-2, min(2, score))
@@ -525,7 +537,12 @@ def _detect_risk_flags(snap: CrossMarketSnapshot) -> List[str]:
     """Detect risk flags from cross-market data."""
     flags = []
 
-    if snap.vix >= 30:
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        _vix_fear = get_risk_thresholds().vix.fear
+    except Exception:
+        _vix_fear = 30
+    if snap.vix >= _vix_fear:
         flags.append(f"VIX 공포 수준 ({snap.vix:.1f})")
     if snap.vix_change_pct > 20:
         flags.append(f"VIX 급등 ({snap.vix_change_pct:+.1f}%)")

@@ -53,8 +53,16 @@ def classify_volatility_regime(
     if korean_vol <= 0:
         korean_vol = vix * 1.3
 
-    # 극단: VKOSPI > 35 + VIX > 35
-    if korean_vol > 35 and vix > 35:
+    # v12.3: risk_config VIX 임계값
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        _vt = get_risk_thresholds().vix
+        _vix_panic, _vix_high, _vix_low = _vt.panic, _vt.normal_high, _vt.normal_low
+    except Exception:
+        _vix_panic, _vix_high, _vix_low = 35, 25, 18
+
+    # 극단: VKOSPI > 35 + VIX > panic
+    if korean_vol > 35 and vix > _vix_panic:
         return VolatilityRegime(
             level="extreme", label="극단", emoji="🔴",
             vix=vix, korean_vol=korean_vol,
@@ -62,8 +70,8 @@ def classify_volatility_regime(
             position_factor=0.3,
         )
 
-    # 고변동: VKOSPI 25-35 + VIX 25-35
-    if korean_vol > 25 or vix > 25:
+    # 고변동: VKOSPI 25-35 + VIX > normal_high
+    if korean_vol > 25 or vix > _vix_high:
         return VolatilityRegime(
             level="high", label="고변동", emoji="🟠",
             vix=vix, korean_vol=korean_vol,
@@ -71,8 +79,8 @@ def classify_volatility_regime(
             position_factor=0.5,
         )
 
-    # 저변동: VKOSPI < 15 + VIX < 18
-    if korean_vol < 15 and vix < 18:
+    # 저변동: VKOSPI < 15 + VIX < normal_low
+    if korean_vol < 15 and vix < _vix_low:
         return VolatilityRegime(
             level="low", label="저변동", emoji="🟢",
             vix=vix, korean_vol=korean_vol,

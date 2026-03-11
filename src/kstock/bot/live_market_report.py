@@ -253,7 +253,11 @@ def _assemble_report(
     """최종 보고서 조립."""
     from kstock.bot.messages import _trend_arrow, _fear_greed_bar
 
-    vix_status = "안정" if macro.vix < 20 else "주의" if macro.vix < 25 else "공포"
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        vix_status = get_risk_thresholds().vix.status_label(macro.vix)
+    except Exception:
+        vix_status = "안정" if macro.vix < 20 else "주의" if macro.vix < 25 else "공포"
     fg_score = getattr(macro, "fear_greed_score", 50)
     fg_label = getattr(macro, "fear_greed_label", "중립")
 

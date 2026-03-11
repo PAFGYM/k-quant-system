@@ -48,11 +48,16 @@ class ContrarianDashboard:
 
 # ── 상수 ──────────────────────────────────────────────────────────
 
-# VIX 임계값
-VIX_EXTREME_FEAR = 30.0
-VIX_FEAR = 25.0
-VIX_GREED = 15.0
-VIX_EXTREME_GREED = 12.0
+# VIX 임계값 — risk_config 중앙화 (v12.3)
+def _vix_thresholds():
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        v = get_risk_thresholds().vix
+        return v.fear, v.normal_high, v.calm, 12.0  # extreme_fear, fear, greed, extreme_greed
+    except Exception:
+        return 30.0, 25.0, 15.0, 12.0
+
+VIX_EXTREME_FEAR, VIX_FEAR, VIX_GREED, VIX_EXTREME_GREED = _vix_thresholds()
 
 # RSI 임계값
 RSI_OVERSOLD = 25

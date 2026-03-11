@@ -43,6 +43,16 @@ class VixThresholds:
             return "normal"
         return "calm"
 
+    def status_label(self, vix: float) -> str:
+        """VIX 값 → 한글 상태 라벨 (디스플레이용)."""
+        if vix >= self.fear:
+            return "공포"
+        if vix >= self.normal_high:
+            return "경계"
+        if vix >= self.normal_low:
+            return "주의"
+        return "안정"
+
 
 @dataclass(frozen=True)
 class UsdkrwThresholds:

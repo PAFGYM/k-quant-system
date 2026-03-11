@@ -489,12 +489,20 @@ def vote(
     sell_thresh = cfg.sell_threshold
     strong_thresh = cfg.strong_threshold
 
-    if vix > 30:  # panic: require higher agreement for BUY
+    # v12.3: risk_config VIX 임계값
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        _vt = get_risk_thresholds().vix
+        _vf, _vh, _vc = _vt.fear, _vt.normal_high, _vt.calm
+    except Exception:
+        _vf, _vh, _vc = 30, 25, 15
+
+    if vix > _vf:  # panic: require higher agreement for BUY
         buy_thresh = min(0.85, buy_thresh + 0.15)
         strong_thresh = min(0.95, strong_thresh + 0.10)
-    elif vix > 25:  # fear
+    elif vix > _vh:  # fear
         buy_thresh = min(0.80, buy_thresh + 0.10)
-    elif vix < 15:  # calm: slightly relax
+    elif vix < _vc:  # calm: slightly relax
         buy_thresh = max(0.50, buy_thresh - 0.05)
 
     # Dissent penalty: if strongest dissenter has high confidence, reduce consensus

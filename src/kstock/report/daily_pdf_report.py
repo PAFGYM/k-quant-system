@@ -355,6 +355,11 @@ async def generate_daily_pdf(
 
     # 글로벌 시장 지표 테이블
     elements.append(Paragraph("Global Market Dashboard", styles["section"]))
+    try:
+        from kstock.core.risk_config import get_risk_thresholds as _grt
+        _vix_label = _grt().vix.status_label(macro.vix)
+    except Exception:
+        _vix_label = "안정" if macro.vix < 20 else "주의" if macro.vix < 25 else "경계"
     index_data = [
         ["지표", "현재값", "등락률", "시그널"],
         ["S&P500", f"{macro.spx_change_pct:+.2f}%", "",
@@ -363,8 +368,7 @@ async def generate_daily_pdf(
          "상승" if macro.nasdaq_change_pct > 0 else "하락"],
         ["다우", f"{getattr(macro, 'dow_change_pct', 0):+.2f}%", "",
          "상승" if getattr(macro, 'dow_change_pct', 0) > 0 else "하락"],
-        ["VIX", f"{macro.vix:.1f}", f"{macro.vix_change_pct:+.1f}%",
-         "안정" if macro.vix < 20 else "주의" if macro.vix < 25 else "경계"],
+        ["VIX", f"{macro.vix:.1f}", f"{macro.vix_change_pct:+.1f}%", _vix_label],
         ["USD/KRW", f"{macro.usdkrw:,.0f}원", f"{macro.usdkrw_change_pct:+.1f}%",
          "원화약세" if macro.usdkrw_change_pct > 0 else "원화강세"],
         ["US10Y", f"{macro.us10y:.2f}%", f"{us10y_chg:+.1f}%", ""],
@@ -631,7 +635,11 @@ async def _generate_text_report(
 
 def _default_market_summary(macro) -> str:
     """AI 없이 기본 시장 요약 생성."""
-    vix_status = "안정" if macro.vix < 20 else "주의" if macro.vix < 25 else "공포"
+    try:
+        from kstock.core.risk_config import get_risk_thresholds
+        vix_status = get_risk_thresholds().vix.status_label(macro.vix)
+    except Exception:
+        vix_status = "안정" if macro.vix < 20 else "주의" if macro.vix < 25 else "공포"
     regime_kr = {
         "risk_on": "적극 공격",
         "neutral": "보수적",
