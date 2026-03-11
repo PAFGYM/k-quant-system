@@ -630,6 +630,19 @@ class SchedulerMixin:
             if not holdings:
                 return
 
+            # v11.0.1: LEGACY_EXEMPT 종목은 매니저 브리핑에서 제외
+            # AI가 프롬프트 무시하고 매도 권유하는 문제 방지
+            try:
+                from kstock.core.risk_manager import LEGACY_EXEMPT_TICKERS
+                holdings = [
+                    h for h in holdings
+                    if h.get("ticker", "") not in LEGACY_EXEMPT_TICKERS
+                ]
+                if not holdings:
+                    return
+            except ImportError:
+                pass
+
             # v9.5: 공유 컨텍스트 구축 (YouTube 인텔 + 뉴스 + 교훈 등)
             shared_ctx = None
             try:
@@ -717,8 +730,8 @@ class SchedulerMixin:
                     except ImportError:
                         pass
 
-                # position/long_term: 재무 데이터 보강
-                if mtype in ("position", "long_term"):
+                # position/long_term/tenbagger: 재무 데이터 보강
+                if mtype in ("position", "long_term", "tenbagger"):
                     try:
                         from kstock.bot.investment_managers import build_fundamental_summary
                         for h in mholdings:
@@ -744,6 +757,33 @@ class SchedulerMixin:
                                 logger.debug("Fundamental enrich %s failed", ticker, exc_info=True)
                     except ImportError:
                         pass
+
+                # v12.0: 텐배거 보유종목 컨텍스트 보강
+                if mtype == "tenbagger":
+                    try:
+                        for h in mholdings:
+                            ticker = h.get("ticker", "")
+                            if not ticker:
+                                continue
+                            tb_data = self.db.get_tenbagger_by_ticker(ticker)
+                            if tb_data:
+                                h["tenbagger_context"] = (
+                                    f"\n[텐배거 점수: {tb_data.get('tenbagger_score', 0):.0f}/100]"
+                                    f"\n섹터: {tb_data.get('sector', '')}"
+                                )
+                            catalysts = self.db.get_tenbagger_catalysts(
+                                ticker, status="pending",
+                            )
+                            if catalysts:
+                                cat_lines = [
+                                    f"  - {c['description']} ({c.get('expected_date', 'TBD')})"
+                                    for c in catalysts[:3]
+                                ]
+                                h["tenbagger_context"] = h.get(
+                                    "tenbagger_context", ""
+                                ) + "\n카탈리스트:\n" + "\n".join(cat_lines)
+                    except Exception:
+                        logger.debug("Tenbagger context enrich failed", exc_info=True)
 
                 # 매니저 성과 + 교훈 주입
                 mgr_perf = None
@@ -1092,11 +1132,13 @@ class SchedulerMixin:
                         price_stale = True
                     pnl_pct = ((current_price - buy_price) / buy_price * 100) if buy_price > 0 and current_price > 0 else 0
                     stale_mark = " ⚠️전일" if price_stale else ""
+                    from kstock.core.risk_manager import LEGACY_EXEMPT_TICKERS
+                    legacy_mark = " [장기보유·매도판단제외]" if ticker in LEGACY_EXEMPT_TICKERS else ""
                     holdings_text += (
                         f"  {name}({ticker}): "
                         f"매수가 {buy_price:,.0f}원, 현재가 {current_price:,.0f}원{stale_mark}, "
                         f"수익률 {pnl_pct:+.1f}%, 수량 {qty}주, "
-                        f"투자시계 {horizon}\n"
+                        f"투자시계 {horizon}{legacy_mark}\n"
                     )
             else:
                 holdings_text = "  보유종목 없음\n"
@@ -1508,6 +1550,7 @@ class SchedulerMixin:
                 f"   - 종목명 + 수익률 + 외인/기관 수급 동향\n"
                 f"   - 투자시계(단기/스윙/중기/장기)에 맞는 판단\n"
                 f"   - 판단: 보유유지/추가매수/일부익절/전량매도/손절 중 택1\n"
+                f"   - [장기보유·매도판단제외] 표시된 종목은 반드시 보유유지 또는 추가매수만 판단. 매도/익절/손절 절대 금지.\n"
                 f"   - 구체적 이유 1줄 (수급 근거 포함)\n"
                 f"   (가격 추측 금지 — 지지선/목표가/손절가 등 구체적 가격은 제공된 데이터만 사용)\n"
                 f"3) 외인/기관 수급 종합 (수급 데이터가 있으면 반드시 분석)\n"
@@ -7061,5 +7104,557 @@ class SchedulerMixin:
             logger.error("job_daily_synthesis failed: %s", e, exc_info=True)
             self.db.upsert_job_run(
                 "daily_synthesis", today_str,
+                status="error", message=str(e)[:100],
+            )
+
+    # ── v12.0: 텐배거 매니저 스케줄러 ────────────────────────────
+
+    async def job_tenbagger_price_monitor(
+        self, context: "ContextTypes.DEFAULT_TYPE",
+    ) -> None:
+        """매일 16:30 — 텐배거 유니버스 가격 모니터링 + 카탈리스트 체크."""
+        today_str = _today()
+        try:
+            universe = self.db.get_tenbagger_universe()
+            if not universe:
+                self.db.upsert_job_run(
+                    "tenbagger_price_monitor", today_str,
+                    status="skip", message="유니버스 비어있음",
+                )
+                return
+
+            alerts = []
+            updated = 0
+            alert_pct = 5.0  # +-5% 변동 알림
+
+            for stock in universe:
+                ticker = stock.get("ticker", "")
+                name = stock.get("name", "")
+                market = stock.get("market", "KRX")
+                prev_price = stock.get("current_price", 0) or 0
+
+                try:
+                    if market == "US":
+                        import yfinance as yf
+                        t = yf.Ticker(ticker)
+                        cur = t.info.get("currentPrice") or t.info.get("regularMarketPrice", 0)
+                    else:
+                        # 한국 종목: yfinance 또는 KIS
+                        try:
+                            cur = await self._get_current_price(ticker)
+                        except Exception:
+                            import yfinance as yf
+                            t = yf.Ticker(f"{ticker}.KS")
+                            cur = t.info.get("currentPrice", 0) or 0
+                            if cur == 0:
+                                t = yf.Ticker(f"{ticker}.KQ")
+                                cur = t.info.get("currentPrice", 0) or 0
+
+                    if cur and cur > 0:
+                        self.db.update_tenbagger_universe_price(ticker, cur)
+                        updated += 1
+
+                        # 큰 변동 알림
+                        if prev_price > 0:
+                            change_pct = (cur - prev_price) / prev_price * 100
+                            if abs(change_pct) >= alert_pct:
+                                direction = "📈" if change_pct > 0 else "📉"
+                                entry = stock.get("entry_price", 0) or 0
+                                total_ret = ""
+                                if entry > 0:
+                                    total_ret = f" (누적 {(cur - entry) / entry * 100:+.1f}%)"
+                                alerts.append(
+                                    f"{direction} {name}({ticker}): "
+                                    f"{change_pct:+.1f}% {total_ret}"
+                                )
+                except Exception:
+                    logger.debug("Tenbagger price fetch %s failed", ticker, exc_info=True)
+
+            # 카탈리스트 체크
+            from datetime import datetime as _dt, timedelta as _td
+            check_date = (_dt.utcnow() + _td(days=7)).strftime("%Y-%m-%d")
+            upcoming = self.db.get_tenbagger_catalysts(status="pending")
+            upcoming_soon = [
+                c for c in upcoming
+                if c.get("expected_date", "") and c["expected_date"] <= check_date
+            ]
+
+            if upcoming_soon:
+                alerts.append("\n📌 임박 카탈리스트:")
+                for c in upcoming_soon[:5]:
+                    alerts.append(
+                        f"  {c['ticker']}: {c['description']} ({c.get('expected_date','')})"
+                    )
+
+            if alerts:
+                admin_id = self._get_admin_chat_id()
+                if admin_id:
+                    msg = (
+                        f"🔟 텐배거 모니터 ({today_str})\n"
+                        f"{'━' * 24}\n"
+                        f"갱신: {updated}/{len(universe)}종목\n\n"
+                        + "\n".join(alerts)
+                    )
+                    await context.bot.send_message(
+                        chat_id=admin_id, text=msg[:4000],
+                    )
+
+            self.db.upsert_job_run(
+                "tenbagger_price_monitor", today_str,
+                status="success", message=f"갱신 {updated}, 알림 {len(alerts)}",
+            )
+
+        except Exception as e:
+            logger.error("job_tenbagger_price_monitor failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "tenbagger_price_monitor", today_str,
+                status="error", message=str(e)[:100],
+            )
+
+    async def job_tenbagger_rescore(
+        self, context: "ContextTypes.DEFAULT_TYPE",
+    ) -> None:
+        """매주 일요일 10:00 — 텐배거 유니버스 전체 리스코어링."""
+        today_str = _today()
+        try:
+            from kstock.signal.tenbagger_screener import (
+                compute_tenbagger_score, format_sector_summary,
+                get_initial_universe, load_tenbagger_config,
+            )
+
+            universe = self.db.get_tenbagger_universe()
+            if not universe:
+                # 유니버스가 비어있으면 config에서 초기화
+                initial = get_initial_universe()
+                for item in initial:
+                    score = compute_tenbagger_score(
+                        ticker=item["ticker"],
+                        name=item["name"],
+                        market=item["market"],
+                        sector=item["sector"],
+                        consensus_data={"ai_avg": item.get("ai_consensus", 50)},
+                    )
+                    self.db.upsert_tenbagger_universe(
+                        ticker=item["ticker"],
+                        name=item["name"],
+                        market=item["market"],
+                        sector=item["sector"],
+                        **score.to_dict(),
+                        ai_consensus=f'{{"ai_avg": {item.get("ai_consensus", 50)}}}',
+                    )
+                    # 카탈리스트도 등록
+                    for cat in item.get("catalysts", []):
+                        self.db.add_tenbagger_catalyst(
+                            ticker=item["ticker"],
+                            catalyst_type="research",
+                            description=cat,
+                        )
+                universe = self.db.get_tenbagger_universe()
+
+            # 리스코어링
+            alerts = []
+            rescored = 0
+
+            for stock in universe:
+                ticker = stock.get("ticker", "")
+                name = stock.get("name", "")
+                old_score = stock.get("tenbagger_score", 0)
+
+                # 수급 데이터 가져오기 (한국 종목만)
+                foreign_days = 0
+                inst_days = 0
+                foreign_change = 0.0
+                if stock.get("market") == "KRX":
+                    try:
+                        sd = self.db.get_supply_demand(ticker, days=20)
+                        if sd:
+                            foreign_days = sum(
+                                1 for d in sd if (d.get("foreign_net") or 0) > 0
+                            )
+                            inst_days = sum(
+                                1 for d in sd if (d.get("institution_net") or 0) > 0
+                            )
+                    except Exception:
+                        pass
+
+                score = compute_tenbagger_score(
+                    ticker=ticker,
+                    name=name,
+                    market=stock.get("market", "KRX"),
+                    sector=stock.get("sector", ""),
+                    foreign_buy_days_in_20=foreign_days,
+                    institution_buy_days_in_20=inst_days,
+                    foreign_ratio_change=foreign_change,
+                    consensus_data={"ai_avg": stock.get("consensus_score", 50)},
+                    current_price=stock.get("current_price", 0),
+                )
+
+                # DB 업데이트
+                self.db.upsert_tenbagger_universe(
+                    ticker=ticker,
+                    name=name,
+                    market=stock.get("market", "KRX"),
+                    sector=stock.get("sector", ""),
+                    **score.to_dict(),
+                )
+
+                # 히스토리 저장
+                self.db.save_tenbagger_score(
+                    ticker=ticker,
+                    score_date=today_str,
+                    **score.to_dict(),
+                )
+
+                rescored += 1
+
+                # 점수 급변 알림 (+-10점)
+                diff = score.tenbagger_score - old_score
+                if abs(diff) >= 10:
+                    direction = "⬆️" if diff > 0 else "⬇️"
+                    alerts.append(
+                        f"{direction} {name}: {old_score:.0f} → {score.tenbagger_score:.0f} "
+                        f"({diff:+.0f}점)"
+                    )
+
+            # 결과 전송
+            admin_id = self._get_admin_chat_id()
+            if admin_id:
+                # 섹터 요약 생성
+                updated_universe = self.db.get_tenbagger_universe()
+                from kstock.signal.tenbagger_screener import TenbaggerScore
+                scores_list = []
+                for u in updated_universe:
+                    scores_list.append(TenbaggerScore(
+                        ticker=u["ticker"], name=u["name"],
+                        market=u.get("market", "KRX"),
+                        sector=u.get("sector", ""),
+                        sector_name=u.get("sector", ""),
+                        tenbagger_score=u.get("tenbagger_score", 0),
+                    ))
+                summary = format_sector_summary(scores_list) if scores_list else ""
+
+                msg = (
+                    f"🔟 텐배거 주간 리스코어링 ({today_str})\n"
+                    f"{'━' * 24}\n"
+                    f"리스코어: {rescored}종목\n"
+                )
+                if alerts:
+                    msg += "\n📊 점수 변동:\n" + "\n".join(alerts[:10]) + "\n"
+                if summary:
+                    msg += f"\n{summary}"
+
+                await context.bot.send_message(
+                    chat_id=admin_id, text=msg[:4000],
+                )
+
+            self.db.upsert_job_run(
+                "tenbagger_rescore", today_str,
+                status="success", message=f"리스코어 {rescored}, 변동 {len(alerts)}",
+            )
+
+        except Exception as e:
+            logger.error("job_tenbagger_rescore failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "tenbagger_rescore", today_str,
+                status="error", message=str(e)[:100],
+            )
+
+    async def job_tenbagger_sector_review(
+        self, context: "ContextTypes.DEFAULT_TYPE",
+    ) -> None:
+        """매월 1일 08:00 — 텐배거 섹터 리뷰 & 졸업/제거 검토."""
+        today_str = _today()
+
+        # 매월 1일만 실행
+        from datetime import datetime as _dt
+        if _dt.utcnow().day != 1:
+            return
+
+        try:
+            universe = self.db.get_tenbagger_universe()
+            if not universe:
+                self.db.upsert_job_run(
+                    "tenbagger_sector_review", today_str,
+                    status="skip", message="유니버스 비어있음",
+                )
+                return
+
+            graduated = []
+            removed = []
+            report_lines = [
+                f"🔟 텐배거 월간 섹터 리뷰 ({today_str})",
+                "━" * 24,
+            ]
+
+            # 섹터별 집계
+            from collections import defaultdict as _dd
+            by_sector: dict[str, list] = _dd(list)
+            for stock in universe:
+                by_sector[stock.get("sector", "unknown")].append(stock)
+
+            for sector, stocks in sorted(by_sector.items()):
+                avg_score = sum(s.get("tenbagger_score", 0) for s in stocks) / len(stocks)
+                avg_return = sum(s.get("current_return", 0) for s in stocks) / len(stocks)
+
+                report_lines.append(
+                    f"\n{sector}: {len(stocks)}종목, "
+                    f"평균 {avg_score:.0f}점, 수익률 {avg_return:+.1f}%"
+                )
+                for s in sorted(stocks, key=lambda x: -x.get("tenbagger_score", 0)):
+                    ret = s.get("current_return", 0)
+                    emoji = "🟢" if ret >= 0 else "🔴"
+                    report_lines.append(
+                        f"  {emoji} {s['name']} {s.get('tenbagger_score', 0):.0f}점 "
+                        f"({ret:+.1f}%)"
+                    )
+
+                    # 졸업 체크: 10배 달성
+                    if ret >= 900:
+                        graduated.append(s["name"])
+                    # 제거 후보: 점수 30 미만 + 수익률 -25% 미만
+                    elif s.get("tenbagger_score", 0) < 30 and ret <= -25:
+                        removed.append(s["name"])
+
+            if graduated:
+                report_lines.append(f"\n🎉 텐배거 졸업: {', '.join(graduated)}")
+            if removed:
+                report_lines.append(f"\n⚠️ 제거 검토: {', '.join(removed)}")
+
+            admin_id = self._get_admin_chat_id()
+            if admin_id:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text="\n".join(report_lines)[:4000],
+                )
+
+            self.db.upsert_job_run(
+                "tenbagger_sector_review", today_str,
+                status="success",
+                message=f"{len(universe)}종목, 졸업{len(graduated)}, 제거{len(removed)}",
+            )
+
+        except Exception as e:
+            logger.error("job_tenbagger_sector_review failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "tenbagger_sector_review", today_str,
+                status="error", message=str(e)[:100],
+            )
+
+    async def job_tenbagger_daily_coaching(
+        self, context: "ContextTypes.DEFAULT_TYPE",
+    ) -> None:
+        """매일 08:00 — 텐배거 일일 매수 코칭 (매수/대기 판단).
+
+        각 텐배거 후보의 현재가를 확인하고,
+        오늘 매수할지 대기할지 구체적으로 코칭한다.
+        """
+        today_str = _today()
+        from datetime import datetime as _dt
+
+        # 평일만 실행
+        now = _dt.now()
+        if now.weekday() >= 5:  # 토(5), 일(6)
+            return
+
+        try:
+            from kstock.signal.tenbagger_screener import (
+                get_initial_universe,
+                load_tenbagger_config,
+            )
+
+            config = load_tenbagger_config()
+            universe = get_initial_universe()
+            if not universe:
+                self.db.upsert_job_run(
+                    "tenbagger_daily_coaching", today_str,
+                    status="skip", message="유니버스 비어있음",
+                )
+                return
+
+            # 보유 종목 확인 — 이미 보유한 건 매수 대상 아님
+            holdings = self.db.get_holdings(holding_type="tenbagger")
+            held_tickers = {h["ticker"] for h in holdings} if holdings else set()
+
+            # 한국 / 미국 분리
+            kr_universe = [u for u in universe if u["market"] == "KRX"]
+            us_universe = [u for u in universe if u["market"] == "US"]
+
+            # ── 매수 금지 조건 체크 ──
+            no_buy_reasons: list[str] = []
+
+            # 1) 선물옵션 만기일 (매월 두번째 목요일)
+            if now.weekday() == 3:  # 목요일
+                day = now.day
+                if 8 <= day <= 14:
+                    no_buy_reasons.append("📅 선물옵션 만기일 — 변동성 극대, 매수 자제")
+
+            # 2) VIX / Fear & Greed 체크
+            try:
+                macro = self.db.get_macro_snapshot()
+                if macro:
+                    fear_greed = macro.get("fear_greed", 50)
+                    vix = macro.get("vix", 20)
+                    if vix and vix > 30:
+                        no_buy_reasons.append(f"⚠️ VIX {vix:.1f} — 공포 과열, 침착하게 대기")
+                    if fear_greed and fear_greed < 20:
+                        no_buy_reasons.append(
+                            f"😱 극단 공포(F&G {fear_greed:.0f}) — "
+                            "역발상 기회지만 급하면 안됨"
+                        )
+            except Exception:
+                pass
+
+            # ── 종목별 코칭 생성 ──
+            buy_today: list[str] = []
+            wait_today: list[str] = []
+            us_coaching_lines: list[str] = []
+
+            for stock in kr_universe:
+                ticker = stock["ticker"]
+                name = stock["name"]
+                grade = stock["grade"]
+                character = stock.get("character", "")
+
+                if ticker in held_tickers:
+                    continue  # 이미 보유 → 스킵
+
+                # 현재가 가져오기
+                cur_price = 0
+                try:
+                    cur_price = await self._get_current_price(ticker)
+                except Exception:
+                    try:
+                        import yfinance as yf
+                        mkt = "KOSPI" if stock.get("market") == "KOSPI" else "KOSDAQ"
+                        suffix = ".KS" if mkt == "KOSPI" else ".KQ"
+                        t = yf.Ticker(f"{ticker}{suffix}")
+                        cur_price = t.info.get("currentPrice", 0) or 0
+                    except Exception:
+                        pass
+
+                if not cur_price or cur_price <= 0:
+                    wait_today.append(f"  ❓ {name}: 가격 조회 실패 — 대기")
+                    continue
+
+                # 전일 대비 변동 체크
+                stock_no_buy = list(no_buy_reasons)
+
+                try:
+                    tb_data = self.db.get_tenbagger_by_ticker(ticker)
+                    if tb_data:
+                        prev = tb_data.get("current_price", 0)
+                        if prev and prev > 0:
+                            chg = (cur_price - prev) / prev * 100
+                            if chg >= 10:
+                                stock_no_buy.append(
+                                    f"🚀 +{chg:.1f}% 급등 — 추격매수 금지"
+                                )
+                            elif chg >= 5:
+                                stock_no_buy.append(
+                                    f"📈 +{chg:.1f}% — 눌림 확인 후 진입"
+                                )
+                            elif chg <= -8:
+                                stock_no_buy.append(
+                                    f"📉 {chg:.1f}% 급락 — 패닉셀 확인, 관망"
+                                )
+                except Exception:
+                    pass
+
+                ge = {"A": "🟢", "B": "🟡", "C": "🟠"}.get(grade, "⚪")
+
+                if stock_no_buy:
+                    reasons = " / ".join(stock_no_buy)
+                    wait_today.append(
+                        f"  🚫 {ge}{name}({ticker}) {cur_price:,.0f}원\n"
+                        f"     → {reasons}"
+                    )
+                else:
+                    strat = {"A": "3분할 피라미딩", "B": "2분할 균등", "C": "소량 1회"}.get(grade, "소량")
+                    buy_today.append(
+                        f"  ✅ {ge}{name}({ticker}) {cur_price:,.0f}원\n"
+                        f"     → {grade}등급 {strat} 진입 가능\n"
+                        f"     💡 {character}"
+                    )
+
+            # 미국 종목 현황 (장전이므로 전일 종가)
+            for stock in us_universe[:5]:
+                ticker = stock["ticker"]
+                name = stock["name"]
+                grade = stock["grade"]
+                ge = {"A": "🟢", "B": "🟡", "C": "🟠"}.get(grade, "⚪")
+
+                if ticker in held_tickers:
+                    continue
+
+                cur_price = 0
+                try:
+                    import yfinance as yf
+                    t = yf.Ticker(ticker)
+                    cur_price = t.info.get("currentPrice") or t.info.get(
+                        "regularMarketPrice", 0
+                    )
+                except Exception:
+                    pass
+
+                if cur_price and cur_price > 0:
+                    us_coaching_lines.append(
+                        f"  {ge}{name}({ticker}): ${cur_price:,.2f}"
+                    )
+
+            # ── 메시지 조립 ──
+            msg_lines = [
+                f"🔟 텐배거 데일리 코칭 ({today_str})",
+                "━" * 28,
+            ]
+
+            if no_buy_reasons:
+                msg_lines.append("\n⚠️ 오늘 시장 주의:")
+                for r in no_buy_reasons:
+                    msg_lines.append(f"  {r}")
+
+            if buy_today:
+                msg_lines.append(f"\n✅ 매수 가능 ({len(buy_today)}종목):")
+                msg_lines.extend(buy_today)
+            else:
+                msg_lines.append("\n🚫 오늘 한국 신규 매수 없음")
+                if not no_buy_reasons and not wait_today:
+                    msg_lines.append("  → 전종목 보유 or 가격 확인 불가")
+
+            if wait_today:
+                msg_lines.append(f"\n⏸️ 대기 ({len(wait_today)}종목):")
+                msg_lines.extend(wait_today)
+
+            if us_coaching_lines:
+                msg_lines.append("\n🇺🇸 미국 텐배거 현황:")
+                msg_lines.extend(us_coaching_lines)
+
+            msg_lines.append("\n" + "━" * 28)
+            if buy_today and not no_buy_reasons:
+                msg_lines.append(
+                    f"💡 {len(buy_today)}종목 진입 OK. "
+                    "시초가 안정 확인 후 분할 매수하세요."
+                )
+            elif no_buy_reasons:
+                msg_lines.append("🛑 시장 불안정 — 오늘은 관망. 내일 다시 판단.")
+            else:
+                msg_lines.append("📋 신규 진입 대상 없음. 기존 모니터링 유지.")
+
+            admin_id = self._get_admin_chat_id()
+            if admin_id:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text="\n".join(msg_lines)[:4000],
+                )
+
+            self.db.upsert_job_run(
+                "tenbagger_daily_coaching", today_str,
+                status="success",
+                message=f"매수OK {len(buy_today)}, 대기 {len(wait_today)}",
+            )
+
+        except Exception as e:
+            logger.error("job_tenbagger_daily_coaching failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "tenbagger_daily_coaching", today_str,
                 status="error", message=str(e)[:100],
             )

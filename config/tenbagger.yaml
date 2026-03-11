@@ -1,0 +1,666 @@
+# K-Quant Tenbagger Manager Configuration v2.0
+# 4개 AI 합의 + 실전 투자 메모 최종판 반영
+# 2026.03.10 기준 — 등급 체계(A/B/C) + 포트폴리오 구조 적용
+#
+# 등급 기준:
+#   A — 10배 경로가 살아 있고, 12~18개월 확인지표 분명 (포지션 8~10%)
+#   B — 좋은 사업이지만 10배보다 3~5배 확률이 더 높음 (포지션 4~6%)
+#   C — 이벤트/옵션 베팅. 맞으면 크지만 틀리면 오래 고생 (포지션 1~3%)
+#
+# 포트폴리오 구조: 코어(45%) / 구조적성장(35%) / 옵션(20%)
+# 지역 배분: 미국 60% / 한국 40%
+
+version: "2.0"
+description: "텐배거 매니저 유니버스 & 스코어링 설정 (최종판)"
+
+# ── 등급 정의 ──────────────────────────────────────────────────
+grades:
+  A:
+    label: "코어 텐배거"
+    position_min_pct: 8
+    position_max_pct: 10
+    description: "10배 경로 + 12~18개월 확인지표 분명"
+  B:
+    label: "구조적 성장"
+    position_min_pct: 4
+    position_max_pct: 6
+    description: "좋은 사업이지만 3~5배 확률이 더 높음"
+  C:
+    label: "옵션 베팅"
+    position_min_pct: 1
+    position_max_pct: 3
+    description: "맞으면 크지만 틀리면 오래 고생"
+
+# ── 포트폴리오 구조 ────────────────────────────────────────────
+portfolio_structure:
+  core_pct: 45          # 코어 텐배거 (A등급)
+  structural_pct: 35    # 구조적 성장 (B등급)
+  option_pct: 20        # 옵션 (C등급)
+  region_us_pct: 60     # 미국 비중
+  region_kr_pct: 40     # 한국 비중
+
+# ── 8 핵심 섹터 ──────────────────────────────────────────────
+sectors:
+  nuclear_smr:
+    name: "원전/SMR"
+    emoji: "☢️"
+    policy_keywords: ["SMR", "원전", "nuclear", "소형모듈원자로", "탈탄소", "우라늄", "HALEU"]
+    tailwind_score: 95
+
+  quantum:
+    name: "양자컴퓨팅/보안"
+    emoji: "🔬"
+    policy_keywords: ["quantum", "양자", "큐비트", "양자컴퓨팅", "양자암호", "PQC", "PUF"]
+    tailwind_score: 80
+
+  optical_ai_infra:
+    name: "광학/AI인프라"
+    emoji: "💡"
+    policy_keywords: ["optical", "광학", "AI반도체", "데이터센터", "HBM", "CPO", "광모듈", "광통신", "광트랜시버", "광케이블", "BEAD", "1.6T"]
+    tailwind_score: 90
+
+  blockchain_stablecoin:
+    name: "스테이블코인/블록체인"
+    emoji: "🪙"
+    policy_keywords: ["stablecoin", "blockchain", "CBDC", "RWA", "토큰화", "수탁", "커스터디"]
+    tailwind_score: 70
+
+  space_defense:
+    name: "우주/방산/6G"
+    emoji: "🛰️"
+    policy_keywords: ["우주", "space", "방산", "6G", "위성통신", "defense", "LEO"]
+    tailwind_score: 85
+
+  robotics:
+    name: "로봇/피지컬AI"
+    emoji: "🤖"
+    policy_keywords: ["로봇", "humanoid", "robot", "자동화", "협동로봇", "피지컬AI", "팔레타이징"]
+    tailwind_score: 85
+
+  clean_energy:
+    name: "2차전지/클린에너지"
+    emoji: "🔋"
+    policy_keywords: ["풍력", "태양광", "그린수소", "ESS", "청정에너지", "풍력타워"]
+    tailwind_score: 75
+
+  cross_sector:
+    name: "크로스섹터"
+    emoji: "🔗"
+    policy_keywords: []
+    tailwind_score: 60
+
+# ── 한국 텐배거 유니버스 (13종목) ────────────────────────────────
+# v2.1 (2026.03.11) — 광통신/우주항공 섹터 신규 편입
+# 순위: 우진 > BHI > 인텔리안 > 일진파워 > 비츠로셀 > 이노스페이스 > 대한광통신 > 오이솔루션 > 에스피지 > ICTK > 컨텍 > 빛과전자 > 켄코아에어로
+# 교체: 오르비텍(적자+희석) → 대한광통신, 씨메스(적자확대) → 빛과전자, 씨에스윈드(섹터약세) → 켄코아에어로
+korea_universe:
+  # ── A등급: 코어 텐배거 ──
+  - code: "105840"
+    name: "우진"
+    sector: "nuclear_smr"
+    market: "KOSPI"
+    grade: "A"
+    rank: 1
+    tier: "core"
+    character: "원전 코어 — 한국형 원전 4대 핵심계측기 독점, 반복매출형"
+    catalysts:
+      - "한수원 88억원 계측기 수주 (2026.02)"
+      - "ICI 102.9억원 수주 (2025.11)"
+      - "가동원전 반복 교체매출 누적"
+      - "체코/폴란드 수출 I&C"
+    kill_conditions:
+      - "ICI/계측기 반복 수주 2~3분기 연속 약화"
+      - "원전 이용률 상승에도 교체수요 실적 미반영"
+      - "i-SMR 기대만 있고 본업 매출 정체"
+    monitor_12m:
+      - "한수원 반복 수주 규모"
+      - "이용률/계속운전 진행상황"
+      - "25년 연간 실적 (3/12 발표)"
+    ai_consensus: 92
+
+  - code: "083650"
+    name: "비에이치아이"
+    sector: "nuclear_smr"
+    market: "KOSDAQ"
+    grade: "A"
+    rank: 2
+    tier: "core"
+    character: "원전 성장 — 실적이 이미 숫자로 증명된 원전+LNG 하이브리드"
+    catalysts:
+      - "25년 매출 7,716억 / 영업이익 733억 (사상 최대)"
+      - "25년 신규 수주 1.8조원"
+      - "26년 전망 매출 9,523억 / 영업이익 1,095억"
+      - "체코 원전 보조기기 / CASK"
+    kill_conditions:
+      - "연간 신규 수주 1조 미달"
+      - "LNG/HRSG 수주 급감"
+      - "원전 프리미엄 미발생"
+    monitor_12m:
+      - "신규 수주 1조 이상 유지"
+      - "체코/국내 원전 발주 진행"
+      - "분기 영업이익률 추이"
+    ai_consensus: 88
+
+  - code: "189300"
+    name: "인텔리안테크"
+    sector: "space_defense"
+    market: "KOSDAQ"
+    grade: "A"
+    rank: 3
+    tier: "core"
+    character: "우주통신 성장 — LEO 매출이 실제 숫자로 보이기 시작"
+    catalysts:
+      - "25년 매출 3,196억 / 영업이익 120억 (흑자전환)"
+      - "4Q 매출 1,243억 / 영업이익 198억 (역대 최고)"
+      - "26년 전망 4,179억 / 395억"
+      - "게이트웨이 안테나 + LEO 수요"
+    kill_conditions:
+      - "게이트웨이/ESA 매출 분기 감소 전환"
+      - "특정 고객/프로그램 지연"
+      - "LEO 안테나 시장 경쟁 급격화"
+    monitor_12m:
+      - "Gateway/ESA 매출 비중"
+      - "신규 LEO 고객 확대"
+      - "분기 영업이익률 개선 추이"
+    ai_consensus: 85
+
+  - code: "094820"
+    name: "일진파워"
+    sector: "nuclear_smr"
+    market: "KOSDAQ"
+    grade: "A"
+    rank: 4
+    tier: "core"
+    character: "원전 운영/정비 — SMR이 늦어져도 돈 버는 운영 레이어"
+    catalysts:
+      - "한빛 3·4호기 기전설비 정비 199.8억원"
+      - "25년 매출 2,520억(+30.5%) / 영업이익 253억(+146.5%)"
+      - "원자력+발전 경상정비 확대"
+    kill_conditions:
+      - "정비 수주 2분기 연속 감소"
+      - "발전소 이용률 하락"
+      - "신규 원전 지연이 정비 수요까지 영향"
+    monitor_12m:
+      - "한수원 반복 수주 규모"
+      - "이용률/계속운전"
+      - "분기별 정비매출 추이"
+    ai_consensus: 82
+
+  - code: "082920"
+    name: "비츠로셀"
+    sector: "space_defense"
+    market: "KOSDAQ"
+    grade: "A"
+    rank: 5
+    tier: "core"
+    character: "방산/에너지 — 고마진 특수배터리 현금창출주"
+    catalysts:
+      - "25년 매출 2,431억 / 영업이익 697억 (역대 최대)"
+      - "앰플·열전지·고온전지 매출 증가"
+      - "방산/에너지 전방환경 유지"
+    kill_conditions:
+      - "방산 예산 축소 / 수출 감소"
+      - "영업이익률 25% 하회"
+      - "경쟁사 진입으로 시장점유율 하락"
+    monitor_12m:
+      - "수출 확대 실적"
+      - "사업 영역 확장"
+      - "분기 영업이익률 추이"
+    ai_consensus: 80
+
+  - code: "462350"
+    name: "이노스페이스"
+    sector: "space_defense"
+    market: "KOSDAQ"
+    grade: "A"
+    rank: 6
+    tier: "core"
+    character: "민간 발사체 유일주 — 26E 흑자전환, 글로벌 발사장 6곳 확보"
+    catalysts:
+      - "26E 매출 925억(+116%) / 영업이익 158억 (흑자전환)"
+      - "글로벌 발사장 6곳 (브라질/호주2/포르투갈/노르웨이/캐나다)"
+      - "KASA 우주수송 예산 2,662억 직접 수혜"
+      - "누리호 5차 발사 (2026.05~06)"
+    kill_conditions:
+      - "2차 발사 실패 (2026 하반기)"
+      - "흑자전환 2분기 이상 지연"
+      - "발사 시장 경쟁 급격화 (SpaceX 소형발사체)"
+    monitor_12m:
+      - "2차 발사 성공 여부"
+      - "흑자전환 확인"
+      - "신규 발사 계약 체결"
+    ai_consensus: 74
+
+  # ── B등급: 구조적 성장 ──
+  - code: "010170"
+    name: "대한광통신"
+    sector: "optical_ai_infra"
+    market: "KOSDAQ"
+    grade: "B"
+    rank: 7
+    tier: "structural"
+    character: "광케이블 독점 — 국내 유일 광섬유 일관생산, 흑자전환 임박"
+    catalysts:
+      - "26E 매출 2,251억 / 영업이익 159억 (흑자전환)"
+      - "미국 BEAD $425억 광케이블 인프라 수혜"
+      - "미국 빅테크 864 Fiber 1차 수주 54억"
+      - "외인+기관 동반 매집, 3/10 상한가"
+    kill_conditions:
+      - "흑자전환 2분기 이상 지연"
+      - "유상증자 추가 발행"
+      - "미국 관세로 수출 차질"
+    monitor_12m:
+      - "분기 흑자전환 확인"
+      - "미국 수주 확대"
+      - "유상증자 오버행 해소"
+    ai_consensus: 74
+
+  - code: "138080"
+    name: "오이솔루션"
+    sector: "optical_ai_infra"
+    market: "KOSDAQ"
+    grade: "B"
+    rank: 8
+    tier: "structural"
+    character: "광트랜시버 국내 1위 — 에릭슨 벤더 등록, Datacom 전환 옵션"
+    catalysts:
+      - "국내 광트랜시버 시장점유율 1위 (수직계열화)"
+      - "에릭슨 공식 벤더 등록 (2025)"
+      - "25년 3Q 누적 매출 +87.7%"
+      - "레이저칩 사업 확장 옵션"
+    kill_conditions:
+      - "에릭슨/일본향 수주 2분기 연속 감소"
+      - "Datacom 전환 지연"
+      - "적자 확대 지속"
+    monitor_12m:
+      - "에릭슨 벤더 물량 확인"
+      - "Datacom 전환 매출"
+      - "적자축소/흑자전환 확인"
+    ai_consensus: 79
+
+  - code: "058610"
+    name: "에스피지"
+    sector: "robotics"
+    market: "KOSDAQ"
+    grade: "B"
+    rank: 7
+    tier: "structural"
+    character: "로봇 부품 — 좋은 부품주이지만 아직 실적 폭발 미확인"
+    catalysts:
+      - "25년 영업이익 179억(+45.4%)"
+      - "26년 전망 매출 4,186억 / 영업이익 271억"
+      - "감속기 국산화 / RV감속기"
+    kill_conditions:
+      - "감속기 매출 비중 정체"
+      - "로봇 시장 성장 둔화"
+      - "일본 경쟁사 가격 압박"
+    monitor_12m:
+      - "로봇 감속기 매출 폭발 여부"
+      - "분기별 수주 추이"
+      - "글로벌 로봇 시장 성장률"
+    ai_consensus: 75
+
+  - code: "456010"
+    name: "ICTK"
+    sector: "quantum"
+    market: "KOSDAQ"
+    grade: "B"
+    rank: 8
+    tier: "structural"
+    character: "양자보안 — 한국 양자에서 가장 현실적인 상용화 축"
+    catalysts:
+      - "MWC 2026 PQC+PUF 양자보안 칩 공개"
+      - "국내 통신사 PQC KMS 솔루션 개발 완료"
+      - "하드웨어 신뢰점(Root of Trust) 아키텍처"
+    kill_conditions:
+      - "상용 계약 12개월 내 미확보"
+      - "PQC 마이그레이션 시장 지연"
+      - "경쟁사 소프트웨어 솔루션에 밀림"
+    monitor_12m:
+      - "실제 상용 계약"
+      - "통신/배터리 고객 확대"
+      - "PQC가 테마→출하로 전환되는지"
+    ai_consensus: 70
+
+  - code: "451760"
+    name: "컨텍"
+    sector: "space_defense"
+    market: "KOSDAQ"
+    grade: "B"
+    rank: 11
+    tier: "structural"
+    character: "위성 지상국 유일주 — 풀밸류체인 + GSaaS 반복수익"
+    catalysts:
+      - "국내 유일 상용 민간 우주 지상국"
+      - "항우연 2026년 위성 지상시스템 수주"
+      - "25년 3Q 누적 매출 +96%"
+      - "스페이스X/아마존/SSC 파트너"
+    kill_conditions:
+      - "적자 확대 3분기 이상 지속"
+      - "지상국 계약 미확보"
+      - "AP위성 인수 시너지 미발현"
+    monitor_12m:
+      - "GSaaS 반복수익 확인"
+      - "흑자전환 확인 (26E)"
+      - "신규 지상국 고객 확대"
+    ai_consensus: 64
+
+  # ── C등급: 옵션 베팅 ──
+  - code: "069540"
+    name: "빛과전자"
+    sector: "optical_ai_infra"
+    market: "KOSDAQ"
+    grade: "C"
+    rank: 12
+    tier: "option"
+    character: "1.6T 광트랜시버 옵션 — 외인 43% 매집, 저가 비대칭 베팅"
+    catalysts:
+      - "1.6T급 광트랜시버 풀라인업 구축 완료"
+      - "AI 데이터센터 양산 본격화"
+      - "외국인 지분율 43%"
+      - "25년 3Q 매출 +97.6%"
+    kill_conditions:
+      - "1.6T 양산 고객 확보 실패"
+      - "적자 확대 3분기 이상 지속"
+      - "외국인 매도 전환"
+    monitor_12m:
+      - "1.6T 양산 매출 확인"
+      - "적자축소/흑자전환"
+      - "외국인 보유비중 변화"
+    ai_consensus: 79
+
+  - code: "274090"
+    name: "켄코아에어로"
+    sector: "space_defense"
+    market: "KOSDAQ"
+    grade: "C"
+    rank: 13
+    tier: "option"
+    character: "NASA/SpaceX 벤더 옵션 — 국내 유일 미국 우주 공급망 진입"
+    catalysts:
+      - "NASA/스페이스X/보잉/록히드마틴 벤더"
+      - "미국 조지아주 생산기지 보유"
+      - "방산+드론+UAM 복합 테마"
+      - "고점 -33% 조정 구간 (3/19 실적발표)"
+    kill_conditions:
+      - "적자 2분기 이상 확대"
+      - "미국 수출 차질 (관세/규제)"
+      - "방산 수주 급감"
+    monitor_12m:
+      - "미국향 매출 비중"
+      - "적자축소/흑자전환"
+      - "신규 수주 확대"
+    ai_consensus: 75
+
+# ── 미국 텐배거 유니버스 (10종목) ──────────────────────────────
+# 순위: LEU > DNN > NXE > BTGO > CRDO > CRCL > IONQ > MDA > SMR > QBTS
+us_universe:
+  # ── A등급: 코어 텐배거 ──
+  - ticker: "LEU"
+    name: "Centrus Energy"
+    sector: "nuclear_smr"
+    grade: "A"
+    rank: 1
+    tier: "core"
+    character: "원자력 연료 코어 — 미국 원전에서 가장 직접적인 병목 수혜"
+    catalysts:
+      - "25년 매출 $4.487억 / 순이익 $7,780만"
+      - "미국 최초 HALEU 1톤+ 생산"
+      - "DOE 향후 10년 $27억 농축 지원"
+      - "2035년 미국 HALEU 수요 연 50톤"
+    kill_conditions:
+      - "DOE 과업 체결 지연/취소"
+      - "Orano/Urenco HALEU 조기 양산"
+      - "HALEU 독점 지위 상실"
+    monitor_12m:
+      - "HALEU 생산량 / DOE 과업 진척"
+      - "Orano Project IKE / Urenco LEU+ 일정"
+      - "병목 해소 여부"
+    ai_consensus: 95
+
+  - ticker: "DNN"
+    name: "Denison Mines"
+    sector: "nuclear_smr"
+    grade: "A"
+    rank: 2
+    tier: "core"
+    character: "우라늄 개발 — 이야기에서 건설 단계로 넘어감"
+    catalysts:
+      - "2026.02 Phoenix ISR FID 확정"
+      - "2026.03 건설 착공"
+      - "ISR 공법 저비용"
+      - "우라늄 가격 상승"
+    kill_conditions:
+      - "건설 일정 1년 이상 지연"
+      - "자본조달 실패"
+      - "ISR 공법 기술적 문제"
+    monitor_12m:
+      - "실제 공사 착공 및 공정 일정"
+      - "자본조달 진행"
+      - "우라늄 현물가 추이"
+    ai_consensus: 85
+
+  - ticker: "NXE"
+    name: "NexGen Energy"
+    sector: "nuclear_smr"
+    grade: "A"
+    rank: 3
+    tier: "core"
+    character: "우라늄 개발 — 승인·현금·대형 자원 삼박자"
+    catalysts:
+      - "2026.03.05 CNSC 최종 건설 승인"
+      - "역대급 고품위 광산 (Rook I)"
+      - "2028 생산 시작 목표"
+    kill_conditions:
+      - "건설 원가 2배 이상 초과"
+      - "환경/지역사회 반대로 지연"
+      - "우라늄 가격 $60 이하 장기 체류"
+    monitor_12m:
+      - "실제 공사 착공 진행"
+      - "자본조달 확보"
+      - "공정 일정 준수"
+    ai_consensus: 83
+
+  - ticker: "BTGO"
+    name: "BitGo"
+    sector: "blockchain_stablecoin"
+    grade: "A"
+    rank: 4
+    tier: "core"
+    character: "커스터디 인프라 — 디지털자산의 새 증권예탁결제원"
+    catalysts:
+      - "2026.01 IPO $2.128억 조달"
+      - "25년 9개월 순이익 $3,530만"
+      - "OCC 승인 신탁은행 전국 확장"
+      - "현재가 $11.14 (IPO $18 하회 — 비대칭)"
+    kill_conditions:
+      - "순이익 적자전환"
+      - "크립토 규제 역행"
+      - "기관 고객 이탈"
+    monitor_12m:
+      - "매출 믹스 변화"
+      - "순이익 유지"
+      - "기관 고객 확대 (인프라장 확인)"
+    ai_consensus: 84
+
+  # ── B등급: 구조적 성장 ──
+  - ticker: "CRDO"
+    name: "Credo Technology"
+    sector: "optical_ai_infra"
+    grade: "B"
+    rank: 5
+    tier: "structural"
+    character: "AI 연결 인프라 — 훌륭한 사업이지만 이제는 품질주"
+    catalysts:
+      - "FY26 3Q 매출 $4.07억 (+201.5% YoY)"
+      - "비GAAP 총마진 68.6%"
+      - "현금 $13억"
+      - "800G/1.6T 전환"
+    kill_conditions:
+      - "하이퍼스케일러 CAPEX 감소"
+      - "고객 집중도 리스크 현실화"
+      - "AI 인프라 피크아웃"
+    monitor_12m:
+      - "하이퍼스케일러 CAPEX 지속"
+      - "고객 집중도 변화"
+      - "AI 인프라 피크아웃 리스크"
+    ai_consensus: 80
+
+  - ticker: "CRCL"
+    name: "Circle"
+    sector: "blockchain_stablecoin"
+    grade: "B"
+    rank: 6
+    tier: "structural"
+    character: "스테이블코인 인프라 — 구조적 성장주지만 금리 민감"
+    catalysts:
+      - "USDC 유통량 $753억"
+      - "4Q 온체인 거래량 $11.9조"
+      - "4Q 매출+리저브수익 $7.70억"
+      - "스테이블코인 법안"
+    kill_conditions:
+      - "금리 급락으로 리저브 수익 감소"
+      - "USDC 점유율 하락"
+      - "규제 역풍"
+    monitor_12m:
+      - "금리 환경 변화"
+      - "USDC 유통량 추이"
+      - "제도화 진행 속도"
+    ai_consensus: 78
+
+  - ticker: "IONQ"
+    name: "IonQ"
+    sector: "quantum"
+    grade: "B"
+    rank: 7
+    tier: "structural"
+    character: "양자 대표주 — 여전히 선두지만 이미 너무 커졌다"
+    catalysts:
+      - "25년 매출 $1.30억 (+202%)"
+      - "현금+투자자산 $33억"
+      - "이온트랩 리더"
+      - "미 국방부 계약"
+    kill_conditions:
+      - "상용 매출 비중 정체"
+      - "경쟁사(IBM/Google) 기술 격차 축소"
+      - "시총 $182억 대비 매출 성장 둔화"
+    monitor_12m:
+      - "계약잔고 / 상용 매출 비중"
+      - "정부 의존도 변화"
+      - "양자 겨울 생존력"
+    ai_consensus: 76
+
+  - ticker: "MDA"
+    name: "MDA Space"
+    sector: "space_defense"
+    grade: "B"
+    rank: 8
+    tier: "structural"
+    character: "우주 인프라 — 실적형 우주주지만 10배보단 3~5배형"
+    catalysts:
+      - "25년 매출 $16.33억"
+      - "백로그 $40억"
+      - "SDA Tranche 2"
+    kill_conditions:
+      - "백로그 감소 전환"
+      - "우주 예산 축소"
+      - "경쟁 심화로 마진 압박"
+    monitor_12m:
+      - "신규 수주 / 백로그 추이"
+      - "우주 예산 방향"
+      - "마진 추이"
+    ai_consensus: 74
+
+  # ── C등급: 옵션 베팅 ──
+  - ticker: "SMR"
+    name: "NuScale Power"
+    sector: "nuclear_smr"
+    grade: "C"
+    rank: 9
+    tier: "option"
+    character: "SMR 옵션 — 살아남을 현금은 있지만 아직 옵션주"
+    catalysts:
+      - "연말 현금 ~$13억"
+      - "유일한 NRC 승인 SMR 설계"
+    kill_conditions:
+      - "고객사 계약 추가 취소"
+      - "현금 소진 가속화"
+      - "경쟁 SMR 설계사 NRC 승인"
+    monitor_12m:
+      - "신규 고객 계약"
+      - "현금 소진 속도"
+      - "SMR 시장 일정"
+    ai_consensus: 62
+
+  - ticker: "QBTS"
+    name: "D-Wave Quantum"
+    sector: "quantum"
+    grade: "C"
+    rank: 10
+    tier: "option"
+    character: "양자 옵션 — QUBT보다 나은 고위험 양자 선택지"
+    catalysts:
+      - "25년 매출 $2,460만 (+179%)"
+      - "실제 매출과 고객 보유"
+      - "양자 어닐링 상용화"
+    kill_conditions:
+      - "매출 성장 둔화"
+      - "현금 소진"
+      - "양자 겨울 장기화"
+    monitor_12m:
+      - "계약잔고 / 상용 매출 비중"
+      - "정부 의존도"
+      - "양자 겨울 생존력"
+    ai_consensus: 60
+
+# ── 제거/하향 종목 (참고용) ────────────────────────────────────
+excluded:
+  - { ticker: "UEC", reason: "DNN/NXE로 대체 — 개발 프로젝트 진척도 약함" }
+  - { ticker: "QUBT", reason: "매출 체급 너무 작고 검증 부족 (4Q $19.8만)" }
+  - { ticker: "ASTS", reason: "좋은 스토리지만 체급과 적자 규모 과대" }
+  - { name: "갤럭시아머니트리", reason: "제도화 속도 의존도 과대" }
+  - { code: "046120", name: "오르비텍", reason: "적자 지속 + 유상증자 리스크 → 대한광통신으로 대체 (v2.1)" }
+  - { code: "475400", name: "씨메스", reason: "적자 확대 + 반복수주 미확보 → 빛과전자로 대체 (v2.1)" }
+  - { code: "112610", name: "씨에스윈드", reason: "풍력 섹터 모멘텀 최악 → 켄코아에어로로 대체 (v2.1)" }
+
+# ── 스코어링 가중치 ──────────────────────────────────────────
+scoring_weights:
+  tam_growth: 0.20
+  policy_tailwind: 0.20
+  technology_moat: 0.15
+  revenue_trajectory: 0.15
+  institutional_discovery: 0.10
+  sector_momentum: 0.10
+  ai_consensus: 0.10
+
+# ── 임계값 ────────────────────────────────────────────────────
+thresholds:
+  stop_loss_pct: -25
+  target_1_pct: 100       # 2배
+  target_2_pct: 500       # 6배
+  target_3_pct: 900       # 10배 (텐배거!)
+
+  max_market_cap_krw: 5000000000000   # 5조원
+  max_market_cap_usd: 5000000000      # $5B
+  min_revenue_growth_pct: 30
+  min_tenbagger_score: 60
+
+# ── 모니터링 설정 ─────────────────────────────────────────────
+monitoring:
+  price_alert_pct: 5
+  catalyst_check_days: 7
+  rescore_day: "sunday"
+  sector_review_day: 1
+
+# ── 투자 판단 기준 (4가지) ────────────────────────────────────
+investment_criteria:
+  - "10배 경로가 실적으로 이어질 수 있는가"
+  - "앞으로 12~18개월 안에 확인할 숫자가 있는가"
+  - "가설이 틀렸을 때 빨리 인정할 수 있는가"
+  - "지금 가격대에서 아직 비대칭이 남아 있는가"
+
+# ── 한 줄 결론 ────────────────────────────────────────────────
+# 한국 총알 하나: 우진 — 가장 작은 독점 + 가장 반복적인 매출 구조
+# 미국 총알 하나: LEU — 원전 르네상스의 진짜 병목(HALEU/농축)이 아직 안 풀림
+# 100배 옵션(한): 씨메스 — 피지컬AI 초기, 적자 확대지만 방향성
+# 100배 옵션(미): QBTS — QUBT보다 매출/고객 있는 양자 옵션

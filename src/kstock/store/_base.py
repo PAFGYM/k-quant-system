@@ -1406,6 +1406,71 @@ CREATE TABLE IF NOT EXISTS daily_synthesis (
     created_at      TEXT    DEFAULT (datetime('now')),
     UNIQUE(date)
 );
+
+-- v12.0: 텐배거 매니저 시스템
+
+CREATE TABLE IF NOT EXISTS tenbagger_universe (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker          TEXT    NOT NULL,
+    name            TEXT    NOT NULL,
+    market          TEXT    DEFAULT 'KRX',
+    sector          TEXT    NOT NULL,
+    tenbagger_score REAL    DEFAULT 0,
+    tam_score       REAL    DEFAULT 0,
+    policy_score    REAL    DEFAULT 0,
+    moat_score      REAL    DEFAULT 0,
+    revenue_score   REAL    DEFAULT 0,
+    discovery_score REAL    DEFAULT 0,
+    momentum_score  REAL    DEFAULT 0,
+    consensus_score REAL    DEFAULT 0,
+    ai_consensus    TEXT    DEFAULT '{}',
+    status          TEXT    DEFAULT 'active',
+    entry_price     REAL    DEFAULT 0,
+    current_price   REAL    DEFAULT 0,
+    current_return  REAL    DEFAULT 0,
+    notes           TEXT    DEFAULT '',
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL,
+    UNIQUE(ticker, market)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenbagger_universe_sector
+    ON tenbagger_universe(sector);
+CREATE INDEX IF NOT EXISTS idx_tenbagger_universe_score
+    ON tenbagger_universe(tenbagger_score DESC);
+
+CREATE TABLE IF NOT EXISTS tenbagger_catalyst (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker          TEXT    NOT NULL,
+    catalyst_type   TEXT    NOT NULL,
+    description     TEXT    NOT NULL,
+    expected_date   TEXT    DEFAULT '',
+    status          TEXT    DEFAULT 'pending',
+    impact_score    REAL    DEFAULT 50,
+    triggered_at    TEXT    DEFAULT '',
+    created_at      TEXT    NOT NULL,
+    updated_at      TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenbagger_catalyst_ticker
+    ON tenbagger_catalyst(ticker);
+
+CREATE TABLE IF NOT EXISTS tenbagger_score_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker          TEXT    NOT NULL,
+    score_date      TEXT    NOT NULL,
+    tenbagger_score REAL    DEFAULT 0,
+    tam_score       REAL    DEFAULT 0,
+    policy_score    REAL    DEFAULT 0,
+    moat_score      REAL    DEFAULT 0,
+    revenue_score   REAL    DEFAULT 0,
+    discovery_score REAL    DEFAULT 0,
+    momentum_score  REAL    DEFAULT 0,
+    consensus_score REAL    DEFAULT 0,
+    price_at_score  REAL    DEFAULT 0,
+    created_at      TEXT    NOT NULL,
+    UNIQUE(ticker, score_date)
+);
 """
 
 

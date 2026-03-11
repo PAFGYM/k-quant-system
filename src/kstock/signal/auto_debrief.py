@@ -165,7 +165,8 @@ async def generate_ai_review(
             past_context = f"\n과거 반복 실수: {', '.join(past_mistakes[:5])}"
 
     horizon_kr = {
-        "scalp": "초단타", "swing": "스윙", "position": "포지션", "long_term": "장기",
+        "scalp": "초단타", "swing": "스윙", "position": "포지션",
+        "long_term": "장기", "tenbagger": "텐배거",
     }.get(horizon, horizon)
 
     prompt = f"""매매 복기를 분석해주세요.

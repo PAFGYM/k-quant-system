@@ -4,6 +4,7 @@ from __future__ import annotations
 from kstock.bot.bot_imports import *  # noqa: F403
 
 import asyncio
+import httpx
 import re
 import time
 import traceback
@@ -80,7 +81,41 @@ class RemoteClaudeMixin:
 
     대화 모드: 💻 클로드 메뉴 → 연속 대화 (--continue) → 🔙 대화 종료
     단발 모드: 클코 <명령> 접두사로 한 번 실행
+    클대표 리모콘: 텔레그램에서 Claude Code CLI 완전 제어
     """
+
+    # ── 클대표 리모콘 퀵 액션 (v11.0) ────────────────────────────
+    _CEO_ACTIONS: dict[str, dict] = {
+        "git_status": {
+            "label": "📋 Git Status",
+            "bash": "cd /Users/botddol/k-quant-system && git status && echo '---' && git log --oneline -5",
+        },
+        "git_diff": {
+            "label": "📝 Git Diff",
+            "bash": "cd /Users/botddol/k-quant-system && git diff --stat && echo '---' && git diff | head -100",
+        },
+        "commit": {
+            "label": "💾 커밋",
+            "cli": "변경사항을 확인하고 적절한 커밋 메시지로 커밋해줘. git status로 확인 후 진행.",
+            "turns": 5,
+        },
+        "push": {
+            "label": "🔀 푸시",
+            "bash": "cd /Users/botddol/k-quant-system && git push origin main 2>&1",
+        },
+        "test": {
+            "label": "🧪 테스트",
+            "bash": "cd /Users/botddol/k-quant-system && PYTHONPATH=src python3 -m pytest tests/ -x -q --tb=short 2>&1 | tail -30",
+        },
+        "logs": {
+            "label": "📊 에러로그",
+            "bash": "grep -iE '(error|exception|traceback|critical)' /tmp/kquant_bot.log | tail -20",
+        },
+        "restart": {"label": "🔄 봇재시작", "special": "restart"},
+        "system": {"label": "📦 시스템상태", "special": "stats"},
+        "dashboard": {"label": "🏠 대시보드", "special": "dashboard"},
+        "continue": {"label": "🔄 이어서", "special": "continue"},
+    }
 
     def _is_authorized_chat(self, update: Update) -> bool:
         """Verify the message comes from the authorized CHAT_ID."""
@@ -143,7 +178,7 @@ class RemoteClaudeMixin:
                 "--output-format", "text",
                 "--dangerously-skip-permissions",
                 "--model", model,
-                "--max-turns", "10",
+                "--max-turns", "25",
             ]
             if continue_conversation:
                 cmd.append("--continue")
@@ -282,6 +317,11 @@ class RemoteClaudeMixin:
         context.user_data["claude_chat_history"] = []
         context.user_data["claude_turn"] = 0
 
+        # v11.0: 클대표 → 리모콘 대시보드
+        if payload == "daepyo":
+            await self._ceo_dashboard(query)
+            return
+
         await safe_edit_or_reply(query,
             f"{tier['emoji']} {tier['name']} 모드 활성화\n"
             f"{'━' * 22}\n\n"
@@ -290,6 +330,245 @@ class RemoteClaudeMixin:
             f"모드 전환: 💻 클로드 다시 누르기\n"
             f"종료: 다른 메뉴 버튼"
         )
+
+    # ── 클대표 리모콘 메서드 (v11.0) ────────────────────────────
+
+    async def _ceo_dashboard(self, target) -> None:
+        """🧠 클대표 리모콘 대시보드 — 퀵 액션 버튼 표시.
+
+        target: CallbackQuery 또는 Update (둘 다 호환).
+        """
+        buttons = [
+            [
+                InlineKeyboardButton("📋 Git Status", callback_data="ceo:git_status"),
+                InlineKeyboardButton("📝 Git Diff", callback_data="ceo:git_diff"),
+            ],
+            [
+                InlineKeyboardButton("💾 커밋", callback_data="ceo:commit"),
+                InlineKeyboardButton("🔀 푸시", callback_data="ceo:push"),
+            ],
+            [
+                InlineKeyboardButton("🧪 테스트", callback_data="ceo:test"),
+                InlineKeyboardButton("📊 에러로그", callback_data="ceo:logs"),
+            ],
+            [
+                InlineKeyboardButton("🔄 봇재시작", callback_data="ceo:restart"),
+                InlineKeyboardButton("📦 시스템상태", callback_data="ceo:system"),
+            ],
+        ]
+        text = (
+            "🧠 클대표 리모콘\n"
+            f"{'━' * 22}\n\n"
+            "Claude Code CLI 원격 제어\n\n"
+            "⚡ 퀵 액션 버튼 또는\n"
+            "자유 텍스트로 명령을 입력하세요.\n\n"
+            "💡 모든 입력이 Claude Code(Opus)로 전달됩니다."
+        )
+        markup = InlineKeyboardMarkup(buttons)
+        await safe_edit_or_reply(target, text, reply_markup=markup)
+
+    async def _action_ceo(self, query, context, payload: str = "") -> None:
+        """ceo:{action} 콜백 핸들러 — 퀵 액션 라우터."""
+        action = self._CEO_ACTIONS.get(payload)
+        if not action:
+            return
+
+        special = action.get("special")
+
+        # 특수 액션
+        if special == "dashboard":
+            await self._ceo_dashboard(query)
+            return
+        if special == "continue":
+            context.user_data["ceo_continue"] = True
+            await safe_edit_or_reply(query,
+                "🔄 이어서 모드\n\n"
+                "다음 메시지가 이전 Claude Code 대화를 이어갑니다.\n"
+                "명령을 입력하세요."
+            )
+            return
+        if special == "restart":
+            await safe_edit_or_reply(query,
+                "🔄 봇 재시작 중...\n잠시 후 자동으로 연결됩니다."
+            )
+            # 기존 ControlMixin의 재시작 로직 재사용
+            import sys
+            os.execv(sys.executable, [sys.executable, "-m", "kstock.app"])
+            return
+        if special == "stats":
+            # 기존 시스템 상태 정보 조합
+            try:
+                import psutil
+                mem = psutil.Process().memory_info().rss / 1024 / 1024
+                mem_text = f"메모리: {mem:.0f}MB"
+            except Exception:
+                mem_text = "메모리: (확인불가)"
+            try:
+                score_row = self.db.get_latest_system_score()
+                score_text = f"시스템 점수: {score_row.get('total_score', '?')}/100" if score_row else "시스템 점수: (없음)"
+            except Exception:
+                score_text = "시스템 점수: (없음)"
+            try:
+                cost = self.db.get_api_costs_summary()
+                cost_today = cost.get("today_cost", 0) if cost else 0
+                cost_text = f"오늘 API: ${cost_today:.3f}"
+            except Exception:
+                cost_text = "오늘 API: (확인불가)"
+            alert_mode = getattr(self, "_alert_mode", "normal")
+            pid = os.getpid()
+
+            buttons = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard")],
+            ])
+            await safe_edit_or_reply(query,
+                f"📦 시스템 상태\n"
+                f"{'━' * 22}\n\n"
+                f"🔧 PID: {pid}\n"
+                f"💾 {mem_text}\n"
+                f"📊 {score_text}\n"
+                f"💰 {cost_text}\n"
+                f"🚨 알림모드: {alert_mode}\n"
+                f"🕐 가동시간: {time.monotonic() / 3600:.1f}h",
+                reply_markup=buttons,
+            )
+            return
+
+        # Bash 직접 실행
+        bash_cmd = action.get("bash")
+        if bash_cmd:
+            await self._ceo_run_bash(query, bash_cmd, action["label"])
+            return
+
+        # Claude Code CLI 실행
+        cli_prompt = action.get("cli")
+        if cli_prompt:
+            turns = action.get("turns", 5)
+            await self._ceo_run_claude_via_callback(query, context, cli_prompt, turns)
+            return
+
+    async def _ceo_run_bash(self, query, cmd: str, label: str) -> None:
+        """Bash 명령 직접 실행 (빠르고 무료)."""
+        await safe_edit_or_reply(query, f"⏳ {label} 실행 중...")
+
+        try:
+            process = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=PROJECT_DIR,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=30,
+            )
+            output = stdout.decode("utf-8", errors="replace").strip()
+            errors = stderr.decode("utf-8", errors="replace").strip()
+            if errors and process.returncode != 0:
+                output = f"{output}\n\n[stderr]\n{errors}" if output else errors
+        except asyncio.TimeoutError:
+            output = "⏰ 30초 타임아웃"
+        except Exception as e:
+            output = f"❌ 실행 오류: {e}"
+
+        if not output:
+            output = "(출력 없음)"
+
+        # 출력 제한 (Telegram 메시지 한도)
+        if len(output) > 3500:
+            output = output[:1500] + "\n\n... (중략) ...\n\n" + output[-1500:]
+
+        status = "✅" if "오류" not in output and "타임아웃" not in output else "⚠️"
+        buttons = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard")],
+        ])
+
+        await query.message.reply_text(
+            f"{status} {label}\n"
+            f"{'─' * 20}\n\n"
+            f"{output}",
+            reply_markup=buttons,
+        )
+
+    async def _ceo_run_claude_via_callback(
+        self, query, context, prompt: str, turns: int = 5,
+    ) -> None:
+        """콜백에서 Claude Code CLI 실행 (커밋 등 복잡한 작업)."""
+        await safe_edit_or_reply(query, f"🧠 클대표 실행 중...\n📝 {prompt[:80]}")
+
+        placeholder = await query.message.reply_text(
+            "⏳ Claude Code(Opus) 실행 중..."
+        )
+
+        progress_task = asyncio.create_task(
+            self._ceo_progress_updater(placeholder, time.monotonic(), "클대표")
+        )
+
+        # 대화 이어가기 여부
+        turn = context.user_data.get("claude_turn", 0)
+        continue_conv = turn > 0
+        context.user_data["claude_turn"] = turn + 1
+
+        output, return_code, elapsed = await self._run_claude_cli(
+            prompt, continue_conversation=continue_conv, model="opus",
+        )
+
+        progress_task.cancel()
+
+        if not output:
+            output = "(출력 없음)"
+
+        status = "✅" if return_code == 0 else "⚠️"
+        header = f"💻 {status} ({elapsed:.0f}초)\n{'─' * 20}\n\n"
+        full = header + output
+
+        if len(full) > MAX_OUTPUT_CHARS:
+            full = (
+                f"{header}출력이 깁니다 ({len(output):,}자)\n\n"
+                f"[앞부분]\n{output[:3000]}\n\n"
+                f"... ({len(output) - 6000:,}자 생략) ...\n\n"
+                f"[뒷부분]\n{output[-3000:]}"
+            )
+
+        try:
+            await placeholder.delete()
+        except Exception:
+            pass
+
+        ceo_buttons = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔄 이어서", callback_data="ceo:continue"),
+                InlineKeyboardButton("💾 커밋", callback_data="ceo:commit"),
+            ],
+            [
+                InlineKeyboardButton("🔀 푸시", callback_data="ceo:push"),
+                InlineKeyboardButton("🔄 봇재시작", callback_data="ceo:restart"),
+            ],
+            [
+                InlineKeyboardButton("🧪 테스트", callback_data="ceo:test"),
+                InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard"),
+            ],
+        ])
+
+        chunks = self._split_message(full)
+        for i, chunk in enumerate(chunks):
+            rm = ceo_buttons if i == len(chunks) - 1 else None
+            await query.message.reply_text(chunk, reply_markup=rm)
+
+    async def _ceo_progress_updater(
+        self, message, start_time: float, tier_name: str,
+    ) -> None:
+        """30초마다 placeholder 메시지의 경과 시간을 업데이트."""
+        try:
+            while True:
+                await asyncio.sleep(30)
+                elapsed = int(time.monotonic() - start_time)
+                try:
+                    await message.edit_text(
+                        f"🧠 {tier_name} 실행 중... ⏱️ {elapsed}초"
+                    )
+                except Exception:
+                    pass  # 메시지 삭제됨 등
+        except asyncio.CancelledError:
+            pass
 
     async def _exit_claude_mode(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -371,8 +650,13 @@ class RemoteClaudeMixin:
                     "텍스트만으로 진행합니다.",
                 )
 
-        # 클대표: 작업 지시 → CLI subprocess (코드 수정, 시스템 제어)
-        if tier_key == "daepyo" and self._is_work_instruction(text):
+        # v11.0: 클대표 리모콘 — 모든 텍스트를 CLI로 전송
+        if tier_key == "daepyo":
+            # ceo_continue 플래그: "이어서" 버튼으로 설정됨
+            if context.user_data.pop("ceo_continue", False):
+                context.user_data["claude_turn"] = max(
+                    context.user_data.get("claude_turn", 0), 1
+                )
             await self._execute_claude_prompt(update, text, context=context)
             return
 
@@ -506,21 +790,34 @@ class RemoteClaudeMixin:
 
         tier_key = context.user_data.get("claude_tier", "") if context else ""
         tier_name = self._CLAUDE_TIERS.get(tier_key, {}).get("name", "Claude Code")
+        is_ceo = tier_key == "daepyo"
+
         placeholder = await update.message.reply_text(
             f"🧠 {tier_name} 실행 중...\n\n"
             f"📝 {prompt[:100]}{'...' if len(prompt) > 100 else ''}\n"
             f"⏳ 최대 {MAX_TIMEOUT // 60}분 소요될 수 있습니다."
         )
 
+        # v11.0: 진행 상황 업데이트 (30초마다)
+        progress_task = None
+        if is_ceo:
+            progress_task = asyncio.create_task(
+                self._ceo_progress_updater(placeholder, time.monotonic(), tier_name)
+            )
+
         # 첫 턴은 새 대화, 이후는 --continue
         continue_conv = in_claude_mode and turn > 0
         # v10.3.1: 클대표 모드 → opus CLI
         cli_model = "sonnet"
-        if context and context.user_data.get("claude_tier") == "daepyo":
+        if is_ceo:
             cli_model = "opus"
         output, return_code, elapsed = await self._run_claude_cli(
             prompt, continue_conversation=continue_conv, model=cli_model,
         )
+
+        # 진행 업데이트 태스크 취소
+        if progress_task:
+            progress_task.cancel()
 
         status = "✅" if return_code == 0 else "⚠️"
         header = (
@@ -532,9 +829,6 @@ class RemoteClaudeMixin:
             output = "(출력 없음)"
 
         full_output = header + output
-
-        # 대화 모드면 키보드 유지
-        reply_markup = get_reply_markup(context)
 
         if len(full_output) > MAX_OUTPUT_CHARS:
             summary = (
@@ -549,18 +843,37 @@ class RemoteClaudeMixin:
         else:
             chunks = self._split_message(full_output)
 
-        # placeholder 삭제하고 새 메시지로 응답 (키보드 유지를 위해)
+        # placeholder 삭제하고 새 메시지로 응답
         try:
             await placeholder.delete()
         except Exception:
             logger.debug("_execute_claude_prompt placeholder delete failed", exc_info=True)
 
-        for i, chunk in enumerate(chunks):
-            # 마지막 청크에 키보드 표시
-            rm = reply_markup if i == len(chunks) - 1 else None
-            await update.message.reply_text(chunk, reply_markup=rm)
+        # v11.0: 클대표 모드 → 후속 액션 버튼
+        if is_ceo:
+            ceo_buttons = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🔄 이어서", callback_data="ceo:continue"),
+                    InlineKeyboardButton("💾 커밋", callback_data="ceo:commit"),
+                ],
+                [
+                    InlineKeyboardButton("🔀 푸시", callback_data="ceo:push"),
+                    InlineKeyboardButton("🔄 봇재시작", callback_data="ceo:restart"),
+                ],
+                [
+                    InlineKeyboardButton("🧪 테스트", callback_data="ceo:test"),
+                    InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard"),
+                ],
+            ])
+            for i, chunk in enumerate(chunks):
+                rm = ceo_buttons if i == len(chunks) - 1 else None
+                await update.message.reply_text(chunk, reply_markup=rm)
+        else:
+            reply_markup = get_reply_markup(context)
+            for i, chunk in enumerate(chunks):
+                rm = reply_markup if i == len(chunks) - 1 else None
+                await update.message.reply_text(chunk, reply_markup=rm)
 
-        # 대화 모드면 안내 표시
         if in_claude_mode:
             turn_num = context.user_data.get("claude_turn", 1)
             logger.info("Claude Code 대화 모드: turn %d 완료", turn_num)
@@ -727,6 +1040,68 @@ class RemoteClaudeMixin:
             "볼드(**) 사용 금지. 이모지로 가독성 확보.\n"
             "한국어 존댓말. 핵심부터."
         ]
+
+        # 날짜/만기일 정보 (AI 날짜 오류 방지)
+        try:
+            from datetime import datetime as _dt, date as _date
+            import calendar
+            now = _dt.now()
+            days_kr = ["월", "화", "수", "목", "금", "토", "일"]
+            today_str = f"{now.month}월 {now.day}일({days_kr[now.weekday()]})"
+
+            # KOSPI200 선물옵션 만기일 = 두번째 목요일
+            def _second_thursday(year, month):
+                cal = calendar.monthcalendar(year, month)
+                count = 0
+                for week in cal:
+                    if week[3] != 0:  # Thursday
+                        count += 1
+                        if count == 2:
+                            return _date(year, month, week[3])
+                return None
+
+            # 미국 옵션 만기일 = 세번째 금요일
+            def _third_friday(year, month):
+                cal = calendar.monthcalendar(year, month)
+                count = 0
+                for week in cal:
+                    if week[4] != 0:  # Friday
+                        count += 1
+                        if count == 3:
+                            return _date(year, month, week[4])
+                return None
+
+            kr_exp = _second_thursday(now.year, now.month)
+            us_exp = _third_friday(now.year, now.month)
+            # 다음달
+            nm = now.month + 1 if now.month < 12 else 1
+            ny = now.year if now.month < 12 else now.year + 1
+            kr_exp_next = _second_thursday(ny, nm)
+            us_exp_next = _third_friday(ny, nm)
+
+            date_lines = [f"[오늘 날짜] {now.year}년 {today_str}"]
+            if kr_exp:
+                d_diff = (kr_exp - now.date()).days
+                status = "오늘!" if d_diff == 0 else f"{d_diff}일 후" if d_diff > 0 else "지남"
+                date_lines.append(
+                    f"[KR 선물옵션 만기] {kr_exp.month}월 {kr_exp.day}일"
+                    f"({days_kr[kr_exp.weekday()]}) — {status}"
+                )
+            if kr_exp_next and kr_exp and (kr_exp - now.date()).days < 0:
+                date_lines.append(
+                    f"[KR 다음 만기] {kr_exp_next.month}월 {kr_exp_next.day}일"
+                    f"({days_kr[kr_exp_next.weekday()]})"
+                )
+            if us_exp:
+                d_diff = (us_exp - now.date()).days
+                status = "오늘!" if d_diff == 0 else f"{d_diff}일 후" if d_diff > 0 else "지남"
+                date_lines.append(
+                    f"[US 옵션 만기] {us_exp.month}월 {us_exp.day}일"
+                    f"({days_kr[us_exp.weekday()]}) — {status}"
+                )
+            parts.append("\n".join(date_lines))
+        except Exception:
+            pass
 
         # 보유종목
         try:

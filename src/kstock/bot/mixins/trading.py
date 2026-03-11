@@ -538,6 +538,11 @@ class TradingMixin:
                     "💎 장기 (2개월+)", callback_data=f"ht:long_term:{holding_id}",
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    "🔟 텐배거 (1~5년)", callback_data=f"ht:tenbagger:{holding_id}",
+                ),
+            ],
             [InlineKeyboardButton("❌ 취소", callback_data="dismiss:0")],
         ])
         await query.message.reply_text(
@@ -568,7 +573,10 @@ class TradingMixin:
             ],
             [
                 InlineKeyboardButton(
-                    "⏭️ 개별 설정은 나중에", callback_data="ht:skip:0",
+                    "🔟 전체 텐배거", callback_data="ht:tenbagger:all",
+                ),
+                InlineKeyboardButton(
+                    "⏭️ 나중에", callback_data="ht:skip:0",
                 ),
             ],
         ])
@@ -1559,7 +1567,7 @@ class TradingMixin:
         from kstock.store._portfolio import HOLDING_THRESHOLDS
         th = HOLDING_THRESHOLDS.get(ht, HOLDING_THRESHOLDS["auto"])
         ht_label = {"scalp": "스캘핑", "swing": "스윙", "position": "포지션",
-                    "long_term": "장기투자", "auto": "자동"}.get(ht, ht)
+                    "long_term": "장기투자", "tenbagger": "텐배거", "auto": "자동"}.get(ht, ht)
 
         msg = (
             f"⚠️ {name} 손절선 보유 유지\n"

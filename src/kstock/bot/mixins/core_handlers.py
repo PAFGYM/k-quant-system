@@ -425,6 +425,31 @@ class CoreHandlersMixin:
             time=dt_time(hour=22, minute=0, tzinfo=KST),
             name="youtube_tier2_deep",
         )
+        # v12.0: 텐배거 매니저 스케줄러
+        jq.run_daily(
+            self.job_tenbagger_price_monitor,
+            time=dt_time(hour=16, minute=30, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="tenbagger_price_monitor",
+        )
+        jq.run_daily(
+            self.job_tenbagger_rescore,
+            time=dt_time(hour=10, minute=0, tzinfo=KST),
+            days=(6,),  # Sunday
+            name="tenbagger_rescore",
+        )
+        jq.run_daily(
+            self.job_tenbagger_sector_review,
+            time=dt_time(hour=8, minute=0, tzinfo=KST),
+            days=(0,),  # Monday (1일만 실행 → job 내부에서 체크)
+            name="tenbagger_sector_review",
+        )
+        jq.run_daily(
+            self.job_tenbagger_daily_coaching,
+            time=dt_time(hour=8, minute=0, tzinfo=KST),
+            days=(0, 1, 2, 3, 4),
+            name="tenbagger_daily_coaching",
+        )
         # KIS WebSocket: 장 시작 전 연결 (08:50), 장 종료 후 해제 (15:35)
         jq.run_daily(
             self.job_ws_connect,
@@ -856,10 +881,13 @@ class CoreHandlersMixin:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Handle screenshot image messages for account analysis."""
-        # Claude Code 대화 모드: 이미지를 Vision API로 분석
+        # Claude Code 대화 모드: 캡션 있는 이미지만 클로드 모드로 전달
+        # 캡션 없는 이미지 → 잔고 분석 경로로 진행 (v11.1)
         if context.user_data.get("claude_mode"):
-            await self._handle_claude_mode_image(update, context)
-            return
+            caption_check = update.message.caption or ""
+            if caption_check.strip():
+                await self._handle_claude_mode_image(update, context)
+                return
 
         # 관리자 모드: 오류 스크린샷 접수
         admin_mode = context.user_data.get("admin_mode")
@@ -2053,6 +2081,7 @@ class CoreHandlersMixin:
             "fav": self._action_favorites,
             "agent": self._action_agent,
             "claude_tier": self._action_claude_tier,
+            "ceo": self._action_ceo,
             "goto": self._action_goto,
             "adm": self._handle_admin_callback,
             # v3.6 신규

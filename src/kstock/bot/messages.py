@@ -381,6 +381,7 @@ def format_sell_alert_stop(
         horizon_kr = {
             "scalp": "초단타", "swing": "스윙",
             "position": "포지션", "long_term": "장기",
+            "tenbagger": "텐배거",
         }.get(holding_type, holding_type)
         return (
             f"\u2550" * 22 + "\n"

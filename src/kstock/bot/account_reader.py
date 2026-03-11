@@ -563,15 +563,39 @@ def format_screenshot_summary(
             lines.append("")
 
         if sold:
-            lines.append("\U0001f4a8 매도 종목")
-            for item in sold:
-                pct = _to_float(item.get("profit_pct", 0))
-                emoji = "\U0001f7e2" if pct > 0 else "\U0001f534"
-                lines.append(
-                    f"   {emoji} {item['name']} ({item['ticker']}) "
-                    f"수익률 {pct:+.2f}%"
-                )
-            lines.append("")
+            # v11.1: 익절/손절 분리 표시
+            profit_sold = [s for s in sold if _to_float(s.get("profit_pct", 0)) > 0]
+            loss_sold = [s for s in sold if _to_float(s.get("profit_pct", 0)) < 0]
+            even_sold = [s for s in sold if _to_float(s.get("profit_pct", 0)) == 0]
+
+            if profit_sold:
+                lines.append("\U0001f7e2 익절 매도")
+                for item in profit_sold:
+                    pct = _to_float(item.get("profit_pct", 0))
+                    lines.append(
+                        f"   \U0001f7e2 {item['name']} ({item['ticker']}) "
+                        f"수익률 {pct:+.2f}%"
+                    )
+                lines.append("")
+
+            if loss_sold:
+                lines.append("\U0001f534 손절 매도")
+                for item in loss_sold:
+                    pct = _to_float(item.get("profit_pct", 0))
+                    lines.append(
+                        f"   \U0001f534 {item['name']} ({item['ticker']}) "
+                        f"수익률 {pct:+.2f}%"
+                    )
+                lines.append("")
+
+            if even_sold:
+                lines.append("\U0001f7e1 본전 매도")
+                for item in even_sold:
+                    lines.append(
+                        f"   \U0001f7e1 {item['name']} ({item['ticker']}) "
+                        f"수익률 0.00%"
+                    )
+                lines.append("")
 
         if cash_change != 0:
             cash_emoji = "\U0001f4b5" if cash_change > 0 else "\U0001f4b8"

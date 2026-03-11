@@ -10,6 +10,7 @@ HOLDING_THRESHOLDS: dict[str, dict[str, float]] = {
     "swing":     {"stop": -0.07, "t1": 0.10, "t2": 0.20},
     "position":  {"stop": -0.12, "t1": 0.20, "t2": 0.40},
     "long_term": {"stop": -0.20, "t1": 0.30, "t2": 0.80},
+    "tenbagger": {"stop": -0.25, "t1": 1.00, "t2": 5.00},   # v12.0: 손절-25%, 1차 2배, 2차 6배
     "auto":      {"stop": -0.05, "t1": 0.03, "t2": 0.07},
 }
 
@@ -397,7 +398,7 @@ class PortfolioMixin:
                 "SELECT COUNT(*) FROM watchlist WHERE active=1",
             ).fetchone()[0]
             counts = {"total": total}
-            for cat in ("scalp", "swing", "position", "long_term"):
+            for cat in ("scalp", "swing", "position", "long_term", "tenbagger"):
                 counts[cat] = conn.execute(
                     "SELECT COUNT(*) FROM watchlist WHERE active=1 AND horizon=?",
                     (cat,),
@@ -737,3 +738,200 @@ class PortfolioMixin:
             conn.execute(
                 f"UPDATE tenbagger_candidates SET {', '.join(sets)} WHERE id=?", vals
             )
+
+    # ── v12.0: tenbagger_universe 메서드 ────────────────────────
+
+    def upsert_tenbagger_universe(
+        self,
+        ticker: str,
+        name: str,
+        market: str = "KRX",
+        sector: str = "",
+        **scores,
+    ) -> int:
+        """텐배거 유니버스 종목 upsert (INSERT or UPDATE)."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO tenbagger_universe
+                    (ticker, name, market, sector, tenbagger_score,
+                     tam_score, policy_score, moat_score, revenue_score,
+                     discovery_score, momentum_score, consensus_score,
+                     ai_consensus, status, entry_price, current_price,
+                     current_return, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 0, ?, ?, ?)
+                ON CONFLICT(ticker, market) DO UPDATE SET
+                    tenbagger_score=excluded.tenbagger_score,
+                    tam_score=excluded.tam_score,
+                    policy_score=excluded.policy_score,
+                    moat_score=excluded.moat_score,
+                    revenue_score=excluded.revenue_score,
+                    discovery_score=excluded.discovery_score,
+                    momentum_score=excluded.momentum_score,
+                    consensus_score=excluded.consensus_score,
+                    current_price=excluded.current_price,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    ticker, name, market, sector,
+                    scores.get("tenbagger_score", 0),
+                    scores.get("tam_score", 0),
+                    scores.get("policy_score", 0),
+                    scores.get("moat_score", 0),
+                    scores.get("revenue_score", 0),
+                    scores.get("discovery_score", 0),
+                    scores.get("momentum_score", 0),
+                    scores.get("consensus_score", 0),
+                    scores.get("ai_consensus", "{}"),
+                    scores.get("entry_price", 0),
+                    scores.get("current_price", 0),
+                    scores.get("notes", ""),
+                    now, now,
+                ),
+            )
+            return cursor.lastrowid or 0
+
+    def get_tenbagger_universe(
+        self, sector: str = "", status: str = "active",
+    ) -> list[dict]:
+        """텐배거 유니버스 조회 (섹터 필터 옵션)."""
+        with self._connect() as conn:
+            if sector:
+                rows = conn.execute(
+                    "SELECT * FROM tenbagger_universe "
+                    "WHERE status=? AND sector=? ORDER BY tenbagger_score DESC",
+                    (status, sector),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM tenbagger_universe "
+                    "WHERE status=? ORDER BY tenbagger_score DESC",
+                    (status,),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_tenbagger_by_ticker(self, ticker: str) -> dict | None:
+        """텐배거 유니버스에서 티커로 단건 조회."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM tenbagger_universe WHERE ticker=? AND status='active'",
+                (ticker,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_tenbagger_universe_price(
+        self, ticker: str, current_price: float, entry_price: float = 0,
+    ) -> None:
+        """텐배거 유니버스 현재가 & 수익률 갱신."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            if entry_price > 0:
+                ret = (current_price - entry_price) / entry_price * 100
+                conn.execute(
+                    "UPDATE tenbagger_universe SET current_price=?, current_return=?, "
+                    "entry_price=?, updated_at=? WHERE ticker=? AND status='active'",
+                    (current_price, round(ret, 2), entry_price, now, ticker),
+                )
+            else:
+                # entry_price 는 유지, current_return 만 갱신
+                conn.execute(
+                    """UPDATE tenbagger_universe SET current_price=?,
+                       current_return=CASE WHEN entry_price > 0
+                           THEN round((? - entry_price) / entry_price * 100, 2)
+                           ELSE 0 END,
+                       updated_at=? WHERE ticker=? AND status='active'""",
+                    (current_price, current_price, now, ticker),
+                )
+
+    # ── v12.0: tenbagger_catalyst 메서드 ────────────────────────
+
+    def add_tenbagger_catalyst(
+        self,
+        ticker: str,
+        catalyst_type: str,
+        description: str,
+        expected_date: str = "",
+        impact_score: float = 50,
+    ) -> int:
+        """텐배거 카탈리스트 추가."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """INSERT INTO tenbagger_catalyst
+                    (ticker, catalyst_type, description, expected_date,
+                     status, impact_score, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)""",
+                (ticker, catalyst_type, description, expected_date,
+                 impact_score, now, now),
+            )
+            return cursor.lastrowid or 0
+
+    def get_tenbagger_catalysts(
+        self, ticker: str = "", status: str = "",
+    ) -> list[dict]:
+        """텐배거 카탈리스트 조회 (티커/상태 필터)."""
+        with self._connect() as conn:
+            query = "SELECT * FROM tenbagger_catalyst WHERE 1=1"
+            params: list = []
+            if ticker:
+                query += " AND ticker=?"
+                params.append(ticker)
+            if status:
+                query += " AND status=?"
+                params.append(status)
+            query += " ORDER BY expected_date ASC"
+            rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def trigger_tenbagger_catalyst(self, catalyst_id: int) -> None:
+        """카탈리스트를 triggered 상태로 변경."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE tenbagger_catalyst SET status='triggered', "
+                "triggered_at=?, updated_at=? WHERE id=?",
+                (now, now, catalyst_id),
+            )
+
+    # ── v12.0: tenbagger_score_history 메서드 ───────────────────
+
+    def save_tenbagger_score(
+        self, ticker: str, score_date: str, **scores,
+    ) -> None:
+        """텐배거 점수 히스토리 저장 (주간 리스코어링용)."""
+        now = datetime.utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO tenbagger_score_history
+                    (ticker, score_date, tenbagger_score,
+                     tam_score, policy_score, moat_score, revenue_score,
+                     discovery_score, momentum_score, consensus_score,
+                     price_at_score, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    ticker, score_date,
+                    scores.get("tenbagger_score", 0),
+                    scores.get("tam_score", 0),
+                    scores.get("policy_score", 0),
+                    scores.get("moat_score", 0),
+                    scores.get("revenue_score", 0),
+                    scores.get("discovery_score", 0),
+                    scores.get("momentum_score", 0),
+                    scores.get("consensus_score", 0),
+                    scores.get("price_at_score", 0),
+                    now,
+                ),
+            )
+
+    def get_tenbagger_score_trend(
+        self, ticker: str, weeks: int = 12,
+    ) -> list[dict]:
+        """텐배거 점수 추이 조회 (최근 N주)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tenbagger_score_history WHERE ticker=? "
+                "ORDER BY score_date DESC LIMIT ?",
+                (ticker, weeks),
+            ).fetchall()
+        return [dict(r) for r in rows]

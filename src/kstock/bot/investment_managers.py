@@ -19,6 +19,8 @@ MANAGER_THRESHOLDS: dict[str, dict] = {
     "swing":     {"stop_loss": -7.0, "take_profit_1": 10.0, "take_profit_2": 20.0},
     "position":  {"stop_loss": -12.0, "take_profit_1": 20.0, "take_profit_2": 40.0},
     "long_term": {"stop_loss": -20.0, "take_profit_1": 30.0, "take_profit_2": 80.0},
+    # v12.0: 텐배거 매니저 (초장기 1~5년, 10배 추구)
+    "tenbagger": {"stop_loss": -25.0, "take_profit_1": 100.0, "take_profit_2": 500.0, "take_profit_3": 900.0},
 }
 
 
@@ -231,6 +233,63 @@ MANAGERS: dict[str, dict] = {
             "💎 워렌 버핏입니다.\n"
             "이 기업의 내재가치를 함께 분석하겠습니다.\n"
             "좋은 기업을 적정 가격에 사는 것이 핵심이죠."
+        ),
+    },
+
+    # v12.0: 텐배거 매니저 (피터 린치의 10배 수익 철학)
+    "tenbagger": {
+        "name": "피터 린치 텐배거",
+        "emoji": "🔟",
+        "title": "텐배거 매니저",
+        "persona": (
+            "너는 피터 린치(Peter Lynch)의 '텐배거(Tenbagger)' 투자 철학을 따르는 초장기 성장주 전문 매니저다.\n"
+            "좋은 스토리가 아니라 실전 투자 메모 관점에서 판단한다.\n\n"
+            "[투자 판단 4대 기준]\n"
+            "1. 10배 경로가 실적으로 이어질 수 있는가\n"
+            "2. 앞으로 12~18개월 안에 확인할 숫자가 있는가\n"
+            "3. 가설이 틀렸을 때 빨리 인정할 수 있는가 (kill condition)\n"
+            "4. 지금 가격대에서 아직 비대칭이 남아 있는가\n\n"
+            "[등급 체계]\n"
+            "A등급(8~10%): 10배 경로 + 12~18개월 확인지표 분명\n"
+            "B등급(4~6%): 좋은 사업이지만 3~5배 확률이 더 높음\n"
+            "C등급(1~3%): 이벤트/옵션 베팅\n\n"
+            "[포트폴리오 구조]\n"
+            "코어 텐배거 45% / 구조적 성장 35% / 옵션 20%\n"
+            "미국 60% / 한국 40%\n\n"
+            "[8대 핵심 섹터]\n"
+            "☢️ 원전/SMR: 연료(LEU), 계측(우진), 정비(일진파워), 설비(BHI), 해체(오르비텍)\n"
+            "🔬 양자보안: PQC+PUF 하드웨어(ICTK), 이온트랩(IONQ), 어닐링(QBTS)\n"
+            "💡 AI인프라: 광연결(CRDO)\n"
+            "🪙 디지털자산 인프라: 커스터디(BTGO), 스테이블코인(CRCL)\n"
+            "🛰️ 우주/방산: 위성안테나(인텔리안), 특수배터리(비츠로셀), 우주인프라(MDA)\n"
+            "🤖 로봇/피지컬AI: 감속기(에스피지), 팔레타이징(씨메스)\n"
+            "🔋 클린에너지: 풍력타워(씨에스윈드)\n\n"
+            "[7팩터 스코어링]\n"
+            "TAM(20%), 정책순풍(20%), 기술해자(15%), 매출궤적(15%), "
+            "기관발견(10%), 섹터모멘텀(10%), AI합의(10%)\n\n"
+            "[진입/포지션 관리]\n"
+            "- 진입: 텐배거 점수 60+, 시총 5조 미만(KR)/$5B 미만(US), 카탈리스트 1+\n"
+            "- A등급 코어주: 확신 있으면 피라미딩 (+30% 후 추가)\n"
+            "- 1차 익절: +100%(2배)→원금 회수, 2차: +500%(6배), 텐배거: +900%(10배)\n"
+            "- 손절: -25% → 가설 붕괴 여부 확인 후 판단\n"
+            "- C등급 옵션: 소량 매수, 맞으면 크지만 틀리면 빨리 인정\n\n"
+            "[코칭 스타일 — 구체적으로 알려줘야 한다]\n"
+            "- 분석할 때 반드시 '현재가 X원에 N주 매수' 형태로 구체적 행동 지침 제시\n"
+            "- A등급: '내일 시초가에 1차 40% 진입, -5% 조정 시 2차 35%, -10% 시 3차 25%'\n"
+            "- B등급: '2분할 50:50, 1차 즉시 + 2차 -5% 조정 대기'\n"
+            "- C등급: '소량 1회 진입, 총 투자금의 1~3%만'\n"
+            "- 손절가/목표가를 반드시 숫자로 명시: '손절 X원(-25%), 2배 목표 Y원'\n"
+            "- '매수하세요'가 아닌 '몇 주를 얼마에 사세요'가 되어야 함\n\n"
+            "[핵심 한 줄]\n"
+            "한국 총알 하나면 우진(가장 작은 독점+반복매출), 미국 총알 하나면 LEU(HALEU 병목 미해소)\n"
+            "말투: 실전적, 냉정하면서 확신 있는 어조. '좋은 스토리와 10배 후보는 다릅니다.'\n"
+        ),
+        "holding_type": "tenbagger",
+        "greeting": (
+            "🔟 텐배거 매니저입니다.\n"
+            "좋은 스토리가 아니라 실적과 비대칭을 봅니다.\n"
+            "한국 20종목 — A등급 코어부터 C등급 옵션까지.\n"
+            "총알 하나면? 한국 우진, 미국 LEU."
         ),
     },
 }
@@ -765,6 +824,30 @@ _INTERPRETATION_RULES: dict[str, str] = {
         "- 단기 주가 하락이지만 펀더멘털 건전 → 추가매수 기회\n\n"
         "밸류에이션/버블 분석과 해자 유형을 반드시 언급하라.\n"
     ),
+    # v12.0: 텐배거 매니저 해석 규칙
+    "tenbagger": (
+        "\n[텐배거 데이터 해석 규칙 — 반드시 적용]\n"
+        "추가 매수 신호:\n"
+        "- 텐배거 점수 ≥ 70 + 카탈리스트 발생 → 피라미딩 매수\n"
+        "- 섹터 ETF 3일 연속 상승 + 외인 순매수 → 섹터 모멘텀 매수\n"
+        "- 매출 QoQ ≥ 20% + 기관 첫 매집 → 발견 단계 매수\n"
+        "- 정부 정책 발표 (예산, 규제완화) → 정책 수혜 매수\n"
+        "- 미국 동종 대장주 +20%↑ 달성 → 한국 후행 상승 기대 매수\n\n"
+        "부분 익절 신호:\n"
+        "- +100% 달성 → 원금 회수 (절반 매도), 나머지 러닝\n"
+        "- +500% 달성 → 추가 30% 매도, 나머지 텐배거 노림\n"
+        "- 카탈리스트 소멸 + 내러티브 약화 → 일부 축소\n\n"
+        "손절/전량 매도 신호:\n"
+        "- -25% 도달 + 투자 논리 훼손 → 손절\n"
+        "- 섹터 전체 정책 역풍 (정부 방침 변경) → 즉시 매도\n"
+        "- 경쟁사 기술 압도 (해자 붕괴) → 매도\n"
+        "- 대표이사 변경 + 사업 방향 전환 → 재검토\n\n"
+        "홀드 (보유 유지):\n"
+        "- 단기 주가 -15% 하락이지만 TAM/정책/기술 해자 건재 → 보유\n"
+        "- 실적 일시 부진이지만 수주 파이프라인 양호 → 보유\n"
+        "- 시장 전체 하락(VIX>25) 중 섹터 상대강도 유지 → 보유 + 추가매수 검토\n\n"
+        "반드시 해당 종목의 섹터, TAM, 카탈리스트 일정, 텐배거 점수를 언급하라.\n"
+    ),
 }
 
 
@@ -876,6 +959,7 @@ async def get_manager_analysis(
             f"호칭: 주호님\n"
             f"볼드(**) 사용 금지. 이모지로 구분.\n"
             f"장기투자 종목은 전시/단기 변동으로 매도 권유 절대 금지.\n"
+            f"[장기보유·매도판단제외] 표시된 종목은 어떤 상황에서도 매도/익절/손절 권유 금지. 보유유지 또는 추가매수만 가능.\n"
             f"위기 상황에서는 수혜/피해 섹터를 명확히 구분하여 분석.\n"
             f"전쟁 후 주도주 전환 가능성도 항상 염두.\n"
             f"[가격 데이터 필수 규칙]\n"
@@ -893,14 +977,17 @@ async def get_manager_analysis(
             get_industry_context = None
 
         holdings_text = ""
+        from kstock.core.risk_manager import LEGACY_EXEMPT_TICKERS
         for h in holdings:
             cp = h.get('current_price', 0)
             price_tag = f"{cp:,.0f}원" if cp > 0 else "미확인"
+            ticker = h.get("ticker", "")
+            legacy_mark = " [장기보유·매도판단제외]" if ticker in LEGACY_EXEMPT_TICKERS else ""
             holdings_text += (
                 f"- {h.get('name', '')}: 매수가 {h.get('buy_price', 0):,.0f}원, "
                 f"현재가 {price_tag}, "
                 f"수익률 {h.get('pnl_pct', 0):+.1f}%, "
-                f"보유일 {h.get('holding_days', 0)}일\n"
+                f"보유일 {h.get('holding_days', 0)}일{legacy_mark}\n"
             )
             for key in ("chart_summary", "fundamental_summary"):
                 summary = h.get(key, "")
@@ -960,10 +1047,10 @@ async def get_manager_analysis(
 async def recommend_investment_type(
     ticker: str, name: str, price: float = 0, market_cap: str = "",
 ) -> str:
-    """AI가 종목 특성 분석 → scalp/swing/position/long_term 중 추천.
+    """AI가 종목 특성 분석 → scalp/swing/position/long_term/tenbagger 중 추천.
 
     Returns:
-        추천 투자유형 키 (scalp, swing, position, long_term) 또는 "" (실패 시)
+        추천 투자유형 키 (scalp, swing, position, long_term, tenbagger) 또는 "" (실패 시)
     """
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
@@ -982,8 +1069,9 @@ async def recommend_investment_type(
             "- scalp: 초단기 1~3일 (변동성 큰 테마주, 소형주)\n"
             "- swing: 스윙 1~4주 (기술적 반등, 이벤트 드리븐)\n"
             "- position: 포지션 1~6개월 (실적 턴어라운드, 섹터 성장)\n"
-            "- long_term: 장기 6개월+ (대형 우량주, 배당주, ETF)\n\n"
-            "반드시 scalp, swing, position, long_term 중 하나만 답해. 다른 말 하지마."
+            "- long_term: 장기 6개월+ (대형 우량주, 배당주, ETF)\n"
+            "- tenbagger: 텐배거 1~5년 (시총 5조미만, TAM폭발, 정책수혜 신성장 섹터)\n\n"
+            "반드시 scalp, swing, position, long_term, tenbagger 중 하나만 답해. 다른 말 하지마."
         )
 
         async with httpx.AsyncClient(timeout=10) as client:
@@ -1002,7 +1090,7 @@ async def recommend_investment_type(
             )
             if resp.status_code == 200:
                 answer = resp.json()["content"][0]["text"].strip().lower()
-                for key in ["long_term", "position", "swing", "scalp"]:
+                for key in ["tenbagger", "long_term", "position", "swing", "scalp"]:
                     if key in answer:
                         return key
         return ""
@@ -1174,6 +1262,7 @@ MANAGER_HORIZON_MAP = {
     "swing": "short",
     "position": "mid",
     "long_term": "long",
+    "tenbagger": "tenbagger",   # v12.0: 초장기 1~5년
 }
 
 
@@ -1492,10 +1581,10 @@ def format_consensus(consensus_list: list[dict]) -> str:
 # ── #5 레짐별 매니저 가중치 ──────────────────────────────────
 
 REGIME_WEIGHTS: dict[str, dict[str, float]] = {
-    "calm": {"scalp": 1.2, "swing": 1.1, "position": 1.0, "long_term": 0.8},
-    "normal": {"scalp": 1.0, "swing": 1.0, "position": 1.0, "long_term": 1.0},
-    "fear": {"scalp": 0.6, "swing": 0.8, "position": 1.1, "long_term": 1.3},
-    "panic": {"scalp": 0.3, "swing": 0.5, "position": 1.0, "long_term": 1.5},
+    "calm": {"scalp": 1.2, "swing": 1.1, "position": 1.0, "long_term": 0.8, "tenbagger": 1.0},
+    "normal": {"scalp": 1.0, "swing": 1.0, "position": 1.0, "long_term": 1.0, "tenbagger": 1.0},
+    "fear": {"scalp": 0.6, "swing": 0.8, "position": 1.1, "long_term": 1.3, "tenbagger": 1.4},
+    "panic": {"scalp": 0.3, "swing": 0.5, "position": 1.0, "long_term": 1.5, "tenbagger": 1.6},
 }
 
 
@@ -1521,11 +1610,17 @@ def analyze_portfolio_balance(holdings_by_type: dict[str, list]) -> str:
         return ""
 
     lines = ["📊 포트폴리오 밸런스 분석", "━" * 20]
-    ideal = {"scalp": (10, 20), "swing": (20, 35), "position": (25, 40), "long_term": (20, 35)}
-    labels = {"scalp": "단타", "swing": "스윙", "position": "포지션", "long_term": "장기"}
+    ideal = {
+        "scalp": (10, 20), "swing": (20, 35), "position": (20, 35),
+        "long_term": (15, 30), "tenbagger": (5, 15),
+    }
+    labels = {
+        "scalp": "단타", "swing": "스윙", "position": "포지션",
+        "long_term": "장기", "tenbagger": "텐배거",
+    }
     warnings = []
 
-    for mtype in ("scalp", "swing", "position", "long_term"):
+    for mtype in ("scalp", "swing", "position", "long_term", "tenbagger"):
         count = len(holdings_by_type.get(mtype, []))
         pct = count / total * 100 if total > 0 else 0
         lo, hi = ideal[mtype]
@@ -1757,6 +1852,10 @@ MANAGER_DISCOVERY_CRITERIA: dict[str, str] = {
         "ROE >15% AND 부채비율 <80% AND FCF 양(+) AND "
         "PBR <1.5 AND 배당수익률 >2% 종목"
     ),
+    "tenbagger": (
+        "시총 5조미만 AND TAM CAGR >30% AND "
+        "정책수혜(원전/양자/로봇/우주/AI) AND 기술해자 보유 종목"
+    ),
 }
 
 
@@ -1806,6 +1905,13 @@ def filter_discovery_candidates(
                 score is not None
                 and getattr(score, "composite", 0) >= 55
                 and rsi < 55
+            )
+        elif manager_key == "tenbagger":
+            # 텐배거: 고점 대비 조정 중 + 종합점수 양호한 소형주
+            match = (
+                score is not None
+                and getattr(score, "composite", 0) >= 50
+                and rsi < 60
             )
 
         if match:
@@ -1910,6 +2016,52 @@ def check_manager_alert_conditions(
             alerts.append(
                 f"{emoji} {name}: 극단 과매도 (RSI {tech.rsi:.0f})\n"
                 f"  장기 관점 추가매수 기회"
+            )
+
+    elif manager_key == "tenbagger":
+        # 텐배거: 극단 과매도 → 구체적 추가매수 코칭
+        if tech.rsi < 25 and getattr(tech, "bb_pctb", 0.5) < 0.1:
+            dip_price = current_price
+            alerts.append(
+                f"{emoji} {name}: 극단 과매도 (RSI {tech.rsi:.0f})\n"
+                f"  📌 추가매수 기회 — 현재가 {dip_price:,.0f}원\n"
+                f"  → 보유 물량의 30~50% 규모로 추가 매수 검토\n"
+                f"  → 반드시 TAM/정책 논리 확인 후 진입"
+            )
+        # -10% 이상 급락 시 코칭
+        elif pnl <= -10 and pnl > stop:
+            alerts.append(
+                f"{emoji} {name}: 조정 중 ({pnl:+.1f}%)\n"
+                f"  📌 현재가 {current_price:,.0f}원 — kill 조건 미해당 시 2차 분할매수 구간\n"
+                f"  → 손절선: {buy_price * (1 + stop/100):,.0f}원 ({stop}%)"
+            )
+        # +30% 이상 시 피라미딩 코칭
+        if 30 <= pnl < tp1:
+            alerts.append(
+                f"{emoji} {name}: A등급이면 피라미딩 구간 ({pnl:+.1f}%)\n"
+                f"  → 확신 시 현재가 {current_price:,.0f}원에 소량 추가 검토"
+            )
+        # 1차 목표 (2배) → 원금 회수 코칭
+        if tp1 <= pnl < thresholds.get("take_profit_2", 500):
+            half_qty = "(보유수량의 50%)"
+            alerts.append(
+                f"{emoji} {name}: 🎯 2배 달성! ({pnl:+.1f}%)\n"
+                f"  → {half_qty} 매도하여 원금 회수\n"
+                f"  → 나머지는 텐배거 목표로 장기 홀드"
+            )
+        # 2차 목표 (6배)
+        if thresholds.get("take_profit_2", 500) <= pnl < thresholds.get("take_profit_3", 900):
+            alerts.append(
+                f"{emoji} {name}: 🎯🎯 6배 달성! ({pnl:+.1f}%)\n"
+                f"  → 추가 30% 매도, 잔여 20%만 텐배거 홀드"
+            )
+        # 텐배거 3차 목표 (10배 달성!)
+        tp3 = thresholds.get("take_profit_3", 900)
+        if pnl >= tp3:
+            alerts.append(
+                f"{emoji} {name}: 🎉 텐배거 달성! ({pnl:+.1f}% >= {tp3}%)\n"
+                f"  축하합니다! 현재가 {current_price:,.0f}원\n"
+                f"  → 전량 매도 or 10% 잔류 후 러닝 판단"
             )
 
     return alerts

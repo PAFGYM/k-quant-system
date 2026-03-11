@@ -1349,21 +1349,26 @@ class AdminExtrasMixin:
     _HZ_TAG = {
         "scalp": "⚡단타", "swing": "🔥스윙",
         "position": "📊포지션", "long_term": "💎장기",
+        "tenbagger": "🔟텐배거",
     }
     _HZ_HDR = {
         "scalp": "⚡ 단타 — 제시 리버모어",
         "swing": "🔥 스윙 — 윌리엄 오닐",
         "position": "📊 포지션 — 피터 린치",
         "long_term": "💎 장기 — 워렌 버핏",
+        "tenbagger": "🔟 텐배거 — 10배 후보",
     }
     _TAB_EMOJI = {
         "holding": "💰", "scalp": "⚡", "swing": "🔥",
-        "position": "📊", "long_term": "💎", "unclassified": "📦",
+        "position": "📊", "long_term": "💎", "tenbagger": "🔟",
+        "unclassified": "📦",
     }
     _TAB_LABEL = {
         "holding": "보유", "scalp": "단타", "swing": "스윙",
-        "position": "포지션", "long_term": "장기", "unclassified": "미분류",
+        "position": "포지션", "long_term": "장기", "tenbagger": "텐배거",
+        "unclassified": "미분류",
     }
+    _TB_GRADE_EMOJI = {"A": "🟢", "B": "🟡", "C": "🟠"}
     _ITEMS_PER_PAGE = 8
 
     async def _sync_universe_to_watchlist(self) -> int:
@@ -1451,10 +1456,11 @@ class AdminExtrasMixin:
                 else:
                     lines.append(f"  {name}")
 
-        # 버튼: 6개 탭 + 자동분류 + 새로고침
+        # 버튼: 7개 탭 + 자동분류 + 새로고침
         buttons = []
         row1 = []
         row2 = []
+        row3 = []
         for cat in ("holding", "scalp", "swing"):
             e = self._TAB_EMOJI[cat]
             n = counts.get(cat, 0)
@@ -1462,15 +1468,20 @@ class AdminExtrasMixin:
             row1.append(InlineKeyboardButton(
                 f"{e}{lbl} {n}", callback_data=f"fav:tab:{cat}:0",
             ))
-        for cat in ("position", "long_term", "unclassified"):
+        for cat in ("position", "long_term", "tenbagger"):
             e = self._TAB_EMOJI[cat]
             n = counts.get(cat, 0)
             lbl = self._TAB_LABEL[cat]
             row2.append(InlineKeyboardButton(
                 f"{e}{lbl} {n}", callback_data=f"fav:tab:{cat}:0",
             ))
+        row3.append(InlineKeyboardButton(
+            f"📦미분류 {counts.get('unclassified', 0)}",
+            callback_data="fav:tab:unclassified:0",
+        ))
         buttons.append(row1)
         buttons.append(row2)
+        buttons.append(row3)
 
         # 매수 추천 + 매니저 + AI토론
         action_row = [
@@ -1500,6 +1511,19 @@ class AdminExtrasMixin:
         ))
         buttons.append(action_row2)
 
+        # 텐배거 유니버스 미등록 시 등록 버튼
+        if counts.get("tenbagger", 0) == 0:
+            buttons.append([InlineKeyboardButton(
+                "🔟 텐배거 20종목 등록하기",
+                callback_data="fav:tb_import",
+            )])
+
+        # 텐배거 리포트 PDF 생성 버튼
+        buttons.append([InlineKeyboardButton(
+            "📄 텐배거 리포트 PDF",
+            callback_data="fav:tb_report",
+        )])
+
         buttons.append(make_feedback_row("즐겨찾기"))
 
         text = "\n".join(lines)
@@ -1522,6 +1546,21 @@ class AdminExtrasMixin:
             f"{hdr} ({total}종목)",
             "━" * 22,
         ]
+
+        # 텐배거 탭이면 등급 정보 로드
+        tb_grades = {}
+        if category == "tenbagger":
+            try:
+                from kstock.signal.tenbagger_screener import get_initial_universe
+                for u in get_initial_universe():
+                    tb_grades[u["ticker"]] = {
+                        "grade": u.get("grade", ""),
+                        "tier": u.get("tier", ""),
+                        "rank": u.get("rank", 99),
+                        "character": u.get("character", ""),
+                    }
+            except Exception:
+                pass
 
         # 종목 데이터 + 가격 조회
         buttons = []
@@ -1550,12 +1589,19 @@ class AdminExtrasMixin:
                 ps = "+" if pnl > 0 else ""
                 hold_tag = f" 보유{pe}{ps}{pnl:.1f}%"
 
+            # 텐배거 등급 태그
+            grade_tag = ""
+            if category == "tenbagger" and ticker in tb_grades:
+                g = tb_grades[ticker]["grade"]
+                ge = self._TB_GRADE_EMOJI.get(g, "")
+                grade_tag = f"{ge}{g} "
+
             if cur > 0:
                 lines.append(
-                    f"{de} {name}: {cur:,.0f}원 ({ds}{dc_pct:.1f}%){hold_tag}"
+                    f"{grade_tag}{de} {name}: {cur:,.0f}원 ({ds}{dc_pct:.1f}%){hold_tag}"
                 )
             else:
-                lines.append(f"  {name}")
+                lines.append(f"  {grade_tag}{name}")
 
             # 종목별 버튼: [종목명] → 상세
             buttons.append([
@@ -2543,6 +2589,66 @@ class AdminExtrasMixin:
         if action == "refresh":
             text, markup = await self._build_dashboard_view()
             await safe_edit_or_reply(query, text, reply_markup=markup)
+            return
+
+        if action == "tb_import":
+            # 텐배거 유니버스 20종목을 즐겨찾기에 자동 등록
+            try:
+                from kstock.signal.tenbagger_screener import get_initial_universe
+                universe = get_initial_universe()
+                added = 0
+                for u in universe:
+                    ticker = u["ticker"]
+                    name = u["name"]
+                    # KRX만 즐겨찾기에 등록 (미국주식은 KIS API 미지원)
+                    if u["market"] != "KRX":
+                        continue
+                    self.db.add_watchlist(ticker, name, horizon="tenbagger", manager="tenbagger")
+                    added += 1
+                await safe_edit_or_reply(query,
+                    f"🔟 텐배거 유니버스 등록 완료!\n\n"
+                    f"한국 {added}종목을 즐겨찾기 텐배거 탭에 추가했습니다.\n"
+                    f"(미국 종목은 별도 관리)",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔟 텐배거 보기", callback_data="fav:tab:tenbagger:0")],
+                        [InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh")],
+                    ]),
+                )
+            except Exception as exc:
+                logger.exception("tb_import failed")
+                await safe_edit_or_reply(query, f"❌ 텐배거 등록 실패: {exc}")
+            return
+
+        if action == "tb_report":
+            # 텐배거 유니버스 PDF 리포트 생성 & 전송
+            try:
+                from kstock.report.tenbagger_pdf_report import (
+                    generate_tenbagger_report,
+                    format_tenbagger_report_text,
+                )
+                await safe_edit_or_reply(query, "🔟 텐배거 리포트 생성 중...")
+
+                pdf_path = generate_tenbagger_report()
+                if pdf_path and os.path.exists(pdf_path):
+                    text_msg = format_tenbagger_report_text()
+                    await context.bot.send_message(
+                        chat_id=self.chat_id, text=text_msg,
+                    )
+                    with open(pdf_path, "rb") as f:
+                        await context.bot.send_document(
+                            chat_id=self.chat_id, document=f,
+                        )
+                else:
+                    await context.bot.send_message(
+                        chat_id=self.chat_id,
+                        text="❌ PDF 생성 실패 (reportlab 미설치?)",
+                    )
+            except Exception as exc:
+                logger.exception("tb_report failed")
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=f"❌ 텐배거 리포트 실패: {exc}",
+                )
             return
 
     # ── 원격접속 메뉴 ─────────────────────────────────────────
