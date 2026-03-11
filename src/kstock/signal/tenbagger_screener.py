@@ -630,6 +630,11 @@ def get_initial_universe() -> list[dict]:
             "kill_conditions": item.get("kill_conditions", []),
             "monitor_12m": item.get("monitor_12m", []),
             "ai_consensus": item.get("ai_consensus", 50),
+            # v2.2: bucket 분류 필드
+            "bucket": "active_tenbagger",
+            "directness": item.get("directness", ""),
+            "earnings_linkage": item.get("earnings_linkage", ""),
+            "catalyst_strength": item.get("catalyst_strength", ""),
         })
 
     for item in config.get("us_universe", []):
@@ -646,6 +651,11 @@ def get_initial_universe() -> list[dict]:
             "kill_conditions": item.get("kill_conditions", []),
             "monitor_12m": item.get("monitor_12m", []),
             "ai_consensus": item.get("ai_consensus", 50),
+            # v2.2: bucket 분류 필드
+            "bucket": "active_tenbagger",
+            "directness": item.get("directness", ""),
+            "earnings_linkage": item.get("earnings_linkage", ""),
+            "catalyst_strength": item.get("catalyst_strength", ""),
         })
 
     return result
@@ -671,6 +681,115 @@ def get_grade_info() -> dict:
         "B": {"label": "구조적 성장", "position_min_pct": 4, "position_max_pct": 6},
         "C": {"label": "옵션 베팅", "position_min_pct": 1, "position_max_pct": 3},
     })
+
+
+def get_theme_watchlist() -> list[dict]:
+    """config에서 테마 워치리스트를 읽어온다 (v2.3).
+
+    theme_watchlist는 active universe에 아직 편입하지 않은 관찰 종목.
+    매매 비대상. 승격(promotion) 조건 충족 시 active로 이동.
+
+    Returns: [{"ticker", "name", "market", "sector", "bucket", "directness",
+               "earnings_linkage", "catalyst_strength", "promotion_rule",
+               "theme", "character", "catalysts", "watch_reasons",
+               "promotion_condition", "ai_consensus", "priority"}, ...]
+    """
+    config = load_tenbagger_config()
+    result = []
+
+    for item in config.get("theme_watchlist", []):
+        result.append({
+            "ticker": item.get("code", item.get("ticker", "")),
+            "name": item["name"],
+            "market": item.get("market", "KRX"),
+            "sector": item.get("sector", ""),
+            "bucket": item.get("bucket", "theme_watchlist"),
+            "directness": item.get("directness", "indirect"),
+            "earnings_linkage": item.get("earnings_linkage", "speculative"),
+            "catalyst_strength": item.get("catalyst_strength", "weak"),
+            "promotion_rule": item.get("promotion_rule", ""),
+            "theme": item.get("theme", ""),
+            "character": item.get("character", ""),
+            "catalysts": item.get("catalysts", []),
+            "watch_reasons": item.get("watch_reasons", []),
+            "promotion_condition": item.get("promotion_condition", ""),
+            "ai_consensus": item.get("ai_consensus", 50),
+            "priority": item.get("priority", 99),
+        })
+
+    return result
+
+
+def get_bucket_info() -> dict:
+    """bucket 정의를 읽어온다 (v2.3)."""
+    config = load_tenbagger_config()
+    return config.get("buckets", {
+        "direction_leaders": {
+            "label": "방향성 리더",
+            "tradeable": False,
+        },
+        "active_tenbagger": {
+            "label": "액티브 텐배거",
+            "tradeable": True,
+        },
+        "theme_watchlist": {
+            "label": "테마 워치리스트",
+            "tradeable": False,
+        },
+    })
+
+
+def get_direction_leaders() -> list[dict]:
+    """config에서 방향성 리더를 읽어온다 (v2.3).
+
+    섹터 on/off 신호용 대형 대표주. 매수 핵심 대상 아님.
+
+    Returns: [{"ticker", "name", "market", "sector", "bucket", "directness",
+               "earnings_linkage", "catalyst_strength", "character",
+               "signal_role", "why_in_bucket"}, ...]
+    """
+    config = load_tenbagger_config()
+    result = []
+
+    for item in config.get("direction_leaders", []):
+        result.append({
+            "ticker": item.get("ticker", item.get("code", "")),
+            "name": item["name"],
+            "market": item.get("market", "US"),
+            "sector": item.get("sector", ""),
+            "bucket": "direction_leaders",
+            "directness": item.get("directness", ""),
+            "earnings_linkage": item.get("earnings_linkage", ""),
+            "catalyst_strength": item.get("catalyst_strength", ""),
+            "character": item.get("character", ""),
+            "signal_role": item.get("signal_role", ""),
+            "why_in_bucket": item.get("why_in_bucket", ""),
+        })
+
+    return result
+
+
+def get_promotion_process() -> dict:
+    """promotion_process 설정을 읽어온다 (v2.3).
+
+    watchlist → active 승격 프로세스.
+    현재: 자동 모니터링 + GPT Pro 수동 승인 구조.
+    """
+    config = load_tenbagger_config()
+    return config.get("promotion_process", {})
+
+
+def get_full_universe() -> dict[str, list[dict]]:
+    """active + watchlist + leaders를 bucket별로 구분해 반환 (v2.2).
+
+    Returns: {"active_tenbagger": [...], "theme_watchlist": [...],
+              "direction_leaders": [...]}
+    """
+    return {
+        "active_tenbagger": get_initial_universe(),
+        "theme_watchlist": get_theme_watchlist(),
+        "direction_leaders": get_direction_leaders(),
+    }
 
 
 # ── 매니저 코칭 (구체적 매수 계획 생성) ────────────────────

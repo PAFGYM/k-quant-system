@@ -10,8 +10,8 @@
 # 포트폴리오 구조: 코어(45%) / 구조적성장(35%) / 옵션(20%)
 # 지역 배분: 미국 60% / 한국 40%
 
-version: "2.0"
-description: "텐배거 매니저 유니버스 & 스코어링 설정 (최종판)"
+version: "2.3"
+description: "텐배거 매니저 유니버스 & 스코어링 설정 (3-bucket P2/P3 체계)"
 
 # ── 등급 정의 ──────────────────────────────────────────────────
 grades:
@@ -56,7 +56,10 @@ sectors:
   optical_ai_infra:
     name: "광학/AI인프라"
     emoji: "💡"
-    policy_keywords: ["optical", "광학", "AI반도체", "데이터센터", "HBM", "CPO", "광모듈", "광통신", "광트랜시버", "광케이블", "BEAD", "1.6T"]
+    policy_keywords: ["optical", "광학", "AI반도체", "데이터센터", "HBM", "CPO",
+                       "Co-Packaged Optics", "광모듈", "광통신", "광트랜시버",
+                       "광케이블", "BEAD", "1.6T", "800G", "AEC",
+                       "silicon photonics", "RF소재", "박막", "커넥터"]
     tailwind_score: 90
 
   blockchain_stablecoin:
@@ -103,6 +106,9 @@ korea_universe:
     rank: 1
     tier: "core"
     character: "원전 코어 — 한국형 원전 4대 핵심계측기 독점, 반복매출형"
+    directness: "direct"           # 한국형 원전 4대 핵심계측기 독점 공급
+    earnings_linkage: "proven"     # 반복 수주 실적 확인 (88억+102.9억)
+    catalyst_strength: "strong"    # 체코/폴란드 수출 + 반복 교체매출
     catalysts:
       - "한수원 88억원 계측기 수주 (2026.02)"
       - "ICI 102.9억원 수주 (2025.11)"
@@ -126,6 +132,9 @@ korea_universe:
     rank: 2
     tier: "core"
     character: "원전 성장 — 실적이 이미 숫자로 증명된 원전+LNG 하이브리드"
+    directness: "direct"           # 원전 보조기기/CASK 직접 공급
+    earnings_linkage: "proven"     # 25년 매출 7716억 사상최대, 수주 1.8조
+    catalyst_strength: "strong"    # 체코 원전 + 26년 영업이익 1095억 전망
     catalysts:
       - "25년 매출 7,716억 / 영업이익 733억 (사상 최대)"
       - "25년 신규 수주 1.8조원"
@@ -149,6 +158,9 @@ korea_universe:
     rank: 3
     tier: "core"
     character: "우주통신 성장 — LEO 매출이 실제 숫자로 보이기 시작"
+    directness: "direct"           # LEO 위성 안테나 직접 공급
+    earnings_linkage: "proven"     # 4Q 매출 1243억/영업이익 198억 역대 최고
+    catalyst_strength: "strong"    # 26년 매출 4179억 전망 + 게이트웨이
     catalysts:
       - "25년 매출 3,196억 / 영업이익 120억 (흑자전환)"
       - "4Q 매출 1,243억 / 영업이익 198억 (역대 최고)"
@@ -172,6 +184,9 @@ korea_universe:
     rank: 4
     tier: "core"
     character: "원전 운영/정비 — SMR이 늦어져도 돈 버는 운영 레이어"
+    directness: "direct"           # 원전 기전설비 정비 직접 수행
+    earnings_linkage: "proven"     # 25년 매출 2520억(+30.5%) 영업이익 253억(+146.5%)
+    catalyst_strength: "strong"    # 반복 정비 수주 + 계속운전 확대
     catalysts:
       - "한빛 3·4호기 기전설비 정비 199.8억원"
       - "25년 매출 2,520억(+30.5%) / 영업이익 253억(+146.5%)"
@@ -194,6 +209,9 @@ korea_universe:
     rank: 5
     tier: "core"
     character: "방산/에너지 — 고마진 특수배터리 현금창출주"
+    directness: "direct"           # 방산 특수배터리 독점 공급
+    earnings_linkage: "proven"     # 영업이익 697억 역대 최대, OPM 28%+
+    catalyst_strength: "strong"    # 방산 수출 확대 + 앰플/열전지 매출 증가
     catalysts:
       - "25년 매출 2,431억 / 영업이익 697억 (역대 최대)"
       - "앰플·열전지·고온전지 매출 증가"
@@ -216,6 +234,9 @@ korea_universe:
     rank: 6
     tier: "core"
     character: "민간 발사체 유일주 — 26E 흑자전환, 글로벌 발사장 6곳 확보"
+    directness: "direct"           # 민간 소형발사체 직접 제조/발사
+    earnings_linkage: "expected"   # 26E 흑자전환 예상, 아직 미확인
+    catalyst_strength: "strong"    # 2차 발사 + KASA 예산 2662억 직접 수혜
     catalysts:
       - "26E 매출 925억(+116%) / 영업이익 158억 (흑자전환)"
       - "글로벌 발사장 6곳 (브라질/호주2/포르투갈/노르웨이/캐나다)"
@@ -240,6 +261,9 @@ korea_universe:
     rank: 7
     tier: "structural"
     character: "광케이블 독점 — 국내 유일 광섬유 일관생산, 흑자전환 임박"
+    directness: "direct"           # 국내 유일 광섬유 일관생산
+    earnings_linkage: "expected"   # 26E 흑자전환 전망, 아직 미확인
+    catalyst_strength: "moderate"  # BEAD 수혜이나 관세 리스크 존재
     catalysts:
       - "26E 매출 2,251억 / 영업이익 159억 (흑자전환)"
       - "미국 BEAD $425억 광케이블 인프라 수혜"
@@ -263,6 +287,9 @@ korea_universe:
     rank: 8
     tier: "structural"
     character: "광트랜시버 국내 1위 — 에릭슨 벤더 등록, Datacom 전환 옵션"
+    directness: "direct"           # 광트랜시버 직접 제조/공급 1위
+    earnings_linkage: "emerging"   # 매출 +87.7% 성장이나 아직 적자
+    catalyst_strength: "moderate"  # 에릭슨 벤더이나 Datacom 전환 불확실
     catalysts:
       - "국내 광트랜시버 시장점유율 1위 (수직계열화)"
       - "에릭슨 공식 벤더 등록 (2025)"
@@ -286,6 +313,9 @@ korea_universe:
     rank: 7
     tier: "structural"
     character: "로봇 부품 — 좋은 부품주이지만 아직 실적 폭발 미확인"
+    directness: "direct"           # 감속기/모터 직접 제조
+    earnings_linkage: "proven"     # 영업이익 179억(+45.4%) 성장 확인
+    catalyst_strength: "moderate"  # 감속기 국산화이나 매출 폭발 미확인
     catalysts:
       - "25년 영업이익 179억(+45.4%)"
       - "26년 전망 매출 4,186억 / 영업이익 271억"
@@ -308,6 +338,9 @@ korea_universe:
     rank: 8
     tier: "structural"
     character: "양자보안 — 한국 양자에서 가장 현실적인 상용화 축"
+    directness: "direct"           # PQC+PUF 양자보안 칩 직접 개발
+    earnings_linkage: "expected"   # 상용 계약 12개월 내 필요
+    catalyst_strength: "moderate"  # MWC 공개이나 실제 계약 미확보
     catalysts:
       - "MWC 2026 PQC+PUF 양자보안 칩 공개"
       - "국내 통신사 PQC KMS 솔루션 개발 완료"
@@ -330,6 +363,9 @@ korea_universe:
     rank: 11
     tier: "structural"
     character: "위성 지상국 유일주 — 풀밸류체인 + GSaaS 반복수익"
+    directness: "direct"           # 위성 지상국 직접 운영/구축
+    earnings_linkage: "emerging"   # 매출 +96% 성장이나 아직 적자
+    catalyst_strength: "moderate"  # 항우연 수주이나 흑자전환 미확인
     catalysts:
       - "국내 유일 상용 민간 우주 지상국"
       - "항우연 2026년 위성 지상시스템 수주"
@@ -354,6 +390,9 @@ korea_universe:
     rank: 12
     tier: "option"
     character: "1.6T 광트랜시버 옵션 — 외인 43% 매집, 저가 비대칭 베팅"
+    directness: "indirect"         # 1.6T 광트랜시버 제조이나 양산 고객 미확보
+    earnings_linkage: "emerging"   # 매출 +97.6%이나 적자 지속
+    catalyst_strength: "moderate"  # 외인 43% 매집이나 양산 불확실
     catalysts:
       - "1.6T급 광트랜시버 풀라인업 구축 완료"
       - "AI 데이터센터 양산 본격화"
@@ -377,6 +416,9 @@ korea_universe:
     rank: 13
     tier: "option"
     character: "NASA/SpaceX 벤더 옵션 — 국내 유일 미국 우주 공급망 진입"
+    directness: "indirect"         # 미국 우주 공급망 Tier2 부품
+    earnings_linkage: "expected"   # 미국향 매출 확대 예상이나 적자
+    catalyst_strength: "moderate"  # NASA/SpaceX 벤더이나 관세 리스크
     catalysts:
       - "NASA/스페이스X/보잉/록히드마틴 벤더"
       - "미국 조지아주 생산기지 보유"
@@ -403,6 +445,9 @@ us_universe:
     rank: 1
     tier: "core"
     character: "원자력 연료 코어 — 미국 원전에서 가장 직접적인 병목 수혜"
+    directness: "direct"           # HALEU 독점 생산 — 미국 원전 유일 병목
+    earnings_linkage: "proven"     # 매출 $4.487억, 순이익 $7780만
+    catalyst_strength: "strong"    # DOE $27억 지원 + HALEU 1톤+ 생산
     catalysts:
       - "25년 매출 $4.487억 / 순이익 $7,780만"
       - "미국 최초 HALEU 1톤+ 생산"
@@ -425,6 +470,9 @@ us_universe:
     rank: 2
     tier: "core"
     character: "우라늄 개발 — 이야기에서 건설 단계로 넘어감"
+    directness: "direct"           # 우라늄 광산 직접 개발/생산
+    earnings_linkage: "expected"   # FID 확정, 건설 착공이나 생산 전
+    catalyst_strength: "strong"    # FID+착공 확정, ISR 저비용 공법
     catalysts:
       - "2026.02 Phoenix ISR FID 확정"
       - "2026.03 건설 착공"
@@ -447,6 +495,9 @@ us_universe:
     rank: 3
     tier: "core"
     character: "우라늄 개발 — 승인·현금·대형 자원 삼박자"
+    directness: "direct"           # 역대급 고품위 우라늄 광산 직접 개발
+    earnings_linkage: "expected"   # CNSC 승인 완료, 2028 생산 목표
+    catalyst_strength: "strong"    # 최종 건설 승인 + 역대급 광산
     catalysts:
       - "2026.03.05 CNSC 최종 건설 승인"
       - "역대급 고품위 광산 (Rook I)"
@@ -468,6 +519,9 @@ us_universe:
     rank: 4
     tier: "core"
     character: "커스터디 인프라 — 디지털자산의 새 증권예탁결제원"
+    directness: "direct"           # 디지털자산 수탁 서비스 직접 제공
+    earnings_linkage: "proven"     # 9개월 순이익 $3530만 확인
+    catalyst_strength: "strong"    # OCC 신탁은행 승인 + IPO 비대칭
     catalysts:
       - "2026.01 IPO $2.128억 조달"
       - "25년 9개월 순이익 $3,530만"
@@ -491,6 +545,9 @@ us_universe:
     rank: 5
     tier: "structural"
     character: "AI 연결 인프라 — 훌륭한 사업이지만 이제는 품질주"
+    directness: "direct"           # AEC/SerDes 직접 설계 — 하이퍼스케일러 공급
+    earnings_linkage: "proven"     # 매출 +201.5%, 총마진 68.6%
+    catalyst_strength: "strong"    # 800G/1.6T 전환 + 현금 $13억
     catalysts:
       - "FY26 3Q 매출 $4.07억 (+201.5% YoY)"
       - "비GAAP 총마진 68.6%"
@@ -513,6 +570,9 @@ us_universe:
     rank: 6
     tier: "structural"
     character: "스테이블코인 인프라 — 구조적 성장주지만 금리 민감"
+    directness: "direct"           # USDC 스테이블코인 직접 발행/운영
+    earnings_linkage: "proven"     # 4Q 매출+리저브 $7.70억
+    catalyst_strength: "moderate"  # 법안 추진이나 금리 민감
     catalysts:
       - "USDC 유통량 $753억"
       - "4Q 온체인 거래량 $11.9조"
@@ -535,6 +595,9 @@ us_universe:
     rank: 7
     tier: "structural"
     character: "양자 대표주 — 여전히 선두지만 이미 너무 커졌다"
+    directness: "direct"           # 이온트랩 양자컴퓨터 직접 개발
+    earnings_linkage: "emerging"   # 매출 +202%이나 시총 $182억 대비 소규모
+    catalyst_strength: "moderate"  # 국방부 계약이나 상용 비중 낮음
     catalysts:
       - "25년 매출 $1.30억 (+202%)"
       - "현금+투자자산 $33억"
@@ -557,6 +620,9 @@ us_universe:
     rank: 8
     tier: "structural"
     character: "우주 인프라 — 실적형 우주주지만 10배보단 3~5배형"
+    directness: "direct"           # 위성/로봇팔 직접 제조
+    earnings_linkage: "proven"     # 매출 $16.33억, 백로그 $40억
+    catalyst_strength: "moderate"  # SDA Tranche 2이나 3-5배형
     catalysts:
       - "25년 매출 $16.33억"
       - "백로그 $40억"
@@ -579,6 +645,9 @@ us_universe:
     rank: 9
     tier: "option"
     character: "SMR 옵션 — 살아남을 현금은 있지만 아직 옵션주"
+    directness: "direct"           # NRC 유일 승인 SMR 설계
+    earnings_linkage: "speculative"  # 매출 미미, 현금 소진 중
+    catalyst_strength: "weak"      # 고객 취소 이력, 신규 계약 필요
     catalysts:
       - "연말 현금 ~$13억"
       - "유일한 NRC 승인 SMR 설계"
@@ -599,6 +668,9 @@ us_universe:
     rank: 10
     tier: "option"
     character: "양자 옵션 — QUBT보다 나은 고위험 양자 선택지"
+    directness: "direct"           # 양자 어닐링 컴퓨터 직접 개발
+    earnings_linkage: "speculative"  # 매출 $2460만, 아직 극소규모
+    catalyst_strength: "weak"      # 양자 겨울 리스크, 상용화 먼 길
     catalysts:
       - "25년 매출 $2,460만 (+179%)"
       - "실제 매출과 고객 보유"
@@ -658,6 +730,303 @@ investment_criteria:
   - "앞으로 12~18개월 안에 확인할 숫자가 있는가"
   - "가설이 틀렸을 때 빨리 인정할 수 있는가"
   - "지금 가격대에서 아직 비대칭이 남아 있는가"
+
+# ── 3-Bucket 체계 (v2.3 P2/P3) ──────────────────────────────
+# korea_universe / us_universe = active_tenbagger (기존 유지)
+# theme_watchlist = 테마 관찰 종목 (아직 active universe에 편입하지 않은 후보)
+# direction_leaders = 섹터 방향 확인용 대형 대표주 (매매 비대상)
+#
+# bucket 분류:
+#   active_tenbagger  — 실제 매매 대상, 포지션 사이징/코칭/리스크 정책 적용
+#   theme_watchlist   — 관찰만, 매매 비대상, 승격(promotion) 조건 충족 시 active로 이동
+#   direction_leaders — 섹터 on/off 판단용 대형주, 매매 비대상
+#
+# directness 분류:
+#   direct            — 핵심 밸류체인 직접 수혜 (매출의 30%+ 연관)
+#   indirect_to_medium — 간접~중간 수혜 (공급망 연관 확인, 매출 검증 중)
+#   indirect          — 간접 수혜 (공급망 2차 이상, 매출 기여 미확정)
+#   thematic          — 테마 연관이나 실적 연결 약함
+#   weak_to_indirect  — 약한~간접 연관
+#   weak              — 약한 연관, 순수 테마 플레이
+
+buckets:
+  direction_leaders:
+    label: "방향성 리더"
+    description: "섹터 방향 확인용 대형 대표주. 매수 핵심 대상보다 섹터 on/off 판단용"
+    tradeable: false
+    criteria:
+      - "market_cap_large"
+      - "high_liquidity"
+      - "sector_leader"
+      - "institution_foreign_flow_relevant"
+      - "not_required_to_be_10x_candidate"
+  active_tenbagger:
+    label: "액티브 텐배거"
+    description: "실제 점수 반영 및 코칭 대상. 공급망 직접성 + 실적 레버리지 + 촉매가 확인된 후보"
+    tradeable: true
+    criteria:
+      - "direct_or_near_direct_ai_infra_linkage"
+      - "earnings_linkage_visible"
+      - "capex_beneficiary"
+      - "catalyst_present"
+      - "liquidity_tradeable"
+      - "not_fully_priced_in"
+  theme_watchlist:
+    label: "테마 워치리스트"
+    description: "연관성은 있으나 직접성/실적 연결성 검증이 더 필요한 후보"
+    tradeable: false
+    criteria:
+      - "thematic_or_indirect_linkage"
+      - "optionality_exists"
+      - "insufficient_earnings_visibility"
+      - "requires_promotion_rule"
+
+# ── 방향성 리더 선정 규칙 ────────────────────────────────────
+direction_leader_rules:
+  sector_price_discovery_role: true
+  liquidity_top_tier: true
+  institutional_attention: true
+  thematic_anchor: true
+  earnings_relevance_to_theme: "medium_or_high"
+
+# ── 승격 프로세스 (watchlist → active) ────────────────────────
+# 현재: 자동 모니터링 + GPT Pro 수동 승인 구조. 자동 승격 미구현.
+promotion_process:
+  stage_1_monitoring:
+    description: "자동 감시"
+    checks:
+      - "unusual_volume"
+      - "price_strength_vs_sector"
+      - "catalyst_keyword_hits"
+      - "earnings_revision_signal"
+      - "supply_chain_confirmation_signal"
+  stage_2_review:
+    description: "GPT Pro 리뷰"
+    requirements:
+      - "directness_revalidated"
+      - "earnings_linkage_revalidated"
+      - "catalyst_strength_scored"
+      - "narrative_not_pure_theme"
+  promotion_threshold:
+    minimum_conditions:
+      - "catalyst_strength >= 70"
+      - "directness_to_ai_capex >= medium"
+      - "earnings_linkage >= medium"
+      - "liquidity_tradeable == true"
+      - "at_least_two_new_confirmations == true"
+
+# ── 방향성 리더 (v2.3) ─────────────────────────────────────────
+# 섹터 on/off 신호용 대형 대표주. 매수 핵심 대상 아님.
+# 이 종목들의 주가/실적/CAPEX 방향이 해당 섹터 텐배거의 선행지표.
+direction_leaders:
+  # ── US direction leaders ──
+  - ticker: "NVDA"
+    name: "NVIDIA"
+    sector: "optical_ai_infra"
+    market: "US"
+    bucket: "direction_leaders"
+    directness: "direct"
+    earnings_linkage: "proven"
+    catalyst_strength: "strong"
+    character: "AI 인프라 절대 리더 — CPO/광통신/HBM 전체 방향 지배"
+    signal_role: "NVDA CAPEX 가이던스 = AI 인프라 사이클 on/off"
+    why_in_bucket: "시총 $2T+ 초대형주, 텐배거 대상 아님, 섹터 신호용"
+
+  - ticker: "AVGO"
+    name: "Broadcom"
+    sector: "optical_ai_infra"
+    market: "US"
+    bucket: "direction_leaders"
+    directness: "direct"
+    earnings_linkage: "proven"
+    catalyst_strength: "strong"
+    character: "AI 네트워킹 ASIC + VMware — 하이퍼스케일러 커스텀칩 바로미터"
+    signal_role: "AVGO AI 매출 가이던스 = 커스텀 ASIC / 네트워킹 수요 on/off"
+    why_in_bucket: "시총 $800B+ 초대형주, CRDO/오이솔루션의 전방 신호"
+
+  - ticker: "ANET"
+    name: "Arista Networks"
+    sector: "optical_ai_infra"
+    market: "US"
+    bucket: "direction_leaders"
+    directness: "direct"
+    earnings_linkage: "proven"
+    catalyst_strength: "strong"
+    character: "데이터센터 스위칭 1위 — AI 클러스터 네트워크 인프라 핵심"
+    signal_role: "ANET 수주/가이던스 = AI 데이터센터 네트워크 투자 사이클"
+    why_in_bucket: "시총 $100B+, 광통신/AI인프라 텐배거의 전방 수요 지표"
+
+  - ticker: "MU"
+    name: "Micron Technology"
+    sector: "optical_ai_infra"
+    market: "US"
+    bucket: "direction_leaders"
+    directness: "direct"
+    earnings_linkage: "proven"
+    catalyst_strength: "strong"
+    character: "HBM 메모리 — NVIDIA GPU 옆에 붙는 핵심 부품 공급"
+    signal_role: "MU HBM 출하/가이던스 = AI 반도체 메모리 사이클 확인"
+    why_in_bucket: "시총 $100B+, SK하이닉스와 HBM 듀얼 신호"
+
+  - ticker: "MRVL"
+    name: "Marvell Technology"
+    sector: "optical_ai_infra"
+    market: "US"
+    bucket: "direction_leaders"
+    directness: "direct"
+    earnings_linkage: "proven"
+    catalyst_strength: "strong"
+    character: "커스텀 AI 실리콘 + 광통신 DSP — AI 인프라 연결 레이어"
+    signal_role: "MRVL 커스텀 실리콘/일렉트로옵틱스 매출 = CPO/연결 인프라 사이클"
+    why_in_bucket: "시총 $60B+, CRDO와 함께 AI 연결 인프라 방향 신호"
+
+  # ── KR direction leaders ──
+  - code: "000660"
+    name: "SK하이닉스"
+    sector: "optical_ai_infra"
+    market: "KOSPI"
+    bucket: "direction_leaders"
+    directness: "direct"
+    earnings_linkage: "proven"
+    catalyst_strength: "strong"
+    character: "HBM 글로벌 1위 — NVIDIA/AI GPU 메모리의 핵심 공급자"
+    signal_role: "SK하이닉스 HBM 출하/ASP = 한국 AI 반도체 체인 on/off"
+    why_in_bucket: "시총 150조+ 초대형주, 한국 AI인프라 텐배거의 방향 지표"
+
+  - code: "005930"
+    name: "삼성전자"
+    sector: "optical_ai_infra"
+    market: "KOSPI"
+    bucket: "direction_leaders"
+    directness: "direct"
+    earnings_linkage: "proven"
+    catalyst_strength: "moderate"
+    character: "반도체/메모리 글로벌 리더 — 한국 테크 전체 방향 바로미터"
+    signal_role: "삼성전자 반도체 실적/설비투자 = 한국 테크 섹터 전반 신호"
+    why_in_bucket: "시총 300조+ 초대형주, 한국 시장 전체 방향 대표 지표"
+
+# ── 테마 워치리스트 (v2.3) ────────────────────────────────────
+# active universe에 아직 편입하지 않은 후보 종목.
+# 매매 비대상. 모니터링/리서치 전용.
+# 승격은 promotion_process 참조 (자동 모니터링 + GPT Pro 수동 승인).
+theme_watchlist:
+  # --- 우선순위 1: 옵티코어 ---
+  - code: "380540"
+    name: "옵티코어"
+    sector: "optical_ai_infra"
+    market: "KOSDAQ"
+    bucket: "theme_watchlist"
+    directness: "indirect_to_medium"
+    theme: "optical_transceiver"
+    character: "광트랜시버 카테고리 연관 — 직접 수혜 가시성 추가 검증 필요"
+    earnings_linkage: "low_to_medium"
+    catalyst_strength: "medium"
+    catalysts:
+      - "광트랜시버 관련 제품 라인업"
+      - "AI 데이터센터 광연결 수요 확대"
+    watch_reasons:
+      - "광트랜시버 카테고리 연관성은 있으나 직접 수혜 가시성 추가 검증 필요"
+      - "실적 연결 확인 중"
+    promotion_condition: "공급망 확인 + 실적 상향 + 지속적 거래량 확대"
+    promotion_rule:
+      - "supply_chain_confirmation"
+      - "earnings_revision_up"
+      - "sustained_volume_expansion"
+    ai_consensus: 55
+    priority: 1
+
+  # --- 우선순위 2: 라이콤 ---
+  - code: "388790"
+    name: "라이콤"
+    sector: "optical_ai_infra"
+    market: "KOSDAQ"
+    bucket: "theme_watchlist"
+    directness: "indirect"
+    theme: "optical_amplifier"
+    character: "광증폭기 전문 — 광통신 테마 적합성은 있으나 AI infra 직접 CAPEX 연결 추가 검증 필요"
+    earnings_linkage: "low_to_medium"
+    catalyst_strength: "medium"
+    catalysts:
+      - "광증폭기/광통신 모듈 기술력"
+      - "데이터센터 광통신 인프라 확대"
+    watch_reasons:
+      - "광통신 테마 적합성은 있으나 AI infra 직접 CAPEX 연결 추가 검증 필요"
+      - "데이터센터 관련성 확인 필요"
+    promotion_condition: "데이터센터 관련성 확인 + 계약/고객 가시성 + 섹터 상대강도"
+    promotion_rule:
+      - "datacenter_relevance_confirmation"
+      - "contract_or_customer_visibility"
+      - "sector_relative_strength"
+    ai_consensus: 50
+    priority: 2
+
+  # --- 우선순위 3: 우리넷 (low-priority) ---
+  - code: "115440"
+    name: "우리넷"
+    sector: "optical_ai_infra"
+    market: "KOSDAQ"
+    bucket: "theme_watchlist"
+    directness: "weak_to_indirect"
+    theme: "optical_transport"
+    character: "광전송 인프라 — 광전송 인프라 연관성은 있으나 AI infra 직접 수혜로 보기엔 한 단계 약함"
+    earnings_linkage: "low"
+    catalyst_strength: "low_to_medium"
+    catalysts:
+      - "광전송장비 국산화"
+      - "통신 인프라 투자 확대 가능성"
+    watch_reasons:
+      - "광전송 인프라 연관성은 있으나 AI infra 직접 수혜로 보기엔 한 단계 약함"
+      - "사업 믹스 변화 확인 필요"
+    promotion_condition: "명확한 AI 인프라 연결 + 사업 믹스 전환 + 유동성 정상화"
+    promotion_rule:
+      - "clear_ai_infra_linkage"
+      - "business_mix_shift_confirmation"
+      - "liquidity_normalization"
+    ai_consensus: 45
+    priority: 3
+
+  # --- 기존 워치리스트 ---
+  - code: "327260"
+    name: "RF머트리얼즈"
+    sector: "optical_ai_infra"
+    market: "KOSDAQ"
+    bucket: "theme_watchlist"
+    directness: "indirect"
+    theme: "CPO/광학소재"
+    character: "CPO 광학 박막 소재 — NVIDIA/Lumentum 공급망 간접 수혜"
+    earnings_linkage: "speculative"
+    catalyst_strength: "moderate"
+    catalysts:
+      - "NVIDIA GTC 2026 CPO 로드맵 가속"
+      - "Lumentum/II-VI CPO 모듈 소재 납품 가능성"
+      - "광학 박막 원천기술 (반사방지/필터)"
+    watch_reasons:
+      - "CPO 매출 비중 미확정 — 간접 수혜 성격"
+      - "흑자 기조이나 CPO 직접 연결 실적 미확인"
+    promotion_condition: "CPO 관련 매출 분기 확인 또는 주요 고객 공식 발표"
+    promotion_rule: "earnings_linkage가 emerging 이상 + directness가 direct로 변경 시 active 승격"
+    ai_consensus: 72
+
+  - code: "043260"
+    name: "성호전자"
+    sector: "optical_ai_infra"
+    market: "KOSDAQ"
+    bucket: "theme_watchlist"
+    directness: "indirect"
+    theme: "CPO/AI커넥터"
+    character: "CPO 커넥터 옵션 — ADS-Tech 정렬, Mellanox/NVIDIA 커넥터"
+    earnings_linkage: "speculative"
+    catalyst_strength: "weak"
+    catalysts:
+      - "ADS-Tech CPO 모듈 정렬 부품"
+      - "Mellanox/NVIDIA InfiniBand 커넥터 납품"
+      - "AI 데이터센터 커넥터 수요 급증"
+    watch_reasons:
+      - "CPO 관련 매출 12개월 내 미발생 가능성"
+      - "주요 고객사 의존도 + 적자 리스크"
+    promotion_condition: "CPO/AI 커넥터 매출 분기 확인 또는 흑자전환"
+    promotion_rule: "earnings_linkage가 emerging 이상 + 흑자전환 시 active C등급 승격"
+    ai_consensus: 65
 
 # ── 한 줄 결론 ────────────────────────────────────────────────
 # 한국 총알 하나: 우진 — 가장 작은 독점 + 가장 반복적인 매출 구조
