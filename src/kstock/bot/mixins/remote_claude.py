@@ -803,6 +803,21 @@ class RemoteClaudeMixin:
                 if resp.status_code == 200:
                     data = resp.json()
                     answer = data["content"][0]["text"].strip().replace("**", "")
+                    try:
+                        from kstock.core.token_tracker import track_usage_global
+
+                        usage = data.get("usage", {})
+                        track_usage_global(
+                            provider="anthropic",
+                            model=tier["model"],
+                            function_name="claude_direct_chat",
+                            input_tokens=usage.get("input_tokens", 0) or 0,
+                            output_tokens=usage.get("output_tokens", 0) or 0,
+                            cache_read_tokens=usage.get("cache_read_input_tokens", 0) or 0,
+                            cache_write_tokens=usage.get("cache_creation_input_tokens", 0) or 0,
+                        )
+                    except Exception:
+                        pass
                 else:
                     error_text = _extract_provider_error_message(resp.text)
                     if _should_try_openai_chat_fallback(
@@ -1231,6 +1246,21 @@ class RemoteClaudeMixin:
                 if resp.status_code == 200:
                     data = resp.json()
                     analysis = data["content"][0]["text"].strip().replace("**", "")
+                    try:
+                        from kstock.core.token_tracker import track_usage_global
+
+                        usage = data.get("usage", {})
+                        track_usage_global(
+                            provider="anthropic",
+                            model="claude-sonnet-4-5-20250929",
+                            function_name="claude_image_analysis",
+                            input_tokens=usage.get("input_tokens", 0) or 0,
+                            output_tokens=usage.get("output_tokens", 0) or 0,
+                            cache_read_tokens=usage.get("cache_read_input_tokens", 0) or 0,
+                            cache_write_tokens=usage.get("cache_creation_input_tokens", 0) or 0,
+                        )
+                    except Exception:
+                        pass
                 else:
                     error_text = _extract_provider_error_message(resp.text)
                     if _should_try_openai_chat_fallback(

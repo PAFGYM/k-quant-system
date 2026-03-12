@@ -40,6 +40,12 @@ _INVESTMENT_HEAVY_HINTS = re.compile(
     r"목표가|지지선|저항선|6자리\s*종목코드|\d{6})",
     re.IGNORECASE,
 )
+_DEEP_INVESTMENT_HINTS = re.compile(
+    r"(비교|포트폴리오|리밸런싱|리밸런스|시나리오|전략|비중|"
+    r"분할매수|분할매도|장기투자|텐베거|수급분석|산업분석|"
+    r"거시|매크로|정책|환율|유가|공매도|숏스퀴즈|이벤트)",
+    re.IGNORECASE,
+)
 
 # [v3.6.6] 매도 지시 / 공포 유발 키워드 필터
 _SELL_PATTERNS = [
@@ -74,6 +80,56 @@ def should_use_lightweight_chat(question: str) -> bool:
         return True
     # 짧은 일반 질의는 기본적으로 빠른 경로로 보낸다.
     return len(text.split()) <= 10
+
+
+def classify_chat_route(question: str) -> str:
+    """질문 복잡도에 따라 light / balanced / deep 경로를 결정한다."""
+    text = str(question or "").strip()
+    if not text:
+        return "balanced"
+    if should_use_lightweight_chat(text):
+        return "light"
+
+    # 한 종목/짧은 투자 질문은 기본적으로 balanced(저비용 고품질) 경로
+    stock_code_count = len(re.findall(r"\b\d{6}\b", text))
+    stock_name_count = len(re.findall(r"[가-힣A-Za-z]{2,10}\s*(?:전자|에너지|중공업|하이닉스|바이오|테크|솔루션|모비스|로직스|홀딩스|금융)", text))
+    if (
+        len(text) <= 180
+        and not _DEEP_INVESTMENT_HINTS.search(text)
+        and stock_code_count <= 1
+        and stock_name_count <= 1
+    ):
+        return "balanced"
+
+    if len(text) > 180 or _DEEP_INVESTMENT_HINTS.search(text) or stock_code_count >= 2 or stock_name_count >= 2:
+        return "deep"
+
+    return "balanced"
+
+
+def _build_balanced_system_prompt(context: dict) -> str:
+    """단일 종목/일반 투자 질문용 중간 프롬프트."""
+    market = context.get("market", "")
+    portfolio = context.get("portfolio", "")
+    recent_briefing = context.get("recent_briefing", "")
+    recommendations = context.get("recommendations", "")
+    lines = [
+        f"너는 {USER_NAME}의 실전 투자 비서다.",
+        "한국어 존댓말로 짧고 분명하게 답하라.",
+        "투자 질문이면 먼저 결론을 말하고, 이유 2~4개와 지금 볼 포인트를 덧붙여라.",
+        "매수/매도 단정 지시는 금지하고, 관심/분할 접근/관망/보유 점검처럼 행동형으로 답하라.",
+        "구체적 가격은 제공된 실시간 데이터가 있을 때만 말하라.",
+        "본문은 6~10줄 안에서 끝내고, 장황한 서론과 반복은 금지한다.",
+    ]
+    if market:
+        lines.append(f"[시장]\n{market[:900]}")
+    if portfolio:
+        lines.append(f"[보유]\n{portfolio[:900]}")
+    if recent_briefing:
+        lines.append(f"[최근 브리핑]\n{recent_briefing[:700]}")
+    if recommendations:
+        lines.append(f"[최근 추천]\n{recommendations[:700]}")
+    return "\n\n".join(lines)
 
 
 def _build_lightweight_system_prompt(context: dict) -> str:
@@ -182,17 +238,19 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
 
     # Build system prompt from context
     from kstock.bot.context_builder import build_system_prompt
-    use_lightweight = should_use_lightweight_chat(question)
-    system_prompt = (
-        _build_lightweight_system_prompt(context)
-        if use_lightweight
-        else build_system_prompt(context)
-    )
+    chat_route = classify_chat_route(question)
+    use_lightweight = chat_route == "light"
+    if chat_route == "light":
+        system_prompt = _build_lightweight_system_prompt(context)
+    elif chat_route == "balanced":
+        system_prompt = _build_balanced_system_prompt(context)
+    else:
+        system_prompt = build_system_prompt(context)
 
     # v6.2: 과거 관련 대화 검색 + 사용자 선호도 컨텍스트
     rag_context = ""
     pref_context = ""
-    if not use_lightweight:
+    if chat_route == "deep":
         try:
             rag_context = chat_memory.get_relevant_context(question, max_items=5)
             pref_context = chat_memory.get_user_preferences_context()
@@ -208,20 +266,41 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
         system_prompt = system_prompt + extra_context
 
     # Assemble conversation messages from history + new question
-    history = chat_memory.get_recent(limit=8 if use_lightweight else 20)
+    history_limit = {
+        "light": 6,
+        "balanced": 8,
+        "deep": 12,
+    }.get(chat_route, 8)
+    history = chat_memory.get_recent(limit=history_limit)
     messages: list[dict[str, str]] = []
     for msg in history:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": question})
+
+    model = "claude-sonnet-4-5-20250929" if chat_route == "deep" else "claude-haiku-4-5-20251001"
+    max_tokens = {
+        "light": 550,
+        "balanced": 850,
+        "deep": 1400,
+    }.get(chat_route, 850)
+    temperature = {
+        "light": 0.15,
+        "balanced": 0.2,
+        "deep": 0.28,
+    }.get(chat_route, 0.2)
+    logger.info(
+        "AI chat route selected: route=%s model=%s history=%d chars=%d",
+        chat_route, model, history_limit, len(question or ""),
+    )
 
     # Call Claude API (async) with Prompt Caching
     # - system prompt: explicit cache (변경 시에만 재생성, 동일하면 캐시 히트)
     # - conversation: automatic cache (멀티턴 대화 자동 캐시)
     try:
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001" if use_lightweight else "claude-sonnet-4-5-20250929",
-            max_tokens=900 if use_lightweight else 2000,
-            temperature=0.2 if use_lightweight else 0.3,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
             cache_control={"type": "ephemeral"},  # 대화 자동 캐시
             system=[{
                 "type": "text",
@@ -255,8 +334,8 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
             from kstock.core.token_tracker import track_usage
             track_usage(
                 db=db, provider="anthropic",
-                model="claude-haiku-4-5-20251001" if use_lightweight else "claude-sonnet-4-5-20250929",
-                function_name="chat",
+                model=model,
+                function_name=f"chat:{chat_route}",
                 response=response,
             )
         except Exception:
