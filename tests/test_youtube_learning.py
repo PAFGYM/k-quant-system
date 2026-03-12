@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from kstock.ingest.global_news import (
+    _build_whisper_download_attempts,
+    _download_audio_for_whisper,
     batch_deep_youtube_analysis,
     summarize_transcript_structured,
 )
@@ -185,3 +187,37 @@ class TestStructuredSummaryFallback:
 
         assert result == expected
         mock_openai.assert_awaited_once()
+
+
+class TestWhisperDownloadFallbacks:
+    def test_build_whisper_download_attempts_includes_audio_stream_fallback(self):
+        attempts = _build_whisper_download_attempts(
+            "https://www.youtube.com/watch?v=test1234567",
+            "/tmp/test1234567.%(ext)s",
+            has_ffmpeg=False,
+        )
+
+        labels = [label for label, _ in attempts]
+        assert labels == ["audio_stream", "compact_video"]
+
+    def test_download_audio_for_whisper_retries_with_fallback(self):
+        fake_result = MagicMock()
+        fake_result.stderr = ""
+        fake_result.stdout = ""
+
+        with patch(
+            "subprocess.run",
+            return_value=fake_result,
+        ) as mock_run, patch(
+            "kstock.ingest.global_news._resolve_whisper_media_path",
+            side_effect=["", "/tmp/abc123.m4a"],
+        ):
+            path = _download_audio_for_whisper(
+                video_id="abc123",
+                tmp_dir="/tmp",
+                env={},
+                has_ffmpeg=False,
+            )
+
+        assert path == "/tmp/abc123.m4a"
+        assert mock_run.call_count == 2

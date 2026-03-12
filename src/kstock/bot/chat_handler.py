@@ -29,6 +29,11 @@ USER_NAME = "주호님"
 
 # Daily limit for AI chat questions
 DEFAULT_DAILY_LIMIT = 50
+DEFAULT_CHAT_DAILY_SOFT_BUDGET_USD = 0.8
+DEFAULT_CHAT_DAILY_HARD_BUDGET_USD = 1.6
+DEFAULT_CHAT_MONTHLY_SOFT_BUDGET_USD = 18.0
+DEFAULT_CHAT_MONTHLY_HARD_BUDGET_USD = 35.0
+DEFAULT_CHAT_DAILY_DEEP_LIMIT = 10
 
 _LIGHT_CHAT_HINTS = (
     "요약", "정리", "번역", "영어", "이메일", "문장", "초안",
@@ -105,6 +110,86 @@ def classify_chat_route(question: str) -> str:
         return "deep"
 
     return "balanced"
+
+
+def _load_float_env(name: str, default: float) -> float:
+    try:
+        value = float(str(os.getenv(name, default)).strip())
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+def _load_int_env(name: str, default: int) -> int:
+    try:
+        value = int(str(os.getenv(name, default)).strip())
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+def _get_chat_budget_snapshot(db) -> tuple[float, float]:
+    daily_cost = 0.0
+    monthly_cost = 0.0
+    try:
+        if hasattr(db, "get_daily_api_usage"):
+            daily = db.get_daily_api_usage() or {}
+            daily_cost = float(daily.get("total_cost", 0) or 0)
+    except Exception:
+        logger.debug("daily api usage lookup failed", exc_info=True)
+    try:
+        if hasattr(db, "get_monthly_api_usage"):
+            monthly = db.get_monthly_api_usage() or {}
+            monthly_cost = float(monthly.get("total_cost", 0) or 0)
+    except Exception:
+        logger.debug("monthly api usage lookup failed", exc_info=True)
+    return daily_cost, monthly_cost
+
+
+def _apply_chat_budget_guard(
+    route: str,
+    usage_count: int,
+    daily_cost: float,
+    monthly_cost: float,
+) -> tuple[str, str]:
+    daily_soft = _load_float_env(
+        "CHAT_API_DAILY_SOFT_BUDGET_USD",
+        DEFAULT_CHAT_DAILY_SOFT_BUDGET_USD,
+    )
+    daily_hard = _load_float_env(
+        "CHAT_API_DAILY_HARD_BUDGET_USD",
+        DEFAULT_CHAT_DAILY_HARD_BUDGET_USD,
+    )
+    monthly_soft = _load_float_env(
+        "CHAT_API_MONTHLY_SOFT_BUDGET_USD",
+        DEFAULT_CHAT_MONTHLY_SOFT_BUDGET_USD,
+    )
+    monthly_hard = _load_float_env(
+        "CHAT_API_MONTHLY_HARD_BUDGET_USD",
+        DEFAULT_CHAT_MONTHLY_HARD_BUDGET_USD,
+    )
+    deep_limit = _load_int_env(
+        "CHAT_DAILY_DEEP_LIMIT",
+        DEFAULT_CHAT_DAILY_DEEP_LIMIT,
+    )
+
+    adjusted = route
+    mode = ""
+
+    if route == "deep" and usage_count >= deep_limit:
+        adjusted = "balanced"
+        mode = "deep_limit"
+
+    if daily_cost >= daily_hard or monthly_cost >= monthly_hard:
+        if adjusted != "light":
+            adjusted = "light"
+        mode = "hard"
+    elif daily_cost >= daily_soft or monthly_cost >= monthly_soft:
+        if adjusted == "deep":
+            adjusted = "balanced"
+        mode = mode or "soft"
+
+    return adjusted, mode
 
 
 def _build_balanced_system_prompt(context: dict) -> str:
@@ -225,6 +310,12 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
             "내일 다시 이용해주세요."
         )
 
+    daily_api_cost, monthly_api_cost = _get_chat_budget_snapshot(db)
+    requested_route = classify_chat_route(question)
+    chat_route, budget_mode = _apply_chat_budget_guard(
+        requested_route, usage_count, daily_api_cost, monthly_api_cost,
+    )
+
     # Initialize Anthropic async client
     try:
         import anthropic
@@ -238,7 +329,6 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
 
     # Build system prompt from context
     from kstock.bot.context_builder import build_system_prompt
-    chat_route = classify_chat_route(question)
     use_lightweight = chat_route == "light"
     if chat_route == "light":
         system_prompt = _build_lightweight_system_prompt(context)
@@ -264,6 +354,13 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
         if rag_context:
             extra_context += f"\n\n{rag_context}"
         system_prompt = system_prompt + extra_context
+    if budget_mode:
+        system_prompt += (
+            "\n\n[비용 보호 모드]\n"
+            "지금은 답변을 더 압축해서 제공하라. "
+            "가장 중요한 결론과 실행 포인트만 우선 제시하고, "
+            "불필요한 반복과 장문 설명은 줄여라."
+        )
 
     # Assemble conversation messages from history + new question
     history_limit = {
@@ -271,6 +368,10 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
         "balanced": 8,
         "deep": 12,
     }.get(chat_route, 8)
+    if budget_mode == "soft":
+        history_limit = max(4, history_limit - 2)
+    elif budget_mode == "hard":
+        history_limit = min(history_limit, 4)
     history = chat_memory.get_recent(limit=history_limit)
     messages: list[dict[str, str]] = []
     for msg in history:
@@ -283,14 +384,21 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
         "balanced": 850,
         "deep": 1400,
     }.get(chat_route, 850)
+    if budget_mode == "soft":
+        max_tokens = int(max_tokens * 0.8)
+    elif budget_mode == "hard":
+        max_tokens = min(max_tokens, 420)
     temperature = {
         "light": 0.15,
         "balanced": 0.2,
         "deep": 0.28,
     }.get(chat_route, 0.2)
+    if budget_mode:
+        temperature = min(temperature, 0.18)
     logger.info(
-        "AI chat route selected: route=%s model=%s history=%d chars=%d",
-        chat_route, model, history_limit, len(question or ""),
+        "AI chat route selected: requested=%s actual=%s budget_mode=%s model=%s history=%d chars=%d daily_cost=%.4f monthly_cost=%.4f",
+        requested_route, chat_route, budget_mode or "off", model, history_limit,
+        len(question or ""), daily_api_cost, monthly_api_cost,
     )
 
     # Call Claude API (async) with Prompt Caching
@@ -420,8 +528,14 @@ def format_chat_usage_status(db) -> str:
     today = datetime.now(KST).strftime("%Y-%m-%d")
     usage_count = db.get_chat_usage_count(today)
     remaining = max(0, daily_limit - usage_count)
-    return (
+    daily_api_cost, monthly_api_cost = _get_chat_budget_snapshot(db)
+    lines = [
         f"{USER_NAME}, 오늘 AI 질문 현황\n"
         f"사용: {usage_count}회 / 한도: {daily_limit}회\n"
         f"남은 횟수: {remaining}회"
-    )
+    ]
+    if daily_api_cost > 0 or monthly_api_cost > 0:
+        lines.append(
+            f"\nAI 비용: 오늘 ${daily_api_cost:.3f} / 이번달 ${monthly_api_cost:.2f}"
+        )
+    return "".join(lines)
