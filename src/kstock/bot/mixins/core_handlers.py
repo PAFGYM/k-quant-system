@@ -311,6 +311,13 @@ class CoreHandlersMixin:
             first=60,
             name="market_pulse",
         )
+        # v14: 인버스 단타 타이밍 알림 (장중 5분 간격)
+        jq.run_repeating(
+            self.job_inverse_timing,
+            interval=300,
+            first=90,
+            name="inverse_timing",
+        )
         # 통합 장 마감 리포트 (16:00 — 텍스트 요약 + PDF 1건)
         jq.run_daily(
             self.job_daily_pdf_report,

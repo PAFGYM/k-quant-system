@@ -7797,6 +7797,84 @@ class SchedulerMixin:
                 status="error", message=str(e)[:100],
             )
 
+    # ── 인버스 단타 타이밍 알림 (장중 5분 간격) ──────────────
+    async def job_inverse_timing(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """인버스 ETF 진입/청산 시그널 모니터링 (단타용)."""
+        if not self.chat_id:
+            return
+        now = datetime.now(KST)
+        if not is_kr_market_open(now.date()):
+            return
+        market_start = now.replace(hour=9, minute=5, second=0, microsecond=0)
+        market_end = now.replace(hour=15, minute=25, second=0, microsecond=0)
+        if not (market_start <= now <= market_end):
+            return
+
+        try:
+            from kstock.signal.inverse_timing import (
+                check_inverse_timing,
+                format_entry_alert,
+            )
+
+            macro = await self.macro_client.get_snapshot()
+
+            # 장중 고점 대비 낙폭은 전일 대비 등락률로 근사
+            signals = check_inverse_timing(
+                kospi_change_pct=macro.kospi_change_pct,
+                kospi_high_drop_pct=macro.kospi_change_pct,
+                kosdaq_change_pct=macro.kosdaq_change_pct,
+                kosdaq_high_drop_pct=macro.kosdaq_change_pct,
+                vix=macro.vix,
+                vix_change_pct=macro.vix_change_pct,
+                usdkrw_change_pct=macro.usdkrw_change_pct,
+                regime=macro.regime,
+                fear_greed=macro.fear_greed_score,
+            )
+
+            for sig in signals:
+                # 쿨다운: 동일 시그널 30분 내 중복 방지
+                cache_key = f"inverse_entry_{sig.target}"
+                last_sent = getattr(self, "_inverse_alert_cache", {}).get(cache_key)
+                if last_sent and (now - last_sent).total_seconds() < 1800:
+                    continue
+
+                msg = format_entry_alert(sig)
+                await context.bot.send_message(
+                    chat_id=self.chat_id, text=msg,
+                )
+                if not hasattr(self, "_inverse_alert_cache"):
+                    self._inverse_alert_cache = {}
+                self._inverse_alert_cache[cache_key] = now
+
+                logger.info(
+                    "Inverse timing alert: %s %s score=%.0f",
+                    sig.action, sig.target, sig.score,
+                )
+
+            # 14:50 강제 청산 리마인더
+            if now.hour == 14 and 50 <= now.minute <= 55:
+                cache_key = "inverse_force_exit"
+                last_sent = getattr(self, "_inverse_alert_cache", {}).get(cache_key)
+                if not last_sent or (now - last_sent).total_seconds() > 3600:
+                    reminder = (
+                        "🚨 인버스 강제 청산 시간\n"
+                        "━" * 18 + "\n"
+                        "⏰ 14:50 단타 원칙\n"
+                        "인버스 보유 중이면\n"
+                        "지금 바로 청산하세요!\n"
+                        "\n"
+                        "당일 청산 = 단타의 기본"
+                    )
+                    await context.bot.send_message(
+                        chat_id=self.chat_id, text=reminder,
+                    )
+                    if not hasattr(self, "_inverse_alert_cache"):
+                        self._inverse_alert_cache = {}
+                    self._inverse_alert_cache[cache_key] = now
+
+        except Exception as e:
+            logger.error("job_inverse_timing failed: %s", e, exc_info=True)
+
     # ── 만기일 대시보드 (07:45 KST, 만기일만 발송) ──────────
     async def job_expiry_dashboard(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """만기일 아침 자동 대시보드."""

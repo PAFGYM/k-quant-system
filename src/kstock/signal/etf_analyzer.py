@@ -168,6 +168,13 @@ ETF_UNIVERSE: dict[str, dict] = {
         "category": "commodity",
         "expense": 0.70,
     },
+    # 인버스 (코스닥)
+    "251340": {
+        "name": "KODEX KOSDAQ150인버스",
+        "benchmark": "229200",
+        "category": "inverse",
+        "expense": 0.64,
+    },
 }
 
 # ---------------------------------------------------------------------------
