@@ -17,6 +17,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from kstock import APP_NAME
 from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
@@ -572,7 +573,7 @@ async def generate_daily_pdf(
         "본 자료에 수록된 내용은 신뢰할 수 있는 자료 및 정보를 바탕으로 "
         "작성한 것이나, 그 정확성이나 완전성을 보장할 수 없습니다. "
         "투자 판단과 책임은 투자자 본인에게 있습니다. "
-        f"K-Quant v3.5 | {date.strftime('%Y.%m.%d')} | For {USER_NAME} Only",
+        f"{APP_NAME} | {date.strftime('%Y.%m.%d')} | For {USER_NAME} Only",
         styles["small"],
     ))
 

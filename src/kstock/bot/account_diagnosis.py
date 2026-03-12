@@ -22,6 +22,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from kstock import APP_NAME
+
 logger = logging.getLogger(__name__)
 
 USER_NAME = "주호님"
@@ -519,7 +521,7 @@ def format_diagnosis_report(diag: AccountDiagnosis) -> str:
             lines.append(f"  -> {sol['action']}")
 
     lines.append("")
-    lines.append("\U0001f916 Powered by K-Quant v3.5")
+    lines.append(f"\U0001f916 Powered by {APP_NAME}")
 
     return "\n".join(lines)
 

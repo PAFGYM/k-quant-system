@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from kstock.signal.scoring import FlowData, ScoreBreakdown
     from kstock.signal.strategies import StrategySignal
 
+from kstock import APP_NAME, DISPLAY_VERSION, SYSTEM_NAME
 from kstock.core.tz import KST
 
 USER_NAME = "주호님"
@@ -129,7 +130,7 @@ def generate_one_liner(tech, flow, macro) -> str:
 
 def format_welcome() -> str:
     return (
-        f"🚀 {USER_NAME}, K-Quant v11.0\n\n"
+        f"🚀 {USER_NAME}, {APP_NAME}\n\n"
         "AI 투자 매니저 시스템\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "👨‍💼 4명의 전담 매니저가 종목을 관리합니다\n"
@@ -1020,13 +1021,13 @@ def format_system_status(last_runs: list, job_infos: list = None) -> str:
             lines.append(f"  {icon} {run.get('job_name', 'N/A')} @ {ended}")
     else:
         lines.append("아직 실행된 작업이 없습니다.")
-    lines.extend(["", "\u2500" * 25, f"\U0001f551 {_now_kst()}", "K-Quant v11.0"])
+    lines.extend(["", "\u2500" * 25, f"\U0001f551 {_now_kst()}", APP_NAME])
     return "\n".join(lines)
 
 
 def format_help() -> str:
     return (
-        f"❓ {USER_NAME}, K-Quant v11.0 도움말\n"
+        f"❓ {USER_NAME}, {APP_NAME} 도움말\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 분석 — 종목명 입력 → AI 즉시 분석\n"
         "📈 시황 — 🟢🟡🔴 신호등 시장 판단\n"
@@ -1057,7 +1058,7 @@ def format_help() -> str:
         "  📊 린치 — 포지션 (손절-12%, 익절+20%)\n"
         "  💎 버핏 — 장기 (손절-20%, 익절+30%)\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🧠 AI 학습 (v11.0)\n"
+        f"🧠 AI 학습 ({DISPLAY_VERSION})\n"
         "  📺 YouTube 24채널 × 5회/일\n"
         "  ⚡ Tier1: Gemini Flash 벌크 스크리닝\n"
         "  🔬 Tier2: Claude Haiku 심화 분석\n"
@@ -1067,7 +1068,7 @@ def format_help() -> str:
         "  /learning — 학습 현황 대시보드\n\n"
         "💡 '온보딩' → 기능 체험 투어\n"
         "⚙️ 더보기 → 고급 기능\n\n"
-        "K-Quant System v11.0"
+        f"{SYSTEM_NAME}"
     )
 
 
@@ -1640,7 +1641,7 @@ def format_onboarding_complete() -> str:
     return (
         f"\U0001f389 {USER_NAME}, 온보딩 완료!\n"
         f"{'━' * 22}\n\n"
-        "K-Quant v11.0의 핵심 기능을 모두 둘러보셨습니다.\n\n"
+        f"{APP_NAME}의 핵심 기능을 모두 둘러보셨습니다.\n\n"
         "\U0001f4cc 매일 07:30 모닝 브리핑 + 4매니저 분석\n"
         "\U0001f4cc 장중 실시간 알림 (급등/매도타겟/경고)\n"
         "\U0001f4cc YouTube 24채널 자동 학습 (5회/일)\n"

@@ -1,6 +1,7 @@
 """Admin, favorites, agents, v3.6 features."""
 from __future__ import annotations
 
+from kstock import APP_NAME, DISPLAY_VERSION, SYSTEM_NAME
 from kstock.bot.bot_imports import *  # noqa: F403
 
 
@@ -101,7 +102,7 @@ class AdminExtrasMixin:
     ) -> None:
         """🛠 관리자 메뉴 버튼 — 인라인 버튼으로 관리 기능 제공."""
         await update.message.reply_text(
-            "\U0001f6e0 관리자 모드 v9.1\n\n"
+            f"\U0001f6e0 관리자 모드 {DISPLAY_VERSION}\n\n"
             "아래 버튼을 눌러주세요.",
             reply_markup=InlineKeyboardMarkup(_admin_buttons()),
         )
@@ -198,7 +199,7 @@ class AdminExtrasMixin:
             context.user_data.pop("admin_mode", None)
             context.user_data.pop("admin_faq_type", None)
             await safe_edit_or_reply(query,
-                "\U0001f6e0 관리자 모드 v9.1\n\n"
+                f"\U0001f6e0 관리자 모드 {DISPLAY_VERSION}\n\n"
                 "아래 버튼을 눌러주세요.",
                 reply_markup=InlineKeyboardMarkup(_admin_buttons()),
             )
@@ -422,7 +423,7 @@ class AdminExtrasMixin:
             await safe_edit_or_reply(query,
                 f"🔧 시스템 제어\n{'━' * 22}\n\n"
                 f"상태: {status_line}\n"
-                f"버전: v9.1",
+                f"버전: {DISPLAY_VERSION}",
                 reply_markup=InlineKeyboardMarkup(sys_buttons),
             )
             return
@@ -574,7 +575,7 @@ class AdminExtrasMixin:
             ws_subs = len(self.ws.get_subscriptions())
 
             await safe_edit_or_reply(query,
-                f"\U0001f4ca 봇 상태 v9.1\n\n"
+                f"\U0001f4ca 봇 상태 {DISPLAY_VERSION}\n\n"
                 f"\u2705 가동: {hours}시간 {mins}분\n"
                 f"\U0001f4b0 보유종목: {len(holdings)}개\n"
                 f"\U0001f916 AI 채팅: {chat_count}회/50\n"
@@ -1103,7 +1104,7 @@ class AdminExtrasMixin:
         """v9.5.5 사용설명서 — 텍스트 메뉴에서 진입."""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         text = (
-            "📖 K-Quant v11.0 사용설명서\n"
+            f"📖 {APP_NAME} 사용설명서\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "AI 투자 비서 + ML 예측 + 24채널 학습\n\n"
             "🔹 기본 사용법\n"
@@ -2862,7 +2863,7 @@ class AdminExtrasMixin:
             )
         elif payload == "v8doc":
             # v11.0: 버전 설명서 PDF 생성 및 전송
-            await safe_edit_or_reply(query, "📋 v11.0 기능 설명서 PDF 생성 중...")
+            await safe_edit_or_reply(query, f"📋 {DISPLAY_VERSION} 기능 설명서 PDF 생성 중...")
             try:
                 import subprocess as _sp
                 _here = os.path.abspath(__file__)
@@ -2889,7 +2890,7 @@ class AdminExtrasMixin:
                         await query.message.reply_document(
                             document=f,
                             filename="K-Quant_v110_Features.pdf",
-                            caption="📋 K-Quant System v11.0 기능 설명서",
+                            caption=f"📋 {SYSTEM_NAME} 기능 설명서",
                         )
                 else:
                     await query.message.reply_text(
@@ -3341,5 +3342,4 @@ class AdminExtrasMixin:
         await query.message.reply_text(
             report[:4000], reply_markup=InlineKeyboardMarkup(buttons),
         )
-
 

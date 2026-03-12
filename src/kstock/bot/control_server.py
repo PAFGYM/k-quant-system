@@ -13,6 +13,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from kstock import DISPLAY_VERSION
+
 logger = logging.getLogger(__name__)
 
 SOCKET_PATH = "/tmp/kquant_control.sock"
@@ -96,7 +98,7 @@ class ControlServer:
             hours, rem = divmod(int(delta.total_seconds()), 3600)
             minutes, secs = divmod(rem, 60)
             uptime = f"{hours}h {minutes}m {secs}s"
-        return {"version": "v9.1", "uptime": uptime, "pid": os.getpid()}
+        return {"version": DISPLAY_VERSION, "uptime": uptime, "pid": os.getpid()}
 
     async def _cmd_status(self, **_kw) -> dict:
         import resource

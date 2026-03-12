@@ -1,6 +1,6 @@
 #!/bin/bash
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# kbot — K-Quant 봇 통합 관리 CLI v9.1
+# kbot — K-Quant 봇 통합 관리 CLI
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
 # 프로세스:
@@ -44,7 +44,15 @@ cd "$SCRIPT_DIR"
 
 PID_FILE="$SCRIPT_DIR/bot.pid"
 LOG_FILE="/tmp/kstock_bot.log"
-VERSION="v9.1"
+VERSION="$(
+  PYTHONPATH="$SCRIPT_DIR/src" python3 - <<'PY' 2>/dev/null || true
+from kstock import DISPLAY_VERSION
+print(DISPLAY_VERSION)
+PY
+)"
+if [ -z "${VERSION:-}" ]; then
+  VERSION="v13.0"
+fi
 
 # ── 색상 ─────────────────────────────────
 RED='\033[0;31m'

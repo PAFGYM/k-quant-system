@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS holdings (
     name          TEXT    NOT NULL,
     buy_price     REAL    NOT NULL,
     current_price REAL,
+    quantity      INTEGER DEFAULT 0,
+    eval_amount   REAL    DEFAULT 0,
     buy_date      TEXT    NOT NULL,
     target_1      REAL,
     target_2      REAL,
@@ -58,6 +60,10 @@ CREATE TABLE IF NOT EXISTS holdings (
     status        TEXT    DEFAULT 'active',
     sold_pct      REAL    DEFAULT 0,
     pnl_pct       REAL    DEFAULT 0,
+    holding_type  TEXT    DEFAULT 'auto',
+    purchase_type TEXT    DEFAULT '',
+    is_margin     INTEGER DEFAULT 0,
+    margin_type   TEXT    DEFAULT '',
     created_at    TEXT    NOT NULL,
     updated_at    TEXT    NOT NULL
 );
@@ -128,6 +134,7 @@ CREATE TABLE IF NOT EXISTS screenshot_holdings (
     current_price   REAL    DEFAULT 0,
     profit_pct      REAL    DEFAULT 0,
     eval_amount     REAL    DEFAULT 0,
+    purchase_type   TEXT    DEFAULT '',
     diagnosis       TEXT,
     diagnosis_action TEXT,
     diagnosis_msg   TEXT,
@@ -1547,30 +1554,36 @@ class StoreBase:
                     )
                 except sqlite3.OperationalError:
                     pass
-            # Migrate: add margin columns to screenshot_holdings
-            try:
-                conn.execute("SELECT is_margin FROM screenshot_holdings LIMIT 1")
-            except sqlite3.OperationalError:
+            # Migrate: screenshot_holdings metadata
+            for col, sql in [
+                (
+                    "purchase_type",
+                    "ALTER TABLE screenshot_holdings ADD COLUMN purchase_type TEXT DEFAULT ''",
+                ),
+                (
+                    "is_margin",
+                    "ALTER TABLE screenshot_holdings ADD COLUMN is_margin INTEGER DEFAULT 0",
+                ),
+                (
+                    "margin_type",
+                    "ALTER TABLE screenshot_holdings ADD COLUMN margin_type TEXT",
+                ),
+            ]:
                 try:
-                    conn.execute(
-                        "ALTER TABLE screenshot_holdings ADD COLUMN is_margin INTEGER DEFAULT 0"
-                    )
+                    conn.execute(f"SELECT {col} FROM screenshot_holdings LIMIT 1")
                 except sqlite3.OperationalError:
-                    pass
-            try:
-                conn.execute("SELECT margin_type FROM screenshot_holdings LIMIT 1")
-            except sqlite3.OperationalError:
-                try:
-                    conn.execute(
-                        "ALTER TABLE screenshot_holdings ADD COLUMN margin_type TEXT"
-                    )
-                except sqlite3.OperationalError:
-                    pass
-            # Migrate: add quantity/eval_amount/holding_type to holdings table
+                    try:
+                        conn.execute(sql)
+                    except sqlite3.OperationalError:
+                        pass
+            # Migrate: holdings metadata
             for col, sql in [
                 ("quantity", "ALTER TABLE holdings ADD COLUMN quantity INTEGER DEFAULT 0"),
                 ("eval_amount", "ALTER TABLE holdings ADD COLUMN eval_amount REAL DEFAULT 0"),
                 ("holding_type", "ALTER TABLE holdings ADD COLUMN holding_type TEXT DEFAULT 'auto'"),
+                ("purchase_type", "ALTER TABLE holdings ADD COLUMN purchase_type TEXT DEFAULT ''"),
+                ("is_margin", "ALTER TABLE holdings ADD COLUMN is_margin INTEGER DEFAULT 0"),
+                ("margin_type", "ALTER TABLE holdings ADD COLUMN margin_type TEXT DEFAULT ''"),
             ]:
                 try:
                     conn.execute(f"SELECT {col} FROM holdings LIMIT 1")
@@ -1579,6 +1592,10 @@ class StoreBase:
                         conn.execute(sql)
                     except sqlite3.OperationalError:
                         pass
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_holdings_purchase "
+                "ON holdings(status, ticker, purchase_type)"
+            )
             # v9.6.0: holdings — atr_at_entry (매수 시점 ATR)
             for col, sql in [
                 ("atr_at_entry", "ALTER TABLE holdings ADD COLUMN atr_at_entry REAL DEFAULT 0"),

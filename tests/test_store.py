@@ -72,6 +72,33 @@ class TestHoldings:
     def test_no_active_holding(self, store):
         assert store.get_holding_by_ticker("999999") is None
 
+    def test_upsert_keeps_purchase_types_separate(self, store):
+        cash_id = store.upsert_holding(
+            ticker="005930", name="삼성전자", quantity=10,
+            buy_price=58000, current_price=60000, pnl_pct=3.45,
+            eval_amount=600000, purchase_type="현금",
+        )
+        margin_id = store.upsert_holding(
+            ticker="005930", name="삼성전자", quantity=5,
+            buy_price=59000, current_price=58000, pnl_pct=-1.69,
+            eval_amount=290000, purchase_type="신용",
+        )
+        assert cash_id != margin_id
+        holdings = store.get_active_holdings()
+        assert len(holdings) == 2
+        assert {h["purchase_type"] for h in holdings} == {"현금", "신용"}
+
+    def test_upsert_persists_margin_metadata(self, store):
+        holding_id = store.upsert_holding(
+            ticker="000660", name="SK하이닉스", quantity=3,
+            buy_price=180000, current_price=182000, pnl_pct=1.1,
+            eval_amount=546000, purchase_type="유융",
+        )
+        holding = store.get_holding(holding_id)
+        assert holding["purchase_type"] == "유융"
+        assert holding["is_margin"] == 1
+        assert holding["margin_type"] == "유융"
+
 
 class TestWatchlist:
     def test_add_and_get(self, store):

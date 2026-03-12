@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from kstock import DISPLAY_VERSION
 from kstock.bot.bot_imports import *  # noqa: F403
 
 
@@ -3885,7 +3886,7 @@ class CommandsMixin:
 
             # ── 7. 업데이트 스케줄 ──
             sched_lines = [
-                "⏰ 학습 스케줄 (v11.0)",
+                f"⏰ 학습 스케줄 ({DISPLAY_VERSION})",
                 "  YouTube 5회: 06:30/08:00/12:00/17:00/21:00",
                 "  칼럼 수집: 08:10, 17:10",
                 "  일일 합성: 21:30 (Flash+Haiku)",

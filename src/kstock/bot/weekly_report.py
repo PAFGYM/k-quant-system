@@ -12,6 +12,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Any
 
+from kstock import APP_NAME
 from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
@@ -326,7 +327,7 @@ def generate_report_content(data: dict[str, Any]) -> str:
     lines.append("=" * 45)
     lines.append("")
     lines.append(f"작성일: {generated_at}")
-    lines.append("Powered by K-Quant v3.5 AI")
+    lines.append(f"Powered by {APP_NAME} AI")
     lines.append("")
 
     # Section 1: Market Summary
@@ -594,7 +595,7 @@ def generate_report_content(data: dict[str, Any]) -> str:
 
     # Footer
     lines.append("=" * 45)
-    lines.append("본 보고서는 K-Quant v3.5 AI가 자동 생성했습니다.")
+    lines.append(f"본 보고서는 {APP_NAME} AI가 자동 생성했습니다.")
     lines.append(f"투자의 최종 결정은 {USER_NAME}의 판단입니다.")
     lines.append("=" * 45)
 

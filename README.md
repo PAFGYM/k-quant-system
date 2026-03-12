@@ -1,4 +1,4 @@
-# K-Quant System v11.0
+# K-Quant System v13.0
 
 한국 주식 AI 퀀트 트레이딩 시스템 + 4매니저 다중 전략 + 텔레그램 봇
 
@@ -13,9 +13,9 @@
 - 한국형 리스크 게이지 (신용잔고/ETF/환율/공매도 7요인)
 - KIS 증권 API 자동매매 연동
 - Claude AI 브리핑 + 매니저 토론 + 자기반성
-- YouTube 24채널 자동 학습 + Gemini Flash/Claude Haiku 2단계 분석 (v11.0)
-- 19명 애널리스트 추적 + 네이버 칼럼 크롤링 (v11.0)
-- 일일 $1 학습 예산 관리 (v11.0)
+- YouTube 24채널 자동 학습 + Gemini Flash/Claude Haiku 2단계 분석 (v13.0)
+- 19명 애널리스트 추적 + 네이버 칼럼 크롤링 (v13.0)
+- 일일 $1 학습 예산 관리 (v13.0)
 - 170+ Python 모듈, 30+ DB 테이블, 50+ 스케줄 잡
 
 ## 4매니저 시스템
@@ -38,7 +38,7 @@
 | 저장 | `models/lgb_model.txt`, `xgb_model.json` |
 | 피처DB | `data/features.db` (일별 전종목 58피처 축적) |
 
-## 학습 파이프라인 (v11.0)
+## 학습 파이프라인 (v13.0)
 
 ### YouTube 학습 (24채널)
 - **Tier1** (Gemini Flash): 전체 영상 빠른 스크리닝 (~$0.0004/건)
@@ -195,7 +195,7 @@ pip3 install --break-system-packages -r requirements.txt
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
 ANTHROPIC_API_KEY=your_key
-GEMINI_API_KEY=your_gemini_key    # v11.0 학습용
+GEMINI_API_KEY=your_gemini_key    # v13.0 학습용
 KIS_APP_KEY=your_kis_key          # 선택 (자동매매)
 KIS_APP_SECRET=your_kis_secret    # 선택
 
@@ -334,7 +334,7 @@ src/kstock/ (170+ 파일)
 
 | 버전 | 주요 변경 |
 |------|----------|
-| v11.0 | $1/일 학습 파이프라인 (24채널, Gemini Flash, 19명 애널리스트, 일일합성) |
+| v13.0 | $1/일 학습 파이프라인 (24채널, Gemini Flash, 19명 애널리스트, 일일합성) |
 | v10.4 | 크로스마켓 18자산 + YouTube 심화학습 |
 | v10.3 | ML 파이프라인 수정 (디스크 저장/로드) |
 | v10.2 | 유가 분석 모듈 (WTI/Brent 레짐) |

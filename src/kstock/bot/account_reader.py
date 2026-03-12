@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from kstock import APP_NAME
 from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,22 @@ _SECTOR_MAP: dict[str, str] = {
     "066570": "전자",
     "003670": "화학",
 }
+
+
+def _normalize_purchase_type(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _holding_identity_key(holding: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(holding.get("ticker", "") or holding.get("name", "") or "").strip(),
+        _normalize_purchase_type(holding.get("purchase_type", "")),
+    )
+
+
+def _purchase_tag(item: dict[str, Any]) -> str:
+    purchase_type = _normalize_purchase_type(item.get("purchase_type", ""))
+    return f" [{purchase_type}]" if purchase_type else ""
 
 
 # ---------------------------------------------------------------------------
@@ -200,51 +217,60 @@ def compare_screenshots(
     Returns:
         Dict with keys: improvements, worsened, sold, new_buys, cash_change.
     """
-    cur_holdings = {h["ticker"]: h for h in current.get("holdings", [])}
-    prev_holdings = {h["ticker"]: h for h in previous.get("holdings", [])}
+    cur_holdings = {
+        _holding_identity_key(h): h for h in current.get("holdings", [])
+        if _holding_identity_key(h)[0]
+    }
+    prev_holdings = {
+        _holding_identity_key(h): h for h in previous.get("holdings", [])
+        if _holding_identity_key(h)[0]
+    }
 
     cur_tickers = set(cur_holdings.keys())
     prev_tickers = set(prev_holdings.keys())
 
     new_buys: list[dict[str, Any]] = []
-    for ticker in cur_tickers - prev_tickers:
-        h = cur_holdings[ticker]
+    for key in cur_tickers - prev_tickers:
+        h = cur_holdings[key]
         new_buys.append({
             "name": h.get("name", ""),
-            "ticker": ticker,
+            "ticker": h.get("ticker", ""),
             "quantity": h.get("quantity", 0),
             "avg_price": h.get("avg_price", 0),
             "current_price": h.get("current_price", 0),
             "eval_amount": h.get("eval_amount", 0),
+            "purchase_type": _normalize_purchase_type(h.get("purchase_type", "")),
         })
 
     sold: list[dict[str, Any]] = []
-    for ticker in prev_tickers - cur_tickers:
-        h = prev_holdings[ticker]
+    for key in prev_tickers - cur_tickers:
+        h = prev_holdings[key]
         sold.append({
             "name": h.get("name", ""),
-            "ticker": ticker,
+            "ticker": h.get("ticker", ""),
             "quantity": h.get("quantity", 0),
             "avg_price": h.get("avg_price", 0),
             "last_price": h.get("current_price", 0),
             "profit_pct": h.get("profit_pct", 0.0),
+            "purchase_type": _normalize_purchase_type(h.get("purchase_type", "")),
         })
 
     improvements: list[dict[str, Any]] = []
     worsened: list[dict[str, Any]] = []
-    for ticker in cur_tickers & prev_tickers:
-        cur_h = cur_holdings[ticker]
-        prev_h = prev_holdings[ticker]
+    for key in cur_tickers & prev_tickers:
+        cur_h = cur_holdings[key]
+        prev_h = prev_holdings[key]
         cur_pct = _to_float(cur_h.get("profit_pct", 0))
         prev_pct = _to_float(prev_h.get("profit_pct", 0))
         change = cur_pct - prev_pct
 
         entry = {
             "name": cur_h.get("name", ""),
-            "ticker": ticker,
+            "ticker": cur_h.get("ticker", ""),
             "prev_profit_pct": prev_pct,
             "cur_profit_pct": cur_pct,
             "change_pct": round(change, 2),
+            "purchase_type": _normalize_purchase_type(cur_h.get("purchase_type", "")),
         }
 
         if change > 0.01:
@@ -408,15 +434,31 @@ def evaluate_diagnosis_accuracy(
         List of accuracy result dicts with keys:
             ticker, name, predicted, actual, correct (bool), confidence.
     """
-    cur_map = {h["ticker"]: h for h in current_holdings}
+    cur_map = {
+        _holding_identity_key(h): h for h in current_holdings if _holding_identity_key(h)[0]
+    }
+    ticker_map = {
+        str(h.get("ticker", "") or "").strip(): h
+        for h in current_holdings if str(h.get("ticker", "") or "").strip()
+    }
+    name_map = {
+        str(h.get("name", "") or "").strip(): h
+        for h in current_holdings if str(h.get("name", "") or "").strip()
+    }
     results: list[dict[str, Any]] = []
 
     for diag in prev_diagnoses:
         ticker = diag.get("ticker", "")
+        name = diag.get("name", "")
+        purchase_type = _normalize_purchase_type(diag.get("purchase_type", ""))
         predicted = diag.get("direction", "hold")
         confidence = diag.get("confidence", 50)
 
-        cur_h = cur_map.get(ticker)
+        cur_h = cur_map.get((str(ticker or name or "").strip(), purchase_type))
+        if cur_h is None and ticker:
+            cur_h = ticker_map.get(str(ticker).strip())
+        if cur_h is None and name:
+            cur_h = name_map.get(str(name).strip())
         if cur_h is None:
             # Stock was sold - consider direction as "down" if predicted down,
             # or unknown
@@ -435,11 +477,12 @@ def evaluate_diagnosis_accuracy(
 
         results.append({
             "ticker": ticker,
-            "name": diag.get("name", ""),
+            "name": name,
             "predicted": predicted,
             "actual": actual,
             "correct": correct,
             "confidence": confidence,
+            "purchase_type": purchase_type,
         })
 
     return results
@@ -501,10 +544,11 @@ def format_screenshot_summary(
             cur_price = _to_float(h.get("current_price", 0))
             pct = _to_float(h.get("profit_pct", 0))
             eval_amt = _to_float(h.get("eval_amount", 0))
+            purchase_tag = _purchase_tag(h)
 
             emoji = "\U0001f7e2" if pct > 0 else "\U0001f534" if pct < 0 else "\U0001f7e1"
-
-            lines.append(f"{emoji} {name} ({ticker})")
+            ticker_text = f" ({ticker})" if ticker else ""
+            lines.append(f"{emoji} {name}{ticker_text}{purchase_tag}")
             lines.append(f"   {qty}주 | 평균 {avg_price:,.0f}원 -> {cur_price:,.0f}원")
             lines.append(f"   수익률 {pct:+.2f}% | 평가 {eval_amt:,.0f}원")
             lines.append("")
@@ -539,7 +583,7 @@ def format_screenshot_summary(
             lines.append("\U0001f7e2 개선 종목")
             for item in improvements[:5]:
                 lines.append(
-                    f"   {item['name']}: {item['prev_profit_pct']:+.2f}% -> "
+                    f"   {item['name']}{_purchase_tag(item)}: {item['prev_profit_pct']:+.2f}% -> "
                     f"{item['cur_profit_pct']:+.2f}% ({item['change_pct']:+.2f}%p)"
                 )
             lines.append("")
@@ -548,7 +592,7 @@ def format_screenshot_summary(
             lines.append("\U0001f534 악화 종목")
             for item in worsened[:5]:
                 lines.append(
-                    f"   {item['name']}: {item['prev_profit_pct']:+.2f}% -> "
+                    f"   {item['name']}{_purchase_tag(item)}: {item['prev_profit_pct']:+.2f}% -> "
                     f"{item['cur_profit_pct']:+.2f}% ({item['change_pct']:+.2f}%p)"
                 )
             lines.append("")
@@ -557,7 +601,7 @@ def format_screenshot_summary(
             lines.append("\U0001f195 신규 매수")
             for item in new_buys:
                 lines.append(
-                    f"   {item['name']} ({item['ticker']}) "
+                    f"   {item['name']}{_purchase_tag(item)} ({item['ticker']}) "
                     f"{item['quantity']}주 @ {_to_float(item['avg_price']):,.0f}원"
                 )
             lines.append("")
@@ -573,7 +617,7 @@ def format_screenshot_summary(
                 for item in profit_sold:
                     pct = _to_float(item.get("profit_pct", 0))
                     lines.append(
-                        f"   \U0001f7e2 {item['name']} ({item['ticker']}) "
+                        f"   \U0001f7e2 {item['name']}{_purchase_tag(item)} ({item['ticker']}) "
                         f"수익률 {pct:+.2f}%"
                     )
                 lines.append("")
@@ -583,7 +627,7 @@ def format_screenshot_summary(
                 for item in loss_sold:
                     pct = _to_float(item.get("profit_pct", 0))
                     lines.append(
-                        f"   \U0001f534 {item['name']} ({item['ticker']}) "
+                        f"   \U0001f534 {item['name']}{_purchase_tag(item)} ({item['ticker']}) "
                         f"수익률 {pct:+.2f}%"
                     )
                 lines.append("")
@@ -592,7 +636,7 @@ def format_screenshot_summary(
                 lines.append("\U0001f7e1 본전 매도")
                 for item in even_sold:
                     lines.append(
-                        f"   \U0001f7e1 {item['name']} ({item['ticker']}) "
+                        f"   \U0001f7e1 {item['name']}{_purchase_tag(item)} ({item['ticker']}) "
                         f"수익률 0.00%"
                     )
                 lines.append("")
@@ -626,7 +670,7 @@ def format_screenshot_summary(
             lines.append("")
 
     lines.append(f"\U0001f551 {now}")
-    lines.append("K-Quant v3.5")
+    lines.append(APP_NAME)
 
     return "\n".join(lines)
 

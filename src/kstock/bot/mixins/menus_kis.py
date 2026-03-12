@@ -1,13 +1,14 @@
 """Menu handlers + KIS integration."""
 from __future__ import annotations
 
+from kstock import APP_NAME, DISPLAY_VERSION
 from kstock.bot.bot_imports import *  # noqa: F403
 
 
 class MenusKisMixin:
     async def _menu_usage_guide(self, update: Update, context) -> None:
         msg = (
-            "📖 주호님, K-Quant v11.0 사용법\n\n"
+            f"📖 주호님, {APP_NAME} 사용법\n\n"
 
             "━━ 메인 메뉴 ━━\n\n"
 
@@ -28,7 +29,7 @@ class MenusKisMixin:
             "💎 버핏: 장기 3개월+ (손절-20%/익절+30%)\n"
             "🔟 텐배거: 초장기 1~5년 (손절-25%/목표 10배!)\n\n"
 
-            "━━ AI 학습 시스템 (v11.0) ━━\n\n"
+            f"━━ AI 학습 시스템 ({DISPLAY_VERSION}) ━━\n\n"
 
             "📺 YouTube 24채널 자동 학습 (5회/일)\n"
             "  ⚡ Tier1: Gemini Flash 벌크 스크리닝\n"
@@ -1882,5 +1883,4 @@ class MenusKisMixin:
                 await safe_edit_or_reply(update_or_query, err_msg)
 
     # == 최적화 인터랙티브 플로우 ================================================
-
 

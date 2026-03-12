@@ -1046,25 +1046,30 @@ class CoreHandlersMixin:
                 cur_price = h.get("current_price", 0)
                 pnl_pct = h.get("profit_pct", 0)
                 eval_amt = h.get("eval_amount", 0)
+                purchase_type = str(h.get("purchase_type", "") or "").strip()
+                is_margin, margin_type = detect_margin_purchase(h)
                 try:
                     self.db.upsert_holding(
                         ticker=ticker, name=hname,
                         quantity=qty, buy_price=avg_price,
                         current_price=cur_price, pnl_pct=pnl_pct,
                         eval_amount=eval_amt,
+                        purchase_type=purchase_type,
+                        is_margin=1 if is_margin else 0,
+                        margin_type=margin_type or "",
                     )
                 except Exception as he:
                     logger.debug("Holding upsert for %s failed: %s", ticker, he)
 
                 # screenshot_holdings 테이블에도 저장
                 try:
-                    is_margin, margin_type = detect_margin_purchase(h)
                     self.db.add_screenshot_holding(
                         screenshot_id=screenshot_id,
                         ticker=ticker, name=hname,
                         quantity=qty, avg_price=avg_price,
                         current_price=cur_price, profit_pct=pnl_pct,
                         eval_amount=eval_amt,
+                        purchase_type=purchase_type,
                         is_margin=1 if is_margin else 0,
                         margin_type=margin_type or "",
                     )
@@ -2974,6 +2979,7 @@ class CoreHandlersMixin:
                         current_price=h.get("current_price", 0),
                         profit_pct=h.get("profit_pct", 0),
                         eval_amount=h.get("eval_amount", 0),
+                        purchase_type=h.get("purchase_type", ""),
                         diagnosis=d.diagnosis,
                         diagnosis_action=d.action,
                         diagnosis_msg=d.message,
@@ -3058,6 +3064,7 @@ class CoreHandlersMixin:
                     current_price=h.get("current_price", 0),
                     profit_pct=r.profit_pct,
                     eval_amount=h.get("eval_amount", 0),
+                    purchase_type=h.get("purchase_type", ""),
                     diagnosis=r.diagnosis,
                     diagnosis_action=r.action,
                     diagnosis_msg=r.message,
@@ -3228,4 +3235,3 @@ class CoreHandlersMixin:
                 logger.debug("_action_profit_taking error recovery edit_text also failed", exc_info=True)
 
     # == Usage guide ===========================================================
-

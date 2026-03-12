@@ -10,6 +10,7 @@ import logging
 import os
 from datetime import datetime, timezone, timedelta
 
+from kstock import APP_NAME
 from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
@@ -181,7 +182,7 @@ async def generate_daily_self_report(db, macro_client=None, ws=None) -> str:
     lines.extend([
         "",
         "\u2500" * 25,
-        f"\U0001f916 K-Quant v9.1 | {now.strftime('%H:%M')} 자가진단 완료",
+        f"\U0001f916 {APP_NAME} | {now.strftime('%H:%M')} 자가진단 완료",
     ])
 
     return "\n".join(lines)
