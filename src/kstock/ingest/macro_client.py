@@ -71,6 +71,11 @@ class MacroSnapshot:
     soxl_change_pct: float = 0.0
     tqqq_price: float = 0.0       # ProShares 3x NASDAQ-100
     tqqq_change_pct: float = 0.0
+    # v13.1: 국내 레버리지/인버스 ETF 실시간값
+    kodex_leverage_price: float = 0.0
+    kodex_leverage_change_pct: float = 0.0
+    kodex_inverse2x_price: float = 0.0
+    kodex_inverse2x_change_pct: float = 0.0
     # v9.0: 선물지수 (장 마감 후에도 방향성 파악 가능)
     es_futures: float = 0.0       # S&P500 E-mini 선물
     es_futures_change_pct: float = 0.0
@@ -327,6 +332,7 @@ class MacroClient:
             "^VIX", "^GSPC", "^IXIC", "KRW=X", "^TNX", "DX-Y.NYB",
             "BTC-USD", "GC=F", "^KS11", "^KQ11",
             "KORU", "SOXL", "TQQQ",  # v6.6: 미국 레버리지 ETF
+            "122630.KS", "252670.KS",  # v13.1: 국내 레버리지/인버스 ETF
             "ES=F", "NQ=F",  # v9.0: 미국 선물지수
             "CL=F", "BZ=F", "NG=F",  # v10.2: 유가/원자재
             "EWY",  # v10.2: 한국ETF
@@ -412,6 +418,8 @@ class MacroClient:
         koru_price, koru_change = _etf_data("KORU")
         soxl_price, soxl_change = _etf_data("SOXL")
         tqqq_price, tqqq_change = _etf_data("TQQQ")
+        kodex_leverage_price, kodex_leverage_change = _etf_data("122630.KS")
+        kodex_inverse2x_price, kodex_inverse2x_change = _etf_data("252670.KS")
 
         # v9.0: 미국 선물지수
         es_price, es_change = _etf_data("ES=F")
@@ -511,6 +519,10 @@ class MacroClient:
             soxl_change_pct=round(soxl_change, 2),
             tqqq_price=round(tqqq_price, 2),
             tqqq_change_pct=round(tqqq_change, 2),
+            kodex_leverage_price=round(kodex_leverage_price, 2),
+            kodex_leverage_change_pct=round(kodex_leverage_change, 2),
+            kodex_inverse2x_price=round(kodex_inverse2x_price, 2),
+            kodex_inverse2x_change_pct=round(kodex_inverse2x_change, 2),
             # v9.0: 선물지수
             es_futures=round(es_price, 2),
             es_futures_change_pct=round(es_change, 2),
@@ -595,6 +607,10 @@ class MacroClient:
             dxy_change_pct=round(float(rng.normal(0, 0.5)), 2),
             fear_greed_score=fg_score,
             fear_greed_label=fg_label,
+            kodex_leverage_price=round(float(rng.uniform(14_000, 24_000)), 2),
+            kodex_leverage_change_pct=round(float(rng.normal(0, 2.4)), 2),
+            kodex_inverse2x_price=round(float(rng.uniform(2_000, 4_000)), 2),
+            kodex_inverse2x_change_pct=round(float(rng.normal(0, 2.2)), 2),
             fetched_at=datetime.now(KST),
             is_cached=False,
         )

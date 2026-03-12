@@ -3906,6 +3906,19 @@ class SchedulerMixin:
                     parts.append(f"NQ선물: {nq:,.0f} ({getattr(macro, 'nq_futures_change_pct', 0):+.2f}%)")
                 futures_line = "\n".join(parts) + "\n"
 
+            domestic_leverage_line = ""
+            kodex_leverage = getattr(macro, "kodex_leverage_price", 0)
+            kodex_leverage_chg = getattr(macro, "kodex_leverage_change_pct", 0)
+            kodex_inverse = getattr(macro, "kodex_inverse2x_price", 0)
+            kodex_inverse_chg = getattr(macro, "kodex_inverse2x_change_pct", 0)
+            domestic_parts = []
+            if kodex_leverage > 0:
+                domestic_parts.append(f"KODEX 레버리지: {kodex_leverage:,.0f} ({kodex_leverage_chg:+.2f}%)")
+            if kodex_inverse > 0:
+                domestic_parts.append(f"인버스2X: {kodex_inverse:,.0f} ({kodex_inverse_chg:+.2f}%)")
+            if domestic_parts:
+                domestic_leverage_line = "\n".join(domestic_parts) + "\n"
+
             msg = (
                 f"📡 시장 신호 변경\n"
                 f"{'━' * 22}\n"
@@ -3913,6 +3926,7 @@ class SchedulerMixin:
                 f"S&P500: {macro.spx_change_pct:+.2f}%\n"
                 f"나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
                 f"{futures_line}"
+                f"{domestic_leverage_line}"
                 f"VIX: {macro.vix:.1f} ({vix_chg:+.1f}%)\n"
                 f"환율: {macro.usdkrw:,.0f}원 ({macro.usdkrw_change_pct:+.1f}%)"
                 f"{vix_alert}\n\n"

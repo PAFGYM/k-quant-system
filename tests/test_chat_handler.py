@@ -165,6 +165,16 @@ class TestGetMarketContext:
         assert "S&P500" in result
         assert "나스닥" not in result
 
+    def test_includes_domestic_leverage_etfs(self) -> None:
+        result = get_market_context({
+            "kodex_leverage_price": 18230,
+            "kodex_leverage_change_pct": -5.2,
+            "kodex_inverse2x_price": 2845,
+            "kodex_inverse2x_change_pct": 4.7,
+        })
+        assert "KODEX 레버리지" in result
+        assert "인버스2X" in result
+
 
 class TestGetPortfolioContext:
     def test_with_none_snapshot(self) -> None:

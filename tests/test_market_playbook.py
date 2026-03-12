@@ -136,3 +136,19 @@ def test_normal_playbook_formats_to_empty_string():
     playbook = build_downside_playbook(macro, [], leverage_change_pct=1.5, inverse_change_pct=-1.0)
     assert playbook.regime == "normal"
     assert format_downside_playbook(playbook) == ""
+
+
+def test_build_downside_playbook_uses_macro_domestic_etf_fields_without_candidates():
+    macro = _macro_snapshot(
+        kodex_leverage_change_pct=-6.2,
+        kodex_inverse2x_change_pct=4.8,
+        kospi_change_pct=-1.9,
+        kosdaq_change_pct=-2.2,
+        es_futures_change_pct=-1.0,
+        nq_futures_change_pct=-1.4,
+    )
+
+    playbook = build_downside_playbook(macro, [])
+
+    assert playbook.regime in {"defense", "crisis"}
+    assert any("KODEX 레버리지" in trigger for trigger in playbook.triggers)

@@ -216,8 +216,16 @@ def build_downside_playbook(
     risk_score = 0.0
     triggers: list[str] = []
 
-    leverage_drop = _safe_float(leverage_change_pct, 0.0)
-    inverse_jump = _safe_float(inverse_change_pct, 0.0)
+    macro_leverage_change = _safe_float(getattr(macro, "kodex_leverage_change_pct", 0.0))
+    macro_inverse_change = _safe_float(getattr(macro, "kodex_inverse2x_change_pct", 0.0))
+    leverage_drop = _safe_float(
+        leverage_change_pct if leverage_change_pct is not None else macro_leverage_change,
+        0.0,
+    )
+    inverse_jump = _safe_float(
+        inverse_change_pct if inverse_change_pct is not None else macro_inverse_change,
+        0.0,
+    )
     kospi_change = _safe_float(getattr(macro, "kospi_change_pct", 0.0))
     kosdaq_change = _safe_float(getattr(macro, "kosdaq_change_pct", 0.0))
     es_change = _safe_float(getattr(macro, "es_futures_change_pct", 0.0))
