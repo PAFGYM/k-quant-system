@@ -96,6 +96,12 @@ class TenbaggerScore:
     monitor_12m: list[str] = field(default_factory=list)
     current_price: float = 0
     market_cap: float = 0
+    future_horizon_months: int = 18
+    future_base_multiple: float = 0
+    future_bull_multiple: float = 0
+    future_base_price: float = 0
+    future_bull_price: float = 0
+    future_value_note: str = ""
 
     # config 등급 (A/B/C) — 실전 투자 메모 기준
     config_grade: str = ""
@@ -148,6 +154,12 @@ class TenbaggerScore:
             "grade": self.grade,
             "tier": self.config_tier,
             "rank": self.config_rank,
+            "future_horizon_months": self.future_horizon_months,
+            "future_base_multiple": self.future_base_multiple,
+            "future_bull_multiple": self.future_bull_multiple,
+            "future_base_price": self.future_base_price,
+            "future_bull_price": self.future_bull_price,
+            "notes": self.future_value_note,
         }
 
 
@@ -367,6 +379,165 @@ def _score_ai_consensus(
     return min(100, avg * 0.8 + agreement_bonus)
 
 
+def _merge_unique_texts(*groups: list[str] | None) -> list[str]:
+    """여러 문자열 리스트를 순서 유지하며 병합한다."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group or []:
+            text = str(item).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+    return merged
+
+
+def _normalize_market(market: str) -> str:
+    """시장 표기를 KRX / US 두 종류로 정규화한다."""
+    text = str(market or "").upper()
+    if text in {"US", "NASDAQ", "NYSE", "AMEX"}:
+        return "US"
+    return "KRX"
+
+
+def _find_universe_item(ticker: str, market: str, config: dict) -> dict[str, Any]:
+    """설정 파일에서 해당 티커의 텐배거 유니버스 항목을 찾는다."""
+    normalized = _normalize_market(market)
+    candidates = (
+        config.get("us_universe", [])
+        if normalized == "US"
+        else config.get("korea_universe", [])
+    )
+    for item in candidates:
+        item_ticker = item.get("ticker", item.get("code", ""))
+        if item_ticker == ticker:
+            return item
+    return {}
+
+
+def _estimate_future_value_path(
+    *,
+    current_price: float,
+    composite_score: float,
+    tam: float,
+    policy: float,
+    moat: float,
+    revenue: float,
+    discovery: float,
+    momentum: float,
+    consensus: float,
+    catalysts: list[str],
+    universe_item: dict[str, Any],
+) -> dict[str, float | int | str]:
+    """점수 + 실전 메모 기반 미래가치 경로를 추정한다.
+
+    DCF 대신 텐배거 매니저 관점의 경로 추정치다.
+    구조적 성장 강도, 실적 가시성, 카탈리스트 밀도를 함께 반영한다.
+    """
+    structural = tam * 0.32 + policy * 0.22 + moat * 0.23 + revenue * 0.23
+    execution = discovery * 0.40 + momentum * 0.28 + consensus * 0.32
+
+    directness_bonus = {
+        "direct": 6.0,
+        "enabler": 4.0,
+        "indirect": 1.5,
+    }.get(str(universe_item.get("directness", "")).lower(), 2.5)
+    earnings_bonus = {
+        "proven": 6.0,
+        "expected": 3.5,
+        "speculative": 1.0,
+    }.get(str(universe_item.get("earnings_linkage", "")).lower(), 2.0)
+    catalyst_strength_bonus = {
+        "strong": 5.0,
+        "medium": 3.0,
+        "weak": 1.0,
+    }.get(str(universe_item.get("catalyst_strength", "")).lower(), 2.0)
+    catalyst_count_bonus = min(8.0, len(catalysts) * 2.0)
+
+    future_quality = min(
+        100.0,
+        structural * 0.48
+        + execution * 0.22
+        + composite_score * 0.20
+        + directness_bonus
+        + earnings_bonus
+        + catalyst_strength_bonus
+        + catalyst_count_bonus,
+    )
+
+    if future_quality >= 88:
+        horizon_months = 18
+        base_multiple = min(6.2, 4.6 + (future_quality - 88) * 0.13)
+        bull_multiple = min(10.0, 7.6 + (future_quality - 88) * 0.17)
+        path_label = "10배 경로 후보"
+    elif future_quality >= 78:
+        horizon_months = 18
+        base_multiple = min(4.8, 3.4 + (future_quality - 78) * 0.10)
+        bull_multiple = min(7.2, 5.1 + (future_quality - 78) * 0.14)
+        path_label = "5~7배 경로"
+    elif future_quality >= 68:
+        horizon_months = 24
+        base_multiple = min(3.5, 2.3 + (future_quality - 68) * 0.08)
+        bull_multiple = min(5.4, 3.9 + (future_quality - 68) * 0.12)
+        path_label = "3~5배 경로"
+    else:
+        horizon_months = 24
+        base_multiple = min(2.3, 1.4 + max(0.0, future_quality - 50) * 0.04)
+        bull_multiple = min(3.8, 2.4 + max(0.0, future_quality - 50) * 0.07)
+        path_label = "옵션형 재평가 경로"
+
+    bull_multiple = max(base_multiple + 1.0, bull_multiple)
+
+    drivers: list[str] = []
+    if tam >= 80:
+        drivers.append("TAM 확장")
+    if moat >= 70:
+        drivers.append("해자 확보")
+    if revenue >= 70:
+        drivers.append("실적 가속")
+    if discovery >= 60:
+        drivers.append("초기 기관 발견")
+    if str(universe_item.get("directness", "")).lower() == "direct":
+        drivers.append("직접 수혜")
+    if str(universe_item.get("earnings_linkage", "")).lower() == "proven":
+        drivers.append("숫자로 확인된 실적")
+    elif str(universe_item.get("earnings_linkage", "")).lower() == "expected":
+        drivers.append("실적 가시화 단계")
+    if len(catalysts) >= 2:
+        drivers.append("카탈리스트 다수")
+
+    driver_text = ", ".join(drivers[:3]) if drivers else "추가 실적 확인 필요"
+    if bull_multiple >= 9.0:
+        note = (
+            f"{path_label}. {horizon_months}개월 기준 기본 {base_multiple:.1f}배, "
+            f"낙관 {bull_multiple:.1f}배. 근거: {driver_text}"
+        )
+    elif base_multiple >= 3.0:
+        note = (
+            f"{path_label}. 현재는 10배보다 3~7배 경로 우세. "
+            f"근거: {driver_text}"
+        )
+    else:
+        note = (
+            f"{path_label}. 재평가 여지는 있으나 실적/수급 검증이 더 필요. "
+            f"근거: {driver_text}"
+        )
+
+    future = {
+        "future_horizon_months": horizon_months,
+        "future_base_multiple": round(base_multiple, 1),
+        "future_bull_multiple": round(bull_multiple, 1),
+        "future_base_price": 0.0,
+        "future_bull_price": 0.0,
+        "future_value_note": note,
+    }
+    if current_price > 0:
+        future["future_base_price"] = round(current_price * base_multiple, 2)
+        future["future_bull_price"] = round(current_price * bull_multiple, 2)
+    return future
+
+
 # ── 종합 스코어링 ───────────────────────────────────────────
 
 def compute_tenbagger_score(
@@ -410,6 +581,7 @@ def compute_tenbagger_score(
 ) -> TenbaggerScore:
     """7팩터 가중 종합 텐배거 점수를 계산한다."""
     config = load_tenbagger_config()
+    universe_item = _find_universe_item(ticker, market, config)
 
     # 가중치 로드
     weights = config.get("scoring_weights", {})
@@ -442,7 +614,10 @@ def compute_tenbagger_score(
     momentum = _score_sector_momentum(
         sector_return_1m, sector_return_3m, leader_return_1m,
     )
-    consensus = _score_ai_consensus(consensus_data)
+    merged_consensus = dict(consensus_data or {})
+    if not merged_consensus and universe_item.get("ai_consensus") is not None:
+        merged_consensus = {"ai_avg": universe_item.get("ai_consensus", 50)}
+    consensus = _score_ai_consensus(merged_consensus)
 
     # 가중 종합
     composite = (
@@ -453,6 +628,25 @@ def compute_tenbagger_score(
         + discovery * w_discovery
         + momentum * w_momentum
         + consensus * w_consensus
+    )
+
+    merged_catalysts = _merge_unique_texts(
+        universe_item.get("catalysts", []),
+        catalysts,
+    )
+    merged_risks = _merge_unique_texts(risks)
+    future = _estimate_future_value_path(
+        current_price=current_price,
+        composite_score=composite,
+        tam=tam,
+        policy=policy,
+        moat=moat,
+        revenue=revenue,
+        discovery=discovery,
+        momentum=momentum,
+        consensus=consensus,
+        catalysts=merged_catalysts,
+        universe_item=universe_item,
     )
 
     return TenbaggerScore(
@@ -470,10 +664,22 @@ def compute_tenbagger_score(
         momentum_score=round(momentum, 1),
         consensus_score=round(consensus, 1),
         tenbagger_score=round(composite, 1),
-        catalysts=catalysts or [],
-        risks=risks or [],
+        catalysts=merged_catalysts,
+        risks=merged_risks,
+        kill_conditions=_merge_unique_texts(universe_item.get("kill_conditions", [])),
+        monitor_12m=_merge_unique_texts(universe_item.get("monitor_12m", [])),
         current_price=current_price,
         market_cap=market_cap,
+        config_grade=universe_item.get("grade", ""),
+        config_tier=universe_item.get("tier", ""),
+        config_rank=int(universe_item.get("rank", 0) or 0),
+        character=universe_item.get("character", ""),
+        future_horizon_months=int(future["future_horizon_months"]),
+        future_base_multiple=float(future["future_base_multiple"]),
+        future_bull_multiple=float(future["future_bull_multiple"]),
+        future_base_price=float(future["future_base_price"]),
+        future_bull_price=float(future["future_bull_price"]),
+        future_value_note=str(future["future_value_note"]),
     )
 
 
@@ -517,6 +723,25 @@ def format_tenbagger_card(score: TenbaggerScore) -> str:
 
     if score.current_price > 0:
         lines.append(f"\n현재가: {score.current_price:,.0f}")
+
+    if score.future_base_multiple > 0:
+        lines.append("\n🔮 미래가치 시나리오:")
+        if score.current_price > 0 and score.future_base_price > 0:
+            lines.append(
+                f"  기본({score.future_horizon_months}개월): "
+                f"{score.future_base_price:,.0f} ({score.future_base_multiple:.1f}배)"
+            )
+            lines.append(
+                f"  낙관({score.future_horizon_months}개월): "
+                f"{score.future_bull_price:,.0f} ({score.future_bull_multiple:.1f}배)"
+            )
+        else:
+            lines.append(
+                f"  기본 {score.future_base_multiple:.1f}배 | "
+                f"낙관 {score.future_bull_multiple:.1f}배"
+            )
+        if score.future_value_note:
+            lines.append(f"  메모: {score.future_value_note}")
 
     if score.catalysts:
         lines.append("\n📌 카탈리스트:")

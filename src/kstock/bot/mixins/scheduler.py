@@ -637,6 +637,7 @@ class SchedulerMixin:
 
         v9.5: shared_context로 YouTube 인텔리전스 + 매니저 크로스 컨텍스트 주입.
         """
+        today_str = _today()
         try:
             from collections import defaultdict
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -644,6 +645,10 @@ class SchedulerMixin:
 
             holdings = self.db.get_active_holdings()
             if not holdings:
+                self.db.upsert_job_run(
+                    "manager_briefings", today_str,
+                    status="skip", message="no active holdings",
+                )
                 return
 
             # v11.0.1: LEGACY_EXEMPT 종목은 매니저 브리핑에서 제외
@@ -655,6 +660,10 @@ class SchedulerMixin:
                     if h.get("ticker", "") not in LEGACY_EXEMPT_TICKERS
                 ]
                 if not holdings:
+                    self.db.upsert_job_run(
+                        "manager_briefings", today_str,
+                        status="skip", message="holdings filtered by exempt list",
+                    )
                     return
             except ImportError:
                 pass
@@ -712,6 +721,7 @@ class SchedulerMixin:
             )
 
             current_alert = getattr(self, '_alert_mode', 'normal')
+            sent_count = 0
             for mtype, mholdings in by_type.items():
                 if mtype not in MANAGERS or not mholdings:
                     continue
@@ -846,6 +856,7 @@ class SchedulerMixin:
                             chat_id=self.chat_id, text=report[:4000],
                             reply_markup=_mgr_btns,
                         )
+                        sent_count += 1
                         # v9.5: 매니저 stance를 DB에 저장 (통합 상태용)
                         try:
                             stance_line = report.split("\n")[0][:120] if report else ""
@@ -872,8 +883,18 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("Failed to send portfolio balance advice", exc_info=True)
 
+            self.db.upsert_job_run(
+                "manager_briefings",
+                today_str,
+                status="success",
+                message=f"groups={len(by_type)}, sent={sent_count}",
+            )
             logger.info("Manager briefings sent: %s", list(by_type.keys()))
         except Exception as e:
+            self.db.upsert_job_run(
+                "manager_briefings", today_str,
+                status="error", message=str(e),
+            )
             logger.debug("Manager briefings error: %s", e)
 
     # ── v8.6: 자동분류 + 매니저 매수 스캔 ────────────────────────
@@ -895,6 +916,7 @@ class SchedulerMixin:
 
     async def _send_manager_watchlist_scan(self, context, macro) -> None:
         """매니저별 관심종목 매수 스캔 — 기술적 데이터 보강 후 AI 분석."""
+        today_str = _today()
         try:
             from collections import defaultdict
             from kstock.bot.investment_managers import (
@@ -903,6 +925,10 @@ class SchedulerMixin:
 
             watchlist = self.db.get_watchlist()
             if not watchlist:
+                self.db.upsert_job_run(
+                    "manager_watchlist_scan", today_str,
+                    status="skip", message="empty watchlist",
+                )
                 return
 
             # 보유종목 티커 set
@@ -984,7 +1010,17 @@ class SchedulerMixin:
                     logger.debug("Manager scan %s error: %s", mgr_key, e)
 
             logger.info("Manager watchlist scan: %d managers had picks", scanned)
+            self.db.upsert_job_run(
+                "manager_watchlist_scan",
+                today_str,
+                status="success",
+                message=f"managers={len(by_manager)}, picks={scanned}",
+            )
         except Exception as e:
+            self.db.upsert_job_run(
+                "manager_watchlist_scan", today_str,
+                status="error", message=str(e),
+            )
             logger.debug("Manager watchlist scan error: %s", e)
 
     async def _generate_daily_actions(self, macro) -> list[dict]:

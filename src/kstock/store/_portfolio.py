@@ -762,6 +762,8 @@ class PortfolioMixin:
                      current_return, notes, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 0, ?, ?, ?)
                 ON CONFLICT(ticker, market) DO UPDATE SET
+                    name=excluded.name,
+                    sector=excluded.sector,
                     tenbagger_score=excluded.tenbagger_score,
                     tam_score=excluded.tam_score,
                     policy_score=excluded.policy_score,
@@ -770,7 +772,9 @@ class PortfolioMixin:
                     discovery_score=excluded.discovery_score,
                     momentum_score=excluded.momentum_score,
                     consensus_score=excluded.consensus_score,
+                    ai_consensus=excluded.ai_consensus,
                     current_price=excluded.current_price,
+                    notes=excluded.notes,
                     updated_at=excluded.updated_at
                 """,
                 (

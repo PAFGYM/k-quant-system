@@ -249,10 +249,13 @@ class TestMorningBriefingApiFailure:
             )
             await mixin.job_morning_briefing(context)
 
-        # On exception the job is recorded with error status
-        mixin.db.upsert_job_run.assert_called_once()
-        args = mixin.db.upsert_job_run.call_args
-        assert args.args[0] == "morning_briefing"
+        # On exception the morning briefing job itself is recorded with error status
+        morning_calls = [
+            call for call in mixin.db.upsert_job_run.call_args_list
+            if call.args and call.args[0] == "morning_briefing"
+        ]
+        assert len(morning_calls) == 1
+        args = morning_calls[0]
         assert args.kwargs.get("status") == "error" or args.args[2] == "error"
 
 
@@ -274,8 +277,12 @@ class TestMorningBriefingRecordsJobRun:
             _attach_mixin_attrs(mixin, holdings=[_make_holding()])
             await mixin.job_morning_briefing(context)
 
-        mixin.db.upsert_job_run.assert_called_once()
-        args = mixin.db.upsert_job_run.call_args
+        morning_calls = [
+            call for call in mixin.db.upsert_job_run.call_args_list
+            if call.args and call.args[0] == "morning_briefing"
+        ]
+        assert len(morning_calls) == 1
+        args = morning_calls[0]
         assert args.args[0] == "morning_briefing"
         assert args.args[1] == "2026-02-25"
         # status should be "success"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -12,6 +13,7 @@ from kstock.core.health_monitor import (
     check_disk_usage,
     check_db_accessible,
     check_db_size,
+    check_manager_pipeline,
     backup_database,
     vacuum_database,
     generate_launchd_plist,
@@ -158,6 +160,74 @@ class TestRunHealthChecks:
         checks = run_health_checks(db_path=db_file)
         check_names = [c.name for c in checks]
         assert "db_accessible" in check_names
+        assert "manager_pipeline" in check_names
+
+
+# =========================================================================
+# TestCheckManagerPipeline
+# =========================================================================
+
+class TestCheckManagerPipeline:
+    """check_manager_pipeline 함수 테스트."""
+
+    def _make_job_runs_table(self, db_file):
+        conn = sqlite3.connect(str(db_file))
+        conn.execute(
+            """
+            CREATE TABLE job_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_name TEXT NOT NULL,
+                run_date TEXT NOT NULL,
+                status TEXT DEFAULT 'success',
+                started_at TEXT,
+                ended_at TEXT,
+                message TEXT,
+                UNIQUE(job_name, run_date)
+            )
+            """
+        )
+        return conn
+
+    def test_recent_manager_jobs_are_ok(self, tmp_path):
+        db_file = tmp_path / "manager_ok.db"
+        conn = self._make_job_runs_table(db_file)
+        now = datetime.now()
+        rows = [
+            ("manager_briefings", now - timedelta(hours=2)),
+            ("manager_watchlist_scan", now - timedelta(hours=3)),
+            ("manager_discovery", now - timedelta(hours=5)),
+            ("manager_reflection", now - timedelta(days=2)),
+        ]
+        for job_name, ended_at in rows:
+            run_date = ended_at.date().isoformat()
+            ts = ended_at.isoformat()
+            conn.execute(
+                "INSERT INTO job_runs (job_name, run_date, status, started_at, ended_at, message) "
+                "VALUES (?, ?, 'success', ?, ?, '')",
+                (job_name, run_date, ts, ts),
+            )
+        conn.commit()
+        conn.close()
+
+        result = check_manager_pipeline(db_file)
+        assert result.status == "ok"
+        assert "정상" in result.message
+
+    def test_missing_or_stale_jobs_return_warning(self, tmp_path):
+        db_file = tmp_path / "manager_warn.db"
+        conn = self._make_job_runs_table(db_file)
+        ended_at = (datetime.now() - timedelta(hours=60)).isoformat()
+        conn.execute(
+            "INSERT INTO job_runs (job_name, run_date, status, started_at, ended_at, message) "
+            "VALUES (?, ?, 'success', ?, ?, '')",
+            ("manager_briefings", "2026-03-10", ended_at, ended_at),
+        )
+        conn.commit()
+        conn.close()
+
+        result = check_manager_pipeline(db_file)
+        assert result.status in {"warning", "error"}
+        assert "매니저" in result.message
 
 
 # =========================================================================
