@@ -332,18 +332,27 @@ async def send_long_message(
         reply_markup: 마지막 메시지에 첨부할 키보드 (InlineKeyboardMarkup 등)
         page_size: 한 페이지 최대 글자 수 (기본 3800, 여유분 포함)
     """
-    if len(text) <= page_size:
-        await target.reply_text(text, reply_markup=reply_markup)
-        return
+    pages = split_long_text(text, page_size=page_size)
+    total = len(pages)
+    for i, page in enumerate(pages):
+        is_last = (i == total - 1)
+        header = f"📄 ({i + 1}/{total})\n" if total > 1 else ""
+        markup = reply_markup if is_last else None
+        await target.reply_text(header + page, reply_markup=markup)
 
-    # 줄 단위로 분할하여 page_size 이내에서 자르기
+
+def split_long_text(text: str, page_size: int = 3800) -> list[str]:
+    """긴 텍스트를 텔레그램 전송용 페이지로 분리."""
+    if len(text) <= page_size:
+        return [text]
+
     lines = text.split("\n")
-    pages = []
-    current_page = []
+    pages: list[str] = []
+    current_page: list[str] = []
     current_len = 0
 
     for line in lines:
-        line_len = len(line) + 1  # +1 for newline
+        line_len = len(line) + 1
         if current_len + line_len > page_size and current_page:
             pages.append("\n".join(current_page))
             current_page = [line]
@@ -354,13 +363,24 @@ async def send_long_message(
 
     if current_page:
         pages.append("\n".join(current_page))
+    return pages or [text[:page_size]]
 
+
+async def send_long_bot_message(
+    bot,
+    chat_id,
+    text: str,
+    reply_markup=None,
+    page_size: int = 3800,
+) -> None:
+    """bot.send_message 경로에서도 긴 메시지를 자동 분할 전송."""
+    pages = split_long_text(text, page_size=page_size)
     total = len(pages)
     for i, page in enumerate(pages):
-        is_last = (i == total - 1)
+        is_last = i == total - 1
         header = f"📄 ({i + 1}/{total})\n" if total > 1 else ""
         markup = reply_markup if is_last else None
-        await target.reply_text(header + page, reply_markup=markup)
+        await bot.send_message(chat_id=chat_id, text=header + page, reply_markup=markup)
 
 
 async def safe_edit_or_reply(query, text: str, reply_markup=None) -> None:

@@ -208,6 +208,23 @@ class TestRecommendations:
         assert store.has_active_recommendation("000660") is True
 
 
+class TestMlPredictions:
+    def test_get_unevaluated_predictions_and_update_result(self, store):
+        pid1 = store.add_prediction("005930", "2026-03-01", 0.72, "[]")
+        pid2 = store.add_prediction("000660", "2026-03-12", 0.41, "[]")
+
+        pending = store.get_unevaluated_predictions(min_age_days=0, limit=10)
+        pending_ids = {row["id"] for row in pending}
+        assert pid1 in pending_ids
+        assert pid2 in pending_ids
+
+        store.update_prediction_result(pid1, actual_return=4.25, correct=1)
+
+        updated = [row for row in store.get_predictions("2026-03-01") if row["id"] == pid1][0]
+        assert updated["actual_return"] == 4.25
+        assert updated["correct"] == 1
+
+
 class TestTrades:
     def test_add_and_get(self, store):
         tid = store.add_trade(

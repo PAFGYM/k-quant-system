@@ -52,6 +52,8 @@ class SchedulerMixin:
     _SELL_TARGET_COOLDOWN_SEC = 86400  # 24시간 (기존 1시간 → 반복 알림 방지)
     _SURGE_THRESHOLD_PCT = 3.0
     _surge_callback_registered: bool = False
+    _DAILY_NORMAL_ALERT_LIMIT = 60
+    _DAILY_URGENT_ALERT_LIMIT = 18
 
     # ── 동시성 보호 ──────────────────────────────────────
     _state_lock: asyncio.Lock | None = None
@@ -121,6 +123,8 @@ class SchedulerMixin:
             self._holdings_cache = []
         if not hasattr(self, '_holdings_index'):
             self._holdings_index = {}  # ticker → holding dict (O(1) 조회)
+        if not hasattr(self, '_alert_budget_notice_ts'):
+            self._alert_budget_notice_ts = {}
         # 경계 모드 초기화 — DB에서 복원
         if not hasattr(self, '_alert_mode'):
             self._alert_mode = "normal"
@@ -134,6 +138,75 @@ class SchedulerMixin:
                     logger.info("Alert mode restored from DB: %s", saved)
             except Exception:
                 logger.debug("Failed to restore alert_mode from DB", exc_info=True)
+
+    def _get_daily_alert_limit(self, priority: str = "normal") -> int:
+        if priority == "urgent":
+            return self._DAILY_URGENT_ALERT_LIMIT
+        if getattr(self, "_alert_mode", "normal") == "wartime":
+            return int(self._DAILY_NORMAL_ALERT_LIMIT * 1.5)
+        return self._DAILY_NORMAL_ALERT_LIMIT
+
+    def _count_recent_alerts(self, hours: int = 24) -> int:
+        try:
+            cutoff = datetime.utcnow() - timedelta(hours=hours)
+            recent = self.db.get_recent_alerts(limit=400) or []
+            count = 0
+            for alert in recent:
+                created_at = str(alert.get("created_at", "") or "").strip()
+                if not created_at:
+                    continue
+                try:
+                    created_dt = datetime.fromisoformat(created_at.replace("Z", ""))
+                except Exception:
+                    if created_at >= cutoff.isoformat():
+                        count += 1
+                    continue
+                if created_dt >= cutoff:
+                    count += 1
+            return count
+        except Exception:
+            logger.debug("count_recent_alerts failed", exc_info=True)
+            return 0
+
+    async def _allow_alert_emit(
+        self,
+        alert_type: str,
+        *,
+        priority: str = "normal",
+        units: int = 1,
+    ) -> bool:
+        """알림 과다 발송 시 낮은 우선순위 알림을 억제한다."""
+        self.__init_scheduler_state__()
+        limit = self._get_daily_alert_limit(priority)
+        count = self._count_recent_alerts(hours=24)
+        if count + max(units, 1) <= limit:
+            return True
+
+        logger.info(
+            "Alert suppressed by daily budget: type=%s priority=%s count=%d limit=%d",
+            alert_type, priority, count, limit,
+        )
+        now = _time.monotonic()
+        last_notice = self._alert_budget_notice_ts.get(priority, 0.0)
+        if (
+            self.chat_id
+            and hasattr(self, "_application")
+            and now - last_notice >= 3600
+        ):
+            self._alert_budget_notice_ts[priority] = now
+            try:
+                await self._application.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(
+                        f"🔕 알림 정리 모드\n"
+                        f"최근 24시간 알림이 {count}건으로 많아져 "
+                        f"`{alert_type}` 유형은 잠시 묶어서 보내고 있어요.\n"
+                        "핵심 긴급 알림만 우선 유지합니다."
+                    ),
+                )
+            except Exception:
+                logger.debug("alert budget notice failed", exc_info=True)
+        return False
 
     # ── 경계 모드 관리 메서드 ──────────────────────────────
     def _get_alert_config(self) -> dict:
@@ -554,7 +627,7 @@ class SchedulerMixin:
                     f"{'━' * 22}\n"
                     f"🤖 K-Quant | 휴장일 간소 브리핑"
                 )
-                await context.bot.send_message(chat_id=self.chat_id, text=msg)
+                await send_long_bot_message(context.bot, self.chat_id, msg)
                 self.db.upsert_job_run("morning_briefing", _today(), status="success")
                 logger.info("Morning briefing sent (market closed)")
                 return
@@ -596,8 +669,10 @@ class SchedulerMixin:
                     InlineKeyboardButton("👎", callback_data="fb:dislike:모닝브리핑"),
                 ],
             ])
-            await context.bot.send_message(
-                chat_id=self.chat_id, text=msg[:4000],
+            await send_long_bot_message(
+                context.bot,
+                self.chat_id,
+                msg,
                 reply_markup=morning_buttons,
             )
 
@@ -613,7 +688,7 @@ class SchedulerMixin:
                 unified = await build_unified_state(self.db, macro_client=self.macro_client)
                 header = format_unified_header(unified)
                 if header and len(header) > 20:
-                    await context.bot.send_message(chat_id=self.chat_id, text=header[:4000])
+                    await send_long_bot_message(context.bot, self.chat_id, header)
             except Exception:
                 logger.debug("Unified state header failed", exc_info=True)
 
@@ -2440,6 +2515,8 @@ class SchedulerMixin:
                         ],
                         [InlineKeyboardButton("📋 액션콘솔", callback_data="menu:daily_actions")],
                     ])
+                    if not await self._allow_alert_emit(f"mgr_{mtype}", priority="normal", units=min(len(alerts), 2)):
+                        continue
                     for alert_text in alerts[:2]:
                         await bot.send_message(
                             chat_id=self.chat_id,
@@ -2531,11 +2608,13 @@ class SchedulerMixin:
                         callback_data=f"detail:{s.ticker}",
                     ),
                 ])
-            await bot.send_message(
-                chat_id=self.chat_id,
-                text="\n".join(lines),
-                reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
-            )
+            if await self._allow_alert_emit("surge_batch", priority="normal", units=min(len(surge_stocks), 3)):
+                await send_long_bot_message(
+                    bot,
+                    self.chat_id,
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+                )
 
         # 장기 보유 추천 (상위 2개, 하루 1회)
         if longterm_picks:
@@ -2564,11 +2643,13 @@ class SchedulerMixin:
                         callback_data=f"multi:{lp.ticker}",
                     ),
                 ])
-            await bot.send_message(
-                chat_id=self.chat_id,
-                text="\n".join(lines),
-                reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
-            )
+            if await self._allow_alert_emit("longterm_pick_batch", priority="normal", units=min(len(longterm_picks), 2)):
+                await send_long_bot_message(
+                    bot,
+                    self.chat_id,
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+                )
 
         # v6.2.2: 반등(V턴) 감지 알림
         if bounce_stocks:
@@ -2604,11 +2685,13 @@ class SchedulerMixin:
                     ))
                 buttons.append(row)
             buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
-            await bot.send_message(
-                chat_id=self.chat_id,
-                text="\n".join(lines),
-                reply_markup=InlineKeyboardMarkup(buttons),
-            )
+            if await self._allow_alert_emit("bounce_batch", priority="normal", units=min(len(bounce_stocks), 3)):
+                await send_long_bot_message(
+                    bot,
+                    self.chat_id,
+                    "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
 
     async def job_eod_report(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self.chat_id:
@@ -3625,9 +3708,7 @@ class SchedulerMixin:
             # 7. 텔레그램 발송
             briefing = format_ai_shock_briefing(result)
             if briefing:
-                await context.bot.send_message(
-                    chat_id=self.chat_id, text=briefing,
-                )
+                await send_long_bot_message(context.bot, self.chat_id, briefing)
 
             # 8. DB 저장
             try:
@@ -4065,7 +4146,7 @@ class SchedulerMixin:
                     f"🤖 K-Quant | {datetime.now(KST).strftime('%H:%M')}"
                 )
 
-            await context.bot.send_message(chat_id=self.chat_id, text=msg)
+            await send_long_bot_message(context.bot, self.chat_id, msg)
 
             # v9.5.1: 브리핑을 DB에 저장 (AI 채팅이 참조할 수 있도록)
             try:
@@ -5632,6 +5713,10 @@ class SchedulerMixin:
         if not self.chat_id or not hasattr(self, '_application'):
             return
         try:
+            if self.db.has_recent_alert(ticker, "surge_ws", hours=12):
+                return
+            if not await self._allow_alert_emit("surge_ws", priority="normal", units=1):
+                return
             # 종목명 조회
             name = ticker
             for item in self.all_tickers:
@@ -5684,6 +5769,7 @@ class SchedulerMixin:
             await self._application.bot.send_message(
                 chat_id=self.chat_id, text=text, reply_markup=keyboard,
             )
+            self.db.insert_alert(ticker, "surge_ws", f"실시간 급등 +{change_pct:.1f}%")
             logger.info("Surge alert: %s %+.1f%%", ticker, change_pct)
         except Exception as e:
             logger.error("Surge alert error %s: %s", ticker, e)
@@ -7397,6 +7483,14 @@ class SchedulerMixin:
                             )
 
                         if alert_msg:
+                            if not await self._allow_alert_emit(
+                                "urgent_news",
+                                priority="urgent",
+                                units=len(new_groups),
+                            ):
+                                logger.info("Urgent news alert suppressed by budget guard")
+                                alert_msg = ""
+                        if alert_msg:
                             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
                             news_buttons = InlineKeyboardMarkup([
                                 [
@@ -7413,6 +7507,7 @@ class SchedulerMixin:
                                 chat_id=self.chat_id, text=alert_msg,
                                 reply_markup=news_buttons,
                             )
+                            self.db.insert_alert("GLOBAL", "urgent_news", alert_msg[:200])
                             # DB에 전송 기록
                             for group in new_groups:
                                 h = make_alert_hash(group)
@@ -7875,6 +7970,88 @@ class SchedulerMixin:
         except Exception as e:
             logger.warning("_notify_verdict_change error: %s", e, exc_info=True)
 
+    def _get_ticker_market(self, ticker: str) -> str:
+        for item in getattr(self, "all_tickers", []) or []:
+            if item.get("code") == ticker:
+                return item.get("market", "KOSPI")
+        return "KOSPI"
+
+    async def _calc_ml_prediction_actual_return(self, ticker: str, pred_date: str) -> float | None:
+        """예측일 기준 5거래일 실제 수익률(%) 계산."""
+        try:
+            import pandas as _pd
+
+            market = self._get_ticker_market(ticker)
+            if hasattr(self, "data_router"):
+                ohlcv = await self.data_router.get_ohlcv(ticker, market=market, period="3mo")
+            else:
+                ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
+            if ohlcv is None or getattr(ohlcv, "empty", True) or len(ohlcv) < 6:
+                return None
+
+            df = ohlcv.copy()
+            if "date" in df.columns:
+                dates = _pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d").tolist()
+            else:
+                dates = _pd.to_datetime(df.index).strftime("%Y-%m-%d").tolist()
+
+            closes = _pd.to_numeric(df["close"], errors="coerce").tolist()
+            pairs = [
+                (d, float(c)) for d, c in zip(dates, closes)
+                if c is not None and not _pd.isna(c)
+            ]
+            if not pairs:
+                return None
+
+            base_idx = None
+            for idx, (date_str, _) in enumerate(pairs):
+                if date_str >= pred_date:
+                    base_idx = idx
+                    break
+            if base_idx is None or base_idx + 5 >= len(pairs):
+                return None
+
+            base_price = pairs[base_idx][1]
+            target_price = pairs[base_idx + 5][1]
+            if base_price <= 0:
+                return None
+            return (target_price - base_price) / base_price * 100.0
+        except Exception:
+            logger.debug("calc_ml_prediction_actual_return failed for %s", ticker, exc_info=True)
+            return None
+
+    async def _backfill_ml_prediction_results(self, limit: int = 500) -> int:
+        """actual_return이 비어 있는 ML 예측 결과를 채운다."""
+        try:
+            pending = self.db.get_unevaluated_predictions(min_age_days=5, limit=limit)
+        except Exception:
+            logger.debug("get_unevaluated_predictions failed", exc_info=True)
+            return 0
+
+        updated = 0
+        for row in pending:
+            ticker = row.get("ticker", "")
+            pred_date = row.get("pred_date", "")
+            if not ticker or not pred_date:
+                continue
+            actual_return = await self._calc_ml_prediction_actual_return(ticker, pred_date)
+            if actual_return is None:
+                continue
+
+            probability = float(row.get("probability", 0) or 0)
+            predicted_up = probability >= 0.5
+            actual_up = actual_return > 3.0
+            try:
+                self.db.update_prediction_result(
+                    row["id"],
+                    round(actual_return, 4),
+                    1 if predicted_up == actual_up else 0,
+                )
+                updated += 1
+            except Exception:
+                logger.debug("update_prediction_result failed for %s", ticker, exc_info=True)
+        return updated
+
     async def job_track_predictions(self, context) -> None:
         """v9.4: 과거 토론 예측 정확도 추적 (16:10).
 
@@ -7883,7 +8060,7 @@ class SchedulerMixin:
         try:
             unevaluated = self.db.get_unevaluated_debates(min_age_days=5)
             if not unevaluated:
-                return
+                unevaluated = []
 
             evaluated = 0
             for debate in unevaluated:
@@ -7927,13 +8104,18 @@ class SchedulerMixin:
                 except Exception as e:
                     logger.debug("track_predictions: error for %s: %s", ticker, e)
 
-            if evaluated > 0:
+            ml_updated = await self._backfill_ml_prediction_results(limit=800)
+
+            if evaluated > 0 or ml_updated > 0:
                 self.db.upsert_job_run(
                     "track_predictions", _today(),
                     status="success",
-                    message=f"evaluated={evaluated}",
+                    message=f"debates={evaluated}, ml={ml_updated}",
                 )
-                logger.info("job_track_predictions: evaluated %d debates", evaluated)
+                logger.info(
+                    "job_track_predictions: evaluated debates=%d ml_predictions=%d",
+                    evaluated, ml_updated,
+                )
 
         except Exception as e:
             logger.error("job_track_predictions failed: %s", e, exc_info=True)

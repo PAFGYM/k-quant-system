@@ -2485,6 +2485,9 @@ async def summarize_transcript_gemini_flash(
     text = transcript[:5000]
 
     is_metadata_only = text.startswith("채널:") or text.startswith("제목:")
+    if is_metadata_only and _is_low_signal_metadata_payload(text):
+        logger.info("Gemini Flash: skip low-signal metadata-only video '%s'", title[:40])
+        return empty
     if is_metadata_only:
         prompt = (
             f"[{source}] 영상 메타데이터 분석:\n{text}\n\n"
@@ -2565,6 +2568,16 @@ def _detect_tracked_analysts(title: str, description: str = "") -> list[str]:
     return [name for name in TRACKED_ANALYSTS if name in text]
 
 
+def _is_low_signal_metadata_payload(text: str) -> bool:
+    """설명/해시태그 없이 제목만 있는 유튜브 메타데이터는 학습 가치가 낮다."""
+    payload = str(text or "").strip()
+    if not payload.startswith(("채널:", "제목:")):
+        return False
+    has_description = "설명:" in payload and len(payload.split("설명:", 1)[1].strip()) >= 60
+    has_hashtags = "해시태그:" in payload
+    return not has_description and not has_hashtags and len(payload) < 120
+
+
 async def batch_youtube_tiered(
     db,
     max_videos: int = 20,
@@ -2630,6 +2643,9 @@ async def batch_youtube_tiered(
                 transcript = f"제목: {item.title}"
 
         if len(transcript) < 30:
+            continue
+        if _is_low_signal_metadata_payload(transcript):
+            result["skipped"] += 1
             continue
 
         # Tier1: Gemini Flash 분석
