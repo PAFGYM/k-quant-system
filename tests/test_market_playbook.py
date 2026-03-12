@@ -45,6 +45,9 @@ def test_build_downside_playbook_flags_crisis_and_strong_stock():
             "crowd_signal": "",
             "event_tags": ["GTC"],
             "market_cap": 1_2000_0000_0000,
+            "flow_signal": "외인+기관 순유입",
+            "short_pattern_codes": ["short_covering"],
+            "short_ratio": 12.5,
         },
         {
             "ticker": "222222",
@@ -57,6 +60,9 @@ def test_build_downside_playbook_flags_crisis_and_strong_stock():
             "vol_ratio": 320.0,
             "crowd_signal": "리딩방 급행 주의",
             "market_cap": 250_0000_0000,
+            "flow_signal": "외인+기관 동반 이탈",
+            "short_pattern_codes": ["short_buildup"],
+            "short_ratio": 14.2,
         },
     ]
 
@@ -65,6 +71,7 @@ def test_build_downside_playbook_flags_crisis_and_strong_stock():
         candidates,
         leverage_change_pct=-7.5,
         inverse_change_pct=5.2,
+        program_data={"total_net": -4200, "arb_net": -600, "non_arb_net": -3100},
     )
 
     assert playbook.regime == "crisis"
@@ -72,8 +79,11 @@ def test_build_downside_playbook_flags_crisis_and_strong_stock():
     assert any("레버리지" in trigger for trigger in playbook.triggers)
     assert playbook.strong_stocks
     assert playbook.strong_stocks[0].ticker == "111111"
+    assert playbook.short_squeeze_watch
+    assert playbook.short_squeeze_watch[0].ticker == "111111"
     assert playbook.avoid_stocks
     assert playbook.avoid_stocks[0].ticker == "222222"
+    assert any("패시브" in line or "비차익" in line for line in playbook.flow_lines)
 
 
 def test_format_downside_playbook_includes_tactics_and_sections():
@@ -103,6 +113,9 @@ def test_format_downside_playbook_includes_tactics_and_sections():
             "vol_ratio": 140.0,
             "crowd_signal": "",
             "market_cap": 1_8000_0000_0000,
+            "flow_signal": "기관 방어 매수",
+            "short_pattern_codes": ["real_buy"],
+            "short_ratio": 10.8,
         },
     ]
 
@@ -111,12 +124,15 @@ def test_format_downside_playbook_includes_tactics_and_sections():
         candidates,
         leverage_change_pct=-3.5,
         inverse_change_pct=2.4,
+        program_data={"total_net": -1800, "arb_net": 200, "non_arb_net": -900},
     )
     text = format_downside_playbook(playbook)
 
     assert playbook.regime in {"caution", "defense"}
     assert "오늘 플레이" in text
+    assert "수급/패시브" in text
     assert "버티는 강한 종목" in text
+    assert "숏커버 레이더" in text
     assert "탄탄주" in text
 
 

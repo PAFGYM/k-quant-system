@@ -1241,6 +1241,203 @@ class SchedulerMixin:
             )
         return lines
 
+    def _get_ticker_tactical_context(self, ticker: str, name: str = "", macro=None) -> dict:
+        """외인/기관·공매도·숏커버 문맥을 종목 단위로 요약."""
+        def _num(value, default: float = 0.0) -> float:
+            try:
+                if value is None:
+                    return default
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        context: dict[str, object] = {}
+
+        try:
+            supply = self.db.get_supply_demand(ticker, days=5)
+            if supply:
+                recent = supply[:5]
+                foreign_total = sum(_num(row.get("foreign_net", 0)) for row in recent)
+                inst_total = sum(_num(row.get("institution_net", 0)) for row in recent)
+                program_total = sum(_num(row.get("program_net", 0)) for row in recent)
+                foreign_pos = sum(1 for row in recent if _num(row.get("foreign_net", 0)) > 0)
+                inst_pos = sum(1 for row in recent if _num(row.get("institution_net", 0)) > 0)
+                flow_signal = ""
+                if foreign_total > 0 and inst_total > 0:
+                    flow_signal = "외인+기관 순유입"
+                elif foreign_total < 0 and inst_total < 0:
+                    flow_signal = "외인+기관 동반 이탈"
+                elif inst_total > 0 > foreign_total:
+                    flow_signal = "기관 방어 매수"
+                elif foreign_total > 0 > inst_total:
+                    flow_signal = "외인 선행 유입"
+
+                context.update({
+                    "foreign_total_5d": round(foreign_total, 1),
+                    "inst_total_5d": round(inst_total, 1),
+                    "program_total_5d": round(program_total, 1),
+                    "foreign_positive_days": foreign_pos,
+                    "inst_positive_days": inst_pos,
+                })
+                if flow_signal:
+                    context["flow_signal"] = flow_signal
+        except Exception:
+            logger.debug("Failed to load supply-demand context for %s", ticker, exc_info=True)
+
+        try:
+            from kstock.signal.short_pattern import detect_all_patterns
+            from kstock.signal.short_selling import analyze_short_selling, generate_timing_signal
+        except Exception:
+            return context
+
+        try:
+            short_history = self.db.get_short_selling(ticker, days=15)
+            if not short_history:
+                return context
+
+            latest_short = short_history[-1]
+            context["short_ratio"] = _num(latest_short.get("short_ratio", 0.0))
+            context["short_balance_ratio"] = _num(latest_short.get("short_balance_ratio", 0.0))
+
+            price_history: list[dict] = []
+            ohlcv = self._ohlcv_cache.get(ticker)
+            if ohlcv is not None and not ohlcv.empty:
+                try:
+                    for _, row in ohlcv.tail(12).iterrows():
+                        price_history.append({
+                            "close": _num(row.get("close", row.get("Close", 0))),
+                            "volume": _num(row.get("volume", row.get("Volume", 0))),
+                        })
+                except Exception:
+                    logger.debug("Failed to build OHLCV context for %s", ticker, exc_info=True)
+
+            market_change = _num(getattr(macro, "kospi_change_pct", 0.0), 0.0) if macro else 0.0
+            pattern_result = detect_all_patterns(
+                short_history,
+                price_history,
+                market_change_pct=market_change,
+                ticker=ticker,
+                name=name or ticker,
+            )
+            if pattern_result.patterns:
+                context["short_pattern_codes"] = [p.code for p in pattern_result.patterns]
+                context["short_pattern_labels"] = [p.name for p in pattern_result.patterns]
+                context["short_pattern_score"] = pattern_result.total_score_adj
+
+            short_signal = analyze_short_selling(short_history, ticker, name or ticker)
+            if short_signal.patterns:
+                context["short_signal"] = short_signal.patterns[0]
+                context["short_score_adj"] = short_signal.score_adj
+
+            timing = generate_timing_signal(short_history, price_history)
+            if timing.get("action") and timing.get("action") != "중립":
+                context["short_timing_action"] = timing.get("action")
+                context["short_timing_reason"] = timing.get("reason", "")
+            elif set(context.get("short_pattern_codes") or []).intersection({"short_squeeze"}):
+                context["short_timing_action"] = "적극 매수"
+                context["short_timing_reason"] = "숏스퀴즈 진행"
+            elif set(context.get("short_pattern_codes") or []).intersection({"short_covering", "real_buy"}):
+                context["short_timing_action"] = "매수 검토"
+                context["short_timing_reason"] = "숏커버/실매수 전환"
+        except Exception:
+            logger.debug("Failed to load short-selling context for %s", ticker, exc_info=True)
+
+        return context
+
+    def _enrich_manager_candidates_with_flow_short_context(
+        self,
+        candidates_by_manager: dict[str, list[dict]],
+        macro=None,
+    ) -> dict[str, list[dict]]:
+        """외인/기관·공매도·숏커버 문맥을 매니저 후보에 반영."""
+        def _num(value, default: float = 0.0) -> float:
+            try:
+                if value is None:
+                    return default
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        context_cache: dict[str, dict] = {}
+
+        for manager_key, candidates in candidates_by_manager.items():
+            for candidate in candidates:
+                ticker = str(candidate.get("ticker", "") or "")
+                if not ticker:
+                    continue
+                if ticker not in context_cache:
+                    context_cache[ticker] = self._get_ticker_tactical_context(
+                        ticker,
+                        str(candidate.get("name", "") or ""),
+                        macro=macro,
+                    )
+                ctx = context_cache[ticker]
+                candidate.update(ctx)
+
+                reasons = list(candidate.get("fit_reasons") or [])
+                fit_score = float(candidate.get("fit_score", 0) or 0)
+                adj = 0.0
+                flow_signal = str(ctx.get("flow_signal", "") or "")
+                short_codes = set(ctx.get("short_pattern_codes") or [])
+                short_action = str(ctx.get("short_timing_action", "") or "")
+                short_ratio = _num(ctx.get("short_ratio", 0.0))
+
+                if flow_signal:
+                    reasons.append(flow_signal)
+                    if flow_signal == "외인+기관 순유입":
+                        adj += 4.0 if manager_key in {"position", "tenbagger", "long_term"} else 3.0
+                    elif flow_signal == "기관 방어 매수":
+                        adj += 3.0 if manager_key in {"swing", "position", "long_term"} else 1.0
+                    elif flow_signal == "외인 선행 유입":
+                        adj += 3.0 if manager_key in {"scalp", "position", "tenbagger"} else 2.0
+                    elif flow_signal == "외인+기관 동반 이탈":
+                        adj -= 6.0 if manager_key in {"scalp", "swing", "position", "tenbagger"} else 4.0
+
+                if "real_buy" in short_codes:
+                    reasons.append("실매수 전환")
+                    adj += 4.0
+                if "short_covering" in short_codes:
+                    reasons.append("숏커버링")
+                    adj += 5.0 if manager_key in {"scalp", "swing", "tenbagger"} else 3.0
+                if "short_squeeze" in short_codes:
+                    reasons.append("숏스퀴즈")
+                    adj += 6.0 if manager_key in {"scalp", "tenbagger"} else 3.0
+                if "short_buildup" in short_codes:
+                    reasons.append("공매도 빌드업")
+                    adj -= 7.0
+                elif short_ratio >= 12.0 and not short_codes.intersection({"real_buy", "short_covering", "short_squeeze"}):
+                    reasons.append(f"공매도 {short_ratio:.1f}%")
+                    adj -= 3.0
+
+                if short_action in {"적극 매수", "매수 검토"} and short_codes.intersection({"real_buy", "short_covering", "short_squeeze"}):
+                    reasons.append(f"숏커버 {short_action}")
+                    if manager_key in {"scalp", "swing", "tenbagger"}:
+                        adj += 2.0
+                    base_action = str(candidate.get("action_hint", "") or "")
+                    if "숏커버" not in base_action:
+                        candidate["action_hint"] = (
+                            f"{base_action} / 숏커버 확인"
+                            if base_action else "숏커버 강도 확인 후 분할 진입"
+                        )
+
+                seen: set[str] = set()
+                deduped: list[str] = []
+                for reason in reasons:
+                    if reason in seen:
+                        continue
+                    seen.add(reason)
+                    deduped.append(reason)
+                candidate["fit_reasons"] = deduped[:5]
+                candidate["fit_score"] = round(max(0.0, min(99.0, fit_score + adj)), 1)
+
+            candidates.sort(key=lambda item: (
+                -float(item.get("fit_score", 0) or 0),
+                -float(item.get("composite", 0) or 0),
+                -float(item.get("confidence_score", 0) or 0),
+            ))
+
+        return candidates_by_manager
+
     def _build_downside_playbook(self, macro) -> object | None:
         """국내 선물/레버리지 급락 대응 플레이북 생성."""
         try:
@@ -1251,6 +1448,11 @@ class SchedulerMixin:
 
         scan_results = list(getattr(self, "_last_scan_results", None) or [])
         candidates: list[dict] = []
+        program_rows = []
+        try:
+            program_rows = self.db.get_program_trading(days=3, market="KOSPI")
+        except Exception:
+            logger.debug("Failed to load program trading for downside playbook", exc_info=True)
         leverage_change = None
         inverse_change = None
         for result in scan_results[:80]:
@@ -1262,6 +1464,11 @@ class SchedulerMixin:
                 leverage_change = float(profile.get("day_change", 0) or 0)
             elif ticker == "252670":
                 inverse_change = float(profile.get("day_change", 0) or 0)
+            profile.update(self._get_ticker_tactical_context(
+                ticker,
+                str(profile.get("name", "") or ""),
+                macro=macro,
+            ))
             candidates.append(profile)
 
         return build_downside_playbook(
@@ -1269,6 +1476,7 @@ class SchedulerMixin:
             candidates,
             leverage_change_pct=leverage_change,
             inverse_change_pct=inverse_change,
+            program_data=(program_rows[0] if program_rows else None),
         )
 
     @staticmethod
@@ -1286,6 +1494,11 @@ class SchedulerMixin:
         for pick in list(getattr(playbook, "strong_stocks", []) or [])[:2]:
             shortcuts.append({
                 "label": f"💪 {pick.name[:8]}",
+                "callback_data": f"fav:stock:{pick.ticker}",
+            })
+        for pick in list(getattr(playbook, "short_squeeze_watch", []) or [])[:1]:
+            shortcuts.append({
+                "label": f"🔥 {pick.name[:8]}",
                 "callback_data": f"fav:stock:{pick.ticker}",
             })
         return shortcuts
@@ -1319,7 +1532,9 @@ class SchedulerMixin:
             market_text = (
                 f"VIX={macro.vix:.1f}, S&P={macro.spx_change_pct:+.2f}%, "
                 f"나스닥={macro.nasdaq_change_pct:+.2f}%, "
-                f"환율={macro.usdkrw:,.0f}원, 레짐={macro.regime}"
+                f"환율={macro.usdkrw:,.0f}원, "
+                f"EWY={getattr(macro, 'ewy_change_pct', 0.0):+.1f}%, "
+                f"레짐={macro.regime}"
             )
 
             # 관심종목을 매니저별 그룹핑 (보유 종목 제외)
@@ -1373,6 +1588,9 @@ class SchedulerMixin:
                 by_manager[hz].append(enrich_watchlist_candidate(hz, w))
 
             current_alert = getattr(self, '_alert_mode', 'normal')
+            by_manager = self._enrich_manager_candidates_with_flow_short_context(
+                by_manager, macro,
+            )
             fast_context = self._build_manager_fast_context(by_manager)
             by_manager = self._enrich_manager_candidates_with_fast_context(
                 by_manager, fast_context,
@@ -1570,6 +1788,18 @@ class SchedulerMixin:
                     "reason": top_pick.thesis,
                     "callback_data": f"fav:stock:{top_pick.ticker}",
                     "button_label": f"💪 {top_pick.name[:8]}",
+                })
+            squeeze_watch = list(getattr(playbook, "short_squeeze_watch", []) or [])
+            if squeeze_watch:
+                top_squeeze = squeeze_watch[0]
+                actions.append({
+                    "priority": "check",
+                    "ticker": top_squeeze.ticker,
+                    "name": top_squeeze.name[:8],
+                    "action": "숏커버 레이더",
+                    "reason": top_squeeze.thesis,
+                    "callback_data": f"fav:stock:{top_squeeze.ticker}",
+                    "button_label": f"🔥 {top_squeeze.name[:8]}",
                 })
 
         # 확인: 포트폴리오 점검
@@ -6690,13 +6920,14 @@ class SchedulerMixin:
             exclude |= {w["ticker"] for w in watchlist}
 
             # 시장 컨텍스트
+            macro = None
             market_text = ""
             try:
                 macro = await self.macro_client.get_snapshot()
                 market_text = (
                     f"VIX={macro.vix:.1f}, S&P={macro.spx_change_pct:+.2f}%, "
                     f"나스닥={macro.nasdaq_change_pct:+.2f}%, "
-                    f"환율={macro.usdkrw:,.0f}원"
+                    f"환율={macro.usdkrw:,.0f}원, EWY={getattr(macro, 'ewy_change_pct', 0.0):+.1f}%"
                 )
             except Exception:
                 logger.debug("Failed to get macro snapshot for manager discovery scan", exc_info=True)
@@ -6710,6 +6941,9 @@ class SchedulerMixin:
                 if candidates:
                     candidates_by_manager[mgr_key] = candidates
 
+            candidates_by_manager = self._enrich_manager_candidates_with_flow_short_context(
+                candidates_by_manager, macro,
+            )
             fast_context = self._build_manager_fast_context(candidates_by_manager)
             candidates_by_manager = self._enrich_manager_candidates_with_fast_context(
                 candidates_by_manager, fast_context,

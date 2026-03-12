@@ -202,6 +202,8 @@ def test_format_manager_action_digest_includes_fast_signals():
                 "youtube_mentions": 4,
                 "news_hits": 2,
                 "community_hits": 2,
+                "flow_signal": "외인+기관 순유입",
+                "short_pattern_labels": ["숏커버링 랠리", "숏스퀴즈"],
                 "crowd_signal": "커뮤니티+테마 공명",
                 "listing_market": "KOSDAQ",
                 "market_cap_label": "1.2조",
@@ -218,6 +220,8 @@ def test_format_manager_action_digest_includes_fast_signals():
     assert "빠른신호" in text
     assert "이벤트 레이더" in text
     assert "군집 레이더" in text
+    assert "외인+기관 순유입" in text
+    assert "숏패턴 숏커버링 랠리/숏스퀴즈" in text
     assert "국내 스몰캡 레이더" in text
     assert "선점 구간" in text
     assert "커뮤니티 2건" in text

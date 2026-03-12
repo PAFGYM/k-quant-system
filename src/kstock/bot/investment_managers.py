@@ -1486,6 +1486,12 @@ def _extract_scan_profile(scan_result) -> dict | None:
         "ma20": _safe_float(getattr(tech, "ma20", 0)),
         "rsi_divergence": int(_safe_float(getattr(tech, "rsi_divergence", 0))),
         "crowd_signal": crowd_signal,
+        "flow_signal": "",
+        "short_ratio": 0.0,
+        "short_balance_ratio": 0.0,
+        "short_pattern_codes": [],
+        "short_pattern_labels": [],
+        "short_timing_action": "",
     }
 
 
@@ -1719,6 +1725,12 @@ def enrich_watchlist_candidate(manager_key: str, candidate: dict) -> dict:
         "ma20": ma20,
         "rsi_divergence": int(_safe_float(candidate.get("rsi_divergence", 0))),
         "crowd_signal": candidate.get("crowd_signal", ""),
+        "flow_signal": candidate.get("flow_signal", ""),
+        "short_ratio": _safe_float(candidate.get("short_ratio", 0)),
+        "short_balance_ratio": _safe_float(candidate.get("short_balance_ratio", 0)),
+        "short_pattern_codes": list(candidate.get("short_pattern_codes") or []),
+        "short_pattern_labels": list(candidate.get("short_pattern_labels") or []),
+        "short_timing_action": candidate.get("short_timing_action", ""),
     }
     _, fit_score, fit_reasons, action_hint = _evaluate_manager_candidate(manager_key, profile)
     guide = MANAGER_ROLE_GUIDES.get(manager_key, {})
@@ -1794,6 +1806,12 @@ def format_manager_action_digest(
                 fast_parts.append("이벤트 " + "/".join(pick["event_tags"][:2]))
             if pick.get("youtube_mentions", 0):
                 fast_parts.append(f"유튜브 {pick['youtube_mentions']}회")
+            if pick.get("flow_signal"):
+                fast_parts.append(str(pick["flow_signal"]))
+            if pick.get("short_pattern_labels"):
+                fast_parts.append("숏패턴 " + "/".join(pick["short_pattern_labels"][:2]))
+            elif pick.get("short_timing_action"):
+                fast_parts.append(f"숏커버 {pick['short_timing_action']}")
             if pick.get("news_hits", 0):
                 fast_parts.append(f"뉴스 {pick['news_hits']}건")
             if pick.get("community_hits", 0):
@@ -1801,7 +1819,7 @@ def format_manager_action_digest(
             if pick.get("crowd_signal"):
                 fast_parts.append(pick["crowd_signal"])
             if fast_parts:
-                lines.append(f"   빠른신호: {' · '.join(fast_parts[:4])}")
+                lines.append(f"   빠른신호: {' · '.join(fast_parts[:6])}")
             action = pick.get("action_hint") or guide.get("action", "")
             if action:
                 lines.append(f"   행동: {action}")
