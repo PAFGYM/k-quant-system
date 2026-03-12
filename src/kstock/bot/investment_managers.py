@@ -1402,6 +1402,20 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _safe_text(value) -> str:
+    text = str(value or "").strip()
+    return text
+
+
+def _format_market_cap_label(market_cap: float) -> str:
+    cap = _safe_float(market_cap, 0.0)
+    if cap <= 0:
+        return ""
+    if cap >= 1_0000_0000_0000:
+        return f"{cap / 1_0000_0000_0000:.1f}조"
+    return f"{cap / 1_0000_0000:.0f}억"
+
+
 def _extract_scan_profile(scan_result) -> dict | None:
     """ScanResult/유사 객체를 매니저 발굴용 공통 프로필로 정규화."""
     tech = getattr(scan_result, "tech", None) or getattr(scan_result, "indicators", None)
@@ -1411,6 +1425,7 @@ def _extract_scan_profile(scan_result) -> dict | None:
 
     info = getattr(scan_result, "info", None)
     flow = getattr(scan_result, "flow", None)
+    listing_market = _safe_text(getattr(info, "market", ""))
 
     price = _safe_float(getattr(info, "current_price", 0))
     market_cap = _safe_float(getattr(info, "market_cap", 0))
@@ -1456,6 +1471,8 @@ def _extract_scan_profile(scan_result) -> dict | None:
         "signal": getattr(score, "signal", ""),
         "confidence_score": _safe_float(getattr(scan_result, "confidence_score", 0)),
         "market_cap": market_cap,
+        "market_cap_label": _format_market_cap_label(market_cap),
+        "listing_market": listing_market,
         "per": per,
         "roe": roe,
         "debt_ratio": debt_ratio,
@@ -1601,10 +1618,24 @@ def _evaluate_manager_candidate(manager_key: str, p: dict) -> tuple[bool, float,
         )
 
     elif manager_key == "tenbagger":
-        if 0 < p["market_cap"] <= 5_0000_0000_0000:
-            size_score = 18.0 if p["market_cap"] <= 2_0000_0000_0000 else 12.0
+        listing_market = p.get("listing_market", "")
+        if listing_market == "KOSDAQ":
+            score += 10.0
+            _append_reason(reasons, True, "코스닥 선행 축")
+        elif listing_market == "KOSPI" and 0 < p["market_cap"] <= 3_0000_0000_0000:
+            score += 4.0
+            _append_reason(reasons, True, "중소형 코스피")
+        if 700_0000_0000 <= p["market_cap"] <= 2_0000_0000_0000:
+            size_score = 18.0
+            score += size_score
+            _append_reason(reasons, True, "국내 스몰캡 핵심 구간")
+        elif 0 < p["market_cap"] <= 5_0000_0000_0000:
+            size_score = 12.0
             score += size_score
             _append_reason(reasons, True, "시총 5조 미만")
+        elif 0 < p["market_cap"] < 500_0000_0000:
+            score -= 8.0
+            _append_reason(reasons, True, "초저유동성 주의")
         if p["composite"] >= 62:
             score += min(20.0, (p["composite"] - 55) * 0.9)
             _append_reason(reasons, True, f"종합점수 {p['composite']:.1f}")
@@ -1662,6 +1693,11 @@ def enrich_watchlist_candidate(manager_key: str, candidate: dict) -> dict:
         "signal": candidate.get("signal", ""),
         "confidence_score": _safe_float(candidate.get("confidence_score", 0)),
         "market_cap": _safe_float(candidate.get("market_cap", 0)),
+        "market_cap_label": candidate.get(
+            "market_cap_label",
+            _format_market_cap_label(candidate.get("market_cap", 0)),
+        ),
+        "listing_market": candidate.get("listing_market") or candidate.get("market", ""),
         "per": _safe_float(candidate.get("per", 0)),
         "roe": _safe_float(candidate.get("roe", 0)),
         "debt_ratio": _safe_float(candidate.get("debt_ratio", 0)),
@@ -1735,6 +1771,19 @@ def format_manager_action_digest(
             )
             reasons = " · ".join(pick.get("fit_reasons") or []) or "핵심 신호 집계 중"
             lines.append(f"   이유: {reasons}")
+            if manager_key == "tenbagger":
+                domestic_bits = []
+                listing_market = pick.get("listing_market", "")
+                market_cap_label = pick.get("market_cap_label", "")
+                entry_stage = pick.get("entry_stage", "")
+                if listing_market:
+                    domestic_bits.append(listing_market)
+                if market_cap_label:
+                    domestic_bits.append(f"시총 {market_cap_label}")
+                if entry_stage:
+                    domestic_bits.append(f"단계 {entry_stage}")
+                if domestic_bits:
+                    lines.append(f"   국내축: {' | '.join(domestic_bits)}")
             fast_parts = []
             if pick.get("event_tags"):
                 fast_parts.append("이벤트 " + "/".join(pick["event_tags"][:2]))
@@ -1749,6 +1798,23 @@ def format_manager_action_digest(
             action = pick.get("action_hint") or guide.get("action", "")
             if action:
                 lines.append(f"   행동: {action}")
+
+    tenbagger_radar = [
+        pick
+        for pick in (picks_by_manager.get("tenbagger") or [])
+        if (pick.get("listing_market") or pick.get("market")) in {"KOSPI", "KOSDAQ", "KRX"}
+    ]
+    if tenbagger_radar:
+        lines.append("")
+        lines.append("🇰🇷 국내 스몰캡 레이더")
+        for pick in tenbagger_radar[:3]:
+            label = pick.get("market_cap_label") or "시총 미확인"
+            stage = pick.get("entry_stage") or "관찰"
+            listing_market = pick.get("listing_market") or pick.get("market") or "KRX"
+            events = "/".join(pick.get("event_tags") or []) or "촉매 탐색"
+            lines.append(
+                f"- {pick.get('name', '')} | {listing_market} {label} | {stage} | {events}"
+            )
 
     if fast_event_lines:
         lines.append("")
@@ -1862,6 +1928,15 @@ async def scan_manager_domain(
             line += f", 뉴스 {news_hits}건"
         if crowd_signal:
             line += f", 군집 {crowd_signal}"
+        listing_market = w.get("listing_market", "")
+        market_cap_label = w.get("market_cap_label", "")
+        entry_stage = w.get("entry_stage", "")
+        if listing_market:
+            line += f", 시장 {listing_market}"
+        if market_cap_label:
+            line += f", 시총 {market_cap_label}"
+        if entry_stage:
+            line += f", 단계 {entry_stage}"
         stocks_text += line + "\n"
 
     if not stocks_text.strip():

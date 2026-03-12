@@ -946,7 +946,23 @@ class SchedulerMixin:
 
             news_items = self.db.get_recent_global_news(limit=12, hours=18)
             raw_event_lines: list[tuple[int, str]] = []
-            priority_tags = ("GTC", "CES", "MWC", "COMPUTEX", "FDA", "FOMC")
+            priority_tags = (
+                "GTC",
+                "CES",
+                "MWC",
+                "COMPUTEX",
+                "INTERBATTERY",
+                "인터배터리",
+                "SEMICON KOREA",
+                "세미콘코리아",
+                "서울모빌리티쇼",
+                "ADEX",
+                "KIMES",
+                "SID",
+                "월드IT쇼",
+                "FDA",
+                "FOMC",
+            )
 
             for item in news_items or []:
                 title = str(item.get("title", "") or "").strip()
@@ -964,6 +980,9 @@ class SchedulerMixin:
                         4 + urgent_bonus,
                         f"{matched_priority[0]} | {title[:64]}",
                     ))
+                    for name in candidate_names:
+                        if name and name in title:
+                            context["event_hits_by_name"][name].append(matched_priority[0])
 
                 for event in analyze_trigger(
                     title,
@@ -1024,6 +1043,25 @@ class SchedulerMixin:
         fast_context: dict,
     ) -> dict[str, list[dict]]:
         """후보 종목에 이벤트/유튜브/뉴스 신호를 합성."""
+        def _infer_tenbagger_entry_stage(candidate: dict) -> str:
+            event_tags = candidate.get("event_tags") or []
+            mentions = int(candidate.get("youtube_mentions", 0) or 0)
+            news_hits = int(candidate.get("news_hits", 0) or 0)
+            crowd_signal = str(candidate.get("crowd_signal", "") or "")
+            listing_market = str(candidate.get("listing_market", "") or "")
+            market_cap = float(candidate.get("market_cap", 0) or 0)
+            fit_score = float(candidate.get("fit_score", 0) or 0)
+
+            if crowd_signal in {"커뮤니티 과열", "개미 과열 경계", "리딩방 급행 주의"}:
+                return "과열 경계"
+            if len(event_tags) >= 2 and mentions >= 3:
+                return "선점 구간"
+            if event_tags and news_hits >= 1:
+                return "촉매 대기"
+            if listing_market == "KOSDAQ" and 700_0000_0000 <= market_cap <= 2_0000_0000_0000 and fit_score >= 68:
+                return "씨앗 구축"
+            return "관찰"
+
         event_hits_by_ticker = fast_context.get("event_hits_by_ticker", {})
         event_hits_by_name = fast_context.get("event_hits_by_name", {})
         news_hits_by_name = fast_context.get("news_hits_by_name", {})
@@ -1080,9 +1118,24 @@ class SchedulerMixin:
                     seen_reason.add(reason)
                     deduped_reasons.append(reason)
                 candidate["fit_reasons"] = deduped_reasons[:4]
+                if manager_key == "tenbagger":
+                    entry_stage = _infer_tenbagger_entry_stage(candidate)
+                    candidate["entry_stage"] = entry_stage
+                    if entry_stage == "선점 구간":
+                        candidate["fit_score"] = round(min(99.0, candidate["fit_score"] + 3.0), 1)
+                        candidate["action_hint"] = "행사·정책 촉매 전에 1차 씨앗 포지션 구축"
+                    elif entry_stage == "촉매 대기":
+                        candidate["action_hint"] = "이벤트 일정 확인 후 눌림에서 씨앗 포지션 구축"
+                    elif entry_stage == "과열 경계":
+                        candidate["fit_score"] = round(max(0.0, candidate["fit_score"] - 5.0), 1)
+                        candidate["action_hint"] = "리딩방·커뮤니티 과열 진정 후만 접근"
+                    elif entry_stage == "씨앗 구축":
+                        candidate["action_hint"] = "뉴스보다 먼저 소액 씨앗만 선점"
 
             candidates.sort(key=lambda item: (
                 -float(item.get("fit_score", 0) or 0),
+                -(1 if item.get("entry_stage") == "선점 구간" else 0),
+                -(1 if item.get("entry_stage") == "씨앗 구축" else 0),
                 -float(item.get("composite", 0) or 0),
                 -float(item.get("confidence_score", 0) or 0),
             ))
@@ -7976,6 +8029,7 @@ class SchedulerMixin:
                 name = stock["name"]
                 grade = stock["grade"]
                 character = stock.get("character", "")
+                listing_market = stock.get("listing_market", "KOSDAQ")
 
                 if ticker in held_tickers:
                     continue  # 이미 보유 → 스킵
@@ -7987,7 +8041,7 @@ class SchedulerMixin:
                 except Exception:
                     try:
                         import yfinance as yf
-                        mkt = "KOSPI" if stock.get("market") == "KOSPI" else "KOSDAQ"
+                        mkt = "KOSPI" if listing_market == "KOSPI" else "KOSDAQ"
                         suffix = ".KS" if mkt == "KOSPI" else ".KQ"
                         t = yf.Ticker(f"{ticker}{suffix}")
                         cur_price = t.info.get("currentPrice", 0) or 0

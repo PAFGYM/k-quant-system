@@ -73,6 +73,7 @@ class TenbaggerScore:
     ticker: str
     name: str
     market: str = "KRX"       # KRX or US
+    listing_market: str = ""
     sector: str = ""
     sector_name: str = ""
     sector_emoji: str = ""
@@ -653,6 +654,7 @@ def compute_tenbagger_score(
         ticker=ticker,
         name=name,
         market=market,
+        listing_market=universe_item.get("market", ""),
         sector=sector,
         sector_name=sector_cfg.get("name", sector),
         sector_emoji=sector_cfg.get("emoji", ""),
@@ -703,6 +705,8 @@ def format_tenbagger_card(score: TenbaggerScore) -> str:
         "━" * 24,
         f"{score.name} ({score.ticker}) [{score.market}]",
     ]
+    if score.listing_market:
+        lines.append(f"🏷 상장시장: {score.listing_market}")
 
     if score.character:
         lines.append(f"💡 {score.character}")
@@ -846,6 +850,7 @@ def get_initial_universe() -> list[dict]:
             "ticker": item["code"],
             "name": item["name"],
             "market": "KRX",
+            "listing_market": item.get("market", "KOSDAQ"),
             "sector": item["sector"],
             "grade": item.get("grade", "C"),
             "tier": item.get("tier", "option"),
@@ -867,6 +872,7 @@ def get_initial_universe() -> list[dict]:
             "ticker": item["ticker"],
             "name": item["name"],
             "market": "US",
+            "listing_market": item.get("market", "US"),
             "sector": item["sector"],
             "grade": item.get("grade", "C"),
             "tier": item.get("tier", "option"),

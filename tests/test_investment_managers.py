@@ -27,6 +27,7 @@ def _make_scan_result(
     debt_ratio: float,
     per: float,
     market_cap: float = 2_0000_0000_0000,
+    market: str = "KOSPI",
     consensus_target: float = 0,
     foreign_days: int = 0,
     inst_days: int = 0,
@@ -62,7 +63,7 @@ def _make_scan_result(
         info=StockInfo(
             ticker=ticker,
             name=name,
-            market="KOSPI",
+            market=market,
             market_cap=market_cap,
             per=per,
             roe=roe,
@@ -153,6 +154,33 @@ def test_enrich_watchlist_candidate_generates_actionable_fields():
     assert enriched["fit_reasons"]
 
 
+def test_tenbagger_prefers_domestic_small_cap_zone():
+    candidate = _make_scan_result(
+        ticker="555555",
+        name="국내텐배거",
+        composite=72,
+        rsi=54,
+        vol_ratio=2.2,
+        bb_pctb=0.58,
+        macd_cross=1,
+        current_price=18200,
+        ma20=17100,
+        return_3m=18,
+        roe=14,
+        debt_ratio=72,
+        per=19,
+        market_cap=1_2000_0000_0000,
+        market="KOSDAQ",
+        foreign_days=2,
+        inst_days=1,
+    )
+
+    picks = filter_discovery_candidates([candidate], "tenbagger")
+    assert len(picks) == 1
+    assert picks[0]["listing_market"] == "KOSDAQ"
+    assert "국내 스몰캡 핵심 구간" in " ".join(picks[0]["fit_reasons"])
+
+
 def test_format_manager_action_digest_includes_fast_signals():
     text = format_manager_action_digest(
         {
@@ -171,6 +199,9 @@ def test_format_manager_action_digest_includes_fast_signals():
                 "youtube_mentions": 4,
                 "news_hits": 2,
                 "crowd_signal": "커뮤니티+테마 공명",
+                "listing_market": "KOSDAQ",
+                "market_cap_label": "1.2조",
+                "entry_stage": "선점 구간",
             }],
         },
         title="🔍 매니저 신규 발굴 레이더",
@@ -183,3 +214,5 @@ def test_format_manager_action_digest_includes_fast_signals():
     assert "빠른신호" in text
     assert "이벤트 레이더" in text
     assert "군집 레이더" in text
+    assert "국내 스몰캡 레이더" in text
+    assert "선점 구간" in text

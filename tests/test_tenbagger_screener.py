@@ -35,6 +35,7 @@ class TestComputeTenbaggerScore:
 
         assert score.config_grade == "A"
         assert score.config_tier == "core"
+        assert score.listing_market == "KOSPI"
         assert "원전" in score.character
         assert score.catalysts
         assert score.kill_conditions
@@ -86,6 +87,7 @@ class TestFormatTenbaggerCard:
         )
 
         text = format_tenbagger_card(score)
+        assert "상장시장" in text
         assert "미래가치 시나리오" in text
         assert "기본(" in text
         assert "낙관(" in text

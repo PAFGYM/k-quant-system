@@ -1,4 +1,4 @@
-"""Future technology sector watchlist engine - K-Quant v3.5.
+"""Future technology sector watchlist engine - K-Quant v13.0.
 
 Defines 3 key future tech sectors (autonomous driving, space/aerospace,
 quantum computing) with tiered watchlists, scoring, and entry evaluation.
@@ -33,6 +33,7 @@ FUTURE_SECTORS: dict[str, dict[str, Any]] = {
             "자율주행", "L3", "L4", "ADAS", "SDV", "라이다", "V2X",
             "자율주행 허용", "무인택시", "로보택시", "웨이모", "모빌아이",
             "자율주행 규제완화", "운전자보조", "자율주행특별법",
+            "서울모빌리티쇼", "CES 모빌리티",
         ],
         "watchlist": {
             "tier1_platform": {
@@ -66,6 +67,7 @@ FUTURE_SECTORS: dict[str, dict[str, Any]] = {
             "우주", "항공", "위성", "발사체", "누리호", "스페이스X",
             "우주항공청", "저궤도", "우주인터넷", "SAR위성", "정찰위성",
             "우주산업육성", "KF-21", "KAI", "방위산업",
+            "ADEX", "서울 ADEX", "방산 전시회",
         ],
         "watchlist": {
             "tier1_platform": {
@@ -99,6 +101,7 @@ FUTURE_SECTORS: dict[str, dict[str, Any]] = {
             "양자컴퓨터", "양자암호", "양자통신", "양자내성암호", "PQC",
             "QKD", "큐비트", "아이온큐", "IONQ", "구글 윌로우",
             "양자기술", "양자우월성", "양자키분배", "포스트양자",
+            "퀀텀코리아", "양자 행사",
         ],
         "watchlist": {
             "tier1_platform": {
