@@ -1496,12 +1496,8 @@ def fetch_transcript_whisper(video_id: str, max_chars: int = 8000) -> str:
         return ""
 
     tmp_dir = tempfile.mkdtemp(prefix="kq_whisper_")
-    audio_path = os.path.join(tmp_dir, f"{video_id}.m4a")
 
     try:
-        # yt-dlp: 오디오 포함 영상 다운로드 (ffmpeg 없이도 동작)
-        url = f"https://www.youtube.com/watch?v={video_id}"
-
         # yt-dlp PATH 설정
         env = os.environ.copy()
         yt_dlp_dir = os.path.expanduser("~/Library/Python/3.9/bin")
@@ -1512,54 +1508,14 @@ def fetch_transcript_whisper(video_id: str, max_chars: int = 8000) -> str:
         has_ffmpeg = bool(subprocess.run(
             ["which", "ffmpeg"], capture_output=True, env=env,
         ).returncode == 0)
-
-        if has_ffmpeg:
-            cmd = [
-                "yt-dlp",
-                "--extract-audio",
-                "--audio-format", "m4a",
-                "--audio-quality", "9",
-                "--max-filesize", "25m",
-                "--download-sections", "*0:00-15:00",
-                "--no-playlist", "--quiet",
-                "-o", audio_path,
-                url,
-            ]
-        else:
-            # ffmpeg 없으면: 오디오+비디오 합본(format 18)을 그대로 다운
-            # Whisper API는 mp4도 지원
-            audio_path = audio_path.replace(".m4a", ".mp4")
-            cmd = [
-                "yt-dlp",
-                "-f", "18",  # 360p mp4 (audio+video, ~5MB/min)
-                "--max-filesize", "25m",
-                "--no-playlist", "--quiet",
-                "-o", audio_path,
-                url,
-            ]
-
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120, env=env,
+        actual_path = _download_audio_for_whisper(
+            video_id=video_id,
+            tmp_dir=tmp_dir,
+            env=env,
+            has_ffmpeg=has_ffmpeg,
         )
-
-        # yt-dlp은 실제 확장자를 바꿀 수 있음
-        actual_path = audio_path
-        if not os.path.exists(audio_path):
-            # .m4a.m4a 등 yt-dlp 확장자 중복 체크
-            for ext in [".m4a", ".webm", ".opus", ".mp3"]:
-                candidate = audio_path.replace(".m4a", ext)
-                if os.path.exists(candidate):
-                    actual_path = candidate
-                    break
-            else:
-                # glob으로 tmp_dir 내 파일 찾기
-                import glob as _glob
-                files = _glob.glob(os.path.join(tmp_dir, f"{video_id}*"))
-                if files:
-                    actual_path = files[0]
-                else:
-                    logger.info("Whisper: yt-dlp no output for %s: %s", video_id, result.stderr[:200])
-                    return ""
+        if not actual_path:
+            return ""
 
         file_size = os.path.getsize(actual_path)
         if file_size > 25 * 1024 * 1024:
@@ -1597,6 +1553,111 @@ def fetch_transcript_whisper(video_id: str, max_chars: int = 8000) -> str:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
             pass
+
+
+def _resolve_whisper_media_path(
+    output_template: str,
+    tmp_dir: str,
+    video_id: str,
+) -> str:
+    import glob as _glob
+
+    direct_candidates = [output_template]
+    stem, _ = os.path.splitext(output_template)
+    for ext in [".m4a", ".webm", ".opus", ".mp3", ".mp4", ".mkv", ".wav"]:
+        direct_candidates.append(stem + ext)
+
+    for candidate in direct_candidates:
+        if os.path.exists(candidate):
+            return candidate
+
+    files = sorted(_glob.glob(os.path.join(tmp_dir, f"{video_id}*")))
+    return files[0] if files else ""
+
+
+def _build_whisper_download_attempts(
+    url: str,
+    output_template: str,
+    has_ffmpeg: bool,
+) -> list[tuple[str, list[str]]]:
+    attempts: list[tuple[str, list[str]]] = []
+
+    if has_ffmpeg:
+        attempts.append((
+            "extract_audio",
+            [
+                "yt-dlp",
+                "--extract-audio",
+                "--audio-format", "m4a",
+                "--audio-quality", "9",
+                "--max-filesize", "25m",
+                "--download-sections", "*0:00-15:00",
+                "--no-playlist", "--quiet", "--no-warnings",
+                "--force-overwrites", "--no-part",
+                "-o", output_template,
+                url,
+            ],
+        ))
+
+    attempts.append((
+        "audio_stream",
+        [
+            "yt-dlp",
+            "-f", "ba[ext=m4a]/ba[ext=webm]/ba/best",
+            "--max-filesize", "25m",
+            "--no-playlist", "--quiet", "--no-warnings",
+            "--force-overwrites", "--no-part",
+            "-o", output_template,
+            url,
+        ],
+    ))
+
+    attempts.append((
+        "compact_video",
+        [
+            "yt-dlp",
+            "-f", "18/best[height<=360]/best",
+            "--max-filesize", "25m",
+            "--no-playlist", "--quiet", "--no-warnings",
+            "--force-overwrites", "--no-part",
+            "-o", output_template,
+            url,
+        ],
+    ))
+    return attempts
+
+
+def _download_audio_for_whisper(
+    *,
+    video_id: str,
+    tmp_dir: str,
+    env: dict,
+    has_ffmpeg: bool,
+) -> str:
+    import subprocess
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    output_template = os.path.join(tmp_dir, f"{video_id}.%(ext)s")
+    last_error = ""
+
+    for label, cmd in _build_whisper_download_attempts(url, output_template, has_ffmpeg):
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+        actual_path = _resolve_whisper_media_path(output_template, tmp_dir, video_id)
+        if actual_path:
+            if label != "extract_audio":
+                logger.info("Whisper: yt-dlp fallback %s succeeded for %s", label, video_id)
+            return actual_path
+        last_error = (result.stderr or result.stdout or "").strip()
+        logger.info("Whisper: yt-dlp %s yielded no output for %s", label, video_id)
+
+    logger.info("Whisper: yt-dlp no output for %s: %s", video_id, last_error[:200])
+    return ""
 
 
 async def deep_analyze_youtube(

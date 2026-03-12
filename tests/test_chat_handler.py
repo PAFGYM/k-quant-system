@@ -10,8 +10,10 @@ from unittest.mock import patch
 import pytest
 
 from kstock.bot.chat_handler import (
+    _apply_chat_budget_guard,
     classify_chat_route,
     format_ai_greeting,
+    format_chat_usage_status,
     handle_ai_question,
     should_use_lightweight_chat,
 )
@@ -37,6 +39,8 @@ class _MockDB:
         self._recs = recs or []
         self._chat_messages = list(chat_messages or [])
         self._usage = 0
+        self._daily_api_usage = {"total_cost": 0}
+        self._monthly_api_usage = {"total_cost": 0}
 
     def get_latest_screenshot(self):
         return self._snapshot
@@ -58,6 +62,12 @@ class _MockDB:
 
     def get_recent_chat_messages(self, limit=10):
         return self._chat_messages[-limit:]
+
+    def get_daily_api_usage(self):
+        return self._daily_api_usage
+
+    def get_monthly_api_usage(self):
+        return self._monthly_api_usage
 
     def cleanup_old_chat_messages(self, hours=24):
         return 0
@@ -113,6 +123,47 @@ class TestLightweightChatRouting:
 
     def test_short_summary_request_uses_light_route(self) -> None:
         assert classify_chat_route("오늘 시장 짧게 요약해줘") == "light"
+
+    def test_budget_guard_downgrades_deep_when_soft_budget_hit(self) -> None:
+        route, mode = _apply_chat_budget_guard(
+            route="deep",
+            usage_count=3,
+            daily_cost=1.0,
+            monthly_cost=5.0,
+        )
+        assert route == "balanced"
+        assert mode == "soft"
+
+    def test_budget_guard_forces_light_when_hard_budget_hit(self) -> None:
+        route, mode = _apply_chat_budget_guard(
+            route="balanced",
+            usage_count=3,
+            daily_cost=2.0,
+            monthly_cost=5.0,
+        )
+        assert route == "light"
+        assert mode == "hard"
+
+    def test_budget_guard_downgrades_deep_after_daily_limit(self) -> None:
+        route, mode = _apply_chat_budget_guard(
+            route="deep",
+            usage_count=12,
+            daily_cost=0.0,
+            monthly_cost=0.0,
+        )
+        assert route == "balanced"
+        assert mode == "deep_limit"
+
+    def test_usage_status_includes_api_cost_when_available(self) -> None:
+        db = _MockDB()
+        db._usage = 4
+        db._daily_api_usage = {"total_cost": 0.42}
+        db._monthly_api_usage = {"total_cost": 7.35}
+
+        text = format_chat_usage_status(db)
+
+        assert "오늘 $0.420" in text
+        assert "이번달 $7.35" in text
 
 
 # ===========================================================================
