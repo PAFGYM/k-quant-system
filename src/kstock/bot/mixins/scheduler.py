@@ -7088,6 +7088,7 @@ class SchedulerMixin:
             today_str = datetime.now(KST).strftime("%Y-%m-%d")
             collected = 0
             alerts = []
+            squeeze_alerts = []
 
             for ticker in list(tickers)[:20]:
                 try:
@@ -7113,6 +7114,22 @@ class SchedulerMixin:
                         name = self._resolve_name(ticker, ticker) if hasattr(self, '_resolve_name') else ticker
                         alerts.append(f"🔴 {name}: 공매도 비중 {ratio:.1f}%")
 
+                    name = self._resolve_name(ticker, ticker) if hasattr(self, '_resolve_name') else ticker
+                    tactical = self._get_ticker_tactical_context(ticker, name)
+                    short_labels = list(tactical.get("short_pattern_labels") or [])
+                    short_codes = set(tactical.get("short_pattern_codes") or [])
+                    if short_codes.intersection({"real_buy", "short_covering", "short_squeeze"}):
+                        action = str(tactical.get("short_timing_action", "") or "관찰")
+                        reason = str(
+                            tactical.get("short_timing_reason")
+                            or tactical.get("flow_signal")
+                            or ""
+                        ).strip()
+                        line = f"🟢 {name}: {'/'.join(short_labels[:2])} | {action}"
+                        if reason:
+                            line += f" | {reason}"
+                        squeeze_alerts.append(line)
+
                     await asyncio.sleep(0.5)  # rate limit
                 except Exception as e:
                     logger.debug("Short selling collect for %s: %s", ticker, e)
@@ -7128,8 +7145,21 @@ class SchedulerMixin:
                     chat_id=self.chat_id, text=msg,
                 )
 
+            if squeeze_alerts:
+                msg = (
+                    f"🔥 숏커버 레이더 ({today_str})\n"
+                    f"{'━' * 22}\n\n"
+                    + "\n".join(squeeze_alerts[:5])
+                )
+                await context.bot.send_message(
+                    chat_id=self.chat_id, text=msg,
+                )
+
             self.db.upsert_job_run("short_selling_collect", today_str, status="success")
-            logger.info("Short selling collected for %d tickers, %d alerts", collected, len(alerts))
+            logger.info(
+                "Short selling collected for %d tickers, %d alerts, %d squeeze alerts",
+                collected, len(alerts), len(squeeze_alerts),
+            )
         except Exception as e:
             logger.error("Short selling collect failed: %s", e)
 
