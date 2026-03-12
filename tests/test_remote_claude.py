@@ -346,6 +346,30 @@ class TestRemoteClaudeHelpers(unittest.TestCase):
         assert not _should_allow_claude_web_search("git status 보고 정리해줘")
         assert not _should_allow_claude_web_search("테스트 실패 원인만 분석해줘")
 
+    def test_build_claude_cli_env_strips_direct_anthropic_auth(self):
+        from kstock.bot.mixins.remote_claude import _build_claude_cli_env
+
+        original = {
+            "CLAUDECODE": "1",
+            "ANTHROPIC_API_KEY": "secret",
+            "ANTHROPIC_AUTH_TOKEN": "secret-token",
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "OPENAI_API_KEY": "keep-me",
+            "CLAUDE_CODE_MAX_BUDGET_USD": "0.5",
+        }
+        with patch.dict(os.environ, original, clear=True):
+            env = _build_claude_cli_env()
+
+        assert "CLAUDECODE" not in env
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "ANTHROPIC_AUTH_TOKEN" not in env
+        assert "ANTHROPIC_BASE_URL" not in env
+        assert "CLAUDE_CODE_USE_BEDROCK" not in env
+        assert env["OPENAI_API_KEY"] == "keep-me"
+        assert env["CLAUDE_CODE_MAX_BUDGET_USD"] == "0.5"
+        assert env["PYTHONPATH"] == "src"
+
 
 if __name__ == "__main__":
     unittest.main()

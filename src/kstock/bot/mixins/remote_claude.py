@@ -44,6 +44,14 @@ _NO_WEB_SEARCH_PROMPT = (
     "로컬 파일, 현재 작업 디렉터리, 이미 제공된 문맥과 추론만으로 해결하라. "
     "사용자가 최신 정보 확인이나 웹 검색을 명시적으로 요청한 경우에만 웹 검색을 고려하라."
 )
+_CLAUDE_CLI_BLOCKED_ENV_KEYS = {
+    "CLAUDECODE",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+}
 
 
 def _get_api_client() -> httpx.AsyncClient:
@@ -51,6 +59,16 @@ def _get_api_client() -> httpx.AsyncClient:
     if _shared_api_client is None or _shared_api_client.is_closed:
         _shared_api_client = httpx.AsyncClient(timeout=45)
     return _shared_api_client
+
+
+def _build_claude_cli_env() -> dict[str, str]:
+    """Claude CLI는 구독 로그인 경로를 우선 사용하도록 인증 env를 제거한다."""
+    clean_env = {
+        k: v for k, v in os.environ.items()
+        if k not in _CLAUDE_CLI_BLOCKED_ENV_KEYS
+    }
+    clean_env["PYTHONPATH"] = "src"
+    return clean_env
 
 
 def _get_openai_key() -> str:
@@ -292,9 +310,8 @@ class RemoteClaudeMixin:
         start_time = time.monotonic()
 
         try:
-            # CLAUDECODE 환경변수 제거: 중첩 세션 방지
-            clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-            clean_env["PYTHONPATH"] = "src"
+            # Claude CLI는 구독 로그인(oauth/keychain) 경로를 우선 사용한다.
+            clean_env = _build_claude_cli_env()
 
             cmd = [
                 CLAUDE_CLI, "-p", prompt,
