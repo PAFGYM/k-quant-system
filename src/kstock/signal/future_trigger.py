@@ -1,4 +1,4 @@
-"""Future technology trigger monitoring and entry evaluation - K-Quant v3.5.
+"""Future technology trigger monitoring and entry evaluation - K-Quant v13.0.
 
 Monitors news keywords, classifies trigger types (policy, corporate, global,
 earnings), matches beneficiary stocks, and evaluates entry conditions.
@@ -59,7 +59,7 @@ TRIGGER_TYPES = {
         "description": "글로벌 기술/시장 이벤트",
         "keywords": [
             "테슬라", "스페이스X", "구글", "아이온큐", "엔비디아",
-            "FSD", "스타십", "양자우월성", "CES", "MWC",
+            "FSD", "스타십", "양자우월성", "CES", "MWC", "GTC", "COMPUTEX",
         ],
     },
     "earnings": {

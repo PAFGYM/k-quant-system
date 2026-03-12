@@ -914,13 +914,246 @@ class SchedulerMixin:
         except Exception as e:
             logger.error("job_auto_classify failed: %s", e)
 
+    def _build_manager_fast_context(self, candidates_by_manager: dict[str, list[dict]]) -> dict:
+        """최근 뉴스/유튜브 기반 빠른 이벤트 컨텍스트 구성."""
+        from collections import defaultdict
+
+        candidate_tickers = {
+            item.get("ticker", "")
+            for items in candidates_by_manager.values()
+            for item in items
+            if item.get("ticker")
+        }
+        candidate_names = {
+            item.get("name", "")
+            for items in candidates_by_manager.values()
+            for item in items
+            if item.get("name")
+        }
+        context = {
+            "event_hits_by_ticker": defaultdict(list),
+            "event_hits_by_name": defaultdict(list),
+            "news_hits_by_name": defaultdict(int),
+            "yt_by_ticker": {},
+            "yt_by_name": {},
+            "event_lines": [],
+            "crowd_lines": [],
+        }
+
+        try:
+            from kstock.signal.future_tech import FUTURE_SECTORS
+            from kstock.signal.future_trigger import TRIGGER_TYPES, analyze_trigger
+
+            news_items = self.db.get_recent_global_news(limit=12, hours=18)
+            raw_event_lines: list[tuple[int, str]] = []
+            priority_tags = ("GTC", "CES", "MWC", "COMPUTEX", "FDA", "FOMC")
+
+            for item in news_items or []:
+                title = str(item.get("title", "") or "").strip()
+                if not title:
+                    continue
+                lowered = title.lower()
+                urgent_bonus = 2 if int(item.get("is_urgent", 0) or 0) else 0
+                for name in candidate_names:
+                    if name and name in title:
+                        context["news_hits_by_name"][name] += 1
+
+                matched_priority = [tag for tag in priority_tags if tag.lower() in lowered]
+                if matched_priority:
+                    raw_event_lines.append((
+                        4 + urgent_bonus,
+                        f"{matched_priority[0]} | {title[:64]}",
+                    ))
+
+                for event in analyze_trigger(
+                    title,
+                    source=item.get("source", ""),
+                    date=str(item.get("created_at", "") or "")[:10],
+                ):
+                    sector_name = FUTURE_SECTORS.get(event.sector, {}).get("name", event.sector)
+                    type_label = TRIGGER_TYPES.get(event.trigger_type, {}).get("label", event.trigger_type)
+                    overlap = [t for t in event.beneficiary_tickers if t in candidate_tickers]
+                    for ticker in event.beneficiary_tickers:
+                        if ticker:
+                            context["event_hits_by_ticker"][ticker].append(sector_name)
+                    for name in candidate_names:
+                        if name and name in title:
+                            context["event_hits_by_name"][name].append(sector_name)
+                    line = f"{sector_name} | {type_label} | {title[:48]}"
+                    if overlap:
+                        line += f" | 수혜 {', '.join(overlap[:2])}"
+                    impact_bonus = 2 if event.impact == "HIGH" else 1
+                    raw_event_lines.append((impact_bonus + urgent_bonus + (2 if overlap else 0), line))
+
+            seen_lines: set[str] = set()
+            for _, line in sorted(raw_event_lines, key=lambda item: item[0], reverse=True):
+                if line in seen_lines:
+                    continue
+                seen_lines.add(line)
+                context["event_lines"].append(line)
+                if len(context["event_lines"]) >= 6:
+                    break
+        except Exception:
+            logger.debug("Manager fast event context build failed", exc_info=True)
+
+        try:
+            yt_mentions = self.db.get_youtube_mentioned_tickers(hours=36)
+            crowd_lines: list[str] = []
+            for item in yt_mentions or []:
+                name = str(item.get("name", "") or "")
+                ticker = str(item.get("ticker", "") or "")
+                mentions = int(item.get("mentions", 0) or 0)
+                if ticker:
+                    context["yt_by_ticker"][ticker] = item
+                if name:
+                    context["yt_by_name"][name] = item
+                if mentions >= 3 and (name in candidate_names or ticker in candidate_tickers):
+                    positive = int(item.get("긍정", 0) or 0)
+                    negative = int(item.get("부정", 0) or 0)
+                    mood = "긍정 우위" if positive >= negative else "과열 경계"
+                    crowd_lines.append(f"{name} | 유튜브 {mentions}회 | {mood}")
+            context["crowd_lines"] = crowd_lines[:5]
+        except Exception:
+            logger.debug("Manager YouTube context build failed", exc_info=True)
+
+        return context
+
+    def _enrich_manager_candidates_with_fast_context(
+        self,
+        candidates_by_manager: dict[str, list[dict]],
+        fast_context: dict,
+    ) -> dict[str, list[dict]]:
+        """후보 종목에 이벤트/유튜브/뉴스 신호를 합성."""
+        event_hits_by_ticker = fast_context.get("event_hits_by_ticker", {})
+        event_hits_by_name = fast_context.get("event_hits_by_name", {})
+        news_hits_by_name = fast_context.get("news_hits_by_name", {})
+        yt_by_ticker = fast_context.get("yt_by_ticker", {})
+        yt_by_name = fast_context.get("yt_by_name", {})
+
+        for manager_key, candidates in candidates_by_manager.items():
+            for candidate in candidates:
+                ticker = candidate.get("ticker", "")
+                name = candidate.get("name", "")
+                yt = yt_by_ticker.get(ticker) or yt_by_name.get(name) or {}
+                mentions = int(yt.get("mentions", 0) or 0)
+                event_tags = list(dict.fromkeys(
+                    list(event_hits_by_ticker.get(ticker, []))
+                    + list(event_hits_by_name.get(name, []))
+                ))[:3]
+                news_hits = int(news_hits_by_name.get(name, 0))
+                crowd_signal = candidate.get("crowd_signal", "")
+
+                if not crowd_signal and mentions >= 4 and not event_tags:
+                    crowd_signal = "커뮤니티 과열"
+                elif not crowd_signal and mentions >= 3 and event_tags:
+                    crowd_signal = "커뮤니티+테마 공명"
+
+                fast_bonus = len(event_tags) * (4 if manager_key in {"position", "tenbagger"} else 2)
+                fast_bonus += min(4, mentions)
+                fast_bonus += min(3, news_hits)
+                if crowd_signal in {"커뮤니티 과열", "개미 과열 경계"}:
+                    fast_bonus -= 4
+
+                candidate["event_tags"] = event_tags
+                candidate["youtube_mentions"] = mentions
+                candidate["news_hits"] = news_hits
+                if crowd_signal:
+                    candidate["crowd_signal"] = crowd_signal
+                try:
+                    base_fit = float(candidate.get("fit_score", 0) or 0)
+                except Exception:
+                    base_fit = 0.0
+                candidate["fit_score"] = round(max(0.0, min(99.0, base_fit + fast_bonus)), 1)
+
+                reasons = list(candidate.get("fit_reasons") or [])
+                if event_tags:
+                    reasons.append(f"이벤트 {event_tags[0]}")
+                if mentions >= 3:
+                    reasons.append(f"유튜브 {mentions}회")
+                if crowd_signal and crowd_signal not in reasons:
+                    reasons.append(crowd_signal)
+                seen_reason: set[str] = set()
+                deduped_reasons = []
+                for reason in reasons:
+                    if reason in seen_reason:
+                        continue
+                    seen_reason.add(reason)
+                    deduped_reasons.append(reason)
+                candidate["fit_reasons"] = deduped_reasons[:4]
+
+            candidates.sort(key=lambda item: (
+                -float(item.get("fit_score", 0) or 0),
+                -float(item.get("composite", 0) or 0),
+                -float(item.get("confidence_score", 0) or 0),
+            ))
+        return candidates_by_manager
+
+    def _build_manager_herd_lines(self, scan_results: list, limit: int = 3) -> list[str]:
+        """리딩방/세력형 군집 신호를 상위 종목에 대해 빠르게 추정."""
+        try:
+            from kstock.signal.herd_detector import scan_herd_all
+        except Exception:
+            return []
+
+        herd_data = []
+        for result in scan_results[:12]:
+            ohlcv = self._ohlcv_cache.get(getattr(result, "ticker", ""))
+            if ohlcv is None or ohlcv.empty or len(ohlcv) < 20:
+                continue
+            try:
+                close_s = ohlcv["close"].astype(float).tail(20)
+                vol_s = ohlcv["volume"].astype(float).tail(20)
+            except Exception:
+                continue
+            if len(close_s) < 20 or len(vol_s) < 20:
+                continue
+
+            avg_vol = float(vol_s.mean()) if float(vol_s.mean()) > 0 else 1.0
+            flow = getattr(result, "flow", None)
+            inst_bias = max(-1.0, min(1.0, float(getattr(flow, "institution_net_buy_days", 0) or 0) / 3.0))
+            foreign_bias = max(-1.0, min(1.0, float(getattr(flow, "foreign_net_buy_days", 0) or 0) / 3.0))
+            daily_inst: list[float] = []
+            daily_foreign: list[float] = []
+            prev_close = None
+
+            for close, vol in zip(close_s.tolist(), vol_s.tolist()):
+                vol_ratio = vol / avg_vol if avg_vol > 0 else 1.0
+                price_bias = 1.0 if prev_close is None or close >= prev_close else -1.0
+                inst_factor = (0.20 if vol_ratio >= 1.5 else -0.08) + inst_bias * 0.18 + price_bias * 0.04
+                foreign_factor = (0.16 if vol_ratio >= 1.3 else -0.08) + foreign_bias * 0.18 + price_bias * 0.04
+                daily_inst.append(vol * max(-0.4, min(0.4, inst_factor)))
+                daily_foreign.append(vol * max(-0.4, min(0.4, foreign_factor)))
+                prev_close = close
+
+            herd_data.append({
+                "ticker": getattr(result, "ticker", ""),
+                "name": getattr(result, "name", ""),
+                "daily_volumes": vol_s.tolist(),
+                "daily_closes": close_s.tolist(),
+                "daily_inst": daily_inst,
+                "daily_foreign": daily_foreign,
+            })
+
+        signals = scan_herd_all(herd_data)
+        lines = []
+        for signal in signals[:limit]:
+            lines.append(
+                f"{signal.name} ({signal.ticker}) | {signal.pattern} | "
+                f"거래량 {signal.volume_ratio:.1f}배"
+            )
+        return lines
+
     async def _send_manager_watchlist_scan(self, context, macro) -> None:
         """매니저별 관심종목 매수 스캔 — 기술적 데이터 보강 후 AI 분석."""
         today_str = _today()
         try:
             from collections import defaultdict
             from kstock.bot.investment_managers import (
-                scan_manager_domain, MANAGERS, compute_recovery_score,
+                MANAGERS,
+                compute_recovery_score,
+                enrich_watchlist_candidate,
+                format_manager_action_digest,
+                scan_manager_domain,
             )
 
             watchlist = self.db.get_watchlist()
@@ -989,12 +1222,29 @@ class SchedulerMixin:
                     if "price" not in w:
                         w["price"] = 0
 
-                by_manager[hz].append(w)
+                by_manager[hz].append(enrich_watchlist_candidate(hz, w))
 
             current_alert = getattr(self, '_alert_mode', 'normal')
+            fast_context = self._build_manager_fast_context(by_manager)
+            by_manager = self._enrich_manager_candidates_with_fast_context(
+                by_manager, fast_context,
+            )
+
+            digest = format_manager_action_digest(
+                by_manager,
+                title="🎯 오늘의 매니저 제안",
+                market_context=market_text,
+                fast_event_lines=fast_context.get("event_lines"),
+                crowd_lines=fast_context.get("crowd_lines"),
+            )
+            if digest:
+                await context.bot.send_message(chat_id=self.chat_id, text=digest[:4000])
+
             scanned = 0
             for mgr_key, stocks in by_manager.items():
                 if not stocks:
+                    continue
+                if max(float(s.get("fit_score", 0) or 0) for s in stocks) < 62:
                     continue
                 try:
                     report = await scan_manager_domain(
@@ -6155,7 +6405,10 @@ class SchedulerMixin:
 
         try:
             from kstock.bot.investment_managers import (
-                scan_manager_domain, filter_discovery_candidates, MANAGERS,
+                MANAGERS,
+                filter_discovery_candidates,
+                format_manager_action_digest,
+                scan_manager_domain,
             )
 
             # 캐시된 스캔 결과 사용 (아침 스캔에서 생성됨)
@@ -6183,12 +6436,40 @@ class SchedulerMixin:
                 logger.debug("Failed to get macro snapshot for manager discovery scan", exc_info=True)
 
             current_alert = getattr(self, '_alert_mode', 'normal')
-            found = 0
+            candidates_by_manager: dict[str, list[dict]] = {}
             for mgr_key in MANAGERS:
                 candidates = filter_discovery_candidates(
                     results, mgr_key, exclude,
                 )
+                if candidates:
+                    candidates_by_manager[mgr_key] = candidates
+
+            fast_context = self._build_manager_fast_context(candidates_by_manager)
+            candidates_by_manager = self._enrich_manager_candidates_with_fast_context(
+                candidates_by_manager, fast_context,
+            )
+            herd_lines = self._build_manager_herd_lines(results)
+            digest = format_manager_action_digest(
+                candidates_by_manager,
+                title="🔍 매니저 신규 발굴 레이더",
+                market_context=market_text,
+                fast_event_lines=fast_context.get("event_lines"),
+                herd_lines=herd_lines,
+                crowd_lines=fast_context.get("crowd_lines"),
+            )
+            if digest:
+                header = "단타/스윙/포지션/장기/텐베거 레인을 분리해 상위 후보만 추렸습니다.\n\n"
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(header + digest)[:4000],
+                )
+
+            found = 0
+            for mgr_key in MANAGERS:
+                candidates = candidates_by_manager.get(mgr_key) or []
                 if not candidates:
+                    continue
+                if max(float(c.get("fit_score", 0) or 0) for c in candidates) < 66:
                     continue
                 try:
                     report = await scan_manager_domain(

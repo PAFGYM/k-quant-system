@@ -55,6 +55,11 @@ class TestClassifyTriggerType:
         assert ttype == "global"
         assert impact == "HIGH"
 
+    def test_gtc_keyword_is_global_trigger(self):
+        ttype, impact = classify_trigger_type("엔비디아 GTC 2026 차세대 AI 칩 공개")
+        assert ttype == "global"
+        assert impact == "HIGH"
+
     def test_earnings_trigger(self):
         ttype, impact = classify_trigger_type("텔레칩스 실적 서프라이즈 매출 급증")
         assert ttype == "earnings"
