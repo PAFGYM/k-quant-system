@@ -1838,6 +1838,70 @@ def format_manager_action_digest(
     return "\n".join(lines) if has_pick else ""
 
 
+def build_manager_shortcuts(
+    picks_by_manager: dict[str, list[dict]],
+    *,
+    max_buttons: int = 5,
+) -> list[dict[str, str]]:
+    """매니저 레이더 메시지용 바로가기 메타데이터."""
+    shortcuts: list[dict[str, str]] = []
+    for manager_key in MANAGERS:
+        picks = picks_by_manager.get(manager_key) or []
+        if not picks:
+            continue
+        manager = MANAGERS.get(manager_key, {})
+        top_pick = picks[0]
+        hint = ""
+        if manager_key == "tenbagger" and top_pick.get("entry_stage"):
+            hint = str(top_pick.get("entry_stage", ""))
+        elif top_pick.get("event_tags"):
+            hint = str((top_pick.get("event_tags") or [""])[0])
+        elif top_pick.get("crowd_signal"):
+            hint = str(top_pick.get("crowd_signal", ""))
+        label = f"{manager.get('emoji', '📌')} {manager.get('title', manager_key)}"
+        if hint:
+            label += f" · {hint}"
+        shortcuts.append({
+            "label": label[:36],
+            "callback_data": f"mgr_tab:{manager_key}",
+        })
+        if len(shortcuts) >= max_buttons:
+            break
+    return shortcuts
+
+
+def build_daily_action_shortcuts(
+    actions: list[dict],
+    *,
+    max_buttons: int = 6,
+) -> list[dict[str, str]]:
+    """액션 콘솔 메시지용 핵심 버튼 메타데이터."""
+    priority_emoji = {
+        "urgent": "🔴",
+        "caution": "🟡",
+        "opportunity": "🟢",
+        "check": "⚪",
+    }
+    shortcuts: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for action in actions:
+        callback_data = str(action.get("callback_data", "") or "")
+        if not callback_data or callback_data in seen:
+            continue
+        seen.add(callback_data)
+        label = str(action.get("button_label", "") or "").strip()
+        if not label:
+            label = f"{action.get('name', '')}: {action.get('action', '')}".strip(": ")
+        label = f"{priority_emoji.get(action.get('priority', ''), '📌')} {label}".strip()
+        shortcuts.append({
+            "label": label[:36],
+            "callback_data": callback_data,
+        })
+        if len(shortcuts) >= max_buttons:
+            break
+    return shortcuts
+
+
 # ── 매니저 관심종목 매수 스캔 ──────────────────────────────
 
 async def scan_manager_domain(

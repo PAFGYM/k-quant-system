@@ -3120,6 +3120,8 @@ class AdminExtrasMixin:
         """오늘의 할 일 — 수동 접근."""
         await update.message.reply_text("📋 오늘의 할 일 생성 중...")
         try:
+            from kstock.bot.investment_managers import build_daily_action_shortcuts
+
             macro = None
             try:
                 macro_client = MacroClient()
@@ -3131,14 +3133,23 @@ class AdminExtrasMixin:
                 actions,
                 alert_mode=getattr(self, "_alert_mode", "normal"),
             )
-            buttons = []
-            for act in actions[:5]:
-                goto = act.get("goto")
-                if goto:
-                    buttons.append([InlineKeyboardButton(
-                        f"{act['emoji']} {act['title'][:20]}",
-                        callback_data=f"goto:{goto}",
-                    )])
+            buttons = make_shortcut_rows(build_daily_action_shortcuts(actions, max_buttons=5))
+            manager_shortcuts = []
+            seen_secondary = set()
+            for action in actions:
+                callback_data = str(action.get("secondary_callback", "") or "")
+                manager_label = str(action.get("manager_label", "") or "").strip()
+                if not callback_data or not manager_label or callback_data in seen_secondary:
+                    continue
+                seen_secondary.add(callback_data)
+                manager_shortcuts.append({
+                    "label": manager_label,
+                    "callback_data": callback_data,
+                })
+                if len(manager_shortcuts) >= 4:
+                    break
+            if manager_shortcuts:
+                buttons.extend(make_shortcut_rows(manager_shortcuts))
             buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
             await send_long_message(
                 update.message, text,

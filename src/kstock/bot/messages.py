@@ -1690,7 +1690,12 @@ def format_daily_actions(actions: list[dict], alert_mode: str = "normal") -> str
         lines.append(priority_labels[p])
         for item in items:
             lines.append(f"  {item['name']}: {item['action']}")
-            lines.append(f"    \u2514 {item['reason']}")
+            manager_label = str(item.get("manager_label", "") or "").strip()
+            reason = str(item.get("reason", "") or "").strip()
+            if manager_label:
+                lines.append(f"    \u2514 {manager_label} | {reason}")
+            else:
+                lines.append(f"    \u2514 {reason}")
         lines.append("")
 
     cnt = {p: sum(1 for a in actions if a.get("priority") == p)

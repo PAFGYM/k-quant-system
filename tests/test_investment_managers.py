@@ -2,10 +2,13 @@
 
 from kstock.bot.bot_imports import ScanResult
 from kstock.bot.investment_managers import (
+    build_daily_action_shortcuts,
+    build_manager_shortcuts,
     enrich_watchlist_candidate,
     filter_discovery_candidates,
     format_manager_action_digest,
 )
+from kstock.bot.messages import format_daily_actions
 from kstock.features.technical import TechnicalIndicators
 from kstock.ingest.kis_client import StockInfo
 from kstock.signal.scoring import FlowData, ScoreBreakdown
@@ -218,3 +221,59 @@ def test_format_manager_action_digest_includes_fast_signals():
     assert "국내 스몰캡 레이더" in text
     assert "선점 구간" in text
     assert "커뮤니티 2건" in text
+
+
+def test_build_manager_shortcuts_reflects_top_hint():
+    shortcuts = build_manager_shortcuts({
+        "scalp": [{
+            "ticker": "111111",
+            "name": "돌파주",
+            "event_tags": ["GTC"],
+        }],
+        "tenbagger": [{
+            "ticker": "222222",
+            "name": "미래주",
+            "entry_stage": "선점 구간",
+        }],
+    })
+
+    assert any(item["callback_data"] == "mgr_tab:scalp" for item in shortcuts)
+    assert any("GTC" in item["label"] for item in shortcuts)
+    assert any("선점 구간" in item["label"] for item in shortcuts)
+
+
+def test_build_daily_action_shortcuts_prefers_button_label_and_dedupes():
+    shortcuts = build_daily_action_shortcuts([
+        {
+            "priority": "urgent",
+            "name": "급등주",
+            "action": "손절 필요",
+            "button_label": "⚡ 급등주 손절",
+            "callback_data": "detail:111111",
+        },
+        {
+            "priority": "caution",
+            "name": "급등주",
+            "action": "재점검",
+            "callback_data": "detail:111111",
+        },
+    ])
+
+    assert len(shortcuts) == 1
+    assert shortcuts[0]["callback_data"] == "detail:111111"
+    assert "급등주 손절" in shortcuts[0]["label"]
+
+
+def test_format_daily_actions_includes_manager_label():
+    text = format_daily_actions([
+        {
+            "priority": "urgent",
+            "name": "미래주",
+            "action": "손절 필요",
+            "reason": "-8.1% (매니저 손절 -7%)",
+            "manager_label": "🔥 스윙 매니저",
+        },
+    ])
+
+    assert "🔥 스윙 매니저" in text
+    assert "미래주: 손절 필요" in text

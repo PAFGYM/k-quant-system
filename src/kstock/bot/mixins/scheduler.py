@@ -1248,6 +1248,7 @@ class SchedulerMixin:
             from collections import defaultdict
             from kstock.bot.investment_managers import (
                 MANAGERS,
+                build_manager_shortcuts,
                 compute_recovery_score,
                 enrich_watchlist_candidate,
                 format_manager_action_digest,
@@ -1336,7 +1337,16 @@ class SchedulerMixin:
                 crowd_lines=fast_context.get("crowd_lines"),
             )
             if digest:
-                await context.bot.send_message(chat_id=self.chat_id, text=digest[:4000])
+                buttons = make_shortcut_rows([
+                    {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},
+                    {"label": "👨‍💼 전체 매니저", "callback_data": "fav:managers"},
+                    *build_manager_shortcuts(by_manager),
+                ])
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=digest[:4000],
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
 
             scanned = 0
             for mgr_key, stocks in by_manager.items():
@@ -1350,8 +1360,19 @@ class SchedulerMixin:
                         alert_mode=current_alert,
                     )
                     if report and "매수 타이밍 종목 없음" not in report:
+                        primary = stocks[0] if stocks else {}
+                        buttons = make_shortcut_rows([
+                            {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},
+                            {"label": "👨‍💼 담당 매니저", "callback_data": f"mgr_tab:{mgr_key}"},
+                            {
+                                "label": f"📊 {primary.get('name', '')[:8]}",
+                                "callback_data": f"fav:stock:{primary.get('ticker', '')}",
+                            } if primary.get("ticker") else {},
+                        ])
                         await context.bot.send_message(
-                            chat_id=self.chat_id, text=report[:4000],
+                            chat_id=self.chat_id,
+                            text=report[:4000],
+                            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
                         )
                         scanned += 1
                 except Exception as e:
@@ -1400,10 +1421,13 @@ class SchedulerMixin:
                 ht = "swing"
 
             # 매니저별 기준 적용
-            from kstock.bot.investment_managers import MANAGER_THRESHOLDS
+            from kstock.bot.investment_managers import MANAGERS, MANAGER_THRESHOLDS
             mgr_th = MANAGER_THRESHOLDS.get(ht, MANAGER_THRESHOLDS["swing"])
             mgr_stop = mgr_th["stop_loss"]
             mgr_tp1 = mgr_th["take_profit_1"]
+            manager = MANAGERS.get(ht, {})
+            manager_label = f"{manager.get('emoji', '📌')} {manager.get('title', '자동')}"
+            manager_tab = f"mgr_tab:{ht}" if ht in MANAGERS else ""
 
             # 긴급: 매니저별 손절 기준 도달
             wartime_stop = mgr_stop * 0.6 if alert_mode == "wartime" else mgr_stop
@@ -1415,7 +1439,11 @@ class SchedulerMixin:
                     "priority": "urgent", "ticker": ticker, "name": name,
                     "action": "손절 필요",
                     "reason": reason,
+                    "manager_key": ht,
+                    "manager_label": manager_label,
                     "callback_data": f"detail:{ticker}",
+                    "secondary_callback": manager_tab,
+                    "button_label": f"{manager.get('emoji', '📌')} {name} 손절",
                 })
             # 주의: 매니저별 1차 익절 기준 60% 도달
             elif pnl >= mgr_tp1 * 0.6 and cur >= target * 0.98:
@@ -1423,7 +1451,11 @@ class SchedulerMixin:
                     "priority": "caution", "ticker": ticker, "name": name,
                     "action": "1차 익절 검토",
                     "reason": f"+{pnl:.1f}% 수익, 목표가 근접",
+                    "manager_key": ht,
+                    "manager_label": manager_label,
                     "callback_data": f"detail:{ticker}",
+                    "secondary_callback": manager_tab,
+                    "button_label": f"{manager.get('emoji', '📌')} {name} 익절",
                 })
             # 주의: 단타 보유일 초과
             elif ht == "scalp" and pnl < 3:
@@ -1431,7 +1463,11 @@ class SchedulerMixin:
                     "priority": "caution", "ticker": ticker, "name": name,
                     "action": "단타 청산 검토",
                     "reason": f"단타 종목 {pnl:+.1f}%",
+                    "manager_key": ht,
+                    "manager_label": manager_label,
                     "callback_data": f"detail:{ticker}",
+                    "secondary_callback": manager_tab,
+                    "button_label": f"{manager.get('emoji', '📌')} {name} 청산",
                 })
             # 주의: 큰 변동
             elif abs(pnl) >= 5:
@@ -1441,7 +1477,11 @@ class SchedulerMixin:
                     "priority": p, "ticker": ticker, "name": name,
                     "action": act,
                     "reason": f"{pnl:+.1f}%",
+                    "manager_key": ht,
+                    "manager_label": manager_label,
                     "callback_data": f"detail:{ticker}",
+                    "secondary_callback": manager_tab,
+                    "button_label": f"{manager.get('emoji', '📌')} {name} 점검",
                 })
 
         # 기회: 시장 레짐
@@ -1474,19 +1514,29 @@ class SchedulerMixin:
     async def _send_daily_actions(self, context, macro) -> None:
         """오늘의 할 일 메시지 전송."""
         try:
+            from kstock.bot.investment_managers import build_daily_action_shortcuts
+
             actions = await self._generate_daily_actions(macro)
             alert_mode = getattr(self, '_alert_mode', 'normal')
             text = format_daily_actions(actions, alert_mode=alert_mode)
 
-            buttons = []
-            for a in actions[:6]:
-                cb = a.get("callback_data", "")
-                if cb:
-                    emoji = {"urgent": "\U0001f534", "caution": "\U0001f7e1",
-                             "opportunity": "\U0001f7e2", "check": "\u26aa"
-                             }.get(a["priority"], "")
-                    label = f"{emoji} {a['name']}: {a['action']}"[:40]
-                    buttons.append([InlineKeyboardButton(label, callback_data=cb)])
+            buttons = make_shortcut_rows(build_daily_action_shortcuts(actions))
+            manager_shortcuts = []
+            seen_secondary = set()
+            for action in actions:
+                callback_data = str(action.get("secondary_callback", "") or "")
+                manager_label = str(action.get("manager_label", "") or "").strip()
+                if not callback_data or not manager_label or callback_data in seen_secondary:
+                    continue
+                seen_secondary.add(callback_data)
+                manager_shortcuts.append({
+                    "label": manager_label,
+                    "callback_data": callback_data,
+                })
+                if len(manager_shortcuts) >= 4:
+                    break
+            if manager_shortcuts:
+                buttons.extend(make_shortcut_rows(manager_shortcuts))
             buttons.append(make_feedback_row("daily_actions"))
 
             await context.bot.send_message(
@@ -2035,7 +2085,7 @@ class SchedulerMixin:
     async def _check_manager_alerts(self, bot) -> None:
         """#3 매니저별 장중 실시간 알림 (보유종목 기술적 조건 체크)."""
         try:
-            from kstock.bot.investment_managers import check_manager_alert_conditions
+            from kstock.bot.investment_managers import MANAGERS, check_manager_alert_conditions
             from kstock.features.technical import compute_indicators
 
             holdings = self.db.get_active_holdings()
@@ -2074,9 +2124,22 @@ class SchedulerMixin:
                         mtype, ticker, h.get("name", ""),
                         tech, cp, bp, hold_days,
                     )
+                    manager = MANAGERS.get(mtype, {})
+                    buttons = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("📊 종목상세", callback_data=f"detail:{ticker}"),
+                            InlineKeyboardButton(
+                                manager.get("title", "담당 매니저"),
+                                callback_data=f"mgr_tab:{mtype}",
+                            ),
+                        ],
+                        [InlineKeyboardButton("📋 액션콘솔", callback_data="menu:daily_actions")],
+                    ])
                     for alert_text in alerts[:2]:
                         await bot.send_message(
-                            chat_id=self.chat_id, text=alert_text[:2000],
+                            chat_id=self.chat_id,
+                            text=alert_text[:2000],
+                            reply_markup=buttons,
                         )
                         self.db.insert_alert(ticker, f"mgr_{mtype}", alert_text[:200])
                 except Exception:
@@ -6504,6 +6567,7 @@ class SchedulerMixin:
         try:
             from kstock.bot.investment_managers import (
                 MANAGERS,
+                build_manager_shortcuts,
                 filter_discovery_candidates,
                 format_manager_action_digest,
                 scan_manager_domain,
@@ -6557,9 +6621,15 @@ class SchedulerMixin:
             )
             if digest:
                 header = "단타/스윙/포지션/장기/텐베거 레인을 분리해 상위 후보만 추렸습니다.\n\n"
+                buttons = make_shortcut_rows([
+                    {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},
+                    {"label": "👨‍💼 전체 매니저", "callback_data": "fav:managers"},
+                    *build_manager_shortcuts(candidates_by_manager),
+                ])
                 await context.bot.send_message(
                     chat_id=self.chat_id,
                     text=(header + digest)[:4000],
+                    reply_markup=InlineKeyboardMarkup(buttons),
                 )
 
             found = 0
@@ -6576,9 +6646,19 @@ class SchedulerMixin:
                     )
                     if report and "매수 타이밍 종목 없음" not in report:
                         header = "🔍 매니저 신규 발굴\n"
+                        primary = candidates[0] if candidates else {}
+                        buttons = make_shortcut_rows([
+                            {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},
+                            {"label": "👨‍💼 담당 매니저", "callback_data": f"mgr_tab:{mgr_key}"},
+                            {
+                                "label": f"📊 {primary.get('name', '')[:8]}",
+                                "callback_data": f"fav:stock:{primary.get('ticker', '')}",
+                            } if primary.get("ticker") else {},
+                        ])
                         await context.bot.send_message(
                             chat_id=self.chat_id,
                             text=(header + report)[:4000],
+                            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
                         )
                         found += 1
                 except Exception as e:
