@@ -8,7 +8,7 @@ from kstock.bot.bot_imports import MAIN_MENU, MORE_MENU
 
 
 # ---------------------------------------------------------------------------
-# MAIN_MENU structure (v3.6.2: 4-row compact layout)
+# MAIN_MENU structure (v13.0 compact layout)
 # ---------------------------------------------------------------------------
 
 class TestMainMenuStructure:
@@ -20,7 +20,7 @@ class TestMainMenuStructure:
 
     def test_menu_has_rows(self):
         rows = MAIN_MENU.keyboard
-        assert len(rows) == 5  # v5.3: 5행 (클로드 추가)
+        assert len(rows) == 5  # v13.0: 5행 (클로드/AI비서 포함)
 
     def test_each_row_has_max_two_columns(self):
         rows = MAIN_MENU.keyboard
@@ -29,7 +29,7 @@ class TestMainMenuStructure:
 
     def test_main_menu_buttons(self):
         flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        for expected in ["분석", "시황", "잔고", "즐겨찾기", "클로드", "에이전트", "리포트", "AI질문", "더보기"]:
+        for expected in ["분석", "시황", "잔고", "즐겨찾기", "클로드", "에이전트", "리포트", "AI비서", "더보기"]:
             assert any(expected in b for b in flat), f"Missing: {expected}"
 
 

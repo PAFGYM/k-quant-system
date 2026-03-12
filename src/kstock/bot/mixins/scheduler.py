@@ -934,6 +934,7 @@ class SchedulerMixin:
             "event_hits_by_ticker": defaultdict(list),
             "event_hits_by_name": defaultdict(list),
             "news_hits_by_name": defaultdict(int),
+            "community_hits_by_name": defaultdict(int),
             "yt_by_ticker": {},
             "yt_by_name": {},
             "event_lines": [],
@@ -946,6 +947,7 @@ class SchedulerMixin:
 
             news_items = self.db.get_recent_global_news(limit=12, hours=18)
             raw_event_lines: list[tuple[int, str]] = []
+            raw_crowd_lines: list[str] = []
             priority_tags = (
                 "GTC",
                 "CES",
@@ -963,6 +965,17 @@ class SchedulerMixin:
                 "FDA",
                 "FOMC",
             )
+            community_keywords = (
+                "리딩방",
+                "추천주",
+                "급등",
+                "상한가",
+                "토론방",
+                "세력",
+                "상따",
+                "주도주",
+                "단독",
+            )
 
             for item in news_items or []:
                 title = str(item.get("title", "") or "").strip()
@@ -975,6 +988,7 @@ class SchedulerMixin:
                         context["news_hits_by_name"][name] += 1
 
                 matched_priority = [tag for tag in priority_tags if tag.lower() in lowered]
+                matched_community = [tag for tag in community_keywords if tag in title]
                 if matched_priority:
                     raw_event_lines.append((
                         4 + urgent_bonus,
@@ -983,6 +997,13 @@ class SchedulerMixin:
                     for name in candidate_names:
                         if name and name in title:
                             context["event_hits_by_name"][name].append(matched_priority[0])
+                if matched_community:
+                    for name in candidate_names:
+                        if name and name in title:
+                            context["community_hits_by_name"][name] += 1
+                            raw_crowd_lines.append(
+                                f"{name} | 커뮤니티 {matched_community[0]} | {title[:44]}"
+                            )
 
                 for event in analyze_trigger(
                     title,
@@ -1012,6 +1033,14 @@ class SchedulerMixin:
                 context["event_lines"].append(line)
                 if len(context["event_lines"]) >= 6:
                     break
+            crowd_seen: set[str] = set()
+            for line in raw_crowd_lines:
+                if line in crowd_seen:
+                    continue
+                crowd_seen.add(line)
+                context["crowd_lines"].append(line)
+                if len(context["crowd_lines"]) >= 4:
+                    break
         except Exception:
             logger.debug("Manager fast event context build failed", exc_info=True)
 
@@ -1031,7 +1060,11 @@ class SchedulerMixin:
                     negative = int(item.get("부정", 0) or 0)
                     mood = "긍정 우위" if positive >= negative else "과열 경계"
                     crowd_lines.append(f"{name} | 유튜브 {mentions}회 | {mood}")
-            context["crowd_lines"] = crowd_lines[:5]
+            merged_crowd = list(context.get("crowd_lines", []))
+            for line in crowd_lines:
+                if line not in merged_crowd:
+                    merged_crowd.append(line)
+            context["crowd_lines"] = merged_crowd[:5]
         except Exception:
             logger.debug("Manager YouTube context build failed", exc_info=True)
 
@@ -1065,6 +1098,7 @@ class SchedulerMixin:
         event_hits_by_ticker = fast_context.get("event_hits_by_ticker", {})
         event_hits_by_name = fast_context.get("event_hits_by_name", {})
         news_hits_by_name = fast_context.get("news_hits_by_name", {})
+        community_hits_by_name = fast_context.get("community_hits_by_name", {})
         yt_by_ticker = fast_context.get("yt_by_ticker", {})
         yt_by_name = fast_context.get("yt_by_name", {})
 
@@ -1079,22 +1113,31 @@ class SchedulerMixin:
                     + list(event_hits_by_name.get(name, []))
                 ))[:3]
                 news_hits = int(news_hits_by_name.get(name, 0))
+                community_hits = int(community_hits_by_name.get(name, 0))
                 crowd_signal = candidate.get("crowd_signal", "")
 
-                if not crowd_signal and mentions >= 4 and not event_tags:
+                if not crowd_signal and community_hits >= 2 and mentions >= 2 and not event_tags:
+                    crowd_signal = "리딩방 급행 주의"
+                elif not crowd_signal and mentions >= 4 and not event_tags:
                     crowd_signal = "커뮤니티 과열"
                 elif not crowd_signal and mentions >= 3 and event_tags:
                     crowd_signal = "커뮤니티+테마 공명"
+                elif not crowd_signal and community_hits >= 1 and mentions >= 2:
+                    crowd_signal = "커뮤니티 확산"
 
                 fast_bonus = len(event_tags) * (4 if manager_key in {"position", "tenbagger"} else 2)
                 fast_bonus += min(4, mentions)
                 fast_bonus += min(3, news_hits)
+                fast_bonus += min(2, community_hits)
                 if crowd_signal in {"커뮤니티 과열", "개미 과열 경계"}:
                     fast_bonus -= 4
+                if crowd_signal == "리딩방 급행 주의":
+                    fast_bonus -= 6
 
                 candidate["event_tags"] = event_tags
                 candidate["youtube_mentions"] = mentions
                 candidate["news_hits"] = news_hits
+                candidate["community_hits"] = community_hits
                 if crowd_signal:
                     candidate["crowd_signal"] = crowd_signal
                 try:
@@ -1108,6 +1151,8 @@ class SchedulerMixin:
                     reasons.append(f"이벤트 {event_tags[0]}")
                 if mentions >= 3:
                     reasons.append(f"유튜브 {mentions}회")
+                if community_hits >= 1:
+                    reasons.append(f"커뮤니티 {community_hits}건")
                 if crowd_signal and crowd_signal not in reasons:
                     reasons.append(crowd_signal)
                 seen_reason: set[str] = set()

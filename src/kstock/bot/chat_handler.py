@@ -30,6 +30,17 @@ USER_NAME = "주호님"
 # Daily limit for AI chat questions
 DEFAULT_DAILY_LIMIT = 50
 
+_LIGHT_CHAT_HINTS = (
+    "요약", "정리", "번역", "영어", "이메일", "문장", "초안",
+    "체크리스트", "할 일", "설명", "한줄", "짧게", "빠르게",
+    "뉴스", "시장", "시황", "분위기", "의미", "왜",
+)
+_INVESTMENT_HEAVY_HINTS = re.compile(
+    r"(매수|매도|손절|익절|종목|주가|차트|포트폴리오|잔고|보유|"
+    r"목표가|지지선|저항선|6자리\s*종목코드|\d{6})",
+    re.IGNORECASE,
+)
+
 # [v3.6.6] 매도 지시 / 공포 유발 키워드 필터
 _SELL_PATTERNS = [
     r'무조건\s*매도',
@@ -48,6 +59,39 @@ _SELL_PATTERNS = [
     r'긴급\s*매도',
 ]
 _SELL_RE = re.compile('|'.join(_SELL_PATTERNS), re.IGNORECASE)
+
+
+def should_use_lightweight_chat(question: str) -> bool:
+    """짧고 가벼운 질문은 경량 채팅 경로로 보낸다."""
+    text = str(question or "").strip()
+    if not text:
+        return False
+    if len(text) > 120:
+        return False
+    if _INVESTMENT_HEAVY_HINTS.search(text):
+        return False
+    if any(hint in text for hint in _LIGHT_CHAT_HINTS):
+        return True
+    # 짧은 일반 질의는 기본적으로 빠른 경로로 보낸다.
+    return len(text.split()) <= 10
+
+
+def _build_lightweight_system_prompt(context: dict) -> str:
+    """빠른 일반/시황 질문용 경량 시스템 프롬프트."""
+    market = context.get("market", "")
+    recent_briefing = context.get("recent_briefing", "")
+    lines = [
+        f"너는 {USER_NAME}의 빠른 투자 비서다.",
+        "핵심부터 3~6줄로 짧고 명확하게 답하라.",
+        "불필요한 서론, 반복, 과장 금지.",
+        "구체적 가격은 제공된 데이터가 있을 때만 인용하고 추측하지 마라.",
+        "투자 질문이면 가능하면 '한줄 결론 / 이유 / 지금 할 일' 순서로 답하라.",
+    ]
+    if market:
+        lines.append(f"[시장 요약]\n{market}")
+    if recent_briefing:
+        lines.append(f"[최근 브리핑]\n{recent_briefing}")
+    return "\n\n".join(lines)
 
 
 def _sanitize_response(answer: str) -> str:
@@ -138,16 +182,22 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
 
     # Build system prompt from context
     from kstock.bot.context_builder import build_system_prompt
-    system_prompt = build_system_prompt(context)
+    use_lightweight = should_use_lightweight_chat(question)
+    system_prompt = (
+        _build_lightweight_system_prompt(context)
+        if use_lightweight
+        else build_system_prompt(context)
+    )
 
     # v6.2: 과거 관련 대화 검색 + 사용자 선호도 컨텍스트
     rag_context = ""
     pref_context = ""
-    try:
-        rag_context = chat_memory.get_relevant_context(question, max_items=5)
-        pref_context = chat_memory.get_user_preferences_context()
-    except Exception as e:
-        logger.debug("RAG/preference context extraction failed: %s", e)
+    if not use_lightweight:
+        try:
+            rag_context = chat_memory.get_relevant_context(question, max_items=5)
+            pref_context = chat_memory.get_user_preferences_context()
+        except Exception as e:
+            logger.debug("RAG/preference context extraction failed: %s", e)
 
     if rag_context or pref_context:
         extra_context = ""
@@ -158,7 +208,7 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
         system_prompt = system_prompt + extra_context
 
     # Assemble conversation messages from history + new question
-    history = chat_memory.get_recent(limit=20)
+    history = chat_memory.get_recent(limit=8 if use_lightweight else 20)
     messages: list[dict[str, str]] = []
     for msg in history:
         messages.append({"role": msg["role"], "content": msg["content"]})
@@ -169,9 +219,9 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
     # - conversation: automatic cache (멀티턴 대화 자동 캐시)
     try:
         response = await client.messages.create(
-            model="claude-sonnet-4-5-20250929",
-            max_tokens=2000,
-            temperature=0.3,
+            model="claude-haiku-4-5-20251001" if use_lightweight else "claude-sonnet-4-5-20250929",
+            max_tokens=900 if use_lightweight else 2000,
+            temperature=0.2 if use_lightweight else 0.3,
             cache_control={"type": "ephemeral"},  # 대화 자동 캐시
             system=[{
                 "type": "text",
@@ -205,7 +255,7 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
             from kstock.core.token_tracker import track_usage
             track_usage(
                 db=db, provider="anthropic",
-                model="claude-sonnet-4-5-20250929",
+                model="claude-haiku-4-5-20251001" if use_lightweight else "claude-sonnet-4-5-20250929",
                 function_name="chat",
                 response=response,
             )

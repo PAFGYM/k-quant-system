@@ -1791,10 +1791,12 @@ def format_manager_action_digest(
                 fast_parts.append(f"유튜브 {pick['youtube_mentions']}회")
             if pick.get("news_hits", 0):
                 fast_parts.append(f"뉴스 {pick['news_hits']}건")
+            if pick.get("community_hits", 0):
+                fast_parts.append(f"커뮤니티 {pick['community_hits']}건")
             if pick.get("crowd_signal"):
                 fast_parts.append(pick["crowd_signal"])
             if fast_parts:
-                lines.append(f"   빠른신호: {' · '.join(fast_parts[:3])}")
+                lines.append(f"   빠른신호: {' · '.join(fast_parts[:4])}")
             action = pick.get("action_hint") or guide.get("action", "")
             if action:
                 lines.append(f"   행동: {action}")

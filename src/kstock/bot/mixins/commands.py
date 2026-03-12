@@ -1362,9 +1362,11 @@ class CommandsMixin:
             )
             return
 
+        from kstock.bot.chat_handler import should_use_lightweight_chat
+        light_chat = should_use_lightweight_chat(question)
         # 즉시 "처리 중..." 메시지 → edit로 교체
         placeholder = await update.message.reply_text(
-            "🤖 Claude가 분석 중입니다..."
+            "🤖 AI비서가 빠르게 답변 중입니다..." if light_chat else "🤖 Claude가 분석 중입니다..."
         )
         try:
             from kstock.bot.chat_handler import handle_ai_question
@@ -1374,189 +1376,194 @@ class CommandsMixin:
             # v9.3.2: 종목 감지 시 모든 데이터 소스 병렬 수집 (부분 실패 허용)
             enriched = question
             stock = None
-            try:
-                stock = self._detect_stock_query(question)
-                if stock:
-                    code = stock.get("code", "")
-                    name = stock.get("name", code)
-                    market = stock.get("market", "KOSPI")
+            chat_mem = ChatMemory(self.db)
+            ctx = {}
+            v_names = None
+            if not light_chat:
+                try:
+                    stock = self._detect_stock_query(question)
+                    if stock:
+                        code = stock.get("code", "")
+                        name = stock.get("name", code)
+                        market = stock.get("market", "KOSPI")
 
-                    # ── 1단계: 데이터 병렬 수집 (각각 독립, 실패 허용) ──
-                    import asyncio
-                    from kstock.ingest.naver_finance import (
-                        NaverFinanceClient,
-                        get_investor_trading, analyze_investor_trend,
-                        get_sector_rankings, analyze_sector_momentum,
-                    )
-                    naver = NaverFinanceClient()
-
-                    # 병렬 실행: yfinance OHLCV, Naver OHLCV, Naver 재무, 수급, 섹터
-                    yf_ohlcv_task = self.yf_client.get_ohlcv(code, market)
-                    nv_ohlcv_task = naver.get_ohlcv(code, period_days=120)
-                    nv_info_task = naver.get_stock_info(code, name)
-                    inv_task = get_investor_trading(code, days=20)
-                    sector_task = get_sector_rankings(limit=15)
-
-                    results = await asyncio.gather(
-                        yf_ohlcv_task, nv_ohlcv_task, nv_info_task,
-                        inv_task, sector_task,
-                        return_exceptions=True,
-                    )
-
-                    yf_ohlcv = results[0] if not isinstance(results[0], Exception) else pd.DataFrame()
-                    nv_ohlcv = results[1] if not isinstance(results[1], Exception) else pd.DataFrame()
-                    nv_info = results[2] if not isinstance(results[2], Exception) else {}
-                    inv_data = results[3] if not isinstance(results[3], Exception) else []
-                    sectors = results[4] if not isinstance(results[4], Exception) else []
-
-                    # ── 2단계: 최선의 OHLCV 선택 ──
-                    ohlcv = pd.DataFrame()
-                    ohlcv_source = "없음"
-                    if isinstance(yf_ohlcv, pd.DataFrame) and not yf_ohlcv.empty:
-                        ohlcv = yf_ohlcv
-                        ohlcv_source = "yfinance"
-                    elif isinstance(nv_ohlcv, pd.DataFrame) and not nv_ohlcv.empty:
-                        ohlcv = nv_ohlcv
-                        ohlcv_source = "네이버"
-
-                    # ── 3단계: 현재가 (다중 소스) ──
-                    cur = 0.0
-                    price_source = ""
-                    # OHLCV 종가
-                    if not ohlcv.empty:
-                        cur = float(ohlcv["close"].astype(float).iloc[-1])
-                        price_source = ohlcv_source
-                    # Naver 재무에서 현재가
-                    if cur <= 0 and isinstance(nv_info, dict) and nv_info.get("current_price", 0) > 0:
-                        cur = float(nv_info["current_price"])
-                        price_source = "네이버시세"
-                    # 수급 데이터에서 종가
-                    if cur <= 0 and inv_data and inv_data[0].get("close", 0) > 0:
-                        cur = float(inv_data[0]["close"])
-                        price_source = "수급데이터"
-                    # KIS/Naver 실시간가
-                    try:
-                        live = await self._get_price(code, base_price=cur)
-                        if live > 0:
-                            cur = live
-                            price_source = "실시간"
-                    except Exception:
-                        pass
-
-                    # ── 4단계: 기술적 분석 (OHLCV 있을 때만) ──
-                    tech_text = ""
-                    if not ohlcv.empty and len(ohlcv) >= 20:
-                        from kstock.core.technical import compute_indicators
-                        tech = compute_indicators(ohlcv)
-                        tech_text = (
-                            f"\n이동평균: 5일 {tech.ma5:,.0f}원, "
-                            f"20일 {tech.ma20:,.0f}원, "
-                            f"60일 {tech.ma60:,.0f}원\n"
-                            f"RSI: {tech.rsi:.1f} | MACD: {tech.macd:.0f}\n"
-                            f"볼린저: 상단 {tech.bb_upper:,.0f} / 하단 {tech.bb_lower:,.0f}"
+                        # ── 1단계: 데이터 병렬 수집 (각각 독립, 실패 허용) ──
+                        import asyncio
+                        from kstock.ingest.naver_finance import (
+                            NaverFinanceClient,
+                            get_investor_trading, analyze_investor_trend,
+                            get_sector_rankings, analyze_sector_momentum,
                         )
-                        # 추가 분석 데이터
-                        close = ohlcv["close"].astype(float)
-                        vol = ohlcv["volume"].astype(float)
-                        if len(close) >= 5:
-                            ret_1w = (float(close.iloc[-1]) / float(close.iloc[-5]) - 1) * 100
-                            vol_avg_5 = float(vol.iloc[-5:].mean())
-                            vol_avg_20 = float(vol.iloc[-20:].mean()) if len(vol) >= 20 else vol_avg_5
-                            vol_ratio = vol_avg_5 / vol_avg_20 if vol_avg_20 > 0 else 1.0
-                            trade_val = float(close.iloc[-5:].mean() * vol.iloc[-5:].mean())
-                            tech_text += (
-                                f"\n1주 수익률: {ret_1w:+.1f}%"
-                                f" | 거래량비: {vol_ratio:.1f}x"
-                                f" | 5일 거래대금: {trade_val/1e8:,.0f}억원"
-                            )
-                        if len(close) >= 20:
-                            ret_1m = (float(close.iloc[-1]) / float(close.iloc[-20]) - 1) * 100
-                            tech_text += f" | 1개월: {ret_1m:+.1f}%"
-                        if len(close) >= 60:
-                            ret_3m = (float(close.iloc[-1]) / float(close.iloc[-60]) - 1) * 100
-                            tech_text += f" | 3개월: {ret_3m:+.1f}%"
+                        naver = NaverFinanceClient()
 
-                    # ── 5단계: 재무 데이터 ──
-                    fin_text = ""
-                    if isinstance(nv_info, dict):
-                        parts = []
-                        if nv_info.get("per", 0) > 0:
-                            parts.append(f"PER {nv_info['per']:.1f}")
-                        if nv_info.get("pbr", 0) > 0:
-                            parts.append(f"PBR {nv_info['pbr']:.2f}")
-                        if nv_info.get("roe", 0) > 0:
-                            parts.append(f"ROE {nv_info['roe']:.1f}%")
-                        if nv_info.get("market_cap", 0) > 0:
-                            parts.append(f"시총 {nv_info['market_cap']/1e8:,.0f}억원")
-                        if nv_info.get("foreign_ratio", 0) > 0:
-                            parts.append(f"외국인비율 {nv_info['foreign_ratio']:.1f}%")
-                        if nv_info.get("52w_high", 0) > 0:
-                            parts.append(f"52주고가 {nv_info['52w_high']:,.0f}원")
-                        if nv_info.get("52w_low", 0) > 0:
-                            parts.append(f"52주저가 {nv_info['52w_low']:,.0f}원")
-                        if parts:
-                            fin_text = f"\n\n[재무/기본정보]\n" + " | ".join(parts)
+                        # 병렬 실행: yfinance OHLCV, Naver OHLCV, Naver 재무, 수급, 섹터
+                        yf_ohlcv_task = self.yf_client.get_ohlcv(code, market)
+                        nv_ohlcv_task = naver.get_ohlcv(code, period_days=120)
+                        nv_info_task = naver.get_stock_info(code, name)
+                        inv_task = get_investor_trading(code, days=20)
+                        sector_task = get_sector_rankings(limit=15)
 
-                    # ── 6단계: 수급 분석 ──
-                    supply_text = ""
-                    if inv_data:
-                        inv_analysis = analyze_investor_trend(inv_data)
-                        supply_text = (
-                            f"\n\n[수급 분석 (최근 20일)]\n"
-                            f"{inv_analysis.get('summary', '')}\n"
-                            f"수급 시그널: {inv_analysis.get('signal', '중립')}"
+                        results = await asyncio.gather(
+                            yf_ohlcv_task, nv_ohlcv_task, nv_info_task,
+                            inv_task, sector_task,
+                            return_exceptions=True,
                         )
-                        # DB 저장
+
+                        yf_ohlcv = results[0] if not isinstance(results[0], Exception) else pd.DataFrame()
+                        nv_ohlcv = results[1] if not isinstance(results[1], Exception) else pd.DataFrame()
+                        nv_info = results[2] if not isinstance(results[2], Exception) else {}
+                        inv_data = results[3] if not isinstance(results[3], Exception) else []
+                        sectors = results[4] if not isinstance(results[4], Exception) else []
+
+                        # ── 2단계: 최선의 OHLCV 선택 ──
+                        ohlcv = pd.DataFrame()
+                        ohlcv_source = "없음"
+                        if isinstance(yf_ohlcv, pd.DataFrame) and not yf_ohlcv.empty:
+                            ohlcv = yf_ohlcv
+                            ohlcv_source = "yfinance"
+                        elif isinstance(nv_ohlcv, pd.DataFrame) and not nv_ohlcv.empty:
+                            ohlcv = nv_ohlcv
+                            ohlcv_source = "네이버"
+
+                        # ── 3단계: 현재가 (다중 소스) ──
+                        cur = 0.0
+                        price_source = ""
+                        if not ohlcv.empty:
+                            cur = float(ohlcv["close"].astype(float).iloc[-1])
+                            price_source = ohlcv_source
+                        if cur <= 0 and isinstance(nv_info, dict) and nv_info.get("current_price", 0) > 0:
+                            cur = float(nv_info["current_price"])
+                            price_source = "네이버시세"
+                        if cur <= 0 and inv_data and inv_data[0].get("close", 0) > 0:
+                            cur = float(inv_data[0]["close"])
+                            price_source = "수급데이터"
                         try:
-                            self.db.bulk_save_supply_demand(code, inv_data)
+                            live = await self._get_price(code, base_price=cur)
+                            if live > 0:
+                                cur = live
+                                price_source = "실시간"
                         except Exception:
                             pass
 
-                    # ── 7단계: 섹터 분석 ──
-                    sector_text = ""
-                    if sectors:
-                        sec_analysis = analyze_sector_momentum(sectors)
-                        sector_text = (
-                            f"\n\n[섹터 동향]\n"
-                            f"{sec_analysis.get('summary', '')}"
-                        )
+                        # ── 4단계: 기술적 분석 (OHLCV 있을 때만) ──
+                        tech_text = ""
+                        if not ohlcv.empty and len(ohlcv) >= 20:
+                            from kstock.core.technical import compute_indicators
+                            tech = compute_indicators(ohlcv)
+                            tech_text = (
+                                f"\n이동평균: 5일 {tech.ma5:,.0f}원, "
+                                f"20일 {tech.ma20:,.0f}원, "
+                                f"60일 {tech.ma60:,.0f}원\n"
+                                f"RSI: {tech.rsi:.1f} | MACD: {tech.macd:.0f}\n"
+                                f"볼린저: 상단 {tech.bb_upper:,.0f} / 하단 {tech.bb_lower:,.0f}"
+                            )
+                            close = ohlcv["close"].astype(float)
+                            vol = ohlcv["volume"].astype(float)
+                            if len(close) >= 5:
+                                ret_1w = (float(close.iloc[-1]) / float(close.iloc[-5]) - 1) * 100
+                                vol_avg_5 = float(vol.iloc[-5:].mean())
+                                vol_avg_20 = float(vol.iloc[-20:].mean()) if len(vol) >= 20 else vol_avg_5
+                                vol_ratio = vol_avg_5 / vol_avg_20 if vol_avg_20 > 0 else 1.0
+                                trade_val = float(close.iloc[-5:].mean() * vol.iloc[-5:].mean())
+                                tech_text += (
+                                    f"\n1주 수익률: {ret_1w:+.1f}%"
+                                    f" | 거래량비: {vol_ratio:.1f}x"
+                                    f" | 5일 거래대금: {trade_val/1e8:,.0f}억원"
+                                )
+                            if len(close) >= 20:
+                                ret_1m = (float(close.iloc[-1]) / float(close.iloc[-20]) - 1) * 100
+                                tech_text += f" | 1개월: {ret_1m:+.1f}%"
+                            if len(close) >= 60:
+                                ret_3m = (float(close.iloc[-1]) / float(close.iloc[-60]) - 1) * 100
+                                tech_text += f" | 3개월: {ret_3m:+.1f}%"
 
-                    # ── 8단계: 데이터 품질 표시 + enriched 조립 ──
-                    data_parts = []
-                    if cur > 0:
-                        data_parts.append(f"현재가: {cur:,.0f}원 (소스: {price_source})")
-                    if tech_text:
-                        data_parts.append(f"[기술적 분석 — {ohlcv_source} {len(ohlcv)}일]{tech_text}")
-                    elif ohlcv_source == "없음":
-                        data_parts.append("⚠️ 차트(OHLCV) 데이터 조회 불가 — 기술적 지표 없이 가용 데이터로 분석")
+                        # ── 5단계: 재무 데이터 ──
+                        fin_text = ""
+                        if isinstance(nv_info, dict):
+                            parts = []
+                            if nv_info.get("per", 0) > 0:
+                                parts.append(f"PER {nv_info['per']:.1f}")
+                            if nv_info.get("pbr", 0) > 0:
+                                parts.append(f"PBR {nv_info['pbr']:.2f}")
+                            if nv_info.get("roe", 0) > 0:
+                                parts.append(f"ROE {nv_info['roe']:.1f}%")
+                            if nv_info.get("market_cap", 0) > 0:
+                                parts.append(f"시총 {nv_info['market_cap']/1e8:,.0f}억원")
+                            if nv_info.get("foreign_ratio", 0) > 0:
+                                parts.append(f"외국인비율 {nv_info['foreign_ratio']:.1f}%")
+                            if nv_info.get("52w_high", 0) > 0:
+                                parts.append(f"52주고가 {nv_info['52w_high']:,.0f}원")
+                            if nv_info.get("52w_low", 0) > 0:
+                                parts.append(f"52주저가 {nv_info['52w_low']:,.0f}원")
+                            if parts:
+                                fin_text = f"\n\n[재무/기본정보]\n" + " | ".join(parts)
 
-                    if data_parts or fin_text or supply_text or sector_text:
-                        enriched = (
-                            f"{question}\n\n"
-                            f"[{name}({code}) 데이터]\n"
-                            + "\n".join(data_parts)
-                            + fin_text
-                            + supply_text
-                            + sector_text
-                            + "\n\n[절대 규칙] 위 데이터의 가격만 참고하라. "
-                            "너의 학습 데이터에 있는 과거 주가를 절대 사용 금지. "
-                            "데이터가 부족한 항목은 '데이터 없음'이라고 명시하고, "
-                            "있는 데이터만으로 최선의 분석을 제공하라."
-                        )
-                        logger.info("AI질문 데이터 주입: %s 현재가=%s원 OHLCV=%s 수급=%s건 재무=%s",
-                                    name, f"{cur:,.0f}" if cur > 0 else "없음",
-                                    ohlcv_source, len(inv_data),
-                                    "있음" if fin_text else "없음")
-                    else:
-                        logger.warning("AI질문: %s 데이터 완전 실패 — 모든 소스 응답 없음", name)
-            except Exception as e:
-                logger.warning("AI질문 데이터 수집 실패: %s", e, exc_info=True)
+                        # ── 6단계: 수급 분석 ──
+                        supply_text = ""
+                        if inv_data:
+                            inv_analysis = analyze_investor_trend(inv_data)
+                            supply_text = (
+                                f"\n\n[수급 분석 (최근 20일)]\n"
+                                f"{inv_analysis.get('summary', '')}\n"
+                                f"수급 시그널: {inv_analysis.get('signal', '중립')}"
+                            )
+                            try:
+                                self.db.bulk_save_supply_demand(code, inv_data)
+                            except Exception:
+                                pass
 
-            chat_mem = ChatMemory(self.db)
-            ctx = await build_full_context_with_macro(
-                self.db, self.macro_client, self.yf_client,
-            )
-            v_names = {stock.get("name", "")} if stock and stock.get("name") else None
+                        # ── 7단계: 섹터 분석 ──
+                        sector_text = ""
+                        if sectors:
+                            sec_analysis = analyze_sector_momentum(sectors)
+                            sector_text = (
+                                f"\n\n[섹터 동향]\n"
+                                f"{sec_analysis.get('summary', '')}"
+                            )
+
+                        # ── 8단계: 데이터 품질 표시 + enriched 조립 ──
+                        data_parts = []
+                        if cur > 0:
+                            data_parts.append(f"현재가: {cur:,.0f}원 (소스: {price_source})")
+                        if tech_text:
+                            data_parts.append(f"[기술적 분석 — {ohlcv_source} {len(ohlcv)}일]{tech_text}")
+                        elif ohlcv_source == "없음":
+                            data_parts.append("⚠️ 차트(OHLCV) 데이터 조회 불가 — 기술적 지표 없이 가용 데이터로 분석")
+
+                        if data_parts or fin_text or supply_text or sector_text:
+                            enriched = (
+                                f"{question}\n\n"
+                                f"[{name}({code}) 데이터]\n"
+                                + "\n".join(data_parts)
+                                + fin_text
+                                + supply_text
+                                + sector_text
+                                + "\n\n[절대 규칙] 위 데이터의 가격만 참고하라. "
+                                "너의 학습 데이터에 있는 과거 주가를 절대 사용 금지. "
+                                "데이터가 부족한 항목은 '데이터 없음'이라고 명시하고, "
+                                "있는 데이터만으로 최선의 분석을 제공하라."
+                            )
+                            logger.info("AI질문 데이터 주입: %s 현재가=%s원 OHLCV=%s 수급=%s건 재무=%s",
+                                        name, f"{cur:,.0f}" if cur > 0 else "없음",
+                                        ohlcv_source, len(inv_data),
+                                        "있음" if fin_text else "없음")
+                        else:
+                            logger.warning("AI질문: %s 데이터 완전 실패 — 모든 소스 응답 없음", name)
+                except Exception as e:
+                    logger.warning("AI질문 데이터 수집 실패: %s", e, exc_info=True)
+
+                ctx = await build_full_context_with_macro(
+                    self.db, self.macro_client, self.yf_client,
+                )
+                v_names = {stock.get("name", "")} if stock and stock.get("name") else None
+            else:
+                try:
+                    from kstock.bot.context_builder import get_market_context
+                    market_snapshot = self.db.get_macro_snapshot() or {}
+                    ctx = {"market": get_market_context(market_snapshot)}
+                except Exception:
+                    ctx = {}
+
             answer = await handle_ai_question(enriched, ctx, self.db, chat_mem, verified_names=v_names)
 
             # AI 응답에서 후속 질문 파싱 → 버튼 변환

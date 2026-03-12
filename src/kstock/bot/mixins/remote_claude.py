@@ -247,14 +247,14 @@ class RemoteClaudeMixin:
             "name": "클대리",
             "emoji": "💬",
             "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 1000,
+            "max_tokens": 800,
             "desc": "빠른 답변, 일반 대화, 간단한 질문",
         },
         "bujang": {
             "name": "클부장",
             "emoji": "📊",
             "model": "claude-sonnet-4-5-20250929",
-            "max_tokens": 2000,
+            "max_tokens": 1400,
             "desc": "주식 분석, 투자 전략, 시황 해석",
         },
         "daepyo": {
@@ -689,7 +689,8 @@ class RemoteClaudeMixin:
         try:
             import httpx
 
-            system_text = await self._build_image_system_prompt()
+            tier_key = context.user_data.get("claude_tier", "daeri")
+            system_text = await self._build_text_chat_system_prompt(tier_key)
 
             # 종목 감지 시 실시간 데이터 추가
             enriched = text
@@ -708,8 +709,12 @@ class RemoteClaudeMixin:
 
             # 대화 이력 (최근 10턴 유지)
             history = context.user_data.get("claude_chat_history", [])
+            history_limit = 8 if tier_key == "daeri" else 14
+            if len(history) > history_limit * 2:
+                history = history[-history_limit * 2:]
             messages = list(history)
             messages.append({"role": "user", "content": enriched})
+            temperature = 0.15 if tier_key == "daeri" else 0.25
 
             client = _get_api_client()
             resp = await client.post(
@@ -722,6 +727,7 @@ class RemoteClaudeMixin:
                 json={
                     "model": tier["model"],
                     "max_tokens": tier["max_tokens"],
+                    "temperature": temperature,
                     "system": system_text,
                     "messages": messages,
                 },
@@ -736,8 +742,8 @@ class RemoteClaudeMixin:
             # 대화 이력 저장
             history.append({"role": "user", "content": text})
             history.append({"role": "assistant", "content": answer})
-            if len(history) > 20:
-                history = history[-20:]
+            if len(history) > history_limit * 2:
+                history = history[-history_limit * 2:]
             context.user_data["claude_chat_history"] = history
 
             # 턴 카운트 증가
@@ -925,6 +931,60 @@ class RemoteClaudeMixin:
                     "⚠️ 이미지 저장 실패. 다시 보내주세요.",
                     reply_markup=CLAUDE_MODE_MENU,
                 )
+
+    async def _build_text_chat_system_prompt(self, tier_key: str = "daeri") -> str:
+        """텍스트 전용 클로드 대화 프롬프트."""
+        tier = self._CLAUDE_TIERS.get(tier_key, self._CLAUDE_TIERS["daeri"])
+        parts = [
+            f"너는 주호님의 {tier['name']}이다.",
+            "한국어 존댓말로 답하고, 말돌리지 말고 바로 핵심부터 답하라.",
+            "가격은 제공된 실시간 데이터가 있을 때만 구체적으로 말하라.",
+            "모호한 질문도 먼저 의도를 추정해 실행 가능한 답부터 제시하라.",
+        ]
+
+        if tier_key == "daeri":
+            parts.append(
+                "답변 형식: 1) 한줄 결론 2) 핵심 이유 2~3개. "
+                "가능하면 6줄 이내로 짧게 답하라."
+            )
+        elif tier_key == "bujang":
+            parts.append(
+                "투자 질문이면 '관심/매수/보유/매도' 중 어디에 가까운지 먼저 말하고, "
+                "그 뒤 이유와 지금 확인할 포인트를 정리하라."
+            )
+
+        try:
+            holdings = self.db.get_active_holdings()
+            if holdings:
+                holding_lines = ["[보유종목]"]
+                for h in holdings[:6]:
+                    name = h.get("name", "")
+                    ticker = h.get("ticker", "")
+                    buy_price = float(h.get("buy_price", 0) or 0)
+                    holding_lines.append(f"- {name}({ticker}) 매수가 {buy_price:,.0f}원")
+                parts.append("\n".join(holding_lines))
+        except Exception:
+            logger.debug("text chat holdings prompt build failed", exc_info=True)
+
+        try:
+            macro = self.db.get_macro_snapshot() or {}
+            market_lines = []
+            if macro.get("kospi"):
+                market_lines.append(
+                    f"코스피 {macro['kospi']:,.2f} ({macro.get('kospi_change_pct', 0):+.2f}%)"
+                )
+            if macro.get("kosdaq"):
+                market_lines.append(
+                    f"코스닥 {macro['kosdaq']:,.2f} ({macro.get('kosdaq_change_pct', 0):+.2f}%)"
+                )
+            if macro.get("vix"):
+                market_lines.append(f"VIX {macro.get('vix', 0):.1f}")
+            if market_lines:
+                parts.append("[시장]\n" + " | ".join(market_lines))
+        except Exception:
+            logger.debug("text chat market prompt build failed", exc_info=True)
+
+        return "\n\n".join(parts)
 
     async def _analyze_image_with_text(
         self, update: Update, context, prompt: str,

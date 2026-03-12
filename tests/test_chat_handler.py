@@ -12,6 +12,7 @@ import pytest
 from kstock.bot.chat_handler import (
     format_ai_greeting,
     handle_ai_question,
+    should_use_lightweight_chat,
 )
 from kstock.bot.context_builder import (
     build_system_prompt,
@@ -94,6 +95,14 @@ class TestHandleAiQuestion:
             result = await handle_ai_question("테스트 질문", {}, db, memory)
         assert "주호님" in result
         assert "ANTHROPIC_API_KEY" in result
+
+
+class TestLightweightChatRouting:
+    def test_short_general_question_uses_lightweight_route(self) -> None:
+        assert should_use_lightweight_chat("오늘 뉴스 요약해줘")
+
+    def test_stock_question_stays_on_full_route(self) -> None:
+        assert not should_use_lightweight_chat("삼성전자 지금 매수 타이밍일까?")
 
 
 # ===========================================================================

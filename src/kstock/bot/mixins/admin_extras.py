@@ -1398,6 +1398,50 @@ class AdminExtrasMixin:
 
         return count
 
+    def _build_action_console_preview(self) -> list[str]:
+        """대시보드 상단용 매수/보유/매도 미리보기."""
+        try:
+            from kstock.bot.investment_managers import MANAGER_THRESHOLDS
+        except Exception:
+            MANAGER_THRESHOLDS = {}
+
+        holdings = self.db.get_active_holdings() or []
+        ranked: list[tuple[int, str]] = []
+
+        for h in holdings:
+            ticker = h.get("ticker", "")
+            name = (h.get("name", "") or ticker)[:8]
+            holding_type = h.get("holding_type", "swing")
+            buy_price = float(h.get("buy_price", 0) or 0)
+            current_price = float(h.get("current_price", 0) or 0)
+            if buy_price <= 0:
+                continue
+            pnl = ((current_price - buy_price) / buy_price * 100) if current_price > 0 else 0.0
+            thresholds = MANAGER_THRESHOLDS.get(
+                holding_type, MANAGER_THRESHOLDS.get("swing", {}),
+            )
+            stop_loss = float(thresholds.get("stop_loss", -7.0) or -7.0)
+            take_profit = float(thresholds.get("take_profit_1", 10.0) or 10.0)
+
+            verdict = "보유 유지"
+            urgency = 1
+            if pnl <= stop_loss + 0.7:
+                verdict = "매도 타이밍 점검"
+                urgency = 4
+            elif pnl >= take_profit:
+                verdict = "분할매도 구간"
+                urgency = 3
+            elif holding_type in {"position", "long_term", "tenbagger"} and pnl <= max(-3.0, stop_loss * 0.5):
+                verdict = "보유/추매 체크"
+                urgency = 2
+            elif holding_type == "scalp":
+                verdict = "당일 추세 확인"
+
+            ranked.append((urgency, f"- {name}: {verdict} ({pnl:+.1f}%)"))
+
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return [line for _, line in ranked[:3]]
+
     async def _build_dashboard_view(
         self, category: str = "", page: int = 0,
     ) -> tuple[str, InlineKeyboardMarkup]:
@@ -1424,6 +1468,10 @@ class AdminExtrasMixin:
             f"💎 장기: {counts.get('long_term', 0)}",
             f"📦 미분류: {counts.get('unclassified', 0)}",
         ]
+        action_preview = self._build_action_console_preview()
+        if action_preview:
+            lines.append("\n📋 액션 콘솔")
+            lines.extend(action_preview)
 
         # 보유종목 미리보기 (최대 5개, 가격 조회)
         if counts.get("holding", 0) > 0:
@@ -1484,21 +1532,24 @@ class AdminExtrasMixin:
         buttons.append(row2)
         buttons.append(row3)
 
-        # 매수 추천 + 매니저 + AI토론
+        # 액션 콘솔 + 매수 추천 + 매니저
         action_row = [
+            InlineKeyboardButton(
+                "📋 액션콘솔", callback_data="menu:daily_actions",
+            ),
             InlineKeyboardButton(
                 "📈 매수추천", callback_data="fav:buy_scan",
             ),
             InlineKeyboardButton(
                 "👨‍💼 매니저", callback_data="fav:managers",
             ),
-            InlineKeyboardButton(
-                "🎙️ AI토론", callback_data="menu:debate",
-            ),
         ]
         buttons.append(action_row)
 
         action_row2 = [
+            InlineKeyboardButton(
+                "🎙️ AI토론", callback_data="menu:debate",
+            ),
             InlineKeyboardButton(
                 "➕ 추가", callback_data="fav:add_mode",
             ),

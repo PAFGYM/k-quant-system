@@ -198,6 +198,7 @@ def test_format_manager_action_digest_includes_fast_signals():
                 "event_tags": ["AI", "GTC"],
                 "youtube_mentions": 4,
                 "news_hits": 2,
+                "community_hits": 2,
                 "crowd_signal": "커뮤니티+테마 공명",
                 "listing_market": "KOSDAQ",
                 "market_cap_label": "1.2조",
@@ -216,3 +217,4 @@ def test_format_manager_action_digest_includes_fast_signals():
     assert "군집 레이더" in text
     assert "국내 스몰캡 레이더" in text
     assert "선점 구간" in text
+    assert "커뮤니티 2건" in text
