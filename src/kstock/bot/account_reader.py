@@ -1,4 +1,4 @@
-"""Account screenshot reader via Claude Vision API - K-Quant v3.5.
+"""Account screenshot reader via AI Vision API - K-Quant v13.
 
 Reads stock brokerage account screenshots using Claude's vision capabilities,
 extracts holdings and summary data, compares with previous snapshots, and
@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 from collections import Counter
 from datetime import datetime
 from typing import Any
@@ -40,13 +41,13 @@ _VISION_PROMPT = (
     "각 보유 종목의 종목명, 종목코드(6자리 숫자, 화면에 있으면), 보유수량, 평균매수가(매입가), "
     "현재가, 수익률(%), 평가손익, 평가금액, 구분(purchase_type)을 추출.\n"
     "종목코드가 화면에 없으면 ticker는 빈 문자열로.\n"
-    "상단 요약에서 매입금액, 평가금액, 평가손익, 수익률, 순자산도 추출.\n\n"
+    "상단 요약에서 매입금액, 평가금액, 평가손익, 수익률, 예수금(현금)도 추출.\n\n"
     "반드시 아래 JSON 형식으로만 응답:\n"
     '{"holdings": [{"name": "종목명", "ticker": "종목코드", "quantity": 수량, "avg_price": 매입가, '
     '"current_price": 현재가, "profit_pct": 수익률, "eval_amount": 평가금액, '
     '"profit_amount": 평가손익, "purchase_type": "현금/유융/신용 등"}], '
     '"summary": {"total_eval": 총평가금액, "total_profit": 총평가손익, '
-    '"total_profit_pct": 총수익률, "total_buy": 총매입금액}}'
+    '"total_profit_pct": 총수익률, "cash": 예수금, "total_buy": 총매입금액}}'
 )
 
 _EMPTY_RESULT: dict[str, Any] = {
@@ -132,14 +133,11 @@ async def parse_account_screenshot(
         logger.warning("Empty image bytes provided")
         return _make_empty_result()
 
-    if not anthropic_key:
-        logger.warning("No Anthropic API key provided")
-        return _make_empty_result()
-
     image_b64 = base64.standard_b64encode(image_bytes).decode("ascii")
 
     # Detect media type from magic bytes
     media_type = _detect_media_type(image_bytes)
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
 
     payload = {
         "model": "claude-sonnet-4-20250514",
@@ -166,6 +164,16 @@ async def parse_account_screenshot(
     }
 
     try:
+        if not anthropic_key and openai_key:
+            logger.warning(
+                "Anthropic API key missing, falling back to OpenAI Vision for screenshot OCR",
+            )
+            return await _parse_with_openai_vision(image_b64, media_type, openai_key)
+
+        if not anthropic_key:
+            logger.warning("No Anthropic API key provided")
+            return _make_empty_result()
+
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
@@ -178,6 +186,16 @@ async def parse_account_screenshot(
             )
 
             if resp.status_code != 200:
+                if _should_try_openai_vision_fallback(
+                    status_code=resp.status_code,
+                    body=resp.text,
+                    openai_key=openai_key,
+                ):
+                    logger.warning(
+                        "Claude Vision API returned %d; falling back to OpenAI Vision",
+                        resp.status_code,
+                    )
+                    return await _parse_with_openai_vision(image_b64, media_type, openai_key)
                 logger.error(
                     "Claude Vision API returned %d: %s",
                     resp.status_code,
@@ -190,9 +208,15 @@ async def parse_account_screenshot(
             return _parse_vision_response(text)
 
     except httpx.TimeoutException:
+        if openai_key:
+            logger.warning("Claude Vision timed out, falling back to OpenAI Vision")
+            return await _parse_with_openai_vision(image_b64, media_type, openai_key)
         logger.error("Claude Vision API request timed out")
         return _make_empty_result()
     except httpx.HTTPError as exc:
+        if openai_key:
+            logger.warning("Claude Vision HTTP error (%s), falling back to OpenAI Vision", exc)
+            return await _parse_with_openai_vision(image_b64, media_type, openai_key)
         logger.error("Claude Vision API HTTP error: %s", exc)
         return _make_empty_result()
     except Exception as exc:
@@ -702,6 +726,24 @@ def format_screenshot_reminder() -> str:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
+def has_meaningful_account_data(parsed: dict[str, Any]) -> bool:
+    """스크린샷 OCR 결과가 비정상적인 올제로 응답인지 판별한다."""
+    holdings = parsed.get("holdings", []) if isinstance(parsed, dict) else []
+    if any(
+        str(item.get("name", "") or "").strip()
+        or str(item.get("ticker", "") or "").strip()
+        for item in holdings
+        if isinstance(item, dict)
+    ):
+        return True
+
+    summary = parsed.get("summary", {}) if isinstance(parsed, dict) else {}
+    for key in ("total_eval", "total_profit", "total_profit_pct", "cash", "total_buy"):
+        if abs(_to_float(summary.get(key, 0))) > 0.0:
+            return True
+    return False
+
 def _make_empty_result() -> dict[str, Any]:
     """Return a fresh empty result dict (avoid mutating the module-level constant)."""
     return {
@@ -713,6 +755,97 @@ def _make_empty_result() -> dict[str, Any]:
             "cash": 0,
         },
     }
+
+
+def _should_try_openai_vision_fallback(
+    *,
+    status_code: int,
+    body: str,
+    openai_key: str,
+) -> bool:
+    """Anthropic Vision 실패 시 OpenAI Vision 우회가 가능한지 판단한다."""
+    if not openai_key:
+        return False
+
+    body_lower = (body or "").lower()
+    fallback_markers = (
+        "credit balance is too low",
+        "insufficient_quota",
+        "rate limit",
+        "overloaded",
+        "temporarily unavailable",
+        "service unavailable",
+    )
+    if any(marker in body_lower for marker in fallback_markers):
+        return True
+    return status_code in {408, 409, 429, 500, 502, 503, 504}
+
+
+async def _parse_with_openai_vision(
+    image_b64: str,
+    media_type: str,
+    openai_key: str,
+) -> dict[str, Any]:
+    """OpenAI Vision으로 계좌 스크린샷을 보조 OCR한다."""
+    if not openai_key:
+        return _make_empty_result()
+
+    payload = {
+        "model": os.getenv("OPENAI_VISION_MODEL", "gpt-4o"),
+        "response_format": {"type": "json_object"},
+        "max_tokens": 2000,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _VISION_PROMPT},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{media_type};base64,{image_b64}",
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openai_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+        if resp.status_code != 200:
+            logger.error(
+                "OpenAI Vision API returned %d: %s",
+                resp.status_code,
+                resp.text[:300],
+            )
+            return _make_empty_result()
+
+        data = resp.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict)
+            )
+        return _parse_vision_response(str(content))
+    except httpx.TimeoutException:
+        logger.error("OpenAI Vision API request timed out")
+        return _make_empty_result()
+    except httpx.HTTPError as exc:
+        logger.error("OpenAI Vision API HTTP error: %s", exc)
+        return _make_empty_result()
+    except Exception as exc:
+        logger.error("Unexpected error calling OpenAI Vision API: %s", exc, exc_info=True)
+        return _make_empty_result()
 
 
 def _detect_media_type(image_bytes: bytes) -> str:

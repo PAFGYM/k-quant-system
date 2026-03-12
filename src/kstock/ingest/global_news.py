@@ -1739,8 +1739,7 @@ async def summarize_transcript_structured(
     import json as _json
 
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return empty
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
 
     text = transcript[:5000]
 
@@ -1784,6 +1783,16 @@ async def summarize_transcript_structured(
             '}\n'
         )
 
+    if not api_key and openai_key:
+        logger.warning(
+            "Anthropic key unavailable for structured summary '%s'; using OpenAI fallback",
+            title[:30],
+        )
+        return await _summarize_structured_with_openai(prompt, title, empty)
+
+    if not api_key:
+        return empty
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
@@ -1801,6 +1810,17 @@ async def summarize_transcript_structured(
                 },
             )
             if resp.status_code != 200:
+                if _should_try_openai_summary_fallback(
+                    status_code=resp.status_code,
+                    body=resp.text,
+                    openai_key=openai_key,
+                ):
+                    logger.warning(
+                        "Structured summary Anthropic error %d for '%s'; using OpenAI fallback",
+                        resp.status_code,
+                        title[:30],
+                    )
+                    return await _summarize_structured_with_openai(prompt, title, empty)
                 logger.warning(
                     "Structured summary API error %d for '%s': %s",
                     resp.status_code, title[:30],
@@ -1881,9 +1901,157 @@ async def summarize_transcript_structured(
             }
 
     except Exception as e:
+        if openai_key:
+            logger.warning(
+                "Structured summary generation failed for '%s', trying OpenAI fallback: %s",
+                title[:30] if title else "unknown",
+                e,
+            )
+            return await _summarize_structured_with_openai(prompt, title, empty)
         logger.warning(
             "Structured summary generation failed for '%s': %s",
             title[:30] if title else "unknown", e, exc_info=True,
+        )
+        return empty
+
+
+def _should_try_openai_summary_fallback(
+    *,
+    status_code: int,
+    body: str,
+    openai_key: str,
+) -> bool:
+    """Anthropic 구조화 요약 실패 시 OpenAI 폴백 여부를 판단한다."""
+    if not openai_key:
+        return False
+
+    body_lower = (body or "").lower()
+    fallback_markers = (
+        "credit balance is too low",
+        "insufficient_quota",
+        "rate limit",
+        "overloaded",
+        "temporarily unavailable",
+        "service unavailable",
+    )
+    if any(marker in body_lower for marker in fallback_markers):
+        return True
+    return status_code in {408, 409, 429, 500, 502, 503, 504}
+
+
+async def _summarize_structured_with_openai(
+    prompt: str,
+    title: str,
+    empty: dict,
+) -> dict:
+    """OpenAI 경량 모델로 유튜브/뉴스 구조화 요약을 보조 생성한다."""
+    import httpx
+    import json as _json
+
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not openai_key:
+        return empty
+
+    model = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openai_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "response_format": {"type": "json_object"},
+                    "max_tokens": 1200,
+                    "temperature": 0.2,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+
+        if resp.status_code != 200:
+            logger.warning(
+                "OpenAI structured summary API error %d for '%s': %s",
+                resp.status_code,
+                title[:30],
+                resp.text[:200] if resp.text else "no body",
+            )
+            return empty
+
+        data = resp.json()
+        raw_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(raw_text, list):
+            raw_text = "".join(
+                part.get("text", "")
+                for part in raw_text
+                if isinstance(part, dict)
+            )
+        raw_text = str(raw_text).strip()
+
+        try:
+            from kstock.core.token_tracker import track_usage_global
+            usage = data.get("usage", {})
+            track_usage_global(
+                provider="gpt",
+                model=model,
+                function_name="youtube_summary_structured_openai_fallback",
+                input_tokens=usage.get("prompt_tokens", 0) or 0,
+                output_tokens=usage.get("completion_tokens", 0) or 0,
+            )
+        except Exception:
+            pass
+
+        json_text = raw_text
+        if "```" in json_text:
+            m = re.search(r"```(?:json)?\s*(.*?)```", json_text, re.DOTALL)
+            if m:
+                json_text = m.group(1)
+        data = _json.loads(json_text) if json_text.startswith("{") else {}
+        if not data:
+            return {**empty, "raw_summary": raw_text[:200], "full_summary": raw_text}
+
+        full_summary = data.get("full_summary", "")
+        summary_lines = full_summary.split("\n")
+        raw_summary = "\n".join(summary_lines[:3]) if summary_lines else full_summary[:200]
+
+        conf = 0.5
+        if data.get("mentioned_tickers"):
+            conf += 0.2
+        if data.get("mentioned_sectors"):
+            conf += 0.1
+        if data.get("key_numbers"):
+            conf += 0.1
+        if data.get("investment_implications"):
+            conf += 0.1
+
+        mentioned_tickers = data.get("mentioned_tickers", [])
+        if not isinstance(mentioned_tickers, list):
+            mentioned_tickers = []
+        mentioned_sectors = data.get("mentioned_sectors", [])
+        if not isinstance(mentioned_sectors, list):
+            mentioned_sectors = []
+        key_numbers = data.get("key_numbers", [])
+        if not isinstance(key_numbers, list):
+            key_numbers = []
+
+        return {
+            "full_summary": full_summary,
+            "mentioned_tickers": mentioned_tickers,
+            "mentioned_sectors": mentioned_sectors,
+            "market_outlook": data.get("market_outlook", ""),
+            "key_numbers": key_numbers,
+            "investment_implications": data.get("investment_implications", ""),
+            "raw_summary": raw_summary,
+            "confidence": min(conf, 1.0),
+        }
+    except Exception as e:
+        logger.warning(
+            "OpenAI structured summary fallback failed for '%s': %s",
+            title[:30] if title else "unknown",
+            e,
+            exc_info=True,
         )
         return empty
 

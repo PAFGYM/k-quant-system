@@ -16,6 +16,7 @@ from kstock.bot.account_reader import (
     evaluate_diagnosis_accuracy,
     format_screenshot_reminder,
     format_screenshot_summary,
+    has_meaningful_account_data,
 )
 
 
@@ -375,6 +376,30 @@ class TestFormatScreenshotSummary:
         parsed = _snapshot()
         text = format_screenshot_summary(parsed)
         assert "보유 종목이 없습니다" in text
+
+
+class TestHasMeaningfulAccountData:
+    """Tests for OCR empty-result guard."""
+
+    def test_true_when_holdings_exist(self):
+        parsed = _snapshot([_holding()])
+        assert has_meaningful_account_data(parsed) is True
+
+    def test_true_when_cash_only_exists(self):
+        parsed = _snapshot([], cash=250000)
+        assert has_meaningful_account_data(parsed) is True
+
+    def test_false_when_all_values_are_zero(self):
+        parsed = {
+            "holdings": [],
+            "summary": {
+                "total_eval": 0,
+                "total_profit": 0,
+                "total_profit_pct": 0,
+                "cash": 0,
+            },
+        }
+        assert has_meaningful_account_data(parsed) is False
 
 
 # ===========================================================================

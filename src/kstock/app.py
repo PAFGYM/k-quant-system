@@ -125,11 +125,16 @@ def main() -> None:
     _write_runtime_state("booting")
 
     from kstock.bot.bot import KQuantBot
+    import kstock as kstock_pkg
     from kstock import __version__
 
     bot = KQuantBot()
     conflict_count = 0
     restart_delay_sec = 10
+    module_path = str(Path(getattr(kstock_pkg, "__file__", "")).resolve())
+
+    if not module_path.startswith(str(ROOT_DIR / "src")):
+        logger.warning("Unexpected kstock module path: %s", module_path)
 
     # v9.3: 기존 holdings 임계값 마이그레이션 (holding_type별 재계산)
     try:
@@ -151,11 +156,13 @@ def main() -> None:
                 "running",
                 version=__version__,
                 conflict_count=conflict_count,
+                module_path=module_path,
             )
             logger.info(
-                "K-Quant System v%s started on %s. Press Ctrl+C to stop.",
+                "K-Quant System v%s started on %s from %s. Press Ctrl+C to stop.",
                 __version__,
                 HOSTNAME,
+                module_path,
             )
             app.run_polling(
                 poll_interval=3.0,

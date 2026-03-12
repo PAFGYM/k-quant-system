@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from kstock.ingest.global_news import batch_deep_youtube_analysis
+from kstock.ingest.global_news import (
+    batch_deep_youtube_analysis,
+    summarize_transcript_structured,
+)
 from kstock.store.sqlite import SQLiteStore
 
 
@@ -120,3 +123,65 @@ class TestBatchDeepYoutubeAnalysis:
         assert results == []
         db.should_upgrade_youtube_intelligence.assert_called_once_with(item.video_id)
         mock_deep.assert_not_called()
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, text: str = "", json_data: dict | None = None):
+        self.status_code = status_code
+        self.text = text
+        self._json_data = json_data or {}
+
+    def json(self):
+        return self._json_data
+
+
+class _FakeAsyncClient:
+    def __init__(self, response):
+        self._response = response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, *args, **kwargs):
+        return self._response
+
+
+class TestStructuredSummaryFallback:
+    @pytest.mark.asyncio
+    async def test_structured_summary_falls_back_to_openai_on_low_credit(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
+
+        anthropic_resp = _FakeResponse(
+            400,
+            text='{"error":{"message":"Your credit balance is too low to access the Anthropic API."}}',
+        )
+        expected = {
+            "full_summary": "시장 핵심 요약",
+            "mentioned_tickers": [{"name": "삼성전자", "ticker": "005930"}],
+            "mentioned_sectors": ["반도체"],
+            "market_outlook": "mixed",
+            "key_numbers": [],
+            "investment_implications": "눌림 확인 후 대응",
+            "raw_summary": "시장 핵심 요약",
+            "confidence": 0.9,
+        }
+
+        with patch(
+            "httpx.AsyncClient",
+            return_value=_FakeAsyncClient(anthropic_resp),
+        ), patch(
+            "kstock.ingest.global_news._summarize_structured_with_openai",
+            AsyncMock(return_value=expected),
+        ) as mock_openai:
+            result = await summarize_transcript_structured(
+                transcript="A" * 500,
+                title="시장 점검 라이브",
+                source="테스트 채널",
+            )
+
+        assert result == expected
+        mock_openai.assert_awaited_once()

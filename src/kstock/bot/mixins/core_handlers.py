@@ -982,6 +982,20 @@ class CoreHandlersMixin:
             image_bytes = await file.download_as_bytearray()
 
             parsed = await parse_account_screenshot(bytes(image_bytes), self.anthropic_key)
+            if not has_meaningful_account_data(parsed):
+                logger.warning(
+                    "Screenshot OCR returned empty/zero account data; skipping DB save",
+                )
+                context.user_data.pop("pending_screenshot_id", None)
+                context.user_data.pop("pending_holdings", None)
+                await update.message.reply_text(
+                    "⚠️ 스크린샷 인식이 불완전했습니다.\n"
+                    "현재 분석값이 모두 0으로 나와 저장하지 않았습니다.\n"
+                    "계좌 전체, 종목명, 수량, 예수금이 잘 보이게 다시 캡처해서 보내주세요.\n"
+                    "Anthropic Vision이 막히면 OpenAI Vision으로 자동 우회합니다.",
+                    reply_markup=get_reply_markup(context),
+                )
+                return
             holdings = parsed.get("holdings", [])
 
             # Get previous screenshot for comparison

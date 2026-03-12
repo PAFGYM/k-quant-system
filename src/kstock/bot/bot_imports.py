@@ -102,6 +102,7 @@ from kstock.bot.account_reader import (
     compare_screenshots,
     format_screenshot_summary,
     format_screenshot_reminder,
+    has_meaningful_account_data,
 )
 from kstock.bot.diagnosis import batch_diagnose, format_diagnosis_report
 from kstock.bot.account_diagnosis import (
