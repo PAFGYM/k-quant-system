@@ -303,6 +303,49 @@ class TestRemoteClaudeHelpers(unittest.TestCase):
             openai_key="openai-test",
         )
 
+    def test_ceo_tier_defaults_to_sonnet_safe_mode(self):
+        from kstock.bot.mixins.remote_claude import RemoteClaudeMixin
+
+        tier = RemoteClaudeMixin._CLAUDE_TIERS["daepyo"]
+        assert tier["model"] == "claude-sonnet-4-5-20250929"
+        assert tier["max_tokens"] == 1800
+
+    def test_consume_ceo_cli_model_uses_sonnet_without_arm(self):
+        from kstock.bot.mixins.remote_claude import RemoteClaudeMixin
+
+        mixin = RemoteClaudeMixin()
+        context = MagicMock()
+        context.user_data = {}
+
+        model, used_opus = mixin._consume_ceo_cli_model(context)
+
+        assert model == "sonnet"
+        assert used_opus is False
+
+    def test_consume_ceo_cli_model_uses_opus_once_when_armed(self):
+        from kstock.bot.mixins.remote_claude import RemoteClaudeMixin
+
+        mixin = RemoteClaudeMixin()
+        context = MagicMock()
+        context.user_data = {"ceo_opus_armed_until": 9999999999}
+
+        model, used_opus = mixin._consume_ceo_cli_model(context)
+        assert model == "opus"
+        assert used_opus is True
+        assert "ceo_opus_armed_until" not in context.user_data
+
+        model, used_opus = mixin._consume_ceo_cli_model(context)
+        assert model == "sonnet"
+        assert used_opus is False
+
+    def test_should_allow_claude_web_search_only_when_explicit(self):
+        from kstock.bot.mixins.remote_claude import _should_allow_claude_web_search
+
+        assert _should_allow_claude_web_search("최신 뉴스 검색해줘")
+        assert _should_allow_claude_web_search("web search로 확인해줘")
+        assert not _should_allow_claude_web_search("git status 보고 정리해줘")
+        assert not _should_allow_claude_web_search("테스트 실패 원인만 분석해줘")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,6 +30,21 @@ _OPENAI_CHAT_FALLBACK_MODELS = {
     "daepyo": "gpt-4o",
 }
 
+_DEFAULT_CLAUDE_CLI_BUDGET_USD = 0.80
+_DEFAULT_CLAUDE_CLI_OPUS_BUDGET_USD = 3.00
+_DEFAULT_CLAUDE_CLI_MAX_TURNS = 8
+_DEFAULT_CLAUDE_CLI_OPUS_MAX_TURNS = 5
+_DEFAULT_CEO_OPUS_ARM_SECONDS = 300
+_WEB_SEARCH_HINTS = re.compile(
+    r"(검색|서치|웹|뉴스\s*찾|최신|실시간|look up|web search|browse|기사\s*찾)",
+    re.IGNORECASE,
+)
+_NO_WEB_SEARCH_PROMPT = (
+    "웹 검색 도구는 기본적으로 사용하지 마라. "
+    "로컬 파일, 현재 작업 디렉터리, 이미 제공된 문맥과 추론만으로 해결하라. "
+    "사용자가 최신 정보 확인이나 웹 검색을 명시적으로 요청한 경우에만 웹 검색을 고려하라."
+)
+
 
 def _get_api_client() -> httpx.AsyncClient:
     global _shared_api_client
@@ -40,6 +55,50 @@ def _get_api_client() -> httpx.AsyncClient:
 
 def _get_openai_key() -> str:
     return os.getenv("OPENAI_API_KEY", "").strip()
+
+
+def _load_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)).strip())
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+def _load_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)).strip())
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+def _should_allow_claude_web_search(prompt: str) -> bool:
+    return bool(_WEB_SEARCH_HINTS.search(str(prompt or "")))
+
+
+def _get_claude_cli_budget_usd(model: str) -> float:
+    if model == "opus":
+        return _load_float_env(
+            "CLAUDE_CODE_OPUS_MAX_BUDGET_USD",
+            _DEFAULT_CLAUDE_CLI_OPUS_BUDGET_USD,
+        )
+    return _load_float_env(
+        "CLAUDE_CODE_MAX_BUDGET_USD",
+        _DEFAULT_CLAUDE_CLI_BUDGET_USD,
+    )
+
+
+def _get_claude_cli_max_turns(model: str) -> int:
+    if model == "opus":
+        return _load_int_env(
+            "CLAUDE_CODE_OPUS_MAX_TURNS",
+            _DEFAULT_CLAUDE_CLI_OPUS_MAX_TURNS,
+        )
+    return _load_int_env(
+        "CLAUDE_CODE_MAX_TURNS",
+        _DEFAULT_CLAUDE_CLI_MAX_TURNS,
+    )
 
 
 def _extract_provider_error_message(body: str) -> str:
@@ -178,6 +237,7 @@ class RemoteClaudeMixin:
         "system": {"label": "📦 시스템상태", "special": "stats"},
         "dashboard": {"label": "🏠 대시보드", "special": "dashboard"},
         "continue": {"label": "🔄 이어서", "special": "continue"},
+        "arm_opus": {"label": "🔥 Opus 1회 승인", "special": "arm_opus"},
     }
 
     def _is_authorized_chat(self, update: Update) -> bool:
@@ -224,7 +284,7 @@ class RemoteClaudeMixin:
         Args:
             prompt: The prompt to send.
             continue_conversation: True면 --continue 플래그로 이전 대화 이어가기.
-            model: CLI 모델 (sonnet/opus). v10.3.1: 클대표=opus.
+            model: CLI 모델 (sonnet/opus). 클대표는 기본 Sonnet, 승인 시 1회 Opus.
 
         Returns:
             Tuple of (output_text, return_code, elapsed_seconds).
@@ -241,8 +301,11 @@ class RemoteClaudeMixin:
                 "--output-format", "text",
                 "--dangerously-skip-permissions",
                 "--model", model,
-                "--max-turns", "25",
+                "--max-turns", str(_get_claude_cli_max_turns(model)),
+                "--max-budget-usd", f"{_get_claude_cli_budget_usd(model):.2f}",
             ]
+            if not _should_allow_claude_web_search(prompt):
+                cmd.extend(["--append-system-prompt", _NO_WEB_SEARCH_PROMPT])
             if continue_conversation:
                 cmd.append("--continue")
 
@@ -323,9 +386,9 @@ class RemoteClaudeMixin:
         "daepyo": {
             "name": "클대표",
             "emoji": "🧠",
-            "model": "claude-opus-4-6",
-            "max_tokens": 4000,
-            "desc": "오류 수정, 기능 개발, 심층 추론",
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 1800,
+            "desc": "오류 수정, 기능 개발, 기본 Sonnet 안전모드",
             "use_cli": True,
         },
     }
@@ -347,7 +410,7 @@ class RemoteClaudeMixin:
                 callback_data="claude_tier:bujang",
             )],
             [InlineKeyboardButton(
-                "🧠 클대표 — 오류수정/기능개발",
+                "🧠 클대표 — 관리자 안전모드",
                 callback_data="claude_tier:daepyo",
             )],
         ]
@@ -363,8 +426,9 @@ class RemoteClaudeMixin:
             f"  빠른 답변, 일상 대화\n\n"
             f"📊 클부장 (Sonnet)\n"
             f"  주식 분석, 투자 전략\n\n"
-            f"🧠 클대표 (Opus)\n"
-            f"  오류 수정, 기능 개발, 심층 추론\n\n"
+            f"🧠 클대표 (기본 Sonnet)\n"
+            f"  오류 수정, 기능 개발, 관리자 안전모드\n"
+            f"  Opus는 1회 승인 후에만 실행\n\n"
             f"모드를 선택하세요 👇",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -379,10 +443,11 @@ class RemoteClaudeMixin:
         context.user_data["claude_tier"] = payload
         context.user_data["claude_chat_history"] = []
         context.user_data["claude_turn"] = 0
+        context.user_data.pop("ceo_opus_armed_until", None)
 
         # v11.0: 클대표 → 리모콘 대시보드
         if payload == "daepyo":
-            await self._ceo_dashboard(query)
+            await self._ceo_dashboard(query, context)
             return
 
         await safe_edit_or_reply(query,
@@ -392,15 +457,42 @@ class RemoteClaudeMixin:
             f"자유롭게 대화하세요.\n"
             f"모드 전환: 💻 클로드 다시 누르기\n"
             f"종료: 다른 메뉴 버튼"
-        )
+            )
 
     # ── 클대표 리모콘 메서드 (v11.0) ────────────────────────────
 
-    async def _ceo_dashboard(self, target) -> None:
+    @staticmethod
+    def _get_ceo_opus_arm_seconds() -> int:
+        return _load_int_env(
+            "CLAUDE_CODE_OPUS_ARM_SECONDS",
+            _DEFAULT_CEO_OPUS_ARM_SECONDS,
+        )
+
+    def _is_ceo_opus_armed(self, context) -> bool:
+        deadline = float(context.user_data.get("ceo_opus_armed_until", 0) or 0)
+        if deadline <= time.time():
+            context.user_data.pop("ceo_opus_armed_until", None)
+            return False
+        return True
+
+    def _arm_ceo_opus(self, context) -> int:
+        seconds = self._get_ceo_opus_arm_seconds()
+        context.user_data["ceo_opus_armed_until"] = time.time() + seconds
+        return seconds
+
+    def _consume_ceo_cli_model(self, context) -> tuple[str, bool]:
+        if self._is_ceo_opus_armed(context):
+            context.user_data.pop("ceo_opus_armed_until", None)
+            return "opus", True
+        return "sonnet", False
+
+    async def _ceo_dashboard(self, target, context=None) -> None:
         """🧠 클대표 리모콘 대시보드 — 퀵 액션 버튼 표시.
 
         target: CallbackQuery 또는 Update (둘 다 호환).
         """
+        opus_ready = bool(context and self._is_ceo_opus_armed(context))
+        opus_label = "🔥 Opus 승인됨" if opus_ready else "🔥 Opus 1회 승인"
         buttons = [
             [
                 InlineKeyboardButton("📋 Git Status", callback_data="ceo:git_status"),
@@ -415,17 +507,24 @@ class RemoteClaudeMixin:
                 InlineKeyboardButton("📊 에러로그", callback_data="ceo:logs"),
             ],
             [
-                InlineKeyboardButton("🔄 봇재시작", callback_data="ceo:restart"),
+                InlineKeyboardButton(opus_label, callback_data="ceo:arm_opus"),
                 InlineKeyboardButton("📦 시스템상태", callback_data="ceo:system"),
             ],
+            [
+                InlineKeyboardButton("🔄 봇재시작", callback_data="ceo:restart"),
+                InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard"),
+            ],
         ]
+        mode_line = "현재 실행모드: Opus 1회 승인됨" if opus_ready else "현재 실행모드: Sonnet 안전모드"
         text = (
             "🧠 클대표 리모콘\n"
             f"{'━' * 22}\n\n"
             "Claude Code CLI 원격 제어\n\n"
-            "⚡ 퀵 액션 버튼 또는\n"
-            "자유 텍스트로 명령을 입력하세요.\n\n"
-            "💡 모든 입력이 Claude Code(Opus)로 전달됩니다."
+            f"⚡ {mode_line}\n"
+            "기본은 Sonnet 안전모드입니다.\n"
+            "Opus는 1회 승인 후 다음 실행에만 사용됩니다.\n\n"
+            "💸 각 실행은 비용 상한과 턴 제한이 걸려 있습니다.\n"
+            "🌐 웹검색은 사용자가 명시적으로 요청할 때만 허용됩니다."
         )
         markup = InlineKeyboardMarkup(buttons)
         await safe_edit_or_reply(target, text, reply_markup=markup)
@@ -440,7 +539,7 @@ class RemoteClaudeMixin:
 
         # 특수 액션
         if special == "dashboard":
-            await self._ceo_dashboard(query)
+            await self._ceo_dashboard(query, context)
             return
         if special == "continue":
             context.user_data["ceo_continue"] = True
@@ -448,6 +547,18 @@ class RemoteClaudeMixin:
                 "🔄 이어서 모드\n\n"
                 "다음 메시지가 이전 Claude Code 대화를 이어갑니다.\n"
                 "명령을 입력하세요."
+            )
+            return
+        if special == "arm_opus":
+            seconds = self._arm_ceo_opus(context)
+            await safe_edit_or_reply(query,
+                "🔥 Opus 1회 승인 완료\n\n"
+                f"다음 Claude Code 실행 1회에만 Opus를 사용합니다.\n"
+                f"승인 유지 시간: {seconds // 60}분\n"
+                "그 이후에는 자동으로 Sonnet 안전모드로 돌아갑니다.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard")],
+                ]),
             )
             return
         if special == "restart":
@@ -491,7 +602,8 @@ class RemoteClaudeMixin:
                 f"📊 {score_text}\n"
                 f"💰 {cost_text}\n"
                 f"🚨 알림모드: {alert_mode}\n"
-                f"🕐 가동시간: {time.monotonic() / 3600:.1f}h",
+                f"🕐 가동시간: {time.monotonic() / 3600:.1f}h\n"
+                f"🧠 클대표 기본모드: Sonnet",
                 reply_markup=buttons,
             )
             return
@@ -555,10 +667,15 @@ class RemoteClaudeMixin:
         self, query, context, prompt: str, turns: int = 5,
     ) -> None:
         """콜백에서 Claude Code CLI 실행 (커밋 등 복잡한 작업)."""
-        await safe_edit_or_reply(query, f"🧠 클대표 실행 중...\n📝 {prompt[:80]}")
+        cli_model, used_opus = self._consume_ceo_cli_model(context)
+        mode_label = "Opus 프리미엄" if used_opus else "Sonnet 안전모드"
+        await safe_edit_or_reply(
+            query,
+            f"🧠 클대표 실행 중...\n⚙️ {mode_label}\n📝 {prompt[:80]}",
+        )
 
         placeholder = await query.message.reply_text(
-            "⏳ Claude Code(Opus) 실행 중..."
+            f"⏳ Claude Code({cli_model}) 실행 중..."
         )
 
         progress_task = asyncio.create_task(
@@ -571,7 +688,7 @@ class RemoteClaudeMixin:
         context.user_data["claude_turn"] = turn + 1
 
         output, return_code, elapsed = await self._run_claude_cli(
-            prompt, continue_conversation=continue_conv, model="opus",
+            prompt, continue_conversation=continue_conv, model=cli_model,
         )
 
         progress_task.cancel()
@@ -580,7 +697,8 @@ class RemoteClaudeMixin:
             output = "(출력 없음)"
 
         status = "✅" if return_code == 0 else "⚠️"
-        header = f"💻 {status} ({elapsed:.0f}초)\n{'─' * 20}\n\n"
+        engine = "Opus" if used_opus else "Sonnet"
+        header = f"💻 {status} {engine} ({elapsed:.0f}초)\n{'─' * 20}\n\n"
         full = header + output
 
         if len(full) > MAX_OUTPUT_CHARS:
@@ -606,9 +724,10 @@ class RemoteClaudeMixin:
                 InlineKeyboardButton("🔄 봇재시작", callback_data="ceo:restart"),
             ],
             [
+                InlineKeyboardButton("🔥 Opus 1회 승인", callback_data="ceo:arm_opus"),
                 InlineKeyboardButton("🧪 테스트", callback_data="ceo:test"),
-                InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard"),
             ],
+            [InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard")],
         ])
 
         chunks = self._split_message(full)
@@ -645,6 +764,7 @@ class RemoteClaudeMixin:
         context.user_data.pop("claude_tier", None)
         context.user_data.pop("awaiting_claude_prompt", None)
         context.user_data.pop("claude_chat_history", None)
+        context.user_data.pop("ceo_opus_armed_until", None)
         await update.message.reply_text(
             f"🤖 {tier_name} 대화를 종료합니다.\n"
             f"총 {turns}회 대화하셨습니다.",
@@ -688,7 +808,7 @@ class RemoteClaudeMixin:
 
         클대리(Haiku) → API 빠른 응답
         클부장(Sonnet) → API 주식 분석
-        클대표(Opus)  → CLI 코드 수정/기능 개발, API 심층 분석
+        클대표(Sonnet 기본) → CLI 코드 수정/기능 개발, 필요 시 Opus 1회 승인
         """
         # 모드 미선택 시 선택 화면 표시
         tier_key = context.user_data.get("claude_tier", "")
@@ -1000,10 +1120,10 @@ class RemoteClaudeMixin:
 
         # 첫 턴은 새 대화, 이후는 --continue
         continue_conv = in_claude_mode and turn > 0
-        # v10.3.1: 클대표 모드 → opus CLI
+        used_opus = False
         cli_model = "sonnet"
         if is_ceo:
-            cli_model = "opus"
+            cli_model, used_opus = self._consume_ceo_cli_model(context)
         output, return_code, elapsed = await self._run_claude_cli(
             prompt, continue_conversation=continue_conv, model=cli_model,
         )
@@ -1013,8 +1133,9 @@ class RemoteClaudeMixin:
             progress_task.cancel()
 
         status = "✅" if return_code == 0 else "⚠️"
+        engine = " Opus" if used_opus else (" Sonnet" if is_ceo else "")
         header = (
-            f"💻 {status} ({elapsed:.0f}초)\n"
+            f"💻 {status}{engine} ({elapsed:.0f}초)\n"
             f"{'─' * 20}\n\n"
         )
 
@@ -1054,9 +1175,10 @@ class RemoteClaudeMixin:
                     InlineKeyboardButton("🔄 봇재시작", callback_data="ceo:restart"),
                 ],
                 [
+                    InlineKeyboardButton("🔥 Opus 1회 승인", callback_data="ceo:arm_opus"),
                     InlineKeyboardButton("🧪 테스트", callback_data="ceo:test"),
-                    InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard"),
                 ],
+                [InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard")],
             ])
             for i, chunk in enumerate(chunks):
                 rm = ceo_buttons if i == len(chunks) - 1 else None
