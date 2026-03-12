@@ -10,12 +10,47 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
+_NEWS_TOPIC_CLUSTERS: dict[str, set[str]] = {
+    "middle_east_war": {"이란", "iran", "공습", "전쟁", "war", "미사일", "missile", "중동", "호르무즈", "hormuz", "테헤란", "israel", "이스라엘"},
+    "russia_ukraine": {"러시아", "우크라이나", "russia", "ukraine", "나토", "nato"},
+    "north_korea": {"북한", "핵", "nuclear", "icbm", "미사일", "north korea"},
+    "trade_war": {"관세", "tariff", "무역전쟁", "trade war", "수출규제", "export ban", "반도체 규제"},
+    "rates_macro": {"금리", "rate", "fomc", "연준", "fed", "cpi", "pce", "실업률"},
+    "oil_energy": {"유가", "oil", "opec", "원유", "wti", "brent", "감산", "증산"},
+}
+_NEWS_TOPIC_STOPWORDS = {
+    "속보", "단독", "업데이트", "긴급", "전망", "분석", "가능성",
+    "시장", "증시", "주식", "헤드라인", "발표", "관련", "우려",
+    "news", "market", "update", "breaking",
+}
+
 
 def _news_title_key(title: str) -> str:
     """유사 뉴스 중복 판별용 정규화 키."""
     normalized = re.sub(r"[^\w\s]", " ", (title or "").lower())
     words = [w for w in normalized.split() if len(w) >= 2]
     return " ".join(sorted(set(words))[:12])
+
+
+def _news_topic_signature(title: str) -> str:
+    """같은 사건군 중복 판별용 토픽 시그니처."""
+    normalized = re.sub(r"[^\w\s]", " ", (title or "").lower())
+    words = [w for w in normalized.split() if len(w) >= 2]
+    topic_keys: list[str] = []
+    for topic, keywords in _NEWS_TOPIC_CLUSTERS.items():
+        if any(kw.lower() in normalized for kw in keywords):
+            topic_keys.append(topic)
+
+    if topic_keys:
+        return "|".join(topic_keys[:2])
+
+    content_words = [
+        w for w in words
+        if w not in _NEWS_TOPIC_STOPWORDS
+        and not any(w == kw.lower() for keywords in _NEWS_TOPIC_CLUSTERS.values() for kw in keywords)
+    ]
+    key_parts = topic_keys[:2] + sorted(set(content_words))[:5]
+    return "|".join(key_parts)
 
 
 def _canonical_news_url(url: str) -> str:
@@ -750,6 +785,7 @@ class MarketMixin:
         seen_video_ids: set[str] = set()
         seen_urls: set[str] = set()
         seen_titles: set[str] = set()
+        seen_urgent_topics: set[str] = set()
         for item in items:
             video_id = item.get("video_id", "")
             if video_id and video_id in seen_video_ids:
@@ -760,12 +796,17 @@ class MarketMixin:
             title_key = _news_title_key(item.get("title", ""))
             if title_key and title_key in seen_titles:
                 continue
+            topic_key = _news_topic_signature(item.get("title", ""))
+            if item.get("is_urgent") and topic_key and topic_key in seen_urgent_topics:
+                continue
             if video_id:
                 seen_video_ids.add(video_id)
             if canonical_url:
                 seen_urls.add(canonical_url)
             if title_key:
                 seen_titles.add(title_key)
+            if item.get("is_urgent") and topic_key:
+                seen_urgent_topics.add(topic_key)
             deduped.append(item)
         return deduped
 
@@ -808,6 +849,7 @@ class MarketMixin:
     def is_similar_alert_sent(self, title_summary: str, hours: int = 24) -> bool:
         """같은 사건으로 보이는 긴급 알림이 최근 전송됐는지 확인."""
         title_key = _news_title_key(title_summary)
+        topic_key = _news_topic_signature(title_summary)
         if not title_key:
             return False
         cutoff = (
@@ -818,7 +860,13 @@ class MarketMixin:
                 "SELECT title_summary FROM sent_urgent_alerts WHERE created_at>=?",
                 (cutoff,),
             ).fetchall()
-        return any(_news_title_key(row["title_summary"]) == title_key for row in rows)
+        for row in rows:
+            existing_title = row["title_summary"]
+            if _news_title_key(existing_title) == title_key:
+                return True
+            if topic_key and topic_key == _news_topic_signature(existing_title):
+                return True
+        return False
 
     def cleanup_old_alerts(self, days: int = 3) -> int:
         """오래된 긴급 알림 기록 정리."""

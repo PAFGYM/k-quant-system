@@ -6622,6 +6622,7 @@ class SchedulerMixin:
     async def job_news_monitor(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """09:00~15:30 매 30분: 보유/즐겨찾기 종목 뉴스 모니터링."""
         try:
+            from kstock.bot.news_action import assess_stock_news_headline
             from kstock.ingest.naver_finance import get_stock_news
 
             # 보유 + 즐겨찾기 종목
@@ -6683,12 +6684,6 @@ class SchedulerMixin:
                 "규제", "완화", "지원", "보조금", "정책", "100조",
                 "공매도", "금지", "재개", "밸류업", "기업가치",
             ]
-            # 시장 전체 뉴스 제외 키워드 (종목과 무관한 뉴스)
-            # v6.2.1: 국채/금리 제거 (정부 정책 모니터링 강화)
-            market_noise = [
-                "코스피", "코스닥", "증시", "지수", "외국인",
-                "기관", "개인", "순매수", "순매도",
-            ]
 
             import re as _re
 
@@ -6701,7 +6696,7 @@ class SchedulerMixin:
                 # 폴백: URL 전체 (code= 파라미터 제거)
                 return _re.sub(r"[&?]code=[^&]*", "", url)
 
-            alerts = []
+            alerts: list[tuple[int, str]] = []
             for ticker, name in list(ticker_names.items())[:15]:
                 try:
                     news_list = await get_stock_news(ticker, limit=5)
@@ -6719,28 +6714,36 @@ class SchedulerMixin:
                         has_name = any(v in title for v in name_variants if len(v) >= 2)
                         if not has_name:
                             continue  # 종목명이 없는 뉴스는 무시
-                        # 중요 뉴스 필터
+                        signal = assess_stock_news_headline(title)
                         is_important = any(kw in title for kw in important_kw)
-                        if is_important:
-                            alerts.append(f"📰 {name}: {title}\n🔗 {url}")
-                            sent_news.add(dedup_key)
-                            # DB에도 저장 (재시작 후 중복 방지)
-                            try:
-                                self.db.conn.execute(
-                                    "INSERT OR IGNORE INTO sent_news_urls (url) VALUES (?)",
-                                    (dedup_key,),
-                                )
-                                self.db.conn.commit()
-                            except Exception:
-                                logger.debug("Failed to persist sent news URL to DB", exc_info=True)
+                        if signal.score == 0 and not is_important:
+                            continue
+                        alert_text = (
+                            f"{signal.emoji} {name} | {signal.label}\n"
+                            f"{title}\n"
+                            f"행동: {signal.action}\n"
+                            f"🔗 {url}"
+                        )
+                        alerts.append((abs(signal.score), alert_text))
+                        sent_news.add(dedup_key)
+                        # DB에도 저장 (재시작 후 중복 방지)
+                        try:
+                            self.db.conn.execute(
+                                "INSERT OR IGNORE INTO sent_news_urls (url) VALUES (?)",
+                                (dedup_key,),
+                            )
+                            self.db.conn.commit()
+                        except Exception:
+                            logger.debug("Failed to persist sent news URL to DB", exc_info=True)
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.debug("News monitor for %s: %s", ticker, e)
 
             if alerts:
+                alerts.sort(key=lambda row: row[0], reverse=True)
                 msg = (
                     f"📰 종목 뉴스 알림\n{'━' * 22}\n\n"
-                    + "\n\n".join(alerts[:5])
+                    + "\n\n".join(text for _, text in alerts[:5])
                 )
                 await context.bot.send_message(
                     chat_id=self.chat_id, text=msg,

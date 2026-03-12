@@ -2386,14 +2386,12 @@ class AdminExtrasMixin:
                 ],
             ])
             try:
+                from kstock.bot.news_action import format_stock_news_brief
                 from kstock.ingest.naver_finance import get_stock_news
                 news = await get_stock_news(ticker, limit=5)
                 if news:
-                    lines = [f"📰 {name} 최근 뉴스\n"]
-                    for i, n in enumerate(news[:5], 1):
-                        lines.append(f"{i}. {n['title']}")
-                        lines.append(f"   {n.get('date', '')} | {n.get('source', '')}")
-                    await safe_edit_or_reply(query, "\n".join(lines), reply_markup=nav_kb)
+                    text = format_stock_news_brief(name, news[:5])
+                    await safe_edit_or_reply(query, text, reply_markup=nav_kb)
                 else:
                     await safe_edit_or_reply(query, f"📰 {name}: 최근 뉴스가 없습니다.", reply_markup=nav_kb)
             except Exception:
@@ -3342,4 +3340,3 @@ class AdminExtrasMixin:
         await query.message.reply_text(
             report[:4000], reply_markup=InlineKeyboardMarkup(buttons),
         )
-

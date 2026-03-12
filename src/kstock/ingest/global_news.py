@@ -298,6 +298,56 @@ YOUTUBE_FEEDS: list[dict] = [
     },
 ]
 
+_YOUTUBE_PRIORITY_KEYWORDS = {
+    "라이브": 6,
+    "live": 6,
+    "생방송": 6,
+    "시황": 5,
+    "장전": 5,
+    "장중": 5,
+    "장마감": 5,
+    "마감시황": 5,
+    "브리핑": 4,
+    "오프닝벨": 4,
+    "개장": 4,
+    "급등": 4,
+    "테마": 4,
+    "fomc": 4,
+    "cpi": 4,
+    "반도체": 3,
+    "2차전지": 3,
+    "바이오": 3,
+    "로봇": 3,
+    "원전": 3,
+    "양자": 3,
+    "우주": 3,
+    "ai": 3,
+}
+
+
+def _youtube_priority_score(item: NewsItem) -> int:
+    """시황/라이브/테마성 영상을 우선 학습하기 위한 점수."""
+    title = str(getattr(item, "title", "") or "").lower()
+    source = str(getattr(item, "source", "") or "").lower()
+    category = str(getattr(item, "category", "") or "")
+    score = 0
+    for keyword, weight in _YOUTUBE_PRIORITY_KEYWORDS.items():
+        if keyword.lower() in title:
+            score += weight
+    if "youtube_broker" in category:
+        score += 4
+    elif "youtube_news" in category:
+        score += 3
+    elif "youtube_us_market" in category:
+        score += 2
+    if any(name.lower() in title for name in TRACKED_ANALYSTS):
+        score += 4
+    if "라이브" in title or "live" in title:
+        score += 2
+    if any(channel.lower() in source for channel in ("삼프로", "증권", "각도기", "biz", "경제tv")):
+        score += 1
+    return score
+
 # ── 긴급 이벤트 키워드 ────────────────────────────────────
 
 URGENT_KEYWORDS_KO = [
@@ -1614,6 +1664,7 @@ async def batch_deep_youtube_analysis(
     # YouTube 영상만 수집
     items = await fetch_global_news(max_per_feed=10, hours_lookback=hours_lookback)
     yt_items = [it for it in items if it.video_id]
+    yt_items.sort(key=_youtube_priority_score, reverse=True)
 
     if not yt_items:
         logger.info("batch_deep_youtube: no YouTube items found")
@@ -2032,6 +2083,7 @@ async def enrich_youtube_summaries(
         db: SQLiteStore instance (있으면 youtube_intelligence 저장)
     """
     yt_items = [it for it in items if it.video_id]
+    yt_items.sort(key=_youtube_priority_score, reverse=True)
     if not yt_items:
         return items
 
@@ -2265,6 +2317,7 @@ async def batch_youtube_tiered(
     # RSS에서 최근 영상 수집
     items = await fetch_global_news(max_per_feed=5, hours_lookback=hours_lookback)
     yt_items = [it for it in items if it.video_id]
+    yt_items.sort(key=_youtube_priority_score, reverse=True)
 
     if not yt_items:
         logger.info("batch_youtube_tiered: no YouTube items found")
