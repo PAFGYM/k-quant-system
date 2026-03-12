@@ -1241,6 +1241,55 @@ class SchedulerMixin:
             )
         return lines
 
+    def _build_downside_playbook(self, macro) -> object | None:
+        """국내 선물/레버리지 급락 대응 플레이북 생성."""
+        try:
+            from kstock.bot.investment_managers import extract_scan_profile
+            from kstock.signal.market_playbook import build_downside_playbook
+        except Exception:
+            return None
+
+        scan_results = list(getattr(self, "_last_scan_results", None) or [])
+        candidates: list[dict] = []
+        leverage_change = None
+        inverse_change = None
+        for result in scan_results[:80]:
+            profile = extract_scan_profile(result)
+            if not profile:
+                continue
+            ticker = profile.get("ticker", "")
+            if ticker == "122630":
+                leverage_change = float(profile.get("day_change", 0) or 0)
+            elif ticker == "252670":
+                inverse_change = float(profile.get("day_change", 0) or 0)
+            candidates.append(profile)
+
+        return build_downside_playbook(
+            macro,
+            candidates,
+            leverage_change_pct=leverage_change,
+            inverse_change_pct=inverse_change,
+        )
+
+    @staticmethod
+    def _playbook_shortcuts(playbook) -> list[dict[str, str]]:
+        """선물 급락 플레이북용 바로가기 버튼."""
+        shortcuts = [
+            {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},
+            {"label": "📊 시장분석", "callback_data": "quick_q:market"},
+        ]
+        if getattr(playbook, "regime", "normal") in {"defense", "crisis"}:
+            shortcuts.append({
+                "label": "🔻 인버스2X",
+                "callback_data": "detail:252670",
+            })
+        for pick in list(getattr(playbook, "strong_stocks", []) or [])[:2]:
+            shortcuts.append({
+                "label": f"💪 {pick.name[:8]}",
+                "callback_data": f"fav:stock:{pick.ticker}",
+            })
+        return shortcuts
+
     async def _send_manager_watchlist_scan(self, context, macro) -> None:
         """매니저별 관심종목 매수 스캔 — 기술적 데이터 보강 후 AI 분석."""
         today_str = _today()
@@ -1397,6 +1446,7 @@ class SchedulerMixin:
         actions = []
         holdings = self.db.get_active_holdings()
         alert_mode = getattr(self, '_alert_mode', 'normal')
+        playbook = self._build_downside_playbook(macro) if macro else None
 
         for h in holdings:
             ticker = h.get("ticker", "")
@@ -1496,6 +1546,31 @@ class SchedulerMixin:
                 })
         except Exception:
             logger.debug("Failed to detect market regime for daily actions", exc_info=True)
+
+        if playbook and getattr(playbook, "regime", "normal") in {"caution", "defense", "crisis"}:
+            play_priority = "urgent" if playbook.regime in {"defense", "crisis"} else "caution"
+            trigger_summary = ", ".join(list(getattr(playbook, "triggers", []) or [])[:2])
+            actions.append({
+                "priority": play_priority,
+                "ticker": "",
+                "name": "선물 급락",
+                "action": "방어 플레이 실행",
+                "reason": trigger_summary or getattr(playbook, "summary", ""),
+                "callback_data": "quick_q:market",
+                "button_label": "🛡 시장 플레이",
+            })
+            strong = list(getattr(playbook, "strong_stocks", []) or [])
+            if strong:
+                top_pick = strong[0]
+                actions.append({
+                    "priority": "check",
+                    "ticker": top_pick.ticker,
+                    "name": top_pick.name[:8],
+                    "action": "강한 종목 감시",
+                    "reason": top_pick.thesis,
+                    "callback_data": f"fav:stock:{top_pick.ticker}",
+                    "button_label": f"💪 {top_pick.name[:8]}",
+                })
 
         # 확인: 포트폴리오 점검
         if len(holdings) >= 2:
@@ -3797,14 +3872,20 @@ class SchedulerMixin:
             return
 
         try:
+            from kstock.signal.market_playbook import format_downside_playbook
+
             macro = await self.macro_client.get_snapshot()
             signal_emoji, signal_label = self._market_signal(macro)
+            playbook = self._build_downside_playbook(macro)
+            playbook_regime = getattr(playbook, "regime", "normal") if playbook else "normal"
+            playbook_band = int(getattr(playbook, "risk_score", 0.0) // 10) if playbook else 0
 
             # 이전 신호와 비교
             prev = getattr(self, '_prev_us_signal', None)
-            if prev == signal_label:
+            current_state = (signal_label, playbook_regime, playbook_band)
+            if prev == current_state:
                 return  # 변동 없으면 스킵
-            self._prev_us_signal = signal_label
+            self._prev_us_signal = current_state
 
             # VIX 급변 체크
             vix_alert = ""
@@ -3838,8 +3919,17 @@ class SchedulerMixin:
                 f"{'━' * 22}\n"
                 f"🤖 K-Quant | {now.strftime('%H:%M')}"
             )
-            await context.bot.send_message(chat_id=self.chat_id, text=msg)
-            logger.info("US futures signal changed: %s → %s", prev, signal_label)
+            playbook_text = format_downside_playbook(playbook) if playbook else ""
+            if playbook_text:
+                msg = f"{msg}\n\n{playbook_text}"
+
+            buttons = make_shortcut_rows(self._playbook_shortcuts(playbook)) if playbook else []
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text=msg[:4000],
+                reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+            )
+            logger.info("US futures signal changed: %s → %s", prev, current_state)
         except Exception as e:
             logger.error("US futures signal failed: %s", e)
 

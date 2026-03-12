@@ -1489,6 +1489,11 @@ def _extract_scan_profile(scan_result) -> dict | None:
     }
 
 
+def extract_scan_profile(scan_result) -> dict | None:
+    """공용 ScanResult 정규화 래퍼."""
+    return _extract_scan_profile(scan_result)
+
+
 def _append_reason(reasons: list[str], condition: bool, text: str) -> None:
     if condition and text not in reasons:
         reasons.append(text)
