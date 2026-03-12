@@ -62,6 +62,9 @@ class CoreHandlersMixin:
         self.ai = AIRouter()
         # v3.6: KIS WebSocket (실시간 호가)
         self.ws = KISWebSocket()
+        self._recent_callbacks: dict[tuple[int, int, str], float] = {}
+        self._callback_expiry_sec = 12 * 60 * 60
+        self._callback_dedupe_sec = 1.5
 
     def build_app(self) -> Application:
         from telegram.request import HTTPXRequest
@@ -2173,11 +2176,62 @@ class CoreHandlersMixin:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         query = update.callback_query
+        data = (query.data or "").strip()
+
+        def _message_age_sec() -> float:
+            msg = getattr(query, "message", None)
+            msg_dt = getattr(msg, "date", None)
+            if not msg_dt:
+                return 0.0
+            now = datetime.now(msg_dt.tzinfo or KST)
+            return max(0.0, (now - msg_dt).total_seconds())
+
+        def _is_duplicate_callback() -> bool:
+            import time as _time
+
+            user_id = getattr(getattr(query, "from_user", None), "id", 0)
+            msg_id = getattr(getattr(query, "message", None), "message_id", 0)
+            key = (user_id, msg_id, data)
+            now = _time.monotonic()
+            last = self._recent_callbacks.get(key, 0.0)
+            self._recent_callbacks[key] = now
+            cutoff = now - max(self._callback_expiry_sec, 60)
+            self._recent_callbacks = {
+                k: ts for k, ts in self._recent_callbacks.items()
+                if ts >= cutoff
+            }
+            return last > 0 and (now - last) < self._callback_dedupe_sec
+
         try:
             await query.answer()
         except Exception:
             logger.debug("handle_callback query.answer failed (query too old or invalid)", exc_info=True)
-        data = query.data or ""
+
+        if not data:
+            try:
+                await query.message.reply_text(
+                    "⚠️ 비어 있는 버튼입니다.\n최신 메시지에서 다시 시도해주세요."
+                )
+            except Exception:
+                logger.debug("Empty callback recovery failed", exc_info=True)
+            return
+
+        if _message_age_sec() > self._callback_expiry_sec:
+            try:
+                await query.message.reply_text(
+                    "⏰ 오래된 버튼이에요.\n/start 또는 최신 메뉴에서 다시 눌러주세요."
+                )
+            except Exception:
+                logger.debug("Expired callback recovery failed", exc_info=True)
+            return
+
+        if _is_duplicate_callback():
+            try:
+                await query.answer("처리 중입니다.", show_alert=False)
+            except Exception:
+                logger.debug("Duplicate callback answer failed", exc_info=True)
+            return
+
         try:
             action, _, payload = data.partition(":")
 
@@ -2195,6 +2249,11 @@ class CoreHandlersMixin:
             handler = dispatch.get(action)
             if handler:
                 await handler(query, context, payload)
+                return
+            logger.warning("Unknown callback action: %s", data)
+            await query.message.reply_text(
+                "⚠️ 오래됐거나 알 수 없는 버튼입니다.\n/start 또는 최신 메뉴에서 다시 시도해주세요."
+            )
         except Exception as e:
             logger.error("Callback error: %s", e, exc_info=True)
             try:
@@ -3169,5 +3228,4 @@ class CoreHandlersMixin:
                 logger.debug("_action_profit_taking error recovery edit_text also failed", exc_info=True)
 
     # == Usage guide ===========================================================
-
 

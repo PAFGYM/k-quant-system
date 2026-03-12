@@ -350,7 +350,9 @@ async def safe_edit_or_reply(query, text: str, reply_markup=None) -> None:
     """
     try:
         await query.edit_message_text(text, reply_markup=reply_markup)
-    except Exception:
+    except Exception as e:
+        if "message is not modified" in str(e).lower():
+            return
         try:
             await query.message.reply_text(text, reply_markup=reply_markup)
         except Exception:
@@ -429,5 +431,4 @@ def _today() -> str:
 # Export all names (including _ prefixed helpers) for mixin imports
 import sys as _sys_mod
 __all__ = [_n for _n in dir(_sys_mod.modules[__name__]) if not _n.startswith('__')]
-
 

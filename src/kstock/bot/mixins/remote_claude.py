@@ -1259,7 +1259,18 @@ class RemoteClaudeMixin:
             return
 
         # Telegram 네트워크 오류는 자동 수정 대상 아님
-        skip_patterns = ["Timed out", "Network", "Connection", "ReadTimeout", "WriteTimeout"]
+        skip_patterns = [
+            "Timed out",
+            "Network",
+            "Connection",
+            "ReadTimeout",
+            "WriteTimeout",
+            "message is not modified",
+            "query is too old",
+            "callback query is too old",
+            "invalid callback data",
+            "message to edit not found",
+        ]
         combined = f"{error_source} {error_str}".lower()
         if any(p.lower() in combined for p in skip_patterns):
             return
