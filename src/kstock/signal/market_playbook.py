@@ -323,6 +323,10 @@ def build_downside_playbook(
     usdkrw_change = _safe_float(getattr(macro, "usdkrw_change_pct", 0.0))
     ewy_change = _safe_float(getattr(macro, "ewy_change_pct", 0.0))
     koru_change = _safe_float(getattr(macro, "koru_change_pct", 0.0))
+    wti_price = _safe_float(getattr(macro, "wti_price", 0.0))
+    wti_change = _safe_float(getattr(macro, "wti_change_pct", 0.0))
+    brent_price = _safe_float(getattr(macro, "brent_price", 0.0))
+    brent_change = _safe_float(getattr(macro, "brent_change_pct", 0.0))
 
     if leverage_drop <= -5.0:
         risk_score += 30.0
@@ -367,6 +371,23 @@ def build_downside_playbook(
         triggers.append(f"원달러 {usdkrw_change:+.1f}%")
     elif usdkrw_change >= 0.3:
         risk_score += 4.0
+
+    if wti_change >= 5.0 or wti_price >= 95.0:
+        risk_score += 10.0
+        triggers.append(f"WTI {wti_change:+.1f}%")
+        flow_lines.append(
+            f"유가 쇼크: WTI ${wti_price:.1f} ({wti_change:+.1f}%) / "
+            f"Brent ${brent_price:.1f} ({brent_change:+.1f}%)"
+        )
+        if usdkrw_change >= 0.7:
+            risk_score += 6.0
+            flow_lines.append("유가+환율 동시 악화: 한국 수입물가·외인 리스크오프 압력")
+        if wti_price >= 95.0 and brent_price >= 95.0:
+            flow_lines.append("지정학 프리미엄 확대: 중동/호르무즈 리스크 점검 필요")
+    elif wti_change >= 2.0 or brent_change >= 2.0:
+        flow_lines.append(
+            f"유가 반등: WTI {wti_change:+.1f}% / Brent {brent_change:+.1f}%"
+        )
 
     if ewy_change <= -2.0:
         risk_score += 10.0

@@ -25,6 +25,10 @@ def _macro_snapshot(**overrides):
         nq_futures_change_pct=-1.8,
         koru_change_pct=-6.1,
         ewy_change_pct=-3.2,
+        wti_price=96.1,
+        wti_change_pct=10.2,
+        brent_price=96.3,
+        brent_change_pct=4.7,
     )
     base.update(overrides)
     return MacroSnapshot(**base)
@@ -84,6 +88,7 @@ def test_build_downside_playbook_flags_crisis_and_strong_stock():
     assert playbook.avoid_stocks
     assert playbook.avoid_stocks[0].ticker == "222222"
     assert any("패시브" in line or "비차익" in line for line in playbook.flow_lines)
+    assert any("유가 쇼크" in line for line in playbook.flow_lines)
 
 
 def test_format_downside_playbook_includes_tactics_and_sections():
@@ -100,6 +105,10 @@ def test_format_downside_playbook_includes_tactics_and_sections():
         usdkrw_change_pct=0.2,
         koru_change_pct=-2.6,
         ewy_change_pct=-1.4,
+        wti_price=86.0,
+        wti_change_pct=1.2,
+        brent_price=87.0,
+        brent_change_pct=1.1,
     )
     candidates = [
         {
@@ -148,6 +157,10 @@ def test_normal_playbook_formats_to_empty_string():
         usdkrw_change_pct=-0.2,
         koru_change_pct=1.2,
         ewy_change_pct=0.7,
+        wti_price=78.0,
+        wti_change_pct=-1.3,
+        brent_price=80.0,
+        brent_change_pct=-1.0,
     )
     playbook = build_downside_playbook(macro, [], leverage_change_pct=1.5, inverse_change_pct=-1.0)
     assert playbook.regime == "normal"
