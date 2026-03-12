@@ -1612,7 +1612,7 @@ async def batch_deep_youtube_analysis(
     from kstock.ingest.global_news import fetch_global_news
 
     # YouTube 영상만 수집
-    items = await fetch_global_news(max_per_feed=10)
+    items = await fetch_global_news(max_per_feed=10, hours_lookback=hours_lookback)
     yt_items = [it for it in items if it.video_id]
 
     if not yt_items:
@@ -1631,8 +1631,14 @@ async def batch_deep_youtube_analysis(
         if db:
             try:
                 if db.check_youtube_processed(item.video_id):
-                    skipped += 1
-                    continue
+                    should_upgrade = True
+                    if hasattr(db, "should_upgrade_youtube_intelligence"):
+                        should_upgrade = db.should_upgrade_youtube_intelligence(
+                            item.video_id,
+                        )
+                    if not should_upgrade:
+                        skipped += 1
+                        continue
             except Exception:
                 pass
 

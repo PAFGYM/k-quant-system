@@ -886,6 +886,65 @@ class MarketMixin:
             logger.debug("check_youtube_processed error for %s", video_id, exc_info=True)
             return False
 
+    def get_youtube_intelligence(self, video_id: str) -> dict | None:
+        """단일 YouTube 인텔리전스 조회."""
+        import json as _json
+
+        if not video_id:
+            return None
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT * FROM youtube_intelligence WHERE video_id = ? LIMIT 1",
+                    (video_id,),
+                ).fetchone()
+            if not row:
+                return None
+            data = dict(row)
+            for key in ("mentioned_tickers", "mentioned_sectors", "key_numbers"):
+                try:
+                    data[key] = _json.loads(data.get(key) or "[]")
+                except Exception:
+                    data[key] = []
+            return data
+        except Exception:
+            logger.debug("get_youtube_intelligence error for %s", video_id, exc_info=True)
+            return None
+
+    def should_upgrade_youtube_intelligence(
+        self,
+        video_id: str,
+        *,
+        min_confidence: float = 0.55,
+        min_summary_chars: int = 160,
+    ) -> bool:
+        """기존 YouTube 요약이 빈약하면 심화 분석으로 재처리해야 하는지 판단."""
+        existing = self.get_youtube_intelligence(video_id)
+        if not existing:
+            return True
+
+        try:
+            confidence = float(existing.get("confidence", 0.0) or 0.0)
+        except Exception:
+            confidence = 0.0
+        full_summary = str(existing.get("full_summary", "") or "")
+        raw_summary = str(existing.get("raw_summary", "") or "")
+        implications = str(existing.get("investment_implications", "") or "")
+        mentioned_tickers = existing.get("mentioned_tickers") or []
+        mentioned_sectors = existing.get("mentioned_sectors") or []
+        best_summary_len = max(len(full_summary.strip()), len(raw_summary.strip()))
+
+        if confidence < min_confidence:
+            return True
+        if best_summary_len < min_summary_chars:
+            return True
+        if not implications.strip():
+            return True
+        if not mentioned_tickers and not mentioned_sectors:
+            return True
+        return False
+
     def get_recent_youtube_intelligence(
         self, hours: int = 24, limit: int = 10,
     ) -> list[dict]:
