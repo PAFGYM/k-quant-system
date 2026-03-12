@@ -1,6 +1,10 @@
 """Tests for market news deduplication and YouTube prioritization."""
 
-from kstock.ingest.global_news import NewsItem, _youtube_priority_score
+from kstock.ingest.global_news import (
+    NewsItem,
+    _youtube_priority_score,
+    merge_related_topic_groups,
+)
 from kstock.store.sqlite import SQLiteStore
 
 
@@ -59,3 +63,25 @@ def test_youtube_priority_score_prefers_live_market_commentary():
     )
 
     assert _youtube_priority_score(live_item) > _youtube_priority_score(generic_item)
+
+
+def test_merge_related_topic_groups_collapses_same_war_cluster():
+    group1 = [
+        NewsItem(
+            title="미국, 이란 핵시설 공습 검토…중동 전쟁 우려",
+            source="연합뉴스 국제",
+            impact_score=10,
+        )
+    ]
+    group2 = [
+        NewsItem(
+            title="이란, 호르무즈 봉쇄 경고…미사일 보복 가능성",
+            source="Reuters Business",
+            impact_score=9,
+        )
+    ]
+
+    merged = merge_related_topic_groups([group1, group2])
+
+    assert len(merged) == 1
+    assert len(merged[0]) == 2

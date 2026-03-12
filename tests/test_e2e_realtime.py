@@ -232,3 +232,25 @@ class TestSwingReview3Days:
         context.bot.send_message.assert_called_once()
         text = context.bot.send_message.call_args.kwargs["text"]
         assert "Samsung" in text or "단기" in text
+
+
+class TestWsConnectWindow:
+    @pytest.mark.asyncio
+    async def test_ws_connect_skips_outside_session(self):
+        Mixin = _get_mixin_class()
+
+        obj = MagicMock()
+        obj.ws = MagicMock()
+        obj.ws.is_connected = False
+
+        mock_now = MagicMock()
+        mock_now.hour = 1
+        mock_now.minute = 5
+        mock_now.date.return_value = datetime.now().date()
+
+        with patch(f"{_MIXIN_MODULE}.datetime") as mock_dt, \
+             patch(f"{_MIXIN_MODULE}.is_kr_market_open", return_value=True):
+            mock_dt.now.return_value = mock_now
+            await Mixin.job_ws_connect(obj, MagicMock())
+
+        obj.ws.connect.assert_not_called()

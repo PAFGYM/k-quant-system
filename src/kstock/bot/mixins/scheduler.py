@@ -5515,6 +5515,13 @@ class SchedulerMixin:
         now = datetime.now(KST)
         if not is_kr_market_open(now.date()):  # 주말
             return
+        if (now.hour, now.minute) < (8, 50) or (now.hour, now.minute) > (15, 35):
+            logger.debug(
+                "Skip WebSocket connect outside KR session: %02d:%02d KST",
+                now.hour,
+                now.minute,
+            )
+            return
 
         try:
             ok = await self.ws.connect()
@@ -7318,6 +7325,7 @@ class SchedulerMixin:
                 translate_titles_to_korean,
                 enrich_youtube_summaries,
                 group_similar_news,
+                merge_related_topic_groups,
                 analyze_urgent_news,
                 make_alert_hash,
             )
@@ -7358,17 +7366,23 @@ class SchedulerMixin:
                 if urgent and self.chat_id:
                     # v9.5.3: 유사 뉴스 그룹핑 (같은 이벤트 통합)
                     groups = group_similar_news(urgent, threshold=0.35)
+                    groups = merge_related_topic_groups(groups)
 
                     # DB 기반 중복 방지 (재시작 후에도 유지)
                     new_groups = []
+                    seen_cycle_topics: set[str] = set()
                     for group in groups:
                         h = make_alert_hash(group)
                         title_summary = group[0].title[:100]
+                        topic_key = make_alert_hash(group[:1])
+                        if topic_key in seen_cycle_topics:
+                            continue
                         if (
                             not self.db.is_alert_sent(h, hours=24)
                             and not self.db.is_similar_alert_sent(title_summary, hours=24)
                         ):
                             new_groups.append(group)
+                            seen_cycle_topics.add(topic_key)
 
                     if new_groups:
                         # AI 분석 포함 리치 알림 생성

@@ -852,6 +852,46 @@ def group_similar_news(items: list[NewsItem], threshold: float = 0.4) -> list[li
     return groups
 
 
+def merge_related_topic_groups(groups: list[list[NewsItem]]) -> list[list[NewsItem]]:
+    """대표 제목 기준으로 같은 사건군 그룹을 한 번 더 합친다.
+
+    1차 그룹핑 후에도 제목 표현이 달라 여러 묶음으로 남는 경우가 있어,
+    같은 토픽 클러스터/유사 대표 제목이면 한 그룹으로 병합한다.
+    """
+    if not groups:
+        return []
+
+    merged: list[list[NewsItem]] = []
+    used: set[int] = set()
+
+    for i, group in enumerate(groups):
+        if i in used:
+            continue
+        combined = list(group)
+        used.add(i)
+        rep_title = group[0].title if group else ""
+
+        for j, other in enumerate(groups):
+            if j in used or not other:
+                continue
+            other_title = other[0].title
+            if _same_topic_cluster(rep_title, other_title) or _title_similarity(rep_title, other_title) >= 0.22:
+                combined.extend(other)
+                used.add(j)
+
+        deduped: list[NewsItem] = []
+        seen = set()
+        for item in sorted(combined, key=lambda x: (x.impact_score, x.title), reverse=True):
+            key = item.url or item.title
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        merged.append(deduped)
+
+    return merged
+
+
 async def analyze_urgent_news(groups: list[list[NewsItem]], db=None) -> str:
     """AI로 긴급 뉴스 그룹을 분석하여 한국 시장 영향 해석.
 
