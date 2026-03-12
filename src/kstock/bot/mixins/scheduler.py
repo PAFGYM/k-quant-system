@@ -6497,7 +6497,11 @@ class SchedulerMixin:
                     new_groups = []
                     for group in groups:
                         h = make_alert_hash(group)
-                        if not self.db.is_alert_sent(h, hours=24):
+                        title_summary = group[0].title[:100]
+                        if (
+                            not self.db.is_alert_sent(h, hours=24)
+                            and not self.db.is_similar_alert_sent(title_summary, hours=24)
+                        ):
                             new_groups.append(group)
 
                     if new_groups:

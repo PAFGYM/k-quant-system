@@ -3,10 +3,47 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
+
+
+def _news_title_key(title: str) -> str:
+    """유사 뉴스 중복 판별용 정규화 키."""
+    normalized = re.sub(r"[^\w\s]", " ", (title or "").lower())
+    words = [w for w in normalized.split() if len(w) >= 2]
+    return " ".join(sorted(set(words))[:12])
+
+
+def _canonical_news_url(url: str) -> str:
+    """추적 파라미터를 제거한 뉴스 URL 정규화."""
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        if "youtu.be" in host:
+            return f"yt:{parsed.path.strip('/')}"
+        query = parse_qs(parsed.query)
+        if "youtube.com" in host and query.get("v"):
+            return f"yt:{query['v'][0]}"
+        clean_query = {
+            key: value for key, value in query.items()
+            if not key.startswith("utm_") and key not in {"si", "feature", "fbclid"}
+        }
+        return urlunparse((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            "",
+            urlencode(sorted(clean_query.items()), doseq=True),
+            "",
+        ))
+    except Exception:
+        return url
 
 
 class MarketMixin:
@@ -626,24 +663,43 @@ class MarketMixin:
     def save_global_news(self, items: list[dict]) -> int:
         """글로벌 뉴스 저장. 중복 URL 스킵. 저장 건수 반환."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        recent_cutoff = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
         saved = 0
         with self._connect() as conn:
             for item in items:
                 url = item.get("url", "")
                 title = item.get("title", "")
-                # URL 기반 중복 체크 (URL 없으면 제목으로 체크)
-                if url:
+                source = item.get("source", "")
+                video_id = item.get("video_id", "")
+
+                if video_id:
                     existing = conn.execute(
-                        "SELECT id FROM global_news WHERE url=?", (url,)
+                        "SELECT id FROM global_news WHERE video_id=? AND created_at>=?",
+                        (video_id, recent_cutoff),
                     ).fetchone()
                     if existing:
                         continue
-                elif title:
-                    existing = conn.execute(
-                        "SELECT id FROM global_news WHERE title=? AND created_at>=?",
-                        (title, (datetime.now() - timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S")),
-                    ).fetchone()
-                    if existing:
+
+                canonical_url = _canonical_news_url(url)
+                if canonical_url:
+                    recent_urls = conn.execute(
+                        "SELECT url FROM global_news WHERE created_at>=?",
+                        (recent_cutoff,),
+                    ).fetchall()
+                    if any(_canonical_news_url(row["url"]) == canonical_url for row in recent_urls if row["url"]):
+                        continue
+
+                title_key = _news_title_key(title)
+                if title_key:
+                    recent_titles = conn.execute(
+                        "SELECT title, source FROM global_news WHERE created_at>=?",
+                        (recent_cutoff,),
+                    ).fetchall()
+                    if any(
+                        _news_title_key(row["title"]) == title_key
+                        and (not source or not row["source"] or row["source"] == source)
+                        for row in recent_titles
+                    ):
                         continue
                 conn.execute(
                     "INSERT INTO global_news "
@@ -689,7 +745,29 @@ class MarketMixin:
                     "ORDER BY impact_score DESC, created_at DESC LIMIT ?",
                     (cutoff, limit),
                 ).fetchall()
-        return [dict(r) for r in rows]
+        items = [dict(r) for r in rows]
+        deduped: list[dict] = []
+        seen_video_ids: set[str] = set()
+        seen_urls: set[str] = set()
+        seen_titles: set[str] = set()
+        for item in items:
+            video_id = item.get("video_id", "")
+            if video_id and video_id in seen_video_ids:
+                continue
+            canonical_url = _canonical_news_url(item.get("url", ""))
+            if canonical_url and canonical_url in seen_urls:
+                continue
+            title_key = _news_title_key(item.get("title", ""))
+            if title_key and title_key in seen_titles:
+                continue
+            if video_id:
+                seen_video_ids.add(video_id)
+            if canonical_url:
+                seen_urls.add(canonical_url)
+            if title_key:
+                seen_titles.add(title_key)
+            deduped.append(item)
+        return deduped
 
     def cleanup_old_news(self, days: int = 7) -> int:
         """오래된 뉴스 정리."""
@@ -726,6 +804,21 @@ class MarketMixin:
                 "(alert_hash, title_summary, created_at) VALUES (?, ?, ?)",
                 (alert_hash, title_summary[:200], now),
             )
+
+    def is_similar_alert_sent(self, title_summary: str, hours: int = 24) -> bool:
+        """같은 사건으로 보이는 긴급 알림이 최근 전송됐는지 확인."""
+        title_key = _news_title_key(title_summary)
+        if not title_key:
+            return False
+        cutoff = (
+            datetime.now() - timedelta(hours=hours)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT title_summary FROM sent_urgent_alerts WHERE created_at>=?",
+                (cutoff,),
+            ).fetchall()
+        return any(_news_title_key(row["title_summary"]) == title_key for row in rows)
 
     def cleanup_old_alerts(self, days: int = 3) -> int:
         """오래된 긴급 알림 기록 정리."""

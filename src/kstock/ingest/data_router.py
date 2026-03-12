@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from kstock.core.market_calendar import is_kr_market_open
 from kstock.core.tz import KST
 
 if TYPE_CHECKING:
@@ -81,6 +82,14 @@ class DataRouter:
             except Exception as e:
                 logger.debug("NaverFinanceClient init failed: %s", e)
         return self._naver
+
+    def _is_kr_live_session(self) -> bool:
+        """한국 정규장 시간인지 확인."""
+        now = datetime.now(KST)
+        if not is_kr_market_open(now.date()):
+            return False
+        minutes = now.hour * 60 + now.minute
+        return 9 * 60 <= minutes <= 15 * 60 + 30
 
     def _get_registry(self):
         """PIT SourceRegistry lazy import."""
@@ -220,7 +229,28 @@ class DataRouter:
                 return price
             self._record_fetch("kis_realtime", ticker, False, elapsed)
 
-        # 2. yfinance
+        # 2. Naver Finance (장중 정확도 우선)
+        naver = self._get_naver_client()
+        if naver and self._is_kr_live_session():
+            try:
+                t0 = time.monotonic()
+                price = await naver.get_current_price(ticker)
+                elapsed = (time.monotonic() - t0) * 1000
+                if price > 0:
+                    self._fallback_count += 1
+                    self._last_source_used = "naver"
+                    self._record_fetch("naver", ticker, True, elapsed)
+                    logger.debug(
+                        "Naver live-session price for %s: %s (count=%d)",
+                        ticker, price, self._fallback_count,
+                    )
+                    return price
+                self._record_fetch("naver", ticker, False, elapsed)
+            except Exception:
+                logger.debug("get_price: Naver live price fetch failed for %s", ticker, exc_info=True)
+                self._record_fetch("naver", ticker, False, 0)
+
+        # 3. yfinance
         if self.yf:
             try:
                 t0 = time.monotonic()
@@ -235,8 +265,7 @@ class DataRouter:
                 logger.debug("get_price: yfinance price fetch failed for %s", ticker, exc_info=True)
                 self._record_fetch("yfinance", ticker, False, 0)
 
-        # 3. Naver Finance (새로운 폴백)
-        naver = self._get_naver_client()
+        # 4. Naver Finance (비장중 또는 yfinance 실패 시 폴백)
         if naver:
             try:
                 t0 = time.monotonic()

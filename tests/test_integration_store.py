@@ -150,6 +150,20 @@ class TestGlobalNewsIntegration:
         deleted = db.cleanup_old_news(days=365)
         assert deleted == 0
 
+    def test_news_retrieve_dedupes_similar_titles(self, db):
+        db.save_global_news([
+            {"title": "Fed 금리 동결 시사", "source": "Reuters", "url": "http://ex.com/a"},
+            {"title": "Fed, 금리 동결 시사", "source": "Reuters", "url": "http://ex.com/b"},
+        ])
+
+        news = db.get_recent_global_news(hours=1)
+
+        assert len(news) == 1
+
+    def test_similar_alert_detection(self, db):
+        db.save_sent_alert("hash-1", "Fed 금리 동결 시사")
+        assert db.is_similar_alert_sent("Fed, 금리 동결 시사")
+
 
 class TestMixinComposition:
     """Mixin 합성 레이어 호환성."""
