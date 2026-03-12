@@ -62,6 +62,9 @@ class CoreHandlersMixin:
         self.ai = AIRouter()
         # v3.6: KIS WebSocket (실시간 호가)
         self.ws = KISWebSocket()
+        self._recent_callbacks: dict[tuple[int, int, str], float] = {}
+        self._callback_expiry_sec = 12 * 60 * 60
+        self._callback_dedupe_sec = 1.5
 
     def build_app(self) -> Application:
         from telegram.request import HTTPXRequest
@@ -979,6 +982,20 @@ class CoreHandlersMixin:
             image_bytes = await file.download_as_bytearray()
 
             parsed = await parse_account_screenshot(bytes(image_bytes), self.anthropic_key)
+            if not has_meaningful_account_data(parsed):
+                logger.warning(
+                    "Screenshot OCR returned empty/zero account data; skipping DB save",
+                )
+                context.user_data.pop("pending_screenshot_id", None)
+                context.user_data.pop("pending_holdings", None)
+                await update.message.reply_text(
+                    "⚠️ 스크린샷 인식이 불완전했습니다.\n"
+                    "현재 분석값이 모두 0으로 나와 저장하지 않았습니다.\n"
+                    "계좌 전체, 종목명, 수량, 예수금이 잘 보이게 다시 캡처해서 보내주세요.\n"
+                    "Anthropic Vision이 막히면 OpenAI Vision으로 자동 우회합니다.",
+                    reply_markup=get_reply_markup(context),
+                )
+                return
             holdings = parsed.get("holdings", [])
 
             # Get previous screenshot for comparison
@@ -1043,25 +1060,30 @@ class CoreHandlersMixin:
                 cur_price = h.get("current_price", 0)
                 pnl_pct = h.get("profit_pct", 0)
                 eval_amt = h.get("eval_amount", 0)
+                purchase_type = str(h.get("purchase_type", "") or "").strip()
+                is_margin, margin_type = detect_margin_purchase(h)
                 try:
                     self.db.upsert_holding(
                         ticker=ticker, name=hname,
                         quantity=qty, buy_price=avg_price,
                         current_price=cur_price, pnl_pct=pnl_pct,
                         eval_amount=eval_amt,
+                        purchase_type=purchase_type,
+                        is_margin=1 if is_margin else 0,
+                        margin_type=margin_type or "",
                     )
                 except Exception as he:
                     logger.debug("Holding upsert for %s failed: %s", ticker, he)
 
                 # screenshot_holdings 테이블에도 저장
                 try:
-                    is_margin, margin_type = detect_margin_purchase(h)
                     self.db.add_screenshot_holding(
                         screenshot_id=screenshot_id,
                         ticker=ticker, name=hname,
                         quantity=qty, avg_price=avg_price,
                         current_price=cur_price, profit_pct=pnl_pct,
                         eval_amount=eval_amt,
+                        purchase_type=purchase_type,
                         is_margin=1 if is_margin else 0,
                         margin_type=margin_type or "",
                     )
@@ -2173,11 +2195,62 @@ class CoreHandlersMixin:
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         query = update.callback_query
+        data = (query.data or "").strip()
+
+        def _message_age_sec() -> float:
+            msg = getattr(query, "message", None)
+            msg_dt = getattr(msg, "date", None)
+            if not msg_dt:
+                return 0.0
+            now = datetime.now(msg_dt.tzinfo or KST)
+            return max(0.0, (now - msg_dt).total_seconds())
+
+        def _is_duplicate_callback() -> bool:
+            import time as _time
+
+            user_id = getattr(getattr(query, "from_user", None), "id", 0)
+            msg_id = getattr(getattr(query, "message", None), "message_id", 0)
+            key = (user_id, msg_id, data)
+            now = _time.monotonic()
+            last = self._recent_callbacks.get(key, 0.0)
+            self._recent_callbacks[key] = now
+            cutoff = now - max(self._callback_expiry_sec, 60)
+            self._recent_callbacks = {
+                k: ts for k, ts in self._recent_callbacks.items()
+                if ts >= cutoff
+            }
+            return last > 0 and (now - last) < self._callback_dedupe_sec
+
         try:
             await query.answer()
         except Exception:
             logger.debug("handle_callback query.answer failed (query too old or invalid)", exc_info=True)
-        data = query.data or ""
+
+        if not data:
+            try:
+                await query.message.reply_text(
+                    "⚠️ 비어 있는 버튼입니다.\n최신 메시지에서 다시 시도해주세요."
+                )
+            except Exception:
+                logger.debug("Empty callback recovery failed", exc_info=True)
+            return
+
+        if _message_age_sec() > self._callback_expiry_sec:
+            try:
+                await query.message.reply_text(
+                    "⏰ 오래된 버튼이에요.\n/start 또는 최신 메뉴에서 다시 눌러주세요."
+                )
+            except Exception:
+                logger.debug("Expired callback recovery failed", exc_info=True)
+            return
+
+        if _is_duplicate_callback():
+            try:
+                await query.answer("처리 중입니다.", show_alert=False)
+            except Exception:
+                logger.debug("Duplicate callback answer failed", exc_info=True)
+            return
+
         try:
             action, _, payload = data.partition(":")
 
@@ -2195,6 +2268,11 @@ class CoreHandlersMixin:
             handler = dispatch.get(action)
             if handler:
                 await handler(query, context, payload)
+                return
+            logger.warning("Unknown callback action: %s", data)
+            await query.message.reply_text(
+                "⚠️ 오래됐거나 알 수 없는 버튼입니다.\n/start 또는 최신 메뉴에서 다시 시도해주세요."
+            )
         except Exception as e:
             logger.error("Callback error: %s", e, exc_info=True)
             try:
@@ -2915,6 +2993,7 @@ class CoreHandlersMixin:
                         current_price=h.get("current_price", 0),
                         profit_pct=h.get("profit_pct", 0),
                         eval_amount=h.get("eval_amount", 0),
+                        purchase_type=h.get("purchase_type", ""),
                         diagnosis=d.diagnosis,
                         diagnosis_action=d.action,
                         diagnosis_msg=d.message,
@@ -2999,6 +3078,7 @@ class CoreHandlersMixin:
                     current_price=h.get("current_price", 0),
                     profit_pct=r.profit_pct,
                     eval_amount=h.get("eval_amount", 0),
+                    purchase_type=h.get("purchase_type", ""),
                     diagnosis=r.diagnosis,
                     diagnosis_action=r.action,
                     diagnosis_msg=r.message,
@@ -3169,5 +3249,3 @@ class CoreHandlersMixin:
                 logger.debug("_action_profit_taking error recovery edit_text also failed", exc_info=True)
 
     # == Usage guide ===========================================================
-
-

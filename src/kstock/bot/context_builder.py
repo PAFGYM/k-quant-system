@@ -545,6 +545,25 @@ def get_market_context(macro_snapshot: dict | None = None) -> str:
         lines.append("--- 미국 레버리지 ETF ---")
         lines.extend(etf_lines)
 
+    # [v13.1] 국내 레버리지/인버스 ETF
+    kodex_leverage = macro_snapshot.get("kodex_leverage_price")
+    kodex_leverage_chg = macro_snapshot.get("kodex_leverage_change_pct")
+    kodex_inverse = macro_snapshot.get("kodex_inverse2x_price")
+    kodex_inverse_chg = macro_snapshot.get("kodex_inverse2x_change_pct")
+
+    kr_etf_lines = []
+    if kodex_leverage is not None and kodex_leverage > 0:
+        kr_etf_lines.append(
+            f"KODEX 레버리지: {kodex_leverage:,.0f}원 ({kodex_leverage_chg:+.2f}%)",
+        )
+    if kodex_inverse is not None and kodex_inverse > 0:
+        kr_etf_lines.append(
+            f"KODEX 인버스2X: {kodex_inverse:,.0f}원 ({kodex_inverse_chg:+.2f}%)",
+        )
+    if kr_etf_lines:
+        lines.append("--- 국내 레버리지 ETF ---")
+        lines.extend(kr_etf_lines)
+
     # [v3.6.6] 유동성 방향 감지: 장단기 금리차
     if us10y is not None and us2y is not None and us10y > 0 and us2y > 0:
         spread = us10y - us2y

@@ -637,6 +637,7 @@ class SchedulerMixin:
 
         v9.5: shared_context로 YouTube 인텔리전스 + 매니저 크로스 컨텍스트 주입.
         """
+        today_str = _today()
         try:
             from collections import defaultdict
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -644,6 +645,10 @@ class SchedulerMixin:
 
             holdings = self.db.get_active_holdings()
             if not holdings:
+                self.db.upsert_job_run(
+                    "manager_briefings", today_str,
+                    status="skip", message="no active holdings",
+                )
                 return
 
             # v11.0.1: LEGACY_EXEMPT 종목은 매니저 브리핑에서 제외
@@ -655,6 +660,10 @@ class SchedulerMixin:
                     if h.get("ticker", "") not in LEGACY_EXEMPT_TICKERS
                 ]
                 if not holdings:
+                    self.db.upsert_job_run(
+                        "manager_briefings", today_str,
+                        status="skip", message="holdings filtered by exempt list",
+                    )
                     return
             except ImportError:
                 pass
@@ -712,6 +721,7 @@ class SchedulerMixin:
             )
 
             current_alert = getattr(self, '_alert_mode', 'normal')
+            sent_count = 0
             for mtype, mholdings in by_type.items():
                 if mtype not in MANAGERS or not mholdings:
                     continue
@@ -846,6 +856,7 @@ class SchedulerMixin:
                             chat_id=self.chat_id, text=report[:4000],
                             reply_markup=_mgr_btns,
                         )
+                        sent_count += 1
                         # v9.5: 매니저 stance를 DB에 저장 (통합 상태용)
                         try:
                             stance_line = report.split("\n")[0][:120] if report else ""
@@ -872,8 +883,18 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("Failed to send portfolio balance advice", exc_info=True)
 
+            self.db.upsert_job_run(
+                "manager_briefings",
+                today_str,
+                status="success",
+                message=f"groups={len(by_type)}, sent={sent_count}",
+            )
             logger.info("Manager briefings sent: %s", list(by_type.keys()))
         except Exception as e:
+            self.db.upsert_job_run(
+                "manager_briefings", today_str,
+                status="error", message=str(e),
+            )
             logger.debug("Manager briefings error: %s", e)
 
     # ── v8.6: 자동분류 + 매니저 매수 스캔 ────────────────────────
@@ -893,16 +914,615 @@ class SchedulerMixin:
         except Exception as e:
             logger.error("job_auto_classify failed: %s", e)
 
+    def _build_manager_fast_context(self, candidates_by_manager: dict[str, list[dict]]) -> dict:
+        """최근 뉴스/유튜브 기반 빠른 이벤트 컨텍스트 구성."""
+        from collections import defaultdict
+
+        candidate_tickers = {
+            item.get("ticker", "")
+            for items in candidates_by_manager.values()
+            for item in items
+            if item.get("ticker")
+        }
+        candidate_names = {
+            item.get("name", "")
+            for items in candidates_by_manager.values()
+            for item in items
+            if item.get("name")
+        }
+        context = {
+            "event_hits_by_ticker": defaultdict(list),
+            "event_hits_by_name": defaultdict(list),
+            "news_hits_by_name": defaultdict(int),
+            "community_hits_by_name": defaultdict(int),
+            "yt_by_ticker": {},
+            "yt_by_name": {},
+            "event_lines": [],
+            "crowd_lines": [],
+        }
+
+        try:
+            from kstock.signal.future_tech import FUTURE_SECTORS
+            from kstock.signal.future_trigger import TRIGGER_TYPES, analyze_trigger
+
+            news_items = self.db.get_recent_global_news(limit=12, hours=18)
+            raw_event_lines: list[tuple[int, str]] = []
+            raw_crowd_lines: list[str] = []
+            priority_tags = (
+                "GTC",
+                "CES",
+                "MWC",
+                "COMPUTEX",
+                "INTERBATTERY",
+                "인터배터리",
+                "SEMICON KOREA",
+                "세미콘코리아",
+                "서울모빌리티쇼",
+                "ADEX",
+                "KIMES",
+                "SID",
+                "월드IT쇼",
+                "FDA",
+                "FOMC",
+            )
+            community_keywords = (
+                "리딩방",
+                "추천주",
+                "급등",
+                "상한가",
+                "토론방",
+                "세력",
+                "상따",
+                "주도주",
+                "단독",
+            )
+
+            for item in news_items or []:
+                title = str(item.get("title", "") or "").strip()
+                if not title:
+                    continue
+                lowered = title.lower()
+                urgent_bonus = 2 if int(item.get("is_urgent", 0) or 0) else 0
+                for name in candidate_names:
+                    if name and name in title:
+                        context["news_hits_by_name"][name] += 1
+
+                matched_priority = [tag for tag in priority_tags if tag.lower() in lowered]
+                matched_community = [tag for tag in community_keywords if tag in title]
+                if matched_priority:
+                    raw_event_lines.append((
+                        4 + urgent_bonus,
+                        f"{matched_priority[0]} | {title[:64]}",
+                    ))
+                    for name in candidate_names:
+                        if name and name in title:
+                            context["event_hits_by_name"][name].append(matched_priority[0])
+                if matched_community:
+                    for name in candidate_names:
+                        if name and name in title:
+                            context["community_hits_by_name"][name] += 1
+                            raw_crowd_lines.append(
+                                f"{name} | 커뮤니티 {matched_community[0]} | {title[:44]}"
+                            )
+
+                for event in analyze_trigger(
+                    title,
+                    source=item.get("source", ""),
+                    date=str(item.get("created_at", "") or "")[:10],
+                ):
+                    sector_name = FUTURE_SECTORS.get(event.sector, {}).get("name", event.sector)
+                    type_label = TRIGGER_TYPES.get(event.trigger_type, {}).get("label", event.trigger_type)
+                    overlap = [t for t in event.beneficiary_tickers if t in candidate_tickers]
+                    for ticker in event.beneficiary_tickers:
+                        if ticker:
+                            context["event_hits_by_ticker"][ticker].append(sector_name)
+                    for name in candidate_names:
+                        if name and name in title:
+                            context["event_hits_by_name"][name].append(sector_name)
+                    line = f"{sector_name} | {type_label} | {title[:48]}"
+                    if overlap:
+                        line += f" | 수혜 {', '.join(overlap[:2])}"
+                    impact_bonus = 2 if event.impact == "HIGH" else 1
+                    raw_event_lines.append((impact_bonus + urgent_bonus + (2 if overlap else 0), line))
+
+            seen_lines: set[str] = set()
+            for _, line in sorted(raw_event_lines, key=lambda item: item[0], reverse=True):
+                if line in seen_lines:
+                    continue
+                seen_lines.add(line)
+                context["event_lines"].append(line)
+                if len(context["event_lines"]) >= 6:
+                    break
+            crowd_seen: set[str] = set()
+            for line in raw_crowd_lines:
+                if line in crowd_seen:
+                    continue
+                crowd_seen.add(line)
+                context["crowd_lines"].append(line)
+                if len(context["crowd_lines"]) >= 4:
+                    break
+        except Exception:
+            logger.debug("Manager fast event context build failed", exc_info=True)
+
+        try:
+            yt_mentions = self.db.get_youtube_mentioned_tickers(hours=36)
+            crowd_lines: list[str] = []
+            for item in yt_mentions or []:
+                name = str(item.get("name", "") or "")
+                ticker = str(item.get("ticker", "") or "")
+                mentions = int(item.get("mentions", 0) or 0)
+                if ticker:
+                    context["yt_by_ticker"][ticker] = item
+                if name:
+                    context["yt_by_name"][name] = item
+                if mentions >= 3 and (name in candidate_names or ticker in candidate_tickers):
+                    positive = int(item.get("긍정", 0) or 0)
+                    negative = int(item.get("부정", 0) or 0)
+                    mood = "긍정 우위" if positive >= negative else "과열 경계"
+                    crowd_lines.append(f"{name} | 유튜브 {mentions}회 | {mood}")
+            merged_crowd = list(context.get("crowd_lines", []))
+            for line in crowd_lines:
+                if line not in merged_crowd:
+                    merged_crowd.append(line)
+            context["crowd_lines"] = merged_crowd[:5]
+        except Exception:
+            logger.debug("Manager YouTube context build failed", exc_info=True)
+
+        return context
+
+    def _enrich_manager_candidates_with_fast_context(
+        self,
+        candidates_by_manager: dict[str, list[dict]],
+        fast_context: dict,
+    ) -> dict[str, list[dict]]:
+        """후보 종목에 이벤트/유튜브/뉴스 신호를 합성."""
+        def _infer_tenbagger_entry_stage(candidate: dict) -> str:
+            event_tags = candidate.get("event_tags") or []
+            mentions = int(candidate.get("youtube_mentions", 0) or 0)
+            news_hits = int(candidate.get("news_hits", 0) or 0)
+            crowd_signal = str(candidate.get("crowd_signal", "") or "")
+            listing_market = str(candidate.get("listing_market", "") or "")
+            market_cap = float(candidate.get("market_cap", 0) or 0)
+            fit_score = float(candidate.get("fit_score", 0) or 0)
+
+            if crowd_signal in {"커뮤니티 과열", "개미 과열 경계", "리딩방 급행 주의"}:
+                return "과열 경계"
+            if len(event_tags) >= 2 and mentions >= 3:
+                return "선점 구간"
+            if event_tags and news_hits >= 1:
+                return "촉매 대기"
+            if listing_market == "KOSDAQ" and 700_0000_0000 <= market_cap <= 2_0000_0000_0000 and fit_score >= 68:
+                return "씨앗 구축"
+            return "관찰"
+
+        event_hits_by_ticker = fast_context.get("event_hits_by_ticker", {})
+        event_hits_by_name = fast_context.get("event_hits_by_name", {})
+        news_hits_by_name = fast_context.get("news_hits_by_name", {})
+        community_hits_by_name = fast_context.get("community_hits_by_name", {})
+        yt_by_ticker = fast_context.get("yt_by_ticker", {})
+        yt_by_name = fast_context.get("yt_by_name", {})
+
+        for manager_key, candidates in candidates_by_manager.items():
+            for candidate in candidates:
+                ticker = candidate.get("ticker", "")
+                name = candidate.get("name", "")
+                yt = yt_by_ticker.get(ticker) or yt_by_name.get(name) or {}
+                mentions = int(yt.get("mentions", 0) or 0)
+                event_tags = list(dict.fromkeys(
+                    list(event_hits_by_ticker.get(ticker, []))
+                    + list(event_hits_by_name.get(name, []))
+                ))[:3]
+                news_hits = int(news_hits_by_name.get(name, 0))
+                community_hits = int(community_hits_by_name.get(name, 0))
+                crowd_signal = candidate.get("crowd_signal", "")
+
+                if not crowd_signal and community_hits >= 2 and mentions >= 2 and not event_tags:
+                    crowd_signal = "리딩방 급행 주의"
+                elif not crowd_signal and mentions >= 4 and not event_tags:
+                    crowd_signal = "커뮤니티 과열"
+                elif not crowd_signal and mentions >= 3 and event_tags:
+                    crowd_signal = "커뮤니티+테마 공명"
+                elif not crowd_signal and community_hits >= 1 and mentions >= 2:
+                    crowd_signal = "커뮤니티 확산"
+
+                fast_bonus = len(event_tags) * (4 if manager_key in {"position", "tenbagger"} else 2)
+                fast_bonus += min(4, mentions)
+                fast_bonus += min(3, news_hits)
+                fast_bonus += min(2, community_hits)
+                if crowd_signal in {"커뮤니티 과열", "개미 과열 경계"}:
+                    fast_bonus -= 4
+                if crowd_signal == "리딩방 급행 주의":
+                    fast_bonus -= 6
+
+                candidate["event_tags"] = event_tags
+                candidate["youtube_mentions"] = mentions
+                candidate["news_hits"] = news_hits
+                candidate["community_hits"] = community_hits
+                if crowd_signal:
+                    candidate["crowd_signal"] = crowd_signal
+                try:
+                    base_fit = float(candidate.get("fit_score", 0) or 0)
+                except Exception:
+                    base_fit = 0.0
+                candidate["fit_score"] = round(max(0.0, min(99.0, base_fit + fast_bonus)), 1)
+
+                reasons = list(candidate.get("fit_reasons") or [])
+                if event_tags:
+                    reasons.append(f"이벤트 {event_tags[0]}")
+                if mentions >= 3:
+                    reasons.append(f"유튜브 {mentions}회")
+                if community_hits >= 1:
+                    reasons.append(f"커뮤니티 {community_hits}건")
+                if crowd_signal and crowd_signal not in reasons:
+                    reasons.append(crowd_signal)
+                seen_reason: set[str] = set()
+                deduped_reasons = []
+                for reason in reasons:
+                    if reason in seen_reason:
+                        continue
+                    seen_reason.add(reason)
+                    deduped_reasons.append(reason)
+                candidate["fit_reasons"] = deduped_reasons[:4]
+                if manager_key == "tenbagger":
+                    entry_stage = _infer_tenbagger_entry_stage(candidate)
+                    candidate["entry_stage"] = entry_stage
+                    if entry_stage == "선점 구간":
+                        candidate["fit_score"] = round(min(99.0, candidate["fit_score"] + 3.0), 1)
+                        candidate["action_hint"] = "행사·정책 촉매 전에 1차 씨앗 포지션 구축"
+                    elif entry_stage == "촉매 대기":
+                        candidate["action_hint"] = "이벤트 일정 확인 후 눌림에서 씨앗 포지션 구축"
+                    elif entry_stage == "과열 경계":
+                        candidate["fit_score"] = round(max(0.0, candidate["fit_score"] - 5.0), 1)
+                        candidate["action_hint"] = "리딩방·커뮤니티 과열 진정 후만 접근"
+                    elif entry_stage == "씨앗 구축":
+                        candidate["action_hint"] = "뉴스보다 먼저 소액 씨앗만 선점"
+
+            candidates.sort(key=lambda item: (
+                -float(item.get("fit_score", 0) or 0),
+                -(1 if item.get("entry_stage") == "선점 구간" else 0),
+                -(1 if item.get("entry_stage") == "씨앗 구축" else 0),
+                -float(item.get("composite", 0) or 0),
+                -float(item.get("confidence_score", 0) or 0),
+            ))
+        return candidates_by_manager
+
+    def _build_manager_herd_lines(self, scan_results: list, limit: int = 3) -> list[str]:
+        """리딩방/세력형 군집 신호를 상위 종목에 대해 빠르게 추정."""
+        try:
+            from kstock.signal.herd_detector import scan_herd_all
+        except Exception:
+            return []
+
+        herd_data = []
+        for result in scan_results[:12]:
+            ohlcv = self._ohlcv_cache.get(getattr(result, "ticker", ""))
+            if ohlcv is None or ohlcv.empty or len(ohlcv) < 20:
+                continue
+            try:
+                close_s = ohlcv["close"].astype(float).tail(20)
+                vol_s = ohlcv["volume"].astype(float).tail(20)
+            except Exception:
+                continue
+            if len(close_s) < 20 or len(vol_s) < 20:
+                continue
+
+            avg_vol = float(vol_s.mean()) if float(vol_s.mean()) > 0 else 1.0
+            flow = getattr(result, "flow", None)
+            inst_bias = max(-1.0, min(1.0, float(getattr(flow, "institution_net_buy_days", 0) or 0) / 3.0))
+            foreign_bias = max(-1.0, min(1.0, float(getattr(flow, "foreign_net_buy_days", 0) or 0) / 3.0))
+            daily_inst: list[float] = []
+            daily_foreign: list[float] = []
+            prev_close = None
+
+            for close, vol in zip(close_s.tolist(), vol_s.tolist()):
+                vol_ratio = vol / avg_vol if avg_vol > 0 else 1.0
+                price_bias = 1.0 if prev_close is None or close >= prev_close else -1.0
+                inst_factor = (0.20 if vol_ratio >= 1.5 else -0.08) + inst_bias * 0.18 + price_bias * 0.04
+                foreign_factor = (0.16 if vol_ratio >= 1.3 else -0.08) + foreign_bias * 0.18 + price_bias * 0.04
+                daily_inst.append(vol * max(-0.4, min(0.4, inst_factor)))
+                daily_foreign.append(vol * max(-0.4, min(0.4, foreign_factor)))
+                prev_close = close
+
+            herd_data.append({
+                "ticker": getattr(result, "ticker", ""),
+                "name": getattr(result, "name", ""),
+                "daily_volumes": vol_s.tolist(),
+                "daily_closes": close_s.tolist(),
+                "daily_inst": daily_inst,
+                "daily_foreign": daily_foreign,
+            })
+
+        signals = scan_herd_all(herd_data)
+        lines = []
+        for signal in signals[:limit]:
+            lines.append(
+                f"{signal.name} ({signal.ticker}) | {signal.pattern} | "
+                f"거래량 {signal.volume_ratio:.1f}배"
+            )
+        return lines
+
+    def _get_ticker_tactical_context(self, ticker: str, name: str = "", macro=None) -> dict:
+        """외인/기관·공매도·숏커버 문맥을 종목 단위로 요약."""
+        def _num(value, default: float = 0.0) -> float:
+            try:
+                if value is None:
+                    return default
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        context: dict[str, object] = {}
+
+        try:
+            supply = self.db.get_supply_demand(ticker, days=5)
+            if supply:
+                recent = supply[:5]
+                foreign_total = sum(_num(row.get("foreign_net", 0)) for row in recent)
+                inst_total = sum(_num(row.get("institution_net", 0)) for row in recent)
+                program_total = sum(_num(row.get("program_net", 0)) for row in recent)
+                foreign_pos = sum(1 for row in recent if _num(row.get("foreign_net", 0)) > 0)
+                inst_pos = sum(1 for row in recent if _num(row.get("institution_net", 0)) > 0)
+                flow_signal = ""
+                if foreign_total > 0 and inst_total > 0:
+                    flow_signal = "외인+기관 순유입"
+                elif foreign_total < 0 and inst_total < 0:
+                    flow_signal = "외인+기관 동반 이탈"
+                elif inst_total > 0 > foreign_total:
+                    flow_signal = "기관 방어 매수"
+                elif foreign_total > 0 > inst_total:
+                    flow_signal = "외인 선행 유입"
+
+                context.update({
+                    "foreign_total_5d": round(foreign_total, 1),
+                    "inst_total_5d": round(inst_total, 1),
+                    "program_total_5d": round(program_total, 1),
+                    "foreign_positive_days": foreign_pos,
+                    "inst_positive_days": inst_pos,
+                })
+                if flow_signal:
+                    context["flow_signal"] = flow_signal
+        except Exception:
+            logger.debug("Failed to load supply-demand context for %s", ticker, exc_info=True)
+
+        try:
+            from kstock.signal.short_pattern import detect_all_patterns
+            from kstock.signal.short_selling import analyze_short_selling, generate_timing_signal
+        except Exception:
+            return context
+
+        try:
+            short_history = self.db.get_short_selling(ticker, days=15)
+            if not short_history:
+                return context
+
+            latest_short = short_history[-1]
+            context["short_ratio"] = _num(latest_short.get("short_ratio", 0.0))
+            context["short_balance_ratio"] = _num(latest_short.get("short_balance_ratio", 0.0))
+
+            price_history: list[dict] = []
+            ohlcv = self._ohlcv_cache.get(ticker)
+            if ohlcv is not None and not ohlcv.empty:
+                try:
+                    for _, row in ohlcv.tail(12).iterrows():
+                        price_history.append({
+                            "close": _num(row.get("close", row.get("Close", 0))),
+                            "volume": _num(row.get("volume", row.get("Volume", 0))),
+                        })
+                except Exception:
+                    logger.debug("Failed to build OHLCV context for %s", ticker, exc_info=True)
+
+            market_change = _num(getattr(macro, "kospi_change_pct", 0.0), 0.0) if macro else 0.0
+            pattern_result = detect_all_patterns(
+                short_history,
+                price_history,
+                market_change_pct=market_change,
+                ticker=ticker,
+                name=name or ticker,
+            )
+            if pattern_result.patterns:
+                context["short_pattern_codes"] = [p.code for p in pattern_result.patterns]
+                context["short_pattern_labels"] = [p.name for p in pattern_result.patterns]
+                context["short_pattern_score"] = pattern_result.total_score_adj
+
+            short_signal = analyze_short_selling(short_history, ticker, name or ticker)
+            if short_signal.patterns:
+                context["short_signal"] = short_signal.patterns[0]
+                context["short_score_adj"] = short_signal.score_adj
+
+            timing = generate_timing_signal(short_history, price_history)
+            if timing.get("action") and timing.get("action") != "중립":
+                context["short_timing_action"] = timing.get("action")
+                context["short_timing_reason"] = timing.get("reason", "")
+            elif set(context.get("short_pattern_codes") or []).intersection({"short_squeeze"}):
+                context["short_timing_action"] = "적극 매수"
+                context["short_timing_reason"] = "숏스퀴즈 진행"
+            elif set(context.get("short_pattern_codes") or []).intersection({"short_covering", "real_buy"}):
+                context["short_timing_action"] = "매수 검토"
+                context["short_timing_reason"] = "숏커버/실매수 전환"
+        except Exception:
+            logger.debug("Failed to load short-selling context for %s", ticker, exc_info=True)
+
+        return context
+
+    def _enrich_manager_candidates_with_flow_short_context(
+        self,
+        candidates_by_manager: dict[str, list[dict]],
+        macro=None,
+    ) -> dict[str, list[dict]]:
+        """외인/기관·공매도·숏커버 문맥을 매니저 후보에 반영."""
+        def _num(value, default: float = 0.0) -> float:
+            try:
+                if value is None:
+                    return default
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        context_cache: dict[str, dict] = {}
+
+        for manager_key, candidates in candidates_by_manager.items():
+            for candidate in candidates:
+                ticker = str(candidate.get("ticker", "") or "")
+                if not ticker:
+                    continue
+                if ticker not in context_cache:
+                    context_cache[ticker] = self._get_ticker_tactical_context(
+                        ticker,
+                        str(candidate.get("name", "") or ""),
+                        macro=macro,
+                    )
+                ctx = context_cache[ticker]
+                candidate.update(ctx)
+
+                reasons = list(candidate.get("fit_reasons") or [])
+                fit_score = float(candidate.get("fit_score", 0) or 0)
+                adj = 0.0
+                flow_signal = str(ctx.get("flow_signal", "") or "")
+                short_codes = set(ctx.get("short_pattern_codes") or [])
+                short_action = str(ctx.get("short_timing_action", "") or "")
+                short_ratio = _num(ctx.get("short_ratio", 0.0))
+
+                if flow_signal:
+                    reasons.append(flow_signal)
+                    if flow_signal == "외인+기관 순유입":
+                        adj += 4.0 if manager_key in {"position", "tenbagger", "long_term"} else 3.0
+                    elif flow_signal == "기관 방어 매수":
+                        adj += 3.0 if manager_key in {"swing", "position", "long_term"} else 1.0
+                    elif flow_signal == "외인 선행 유입":
+                        adj += 3.0 if manager_key in {"scalp", "position", "tenbagger"} else 2.0
+                    elif flow_signal == "외인+기관 동반 이탈":
+                        adj -= 6.0 if manager_key in {"scalp", "swing", "position", "tenbagger"} else 4.0
+
+                if "real_buy" in short_codes:
+                    reasons.append("실매수 전환")
+                    adj += 4.0
+                if "short_covering" in short_codes:
+                    reasons.append("숏커버링")
+                    adj += 5.0 if manager_key in {"scalp", "swing", "tenbagger"} else 3.0
+                if "short_squeeze" in short_codes:
+                    reasons.append("숏스퀴즈")
+                    adj += 6.0 if manager_key in {"scalp", "tenbagger"} else 3.0
+                if "short_buildup" in short_codes:
+                    reasons.append("공매도 빌드업")
+                    adj -= 7.0
+                elif short_ratio >= 12.0 and not short_codes.intersection({"real_buy", "short_covering", "short_squeeze"}):
+                    reasons.append(f"공매도 {short_ratio:.1f}%")
+                    adj -= 3.0
+
+                if short_action in {"적극 매수", "매수 검토"} and short_codes.intersection({"real_buy", "short_covering", "short_squeeze"}):
+                    reasons.append(f"숏커버 {short_action}")
+                    if manager_key in {"scalp", "swing", "tenbagger"}:
+                        adj += 2.0
+                    base_action = str(candidate.get("action_hint", "") or "")
+                    if "숏커버" not in base_action:
+                        candidate["action_hint"] = (
+                            f"{base_action} / 숏커버 확인"
+                            if base_action else "숏커버 강도 확인 후 분할 진입"
+                        )
+
+                seen: set[str] = set()
+                deduped: list[str] = []
+                for reason in reasons:
+                    if reason in seen:
+                        continue
+                    seen.add(reason)
+                    deduped.append(reason)
+                candidate["fit_reasons"] = deduped[:5]
+                candidate["fit_score"] = round(max(0.0, min(99.0, fit_score + adj)), 1)
+
+            candidates.sort(key=lambda item: (
+                -float(item.get("fit_score", 0) or 0),
+                -float(item.get("composite", 0) or 0),
+                -float(item.get("confidence_score", 0) or 0),
+            ))
+
+        return candidates_by_manager
+
+    def _build_downside_playbook(self, macro) -> object | None:
+        """국내 선물/레버리지 급락 대응 플레이북 생성."""
+        try:
+            from kstock.bot.investment_managers import extract_scan_profile
+            from kstock.signal.market_playbook import build_downside_playbook
+        except Exception:
+            return None
+
+        scan_results = list(getattr(self, "_last_scan_results", None) or [])
+        candidates: list[dict] = []
+        program_rows = []
+        try:
+            program_rows = self.db.get_program_trading(days=3, market="KOSPI")
+        except Exception:
+            logger.debug("Failed to load program trading for downside playbook", exc_info=True)
+        leverage_change = None
+        inverse_change = None
+        for result in scan_results[:80]:
+            profile = extract_scan_profile(result)
+            if not profile:
+                continue
+            ticker = profile.get("ticker", "")
+            if ticker == "122630":
+                leverage_change = float(profile.get("day_change", 0) or 0)
+            elif ticker == "252670":
+                inverse_change = float(profile.get("day_change", 0) or 0)
+            profile.update(self._get_ticker_tactical_context(
+                ticker,
+                str(profile.get("name", "") or ""),
+                macro=macro,
+            ))
+            candidates.append(profile)
+
+        return build_downside_playbook(
+            macro,
+            candidates,
+            leverage_change_pct=leverage_change,
+            inverse_change_pct=inverse_change,
+            program_data=(program_rows[0] if program_rows else None),
+        )
+
+    @staticmethod
+    def _playbook_shortcuts(playbook) -> list[dict[str, str]]:
+        """선물 급락 플레이북용 바로가기 버튼."""
+        shortcuts = [
+            {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},
+            {"label": "📊 시장분석", "callback_data": "quick_q:market"},
+        ]
+        if getattr(playbook, "regime", "normal") in {"defense", "crisis"}:
+            shortcuts.append({
+                "label": "🔻 인버스2X",
+                "callback_data": "detail:252670",
+            })
+        for pick in list(getattr(playbook, "strong_stocks", []) or [])[:2]:
+            shortcuts.append({
+                "label": f"💪 {pick.name[:8]}",
+                "callback_data": f"fav:stock:{pick.ticker}",
+            })
+        for pick in list(getattr(playbook, "short_squeeze_watch", []) or [])[:1]:
+            shortcuts.append({
+                "label": f"🔥 {pick.name[:8]}",
+                "callback_data": f"fav:stock:{pick.ticker}",
+            })
+        return shortcuts
+
     async def _send_manager_watchlist_scan(self, context, macro) -> None:
         """매니저별 관심종목 매수 스캔 — 기술적 데이터 보강 후 AI 분석."""
+        today_str = _today()
         try:
             from collections import defaultdict
             from kstock.bot.investment_managers import (
-                scan_manager_domain, MANAGERS, compute_recovery_score,
+                MANAGERS,
+                build_manager_shortcuts,
+                compute_recovery_score,
+                enrich_watchlist_candidate,
+                format_manager_action_digest,
+                scan_manager_domain,
             )
 
             watchlist = self.db.get_watchlist()
             if not watchlist:
+                self.db.upsert_job_run(
+                    "manager_watchlist_scan", today_str,
+                    status="skip", message="empty watchlist",
+                )
                 return
 
             # 보유종목 티커 set
@@ -912,7 +1532,9 @@ class SchedulerMixin:
             market_text = (
                 f"VIX={macro.vix:.1f}, S&P={macro.spx_change_pct:+.2f}%, "
                 f"나스닥={macro.nasdaq_change_pct:+.2f}%, "
-                f"환율={macro.usdkrw:,.0f}원, 레짐={macro.regime}"
+                f"환율={macro.usdkrw:,.0f}원, "
+                f"EWY={getattr(macro, 'ewy_change_pct', 0.0):+.1f}%, "
+                f"레짐={macro.regime}"
             )
 
             # 관심종목을 매니저별 그룹핑 (보유 종목 제외)
@@ -963,12 +1585,41 @@ class SchedulerMixin:
                     if "price" not in w:
                         w["price"] = 0
 
-                by_manager[hz].append(w)
+                by_manager[hz].append(enrich_watchlist_candidate(hz, w))
 
             current_alert = getattr(self, '_alert_mode', 'normal')
+            by_manager = self._enrich_manager_candidates_with_flow_short_context(
+                by_manager, macro,
+            )
+            fast_context = self._build_manager_fast_context(by_manager)
+            by_manager = self._enrich_manager_candidates_with_fast_context(
+                by_manager, fast_context,
+            )
+
+            digest = format_manager_action_digest(
+                by_manager,
+                title="🎯 오늘의 매니저 제안",
+                market_context=market_text,
+                fast_event_lines=fast_context.get("event_lines"),
+                crowd_lines=fast_context.get("crowd_lines"),
+            )
+            if digest:
+                buttons = make_shortcut_rows([
+                    {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},
+                    {"label": "👨‍💼 전체 매니저", "callback_data": "fav:managers"},
+                    *build_manager_shortcuts(by_manager),
+                ])
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=digest[:4000],
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+
             scanned = 0
             for mgr_key, stocks in by_manager.items():
                 if not stocks:
+                    continue
+                if max(float(s.get("fit_score", 0) or 0) for s in stocks) < 62:
                     continue
                 try:
                     report = await scan_manager_domain(
@@ -976,15 +1627,36 @@ class SchedulerMixin:
                         alert_mode=current_alert,
                     )
                     if report and "매수 타이밍 종목 없음" not in report:
+                        primary = stocks[0] if stocks else {}
+                        buttons = make_shortcut_rows([
+                            {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},
+                            {"label": "👨‍💼 담당 매니저", "callback_data": f"mgr_tab:{mgr_key}"},
+                            {
+                                "label": f"📊 {primary.get('name', '')[:8]}",
+                                "callback_data": f"fav:stock:{primary.get('ticker', '')}",
+                            } if primary.get("ticker") else {},
+                        ])
                         await context.bot.send_message(
-                            chat_id=self.chat_id, text=report[:4000],
+                            chat_id=self.chat_id,
+                            text=report[:4000],
+                            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
                         )
                         scanned += 1
                 except Exception as e:
                     logger.debug("Manager scan %s error: %s", mgr_key, e)
 
             logger.info("Manager watchlist scan: %d managers had picks", scanned)
+            self.db.upsert_job_run(
+                "manager_watchlist_scan",
+                today_str,
+                status="success",
+                message=f"managers={len(by_manager)}, picks={scanned}",
+            )
         except Exception as e:
+            self.db.upsert_job_run(
+                "manager_watchlist_scan", today_str,
+                status="error", message=str(e),
+            )
             logger.debug("Manager watchlist scan error: %s", e)
 
     async def _generate_daily_actions(self, macro) -> list[dict]:
@@ -992,6 +1664,7 @@ class SchedulerMixin:
         actions = []
         holdings = self.db.get_active_holdings()
         alert_mode = getattr(self, '_alert_mode', 'normal')
+        playbook = self._build_downside_playbook(macro) if macro else None
 
         for h in holdings:
             ticker = h.get("ticker", "")
@@ -1016,10 +1689,13 @@ class SchedulerMixin:
                 ht = "swing"
 
             # 매니저별 기준 적용
-            from kstock.bot.investment_managers import MANAGER_THRESHOLDS
+            from kstock.bot.investment_managers import MANAGERS, MANAGER_THRESHOLDS
             mgr_th = MANAGER_THRESHOLDS.get(ht, MANAGER_THRESHOLDS["swing"])
             mgr_stop = mgr_th["stop_loss"]
             mgr_tp1 = mgr_th["take_profit_1"]
+            manager = MANAGERS.get(ht, {})
+            manager_label = f"{manager.get('emoji', '📌')} {manager.get('title', '자동')}"
+            manager_tab = f"mgr_tab:{ht}" if ht in MANAGERS else ""
 
             # 긴급: 매니저별 손절 기준 도달
             wartime_stop = mgr_stop * 0.6 if alert_mode == "wartime" else mgr_stop
@@ -1031,7 +1707,11 @@ class SchedulerMixin:
                     "priority": "urgent", "ticker": ticker, "name": name,
                     "action": "손절 필요",
                     "reason": reason,
+                    "manager_key": ht,
+                    "manager_label": manager_label,
                     "callback_data": f"detail:{ticker}",
+                    "secondary_callback": manager_tab,
+                    "button_label": f"{manager.get('emoji', '📌')} {name} 손절",
                 })
             # 주의: 매니저별 1차 익절 기준 60% 도달
             elif pnl >= mgr_tp1 * 0.6 and cur >= target * 0.98:
@@ -1039,7 +1719,11 @@ class SchedulerMixin:
                     "priority": "caution", "ticker": ticker, "name": name,
                     "action": "1차 익절 검토",
                     "reason": f"+{pnl:.1f}% 수익, 목표가 근접",
+                    "manager_key": ht,
+                    "manager_label": manager_label,
                     "callback_data": f"detail:{ticker}",
+                    "secondary_callback": manager_tab,
+                    "button_label": f"{manager.get('emoji', '📌')} {name} 익절",
                 })
             # 주의: 단타 보유일 초과
             elif ht == "scalp" and pnl < 3:
@@ -1047,7 +1731,11 @@ class SchedulerMixin:
                     "priority": "caution", "ticker": ticker, "name": name,
                     "action": "단타 청산 검토",
                     "reason": f"단타 종목 {pnl:+.1f}%",
+                    "manager_key": ht,
+                    "manager_label": manager_label,
                     "callback_data": f"detail:{ticker}",
+                    "secondary_callback": manager_tab,
+                    "button_label": f"{manager.get('emoji', '📌')} {name} 청산",
                 })
             # 주의: 큰 변동
             elif abs(pnl) >= 5:
@@ -1057,7 +1745,11 @@ class SchedulerMixin:
                     "priority": p, "ticker": ticker, "name": name,
                     "action": act,
                     "reason": f"{pnl:+.1f}%",
+                    "manager_key": ht,
+                    "manager_label": manager_label,
                     "callback_data": f"detail:{ticker}",
+                    "secondary_callback": manager_tab,
+                    "button_label": f"{manager.get('emoji', '📌')} {name} 점검",
                 })
 
         # 기회: 시장 레짐
@@ -1072,6 +1764,43 @@ class SchedulerMixin:
                 })
         except Exception:
             logger.debug("Failed to detect market regime for daily actions", exc_info=True)
+
+        if playbook and getattr(playbook, "regime", "normal") in {"caution", "defense", "crisis"}:
+            play_priority = "urgent" if playbook.regime in {"defense", "crisis"} else "caution"
+            trigger_summary = ", ".join(list(getattr(playbook, "triggers", []) or [])[:2])
+            actions.append({
+                "priority": play_priority,
+                "ticker": "",
+                "name": "선물 급락",
+                "action": "방어 플레이 실행",
+                "reason": trigger_summary or getattr(playbook, "summary", ""),
+                "callback_data": "quick_q:market",
+                "button_label": "🛡 시장 플레이",
+            })
+            strong = list(getattr(playbook, "strong_stocks", []) or [])
+            if strong:
+                top_pick = strong[0]
+                actions.append({
+                    "priority": "check",
+                    "ticker": top_pick.ticker,
+                    "name": top_pick.name[:8],
+                    "action": "강한 종목 감시",
+                    "reason": top_pick.thesis,
+                    "callback_data": f"fav:stock:{top_pick.ticker}",
+                    "button_label": f"💪 {top_pick.name[:8]}",
+                })
+            squeeze_watch = list(getattr(playbook, "short_squeeze_watch", []) or [])
+            if squeeze_watch:
+                top_squeeze = squeeze_watch[0]
+                actions.append({
+                    "priority": "check",
+                    "ticker": top_squeeze.ticker,
+                    "name": top_squeeze.name[:8],
+                    "action": "숏커버 레이더",
+                    "reason": top_squeeze.thesis,
+                    "callback_data": f"fav:stock:{top_squeeze.ticker}",
+                    "button_label": f"🔥 {top_squeeze.name[:8]}",
+                })
 
         # 확인: 포트폴리오 점검
         if len(holdings) >= 2:
@@ -1090,19 +1819,29 @@ class SchedulerMixin:
     async def _send_daily_actions(self, context, macro) -> None:
         """오늘의 할 일 메시지 전송."""
         try:
+            from kstock.bot.investment_managers import build_daily_action_shortcuts
+
             actions = await self._generate_daily_actions(macro)
             alert_mode = getattr(self, '_alert_mode', 'normal')
             text = format_daily_actions(actions, alert_mode=alert_mode)
 
-            buttons = []
-            for a in actions[:6]:
-                cb = a.get("callback_data", "")
-                if cb:
-                    emoji = {"urgent": "\U0001f534", "caution": "\U0001f7e1",
-                             "opportunity": "\U0001f7e2", "check": "\u26aa"
-                             }.get(a["priority"], "")
-                    label = f"{emoji} {a['name']}: {a['action']}"[:40]
-                    buttons.append([InlineKeyboardButton(label, callback_data=cb)])
+            buttons = make_shortcut_rows(build_daily_action_shortcuts(actions))
+            manager_shortcuts = []
+            seen_secondary = set()
+            for action in actions:
+                callback_data = str(action.get("secondary_callback", "") or "")
+                manager_label = str(action.get("manager_label", "") or "").strip()
+                if not callback_data or not manager_label or callback_data in seen_secondary:
+                    continue
+                seen_secondary.add(callback_data)
+                manager_shortcuts.append({
+                    "label": manager_label,
+                    "callback_data": callback_data,
+                })
+                if len(manager_shortcuts) >= 4:
+                    break
+            if manager_shortcuts:
+                buttons.extend(make_shortcut_rows(manager_shortcuts))
             buttons.append(make_feedback_row("daily_actions"))
 
             await context.bot.send_message(
@@ -1651,7 +2390,7 @@ class SchedulerMixin:
     async def _check_manager_alerts(self, bot) -> None:
         """#3 매니저별 장중 실시간 알림 (보유종목 기술적 조건 체크)."""
         try:
-            from kstock.bot.investment_managers import check_manager_alert_conditions
+            from kstock.bot.investment_managers import MANAGERS, check_manager_alert_conditions
             from kstock.features.technical import compute_indicators
 
             holdings = self.db.get_active_holdings()
@@ -1690,9 +2429,22 @@ class SchedulerMixin:
                         mtype, ticker, h.get("name", ""),
                         tech, cp, bp, hold_days,
                     )
+                    manager = MANAGERS.get(mtype, {})
+                    buttons = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("📊 종목상세", callback_data=f"detail:{ticker}"),
+                            InlineKeyboardButton(
+                                manager.get("title", "담당 매니저"),
+                                callback_data=f"mgr_tab:{mtype}",
+                            ),
+                        ],
+                        [InlineKeyboardButton("📋 액션콘솔", callback_data="menu:daily_actions")],
+                    ])
                     for alert_text in alerts[:2]:
                         await bot.send_message(
-                            chat_id=self.chat_id, text=alert_text[:2000],
+                            chat_id=self.chat_id,
+                            text=alert_text[:2000],
+                            reply_markup=buttons,
                         )
                         self.db.insert_alert(ticker, f"mgr_{mtype}", alert_text[:200])
                 except Exception:
@@ -3350,14 +4102,20 @@ class SchedulerMixin:
             return
 
         try:
+            from kstock.signal.market_playbook import format_downside_playbook
+
             macro = await self.macro_client.get_snapshot()
             signal_emoji, signal_label = self._market_signal(macro)
+            playbook = self._build_downside_playbook(macro)
+            playbook_regime = getattr(playbook, "regime", "normal") if playbook else "normal"
+            playbook_band = int(getattr(playbook, "risk_score", 0.0) // 10) if playbook else 0
 
             # 이전 신호와 비교
             prev = getattr(self, '_prev_us_signal', None)
-            if prev == signal_label:
+            current_state = (signal_label, playbook_regime, playbook_band)
+            if prev == current_state:
                 return  # 변동 없으면 스킵
-            self._prev_us_signal = signal_label
+            self._prev_us_signal = current_state
 
             # VIX 급변 체크
             vix_alert = ""
@@ -3378,6 +4136,19 @@ class SchedulerMixin:
                     parts.append(f"NQ선물: {nq:,.0f} ({getattr(macro, 'nq_futures_change_pct', 0):+.2f}%)")
                 futures_line = "\n".join(parts) + "\n"
 
+            domestic_leverage_line = ""
+            kodex_leverage = getattr(macro, "kodex_leverage_price", 0)
+            kodex_leverage_chg = getattr(macro, "kodex_leverage_change_pct", 0)
+            kodex_inverse = getattr(macro, "kodex_inverse2x_price", 0)
+            kodex_inverse_chg = getattr(macro, "kodex_inverse2x_change_pct", 0)
+            domestic_parts = []
+            if kodex_leverage > 0:
+                domestic_parts.append(f"KODEX 레버리지: {kodex_leverage:,.0f} ({kodex_leverage_chg:+.2f}%)")
+            if kodex_inverse > 0:
+                domestic_parts.append(f"인버스2X: {kodex_inverse:,.0f} ({kodex_inverse_chg:+.2f}%)")
+            if domestic_parts:
+                domestic_leverage_line = "\n".join(domestic_parts) + "\n"
+
             msg = (
                 f"📡 시장 신호 변경\n"
                 f"{'━' * 22}\n"
@@ -3385,14 +4156,24 @@ class SchedulerMixin:
                 f"S&P500: {macro.spx_change_pct:+.2f}%\n"
                 f"나스닥: {macro.nasdaq_change_pct:+.2f}%\n"
                 f"{futures_line}"
+                f"{domestic_leverage_line}"
                 f"VIX: {macro.vix:.1f} ({vix_chg:+.1f}%)\n"
                 f"환율: {macro.usdkrw:,.0f}원 ({macro.usdkrw_change_pct:+.1f}%)"
                 f"{vix_alert}\n\n"
                 f"{'━' * 22}\n"
                 f"🤖 K-Quant | {now.strftime('%H:%M')}"
             )
-            await context.bot.send_message(chat_id=self.chat_id, text=msg)
-            logger.info("US futures signal changed: %s → %s", prev, signal_label)
+            playbook_text = format_downside_playbook(playbook) if playbook else ""
+            if playbook_text:
+                msg = f"{msg}\n\n{playbook_text}"
+
+            buttons = make_shortcut_rows(self._playbook_shortcuts(playbook)) if playbook else []
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text=msg[:4000],
+                reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+            )
+            logger.info("US futures signal changed: %s → %s", prev, current_state)
         except Exception as e:
             logger.error("US futures signal failed: %s", e)
 
@@ -4733,6 +5514,13 @@ class SchedulerMixin:
         # 장중 시간 체크 (평일 08:50~15:35)
         now = datetime.now(KST)
         if not is_kr_market_open(now.date()):  # 주말
+            return
+        if (now.hour, now.minute) < (8, 50) or (now.hour, now.minute) > (15, 35):
+            logger.debug(
+                "Skip WebSocket connect outside KR session: %02d:%02d KST",
+                now.hour,
+                now.minute,
+            )
             return
 
         try:
@@ -6119,7 +6907,11 @@ class SchedulerMixin:
 
         try:
             from kstock.bot.investment_managers import (
-                scan_manager_domain, filter_discovery_candidates, MANAGERS,
+                MANAGERS,
+                build_manager_shortcuts,
+                filter_discovery_candidates,
+                format_manager_action_digest,
+                scan_manager_domain,
             )
 
             # 캐시된 스캔 결과 사용 (아침 스캔에서 생성됨)
@@ -6135,24 +6927,62 @@ class SchedulerMixin:
             exclude |= {w["ticker"] for w in watchlist}
 
             # 시장 컨텍스트
+            macro = None
             market_text = ""
             try:
                 macro = await self.macro_client.get_snapshot()
                 market_text = (
                     f"VIX={macro.vix:.1f}, S&P={macro.spx_change_pct:+.2f}%, "
                     f"나스닥={macro.nasdaq_change_pct:+.2f}%, "
-                    f"환율={macro.usdkrw:,.0f}원"
+                    f"환율={macro.usdkrw:,.0f}원, EWY={getattr(macro, 'ewy_change_pct', 0.0):+.1f}%"
                 )
             except Exception:
                 logger.debug("Failed to get macro snapshot for manager discovery scan", exc_info=True)
 
             current_alert = getattr(self, '_alert_mode', 'normal')
-            found = 0
+            candidates_by_manager: dict[str, list[dict]] = {}
             for mgr_key in MANAGERS:
                 candidates = filter_discovery_candidates(
                     results, mgr_key, exclude,
                 )
+                if candidates:
+                    candidates_by_manager[mgr_key] = candidates
+
+            candidates_by_manager = self._enrich_manager_candidates_with_flow_short_context(
+                candidates_by_manager, macro,
+            )
+            fast_context = self._build_manager_fast_context(candidates_by_manager)
+            candidates_by_manager = self._enrich_manager_candidates_with_fast_context(
+                candidates_by_manager, fast_context,
+            )
+            herd_lines = self._build_manager_herd_lines(results)
+            digest = format_manager_action_digest(
+                candidates_by_manager,
+                title="🔍 매니저 신규 발굴 레이더",
+                market_context=market_text,
+                fast_event_lines=fast_context.get("event_lines"),
+                herd_lines=herd_lines,
+                crowd_lines=fast_context.get("crowd_lines"),
+            )
+            if digest:
+                header = "단타/스윙/포지션/장기/텐베거 레인을 분리해 상위 후보만 추렸습니다.\n\n"
+                buttons = make_shortcut_rows([
+                    {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},
+                    {"label": "👨‍💼 전체 매니저", "callback_data": "fav:managers"},
+                    *build_manager_shortcuts(candidates_by_manager),
+                ])
+                await context.bot.send_message(
+                    chat_id=self.chat_id,
+                    text=(header + digest)[:4000],
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+
+            found = 0
+            for mgr_key in MANAGERS:
+                candidates = candidates_by_manager.get(mgr_key) or []
                 if not candidates:
+                    continue
+                if max(float(c.get("fit_score", 0) or 0) for c in candidates) < 66:
                     continue
                 try:
                     report = await scan_manager_domain(
@@ -6161,9 +6991,19 @@ class SchedulerMixin:
                     )
                     if report and "매수 타이밍 종목 없음" not in report:
                         header = "🔍 매니저 신규 발굴\n"
+                        primary = candidates[0] if candidates else {}
+                        buttons = make_shortcut_rows([
+                            {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},
+                            {"label": "👨‍💼 담당 매니저", "callback_data": f"mgr_tab:{mgr_key}"},
+                            {
+                                "label": f"📊 {primary.get('name', '')[:8]}",
+                                "callback_data": f"fav:stock:{primary.get('ticker', '')}",
+                            } if primary.get("ticker") else {},
+                        ])
                         await context.bot.send_message(
                             chat_id=self.chat_id,
                             text=(header + report)[:4000],
+                            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
                         )
                         found += 1
                 except Exception as e:
@@ -6255,6 +7095,7 @@ class SchedulerMixin:
             today_str = datetime.now(KST).strftime("%Y-%m-%d")
             collected = 0
             alerts = []
+            squeeze_alerts = []
 
             for ticker in list(tickers)[:20]:
                 try:
@@ -6280,6 +7121,22 @@ class SchedulerMixin:
                         name = self._resolve_name(ticker, ticker) if hasattr(self, '_resolve_name') else ticker
                         alerts.append(f"🔴 {name}: 공매도 비중 {ratio:.1f}%")
 
+                    name = self._resolve_name(ticker, ticker) if hasattr(self, '_resolve_name') else ticker
+                    tactical = self._get_ticker_tactical_context(ticker, name)
+                    short_labels = list(tactical.get("short_pattern_labels") or [])
+                    short_codes = set(tactical.get("short_pattern_codes") or [])
+                    if short_codes.intersection({"real_buy", "short_covering", "short_squeeze"}):
+                        action = str(tactical.get("short_timing_action", "") or "관찰")
+                        reason = str(
+                            tactical.get("short_timing_reason")
+                            or tactical.get("flow_signal")
+                            or ""
+                        ).strip()
+                        line = f"🟢 {name}: {'/'.join(short_labels[:2])} | {action}"
+                        if reason:
+                            line += f" | {reason}"
+                        squeeze_alerts.append(line)
+
                     await asyncio.sleep(0.5)  # rate limit
                 except Exception as e:
                     logger.debug("Short selling collect for %s: %s", ticker, e)
@@ -6295,8 +7152,21 @@ class SchedulerMixin:
                     chat_id=self.chat_id, text=msg,
                 )
 
+            if squeeze_alerts:
+                msg = (
+                    f"🔥 숏커버 레이더 ({today_str})\n"
+                    f"{'━' * 22}\n\n"
+                    + "\n".join(squeeze_alerts[:5])
+                )
+                await context.bot.send_message(
+                    chat_id=self.chat_id, text=msg,
+                )
+
             self.db.upsert_job_run("short_selling_collect", today_str, status="success")
-            logger.info("Short selling collected for %d tickers, %d alerts", collected, len(alerts))
+            logger.info(
+                "Short selling collected for %d tickers, %d alerts, %d squeeze alerts",
+                collected, len(alerts), len(squeeze_alerts),
+            )
         except Exception as e:
             logger.error("Short selling collect failed: %s", e)
 
@@ -6305,6 +7175,7 @@ class SchedulerMixin:
     async def job_news_monitor(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         """09:00~15:30 매 30분: 보유/즐겨찾기 종목 뉴스 모니터링."""
         try:
+            from kstock.bot.news_action import assess_stock_news_headline
             from kstock.ingest.naver_finance import get_stock_news
 
             # 보유 + 즐겨찾기 종목
@@ -6366,12 +7237,6 @@ class SchedulerMixin:
                 "규제", "완화", "지원", "보조금", "정책", "100조",
                 "공매도", "금지", "재개", "밸류업", "기업가치",
             ]
-            # 시장 전체 뉴스 제외 키워드 (종목과 무관한 뉴스)
-            # v6.2.1: 국채/금리 제거 (정부 정책 모니터링 강화)
-            market_noise = [
-                "코스피", "코스닥", "증시", "지수", "외국인",
-                "기관", "개인", "순매수", "순매도",
-            ]
 
             import re as _re
 
@@ -6384,7 +7249,7 @@ class SchedulerMixin:
                 # 폴백: URL 전체 (code= 파라미터 제거)
                 return _re.sub(r"[&?]code=[^&]*", "", url)
 
-            alerts = []
+            alerts: list[tuple[int, str]] = []
             for ticker, name in list(ticker_names.items())[:15]:
                 try:
                     news_list = await get_stock_news(ticker, limit=5)
@@ -6402,28 +7267,36 @@ class SchedulerMixin:
                         has_name = any(v in title for v in name_variants if len(v) >= 2)
                         if not has_name:
                             continue  # 종목명이 없는 뉴스는 무시
-                        # 중요 뉴스 필터
+                        signal = assess_stock_news_headline(title)
                         is_important = any(kw in title for kw in important_kw)
-                        if is_important:
-                            alerts.append(f"📰 {name}: {title}\n🔗 {url}")
-                            sent_news.add(dedup_key)
-                            # DB에도 저장 (재시작 후 중복 방지)
-                            try:
-                                self.db.conn.execute(
-                                    "INSERT OR IGNORE INTO sent_news_urls (url) VALUES (?)",
-                                    (dedup_key,),
-                                )
-                                self.db.conn.commit()
-                            except Exception:
-                                logger.debug("Failed to persist sent news URL to DB", exc_info=True)
+                        if signal.score == 0 and not is_important:
+                            continue
+                        alert_text = (
+                            f"{signal.emoji} {name} | {signal.label}\n"
+                            f"{title}\n"
+                            f"행동: {signal.action}\n"
+                            f"🔗 {url}"
+                        )
+                        alerts.append((abs(signal.score), alert_text))
+                        sent_news.add(dedup_key)
+                        # DB에도 저장 (재시작 후 중복 방지)
+                        try:
+                            self.db.conn.execute(
+                                "INSERT OR IGNORE INTO sent_news_urls (url) VALUES (?)",
+                                (dedup_key,),
+                            )
+                            self.db.conn.commit()
+                        except Exception:
+                            logger.debug("Failed to persist sent news URL to DB", exc_info=True)
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.debug("News monitor for %s: %s", ticker, e)
 
             if alerts:
+                alerts.sort(key=lambda row: row[0], reverse=True)
                 msg = (
                     f"📰 종목 뉴스 알림\n{'━' * 22}\n\n"
-                    + "\n\n".join(alerts[:5])
+                    + "\n\n".join(text for _, text in alerts[:5])
                 )
                 await context.bot.send_message(
                     chat_id=self.chat_id, text=msg,
@@ -6452,6 +7325,7 @@ class SchedulerMixin:
                 translate_titles_to_korean,
                 enrich_youtube_summaries,
                 group_similar_news,
+                merge_related_topic_groups,
                 analyze_urgent_news,
                 make_alert_hash,
             )
@@ -6492,13 +7366,23 @@ class SchedulerMixin:
                 if urgent and self.chat_id:
                     # v9.5.3: 유사 뉴스 그룹핑 (같은 이벤트 통합)
                     groups = group_similar_news(urgent, threshold=0.35)
+                    groups = merge_related_topic_groups(groups)
 
                     # DB 기반 중복 방지 (재시작 후에도 유지)
                     new_groups = []
+                    seen_cycle_topics: set[str] = set()
                     for group in groups:
                         h = make_alert_hash(group)
-                        if not self.db.is_alert_sent(h, hours=24):
+                        title_summary = group[0].title[:100]
+                        topic_key = make_alert_hash(group[:1])
+                        if topic_key in seen_cycle_topics:
+                            continue
+                        if (
+                            not self.db.is_alert_sent(h, hours=24)
+                            and not self.db.is_similar_alert_sent(title_summary, hours=24)
+                        ):
                             new_groups.append(group)
+                            seen_cycle_topics.add(topic_key)
 
                     if new_groups:
                         # AI 분석 포함 리치 알림 생성
@@ -7652,6 +8536,7 @@ class SchedulerMixin:
                 name = stock["name"]
                 grade = stock["grade"]
                 character = stock.get("character", "")
+                listing_market = stock.get("listing_market", "KOSDAQ")
 
                 if ticker in held_tickers:
                     continue  # 이미 보유 → 스킵
@@ -7663,7 +8548,7 @@ class SchedulerMixin:
                 except Exception:
                     try:
                         import yfinance as yf
-                        mkt = "KOSPI" if stock.get("market") == "KOSPI" else "KOSDAQ"
+                        mkt = "KOSPI" if listing_market == "KOSPI" else "KOSDAQ"
                         suffix = ".KS" if mkt == "KOSPI" else ".KQ"
                         t = yf.Ticker(f"{ticker}{suffix}")
                         cur_price = t.info.get("currentPrice", 0) or 0

@@ -5,6 +5,7 @@ from kstock.bot.bot_imports import *  # noqa: F403
 
 import asyncio
 import httpx
+import json
 import re
 import time
 import traceback
@@ -14,12 +15,151 @@ logger = logging.getLogger(__name__)
 # v10.3.1: 공유 httpx 클라이언트 (FD leak 방지)
 _shared_api_client: httpx.AsyncClient | None = None
 
+_ANTHROPIC_FALLBACK_MARKERS = (
+    "credit balance is too low",
+    "insufficient_quota",
+    "rate limit",
+    "overloaded",
+    "temporarily unavailable",
+    "service unavailable",
+)
+
+_OPENAI_CHAT_FALLBACK_MODELS = {
+    "daeri": "gpt-4o-mini",
+    "bujang": "gpt-4o",
+    "daepyo": "gpt-4o",
+}
+
+_DEFAULT_CLAUDE_CLI_BUDGET_USD = 0.80
+_DEFAULT_CLAUDE_CLI_OPUS_BUDGET_USD = 3.00
+_DEFAULT_CLAUDE_CLI_MAX_TURNS = 8
+_DEFAULT_CLAUDE_CLI_OPUS_MAX_TURNS = 5
+_DEFAULT_CEO_OPUS_ARM_SECONDS = 300
+_WEB_SEARCH_HINTS = re.compile(
+    r"(검색|서치|웹|뉴스\s*찾|최신|실시간|look up|web search|browse|기사\s*찾)",
+    re.IGNORECASE,
+)
+_NO_WEB_SEARCH_PROMPT = (
+    "웹 검색 도구는 기본적으로 사용하지 마라. "
+    "로컬 파일, 현재 작업 디렉터리, 이미 제공된 문맥과 추론만으로 해결하라. "
+    "사용자가 최신 정보 확인이나 웹 검색을 명시적으로 요청한 경우에만 웹 검색을 고려하라."
+)
+_CLAUDE_CLI_BLOCKED_ENV_KEYS = {
+    "CLAUDECODE",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+}
+
 
 def _get_api_client() -> httpx.AsyncClient:
     global _shared_api_client
     if _shared_api_client is None or _shared_api_client.is_closed:
         _shared_api_client = httpx.AsyncClient(timeout=45)
     return _shared_api_client
+
+
+def _build_claude_cli_env() -> dict[str, str]:
+    """Claude CLI는 구독 로그인 경로를 우선 사용하도록 인증 env를 제거한다."""
+    clean_env = {
+        k: v for k, v in os.environ.items()
+        if k not in _CLAUDE_CLI_BLOCKED_ENV_KEYS
+    }
+    clean_env["PYTHONPATH"] = "src"
+    return clean_env
+
+
+def _get_openai_key() -> str:
+    return os.getenv("OPENAI_API_KEY", "").strip()
+
+
+def _load_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)).strip())
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+def _load_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)).strip())
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+def _should_allow_claude_web_search(prompt: str) -> bool:
+    return bool(_WEB_SEARCH_HINTS.search(str(prompt or "")))
+
+
+def _get_claude_cli_budget_usd(model: str) -> float:
+    if model == "opus":
+        return _load_float_env(
+            "CLAUDE_CODE_OPUS_MAX_BUDGET_USD",
+            _DEFAULT_CLAUDE_CLI_OPUS_BUDGET_USD,
+        )
+    return _load_float_env(
+        "CLAUDE_CODE_MAX_BUDGET_USD",
+        _DEFAULT_CLAUDE_CLI_BUDGET_USD,
+    )
+
+
+def _get_claude_cli_max_turns(model: str) -> int:
+    if model == "opus":
+        return _load_int_env(
+            "CLAUDE_CODE_OPUS_MAX_TURNS",
+            _DEFAULT_CLAUDE_CLI_OPUS_MAX_TURNS,
+        )
+    return _load_int_env(
+        "CLAUDE_CODE_MAX_TURNS",
+        _DEFAULT_CLAUDE_CLI_MAX_TURNS,
+    )
+
+
+def _extract_provider_error_message(body: str) -> str:
+    """Upstream API 오류 바디에서 사람이 읽을 메시지를 뽑는다."""
+    if not body:
+        return ""
+
+    try:
+        payload = json.loads(body)
+    except Exception:
+        payload = {}
+
+    message = ""
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or error.get("details") or "").strip()
+        elif error:
+            message = str(error).strip()
+        if not message:
+            message = str(payload.get("message") or "").strip()
+
+    if not message:
+        message = str(body).strip()
+
+    message = re.sub(r"\s+", " ", message).strip()
+    return message[:240]
+
+
+def _should_try_openai_chat_fallback(
+    *,
+    status_code: int,
+    body: str,
+    openai_key: str,
+) -> bool:
+    """Anthropic 대화 실패 시 OpenAI 우회 가능 여부를 판단한다."""
+    if not openai_key:
+        return False
+
+    body_lower = (body or "").lower()
+    if any(marker in body_lower for marker in _ANTHROPIC_FALLBACK_MARKERS):
+        return True
+    return status_code in {400, 408, 409, 429, 500, 502, 503, 504}
 
 
 # Claude CLI path (auto-detect)
@@ -115,6 +255,7 @@ class RemoteClaudeMixin:
         "system": {"label": "📦 시스템상태", "special": "stats"},
         "dashboard": {"label": "🏠 대시보드", "special": "dashboard"},
         "continue": {"label": "🔄 이어서", "special": "continue"},
+        "arm_opus": {"label": "🔥 Opus 1회 승인", "special": "arm_opus"},
     }
 
     def _is_authorized_chat(self, update: Update) -> bool:
@@ -161,7 +302,7 @@ class RemoteClaudeMixin:
         Args:
             prompt: The prompt to send.
             continue_conversation: True면 --continue 플래그로 이전 대화 이어가기.
-            model: CLI 모델 (sonnet/opus). v10.3.1: 클대표=opus.
+            model: CLI 모델 (sonnet/opus). 클대표는 기본 Sonnet, 승인 시 1회 Opus.
 
         Returns:
             Tuple of (output_text, return_code, elapsed_seconds).
@@ -169,17 +310,19 @@ class RemoteClaudeMixin:
         start_time = time.monotonic()
 
         try:
-            # CLAUDECODE 환경변수 제거: 중첩 세션 방지
-            clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-            clean_env["PYTHONPATH"] = "src"
+            # Claude CLI는 구독 로그인(oauth/keychain) 경로를 우선 사용한다.
+            clean_env = _build_claude_cli_env()
 
             cmd = [
                 CLAUDE_CLI, "-p", prompt,
                 "--output-format", "text",
                 "--dangerously-skip-permissions",
                 "--model", model,
-                "--max-turns", "25",
+                "--max-turns", str(_get_claude_cli_max_turns(model)),
+                "--max-budget-usd", f"{_get_claude_cli_budget_usd(model):.2f}",
             ]
+            if not _should_allow_claude_web_search(prompt):
+                cmd.extend(["--append-system-prompt", _NO_WEB_SEARCH_PROMPT])
             if continue_conversation:
                 cmd.append("--continue")
 
@@ -247,22 +390,22 @@ class RemoteClaudeMixin:
             "name": "클대리",
             "emoji": "💬",
             "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 1000,
+            "max_tokens": 800,
             "desc": "빠른 답변, 일반 대화, 간단한 질문",
         },
         "bujang": {
             "name": "클부장",
             "emoji": "📊",
             "model": "claude-sonnet-4-5-20250929",
-            "max_tokens": 2000,
+            "max_tokens": 1400,
             "desc": "주식 분석, 투자 전략, 시황 해석",
         },
         "daepyo": {
             "name": "클대표",
             "emoji": "🧠",
-            "model": "claude-opus-4-6",
-            "max_tokens": 4000,
-            "desc": "오류 수정, 기능 개발, 심층 추론",
+            "model": "claude-sonnet-4-5-20250929",
+            "max_tokens": 1800,
+            "desc": "오류 수정, 기능 개발, 기본 Sonnet 안전모드",
             "use_cli": True,
         },
     }
@@ -284,7 +427,7 @@ class RemoteClaudeMixin:
                 callback_data="claude_tier:bujang",
             )],
             [InlineKeyboardButton(
-                "🧠 클대표 — 오류수정/기능개발",
+                "🧠 클대표 — 관리자 안전모드",
                 callback_data="claude_tier:daepyo",
             )],
         ]
@@ -300,8 +443,9 @@ class RemoteClaudeMixin:
             f"  빠른 답변, 일상 대화\n\n"
             f"📊 클부장 (Sonnet)\n"
             f"  주식 분석, 투자 전략\n\n"
-            f"🧠 클대표 (Opus)\n"
-            f"  오류 수정, 기능 개발, 심층 추론\n\n"
+            f"🧠 클대표 (기본 Sonnet)\n"
+            f"  오류 수정, 기능 개발, 관리자 안전모드\n"
+            f"  Opus는 1회 승인 후에만 실행\n\n"
             f"모드를 선택하세요 👇",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -316,10 +460,11 @@ class RemoteClaudeMixin:
         context.user_data["claude_tier"] = payload
         context.user_data["claude_chat_history"] = []
         context.user_data["claude_turn"] = 0
+        context.user_data.pop("ceo_opus_armed_until", None)
 
         # v11.0: 클대표 → 리모콘 대시보드
         if payload == "daepyo":
-            await self._ceo_dashboard(query)
+            await self._ceo_dashboard(query, context)
             return
 
         await safe_edit_or_reply(query,
@@ -329,15 +474,42 @@ class RemoteClaudeMixin:
             f"자유롭게 대화하세요.\n"
             f"모드 전환: 💻 클로드 다시 누르기\n"
             f"종료: 다른 메뉴 버튼"
-        )
+            )
 
     # ── 클대표 리모콘 메서드 (v11.0) ────────────────────────────
 
-    async def _ceo_dashboard(self, target) -> None:
+    @staticmethod
+    def _get_ceo_opus_arm_seconds() -> int:
+        return _load_int_env(
+            "CLAUDE_CODE_OPUS_ARM_SECONDS",
+            _DEFAULT_CEO_OPUS_ARM_SECONDS,
+        )
+
+    def _is_ceo_opus_armed(self, context) -> bool:
+        deadline = float(context.user_data.get("ceo_opus_armed_until", 0) or 0)
+        if deadline <= time.time():
+            context.user_data.pop("ceo_opus_armed_until", None)
+            return False
+        return True
+
+    def _arm_ceo_opus(self, context) -> int:
+        seconds = self._get_ceo_opus_arm_seconds()
+        context.user_data["ceo_opus_armed_until"] = time.time() + seconds
+        return seconds
+
+    def _consume_ceo_cli_model(self, context) -> tuple[str, bool]:
+        if self._is_ceo_opus_armed(context):
+            context.user_data.pop("ceo_opus_armed_until", None)
+            return "opus", True
+        return "sonnet", False
+
+    async def _ceo_dashboard(self, target, context=None) -> None:
         """🧠 클대표 리모콘 대시보드 — 퀵 액션 버튼 표시.
 
         target: CallbackQuery 또는 Update (둘 다 호환).
         """
+        opus_ready = bool(context and self._is_ceo_opus_armed(context))
+        opus_label = "🔥 Opus 승인됨" if opus_ready else "🔥 Opus 1회 승인"
         buttons = [
             [
                 InlineKeyboardButton("📋 Git Status", callback_data="ceo:git_status"),
@@ -352,17 +524,24 @@ class RemoteClaudeMixin:
                 InlineKeyboardButton("📊 에러로그", callback_data="ceo:logs"),
             ],
             [
-                InlineKeyboardButton("🔄 봇재시작", callback_data="ceo:restart"),
+                InlineKeyboardButton(opus_label, callback_data="ceo:arm_opus"),
                 InlineKeyboardButton("📦 시스템상태", callback_data="ceo:system"),
             ],
+            [
+                InlineKeyboardButton("🔄 봇재시작", callback_data="ceo:restart"),
+                InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard"),
+            ],
         ]
+        mode_line = "현재 실행모드: Opus 1회 승인됨" if opus_ready else "현재 실행모드: Sonnet 안전모드"
         text = (
             "🧠 클대표 리모콘\n"
             f"{'━' * 22}\n\n"
             "Claude Code CLI 원격 제어\n\n"
-            "⚡ 퀵 액션 버튼 또는\n"
-            "자유 텍스트로 명령을 입력하세요.\n\n"
-            "💡 모든 입력이 Claude Code(Opus)로 전달됩니다."
+            f"⚡ {mode_line}\n"
+            "기본은 Sonnet 안전모드입니다.\n"
+            "Opus는 1회 승인 후 다음 실행에만 사용됩니다.\n\n"
+            "💸 각 실행은 비용 상한과 턴 제한이 걸려 있습니다.\n"
+            "🌐 웹검색은 사용자가 명시적으로 요청할 때만 허용됩니다."
         )
         markup = InlineKeyboardMarkup(buttons)
         await safe_edit_or_reply(target, text, reply_markup=markup)
@@ -377,7 +556,7 @@ class RemoteClaudeMixin:
 
         # 특수 액션
         if special == "dashboard":
-            await self._ceo_dashboard(query)
+            await self._ceo_dashboard(query, context)
             return
         if special == "continue":
             context.user_data["ceo_continue"] = True
@@ -385,6 +564,18 @@ class RemoteClaudeMixin:
                 "🔄 이어서 모드\n\n"
                 "다음 메시지가 이전 Claude Code 대화를 이어갑니다.\n"
                 "명령을 입력하세요."
+            )
+            return
+        if special == "arm_opus":
+            seconds = self._arm_ceo_opus(context)
+            await safe_edit_or_reply(query,
+                "🔥 Opus 1회 승인 완료\n\n"
+                f"다음 Claude Code 실행 1회에만 Opus를 사용합니다.\n"
+                f"승인 유지 시간: {seconds // 60}분\n"
+                "그 이후에는 자동으로 Sonnet 안전모드로 돌아갑니다.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard")],
+                ]),
             )
             return
         if special == "restart":
@@ -428,7 +619,8 @@ class RemoteClaudeMixin:
                 f"📊 {score_text}\n"
                 f"💰 {cost_text}\n"
                 f"🚨 알림모드: {alert_mode}\n"
-                f"🕐 가동시간: {time.monotonic() / 3600:.1f}h",
+                f"🕐 가동시간: {time.monotonic() / 3600:.1f}h\n"
+                f"🧠 클대표 기본모드: Sonnet",
                 reply_markup=buttons,
             )
             return
@@ -492,10 +684,15 @@ class RemoteClaudeMixin:
         self, query, context, prompt: str, turns: int = 5,
     ) -> None:
         """콜백에서 Claude Code CLI 실행 (커밋 등 복잡한 작업)."""
-        await safe_edit_or_reply(query, f"🧠 클대표 실행 중...\n📝 {prompt[:80]}")
+        cli_model, used_opus = self._consume_ceo_cli_model(context)
+        mode_label = "Opus 프리미엄" if used_opus else "Sonnet 안전모드"
+        await safe_edit_or_reply(
+            query,
+            f"🧠 클대표 실행 중...\n⚙️ {mode_label}\n📝 {prompt[:80]}",
+        )
 
         placeholder = await query.message.reply_text(
-            "⏳ Claude Code(Opus) 실행 중..."
+            f"⏳ Claude Code({cli_model}) 실행 중..."
         )
 
         progress_task = asyncio.create_task(
@@ -508,7 +705,7 @@ class RemoteClaudeMixin:
         context.user_data["claude_turn"] = turn + 1
 
         output, return_code, elapsed = await self._run_claude_cli(
-            prompt, continue_conversation=continue_conv, model="opus",
+            prompt, continue_conversation=continue_conv, model=cli_model,
         )
 
         progress_task.cancel()
@@ -517,7 +714,8 @@ class RemoteClaudeMixin:
             output = "(출력 없음)"
 
         status = "✅" if return_code == 0 else "⚠️"
-        header = f"💻 {status} ({elapsed:.0f}초)\n{'─' * 20}\n\n"
+        engine = "Opus" if used_opus else "Sonnet"
+        header = f"💻 {status} {engine} ({elapsed:.0f}초)\n{'─' * 20}\n\n"
         full = header + output
 
         if len(full) > MAX_OUTPUT_CHARS:
@@ -543,9 +741,10 @@ class RemoteClaudeMixin:
                 InlineKeyboardButton("🔄 봇재시작", callback_data="ceo:restart"),
             ],
             [
+                InlineKeyboardButton("🔥 Opus 1회 승인", callback_data="ceo:arm_opus"),
                 InlineKeyboardButton("🧪 테스트", callback_data="ceo:test"),
-                InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard"),
             ],
+            [InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard")],
         ])
 
         chunks = self._split_message(full)
@@ -582,6 +781,7 @@ class RemoteClaudeMixin:
         context.user_data.pop("claude_tier", None)
         context.user_data.pop("awaiting_claude_prompt", None)
         context.user_data.pop("claude_chat_history", None)
+        context.user_data.pop("ceo_opus_armed_until", None)
         await update.message.reply_text(
             f"🤖 {tier_name} 대화를 종료합니다.\n"
             f"총 {turns}회 대화하셨습니다.",
@@ -625,7 +825,7 @@ class RemoteClaudeMixin:
 
         클대리(Haiku) → API 빠른 응답
         클부장(Sonnet) → API 주식 분석
-        클대표(Opus)  → CLI 코드 수정/기능 개발, API 심층 분석
+        클대표(Sonnet 기본) → CLI 코드 수정/기능 개발, 필요 시 Opus 1회 승인
         """
         # 모드 미선택 시 선택 화면 표시
         tier_key = context.user_data.get("claude_tier", "")
@@ -675,9 +875,10 @@ class RemoteClaudeMixin:
             tier_key = context.user_data.get("claude_tier", "daeri")
             tier = self._CLAUDE_TIERS.get(tier_key, self._CLAUDE_TIERS["daeri"])
 
-        if not self.anthropic_key:
+        openai_key = _get_openai_key()
+        if not self.anthropic_key and not openai_key:
             await update.message.reply_text(
-                "⚠️ ANTHROPIC_API_KEY 미설정",
+                "⚠️ AI 대화 API 키가 설정되지 않았습니다.",
                 reply_markup=get_reply_markup(context),
             )
             return
@@ -689,7 +890,8 @@ class RemoteClaudeMixin:
         try:
             import httpx
 
-            system_text = await self._build_image_system_prompt()
+            tier_key = context.user_data.get("claude_tier", "daeri")
+            system_text = await self._build_text_chat_system_prompt(tier_key)
 
             # 종목 감지 시 실시간 데이터 추가
             enriched = text
@@ -708,36 +910,98 @@ class RemoteClaudeMixin:
 
             # 대화 이력 (최근 10턴 유지)
             history = context.user_data.get("claude_chat_history", [])
+            history_limit = 8 if tier_key == "daeri" else 14
+            if len(history) > history_limit * 2:
+                history = history[-history_limit * 2:]
             messages = list(history)
             messages.append({"role": "user", "content": enriched})
+            temperature = 0.15 if tier_key == "daeri" else 0.25
+            answer = ""
+            used_openai_fallback = False
 
-            client = _get_api_client()
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": self.anthropic_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": tier["model"],
-                    "max_tokens": tier["max_tokens"],
-                    "system": system_text,
-                    "messages": messages,
-                },
-            )
+            if self.anthropic_key:
+                client = _get_api_client()
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": self.anthropic_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": tier["model"],
+                        "max_tokens": tier["max_tokens"],
+                        "temperature": temperature,
+                        "system": system_text,
+                        "messages": messages,
+                    },
+                )
 
-            if resp.status_code == 200:
-                data = resp.json()
-                answer = data["content"][0]["text"].strip().replace("**", "")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    answer = data["content"][0]["text"].strip().replace("**", "")
+                    try:
+                        from kstock.core.token_tracker import track_usage_global
+
+                        usage = data.get("usage", {})
+                        track_usage_global(
+                            provider="anthropic",
+                            model=tier["model"],
+                            function_name="claude_direct_chat",
+                            input_tokens=usage.get("input_tokens", 0) or 0,
+                            output_tokens=usage.get("output_tokens", 0) or 0,
+                            cache_read_tokens=usage.get("cache_read_input_tokens", 0) or 0,
+                            cache_write_tokens=usage.get("cache_creation_input_tokens", 0) or 0,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    error_text = _extract_provider_error_message(resp.text)
+                    if _should_try_openai_chat_fallback(
+                        status_code=resp.status_code,
+                        body=resp.text,
+                        openai_key=openai_key,
+                    ):
+                        logger.warning(
+                            "Claude direct chat returned %d, using OpenAI fallback: %s",
+                            resp.status_code,
+                            error_text or "no body",
+                        )
+                        answer = await self._call_openai_chat_fallback(
+                            system_text,
+                            messages,
+                            tier_key=tier_key,
+                            max_tokens=tier["max_tokens"],
+                            temperature=temperature,
+                        )
+                        used_openai_fallback = True
+                    else:
+                        answer = (
+                            "⚠️ 클로드 대화 서버가 요청을 처리하지 못했습니다.\n"
+                            f"원인: {error_text or f'HTTP {resp.status_code}'}\n"
+                            "잠시 후 다시 시도해주세요."
+                        )
             else:
-                answer = f"API 오류: {resp.status_code}"
+                answer = await self._call_openai_chat_fallback(
+                    system_text,
+                    messages,
+                    tier_key=tier_key,
+                    max_tokens=tier["max_tokens"],
+                    temperature=temperature,
+                )
+                used_openai_fallback = True
+
+            if used_openai_fallback:
+                answer = (
+                    "참고: 클로드 응답 경로에 문제가 있어 보조 엔진으로 우회했습니다.\n\n"
+                    + answer
+                )
 
             # 대화 이력 저장
             history.append({"role": "user", "content": text})
             history.append({"role": "assistant", "content": answer})
-            if len(history) > 20:
-                history = history[-20:]
+            if len(history) > history_limit * 2:
+                history = history[-history_limit * 2:]
             context.user_data["claude_chat_history"] = history
 
             # 턴 카운트 증가
@@ -766,6 +1030,72 @@ class RemoteClaudeMixin:
                     "⚠️ 응답 중 오류가 발생했어요. 다시 시도해주세요.",
                     reply_markup=get_reply_markup(context),
                 )
+
+    async def _call_openai_chat_fallback(
+        self,
+        system_text: str,
+        messages: list[dict[str, str]],
+        *,
+        tier_key: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        """클로드 대화 실패 시 OpenAI 채팅으로 우회한다."""
+        openai_key = _get_openai_key()
+        if not openai_key:
+            raise RuntimeError("OPENAI_API_KEY 미설정")
+
+        model = _OPENAI_CHAT_FALLBACK_MODELS.get(tier_key, "gpt-4o-mini")
+        payload_messages = []
+        if system_text:
+            payload_messages.append({"role": "system", "content": system_text})
+        payload_messages.extend(messages)
+
+        client = _get_api_client()
+        resp = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {openai_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": payload_messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            },
+        )
+        if resp.status_code != 200:
+            error_text = _extract_provider_error_message(resp.text)
+            raise RuntimeError(
+                f"OpenAI fallback error {resp.status_code}: {error_text or 'unknown'}"
+            )
+
+        data = resp.json()
+        answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(answer, list):
+            answer = "".join(
+                part.get("text", "")
+                for part in answer
+                if isinstance(part, dict)
+            )
+        answer = str(answer).strip().replace("**", "")
+
+        try:
+            from kstock.core.token_tracker import track_usage_global
+
+            usage = data.get("usage", {})
+            track_usage_global(
+                provider="gpt",
+                model=model,
+                function_name="claude_text_chat_openai_fallback",
+                input_tokens=usage.get("prompt_tokens", 0) or 0,
+                output_tokens=usage.get("completion_tokens", 0) or 0,
+            )
+        except Exception:
+            pass
+
+        return answer or "응답이 비어 있습니다."
 
     async def _execute_claude_prompt(
         self, update: Update, prompt: str, *, context=None
@@ -807,10 +1137,10 @@ class RemoteClaudeMixin:
 
         # 첫 턴은 새 대화, 이후는 --continue
         continue_conv = in_claude_mode and turn > 0
-        # v10.3.1: 클대표 모드 → opus CLI
+        used_opus = False
         cli_model = "sonnet"
         if is_ceo:
-            cli_model = "opus"
+            cli_model, used_opus = self._consume_ceo_cli_model(context)
         output, return_code, elapsed = await self._run_claude_cli(
             prompt, continue_conversation=continue_conv, model=cli_model,
         )
@@ -820,8 +1150,9 @@ class RemoteClaudeMixin:
             progress_task.cancel()
 
         status = "✅" if return_code == 0 else "⚠️"
+        engine = " Opus" if used_opus else (" Sonnet" if is_ceo else "")
         header = (
-            f"💻 {status} ({elapsed:.0f}초)\n"
+            f"💻 {status}{engine} ({elapsed:.0f}초)\n"
             f"{'─' * 20}\n\n"
         )
 
@@ -861,9 +1192,10 @@ class RemoteClaudeMixin:
                     InlineKeyboardButton("🔄 봇재시작", callback_data="ceo:restart"),
                 ],
                 [
+                    InlineKeyboardButton("🔥 Opus 1회 승인", callback_data="ceo:arm_opus"),
                     InlineKeyboardButton("🧪 테스트", callback_data="ceo:test"),
-                    InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard"),
                 ],
+                [InlineKeyboardButton("🏠 대시보드", callback_data="ceo:dashboard")],
             ])
             for i, chunk in enumerate(chunks):
                 rm = ceo_buttons if i == len(chunks) - 1 else None
@@ -891,9 +1223,9 @@ class RemoteClaudeMixin:
         v6.2.1: 이미지 먼저 보내고 텍스트를 나중에 보내는 워크플로 지원.
         v9.3: 대기 시간 30초 → 2분으로 확대, 만료 시 알림 추가.
         """
-        if not self.anthropic_key:
+        if not self.anthropic_key and not _get_openai_key():
             await update.message.reply_text(
-                "⚠️ Anthropic API 키 없음",
+                "⚠️ 이미지 분석용 AI API 키가 없습니다.",
                 reply_markup=CLAUDE_MODE_MENU,
             )
             return
@@ -926,6 +1258,60 @@ class RemoteClaudeMixin:
                     reply_markup=CLAUDE_MODE_MENU,
                 )
 
+    async def _build_text_chat_system_prompt(self, tier_key: str = "daeri") -> str:
+        """텍스트 전용 클로드 대화 프롬프트."""
+        tier = self._CLAUDE_TIERS.get(tier_key, self._CLAUDE_TIERS["daeri"])
+        parts = [
+            f"너는 주호님의 {tier['name']}이다.",
+            "한국어 존댓말로 답하고, 말돌리지 말고 바로 핵심부터 답하라.",
+            "가격은 제공된 실시간 데이터가 있을 때만 구체적으로 말하라.",
+            "모호한 질문도 먼저 의도를 추정해 실행 가능한 답부터 제시하라.",
+        ]
+
+        if tier_key == "daeri":
+            parts.append(
+                "답변 형식: 1) 한줄 결론 2) 핵심 이유 2~3개. "
+                "가능하면 6줄 이내로 짧게 답하라."
+            )
+        elif tier_key == "bujang":
+            parts.append(
+                "투자 질문이면 '관심/매수/보유/매도' 중 어디에 가까운지 먼저 말하고, "
+                "그 뒤 이유와 지금 확인할 포인트를 정리하라."
+            )
+
+        try:
+            holdings = self.db.get_active_holdings()
+            if holdings:
+                holding_lines = ["[보유종목]"]
+                for h in holdings[:6]:
+                    name = h.get("name", "")
+                    ticker = h.get("ticker", "")
+                    buy_price = float(h.get("buy_price", 0) or 0)
+                    holding_lines.append(f"- {name}({ticker}) 매수가 {buy_price:,.0f}원")
+                parts.append("\n".join(holding_lines))
+        except Exception:
+            logger.debug("text chat holdings prompt build failed", exc_info=True)
+
+        try:
+            macro = self.db.get_macro_snapshot() or {}
+            market_lines = []
+            if macro.get("kospi"):
+                market_lines.append(
+                    f"코스피 {macro['kospi']:,.2f} ({macro.get('kospi_change_pct', 0):+.2f}%)"
+                )
+            if macro.get("kosdaq"):
+                market_lines.append(
+                    f"코스닥 {macro['kosdaq']:,.2f} ({macro.get('kosdaq_change_pct', 0):+.2f}%)"
+                )
+            if macro.get("vix"):
+                market_lines.append(f"VIX {macro.get('vix', 0):.1f}")
+            if market_lines:
+                parts.append("[시장]\n" + " | ".join(market_lines))
+        except Exception:
+            logger.debug("text chat market prompt build failed", exc_info=True)
+
+        return "\n\n".join(parts)
+
     async def _analyze_image_with_text(
         self, update: Update, context, prompt: str,
         img_b64: str | None = None,
@@ -941,7 +1327,6 @@ class RemoteClaudeMixin:
 
         try:
             import base64
-            import httpx
 
             if img_b64 is None:
                 photo = update.message.photo[-1]
@@ -951,53 +1336,107 @@ class RemoteClaudeMixin:
 
             # v9.5.1: 시스템 프롬프트 구축 (포트폴리오/브리핑 컨텍스트 포함)
             system_text = await self._build_image_system_prompt()
+            openai_key = _get_openai_key()
+            analysis = ""
+            used_openai_fallback = False
 
-            client = _get_api_client()
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": self.anthropic_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": "claude-sonnet-4-5-20250929",
-                    "max_tokens": 2000,
-                    "system": system_text,
-                    "messages": [{
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/jpeg",
-                                    "data": img_b64,
+            if self.anthropic_key:
+                client = _get_api_client()
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": self.anthropic_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-sonnet-4-5-20250929",
+                        "max_tokens": 2000,
+                        "system": system_text,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/jpeg",
+                                        "data": img_b64,
+                                    },
                                 },
-                            },
-                            {
-                                "type": "text",
-                                "text": (
-                                    f"주호님의 이미지 분석 요청입니다.\n\n"
-                                    f"질문/요청: {prompt}\n\n"
-                                    f"이미지가 주식 차트/데이터/봇 스크린샷이라면 "
-                                    f"보유종목과 최근 브리핑을 참고하여 투자 관점에서 분석해주세요.\n"
-                                    f"K-Quant 봇이 보낸 메시지 스크린샷이면 "
-                                    f"해당 내용을 이미 알고 있는 시스템 컨텍스트와 연결하여 답변해주세요.\n"
-                                    f"코드나 에러 스크린샷이면 원인 분석 + 해결책을 제시해주세요.\n"
-                                    f"볼드(**) 사용 금지. 이모지로 가독성 확보."
-                                ),
-                            },
-                        ],
-                    }],
-                },
-            )
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        f"주호님의 이미지 분석 요청입니다.\n\n"
+                                        f"질문/요청: {prompt}\n\n"
+                                        f"이미지가 주식 차트/데이터/봇 스크린샷이라면 "
+                                        f"보유종목과 최근 브리핑을 참고하여 투자 관점에서 분석해주세요.\n"
+                                        f"K-Quant 봇이 보낸 메시지 스크린샷이면 "
+                                        f"해당 내용을 이미 알고 있는 시스템 컨텍스트와 연결하여 답변해주세요.\n"
+                                        f"코드나 에러 스크린샷이면 원인 분석 + 해결책을 제시해주세요.\n"
+                                        f"볼드(**) 사용 금지. 이모지로 가독성 확보."
+                                    ),
+                                },
+                            ],
+                        }],
+                    },
+                )
 
-            if resp.status_code == 200:
-                data = resp.json()
-                analysis = data["content"][0]["text"].strip().replace("**", "")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    analysis = data["content"][0]["text"].strip().replace("**", "")
+                    try:
+                        from kstock.core.token_tracker import track_usage_global
+
+                        usage = data.get("usage", {})
+                        track_usage_global(
+                            provider="anthropic",
+                            model="claude-sonnet-4-5-20250929",
+                            function_name="claude_image_analysis",
+                            input_tokens=usage.get("input_tokens", 0) or 0,
+                            output_tokens=usage.get("output_tokens", 0) or 0,
+                            cache_read_tokens=usage.get("cache_read_input_tokens", 0) or 0,
+                            cache_write_tokens=usage.get("cache_creation_input_tokens", 0) or 0,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    error_text = _extract_provider_error_message(resp.text)
+                    if _should_try_openai_chat_fallback(
+                        status_code=resp.status_code,
+                        body=resp.text,
+                        openai_key=openai_key,
+                    ):
+                        logger.warning(
+                            "Claude vision returned %d, using OpenAI fallback: %s",
+                            resp.status_code,
+                            error_text or "no body",
+                        )
+                        analysis = await self._call_openai_vision_fallback(
+                            system_text=system_text,
+                            prompt=prompt,
+                            img_b64=img_b64,
+                        )
+                        used_openai_fallback = True
+                    else:
+                        analysis = (
+                            "⚠️ 클로드 이미지 분석 서버가 요청을 처리하지 못했습니다.\n"
+                            f"원인: {error_text or f'HTTP {resp.status_code}'}\n"
+                            "잠시 후 다시 시도해주세요."
+                        )
             else:
-                analysis = f"API 오류: {resp.status_code}"
+                analysis = await self._call_openai_vision_fallback(
+                    system_text=system_text,
+                    prompt=prompt,
+                    img_b64=img_b64,
+                )
+                used_openai_fallback = True
+
+            if used_openai_fallback:
+                analysis = (
+                    "참고: 클로드 이미지 경로에 문제가 있어 보조 엔진으로 우회했습니다.\n\n"
+                    + analysis
+                )
 
             # 턴 카운트 증가
             turn = context.user_data.get("claude_turn", 0)
@@ -1022,6 +1461,90 @@ class RemoteClaudeMixin:
                 "⚠️ 이미지 분석에 실패했어요. 다른 이미지로 시도해주세요.",
                 reply_markup=CLAUDE_MODE_MENU,
             )
+
+    async def _call_openai_vision_fallback(
+        self,
+        *,
+        system_text: str,
+        prompt: str,
+        img_b64: str,
+    ) -> str:
+        """클로드 비전 실패 시 OpenAI Vision으로 우회한다."""
+        openai_key = _get_openai_key()
+        if not openai_key:
+            raise RuntimeError("OPENAI_API_KEY 미설정")
+
+        model = os.getenv("OPENAI_VISION_MODEL", "gpt-4o")
+        vision_prompt = (
+            f"{system_text}\n\n"
+            f"주호님의 이미지 분석 요청입니다.\n\n"
+            f"질문/요청: {prompt}\n\n"
+            "이미지가 주식 차트/데이터/봇 스크린샷이라면 "
+            "보유종목과 최근 브리핑을 참고하여 투자 관점에서 분석해주세요.\n"
+            "K-Quant 봇이 보낸 메시지 스크린샷이면 "
+            "해당 내용을 이미 알고 있는 시스템 컨텍스트와 연결하여 답변해주세요.\n"
+            "코드나 에러 스크린샷이면 원인 분석 + 해결책을 제시해주세요.\n"
+            "볼드(**) 사용 금지. 이모지로 가독성 확보."
+        )
+
+        client = _get_api_client()
+        resp = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {openai_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": 1800,
+                "temperature": 0.2,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": vision_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{img_b64}",
+                                },
+                            },
+                        ],
+                    },
+                ],
+            },
+        )
+        if resp.status_code != 200:
+            error_text = _extract_provider_error_message(resp.text)
+            raise RuntimeError(
+                f"OpenAI vision fallback error {resp.status_code}: {error_text or 'unknown'}"
+            )
+
+        data = resp.json()
+        analysis = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(analysis, list):
+            analysis = "".join(
+                part.get("text", "")
+                for part in analysis
+                if isinstance(part, dict)
+            )
+        analysis = str(analysis).strip().replace("**", "")
+
+        try:
+            from kstock.core.token_tracker import track_usage_global
+
+            usage = data.get("usage", {})
+            track_usage_global(
+                provider="gpt",
+                model=model,
+                function_name="claude_vision_openai_fallback",
+                input_tokens=usage.get("prompt_tokens", 0) or 0,
+                output_tokens=usage.get("completion_tokens", 0) or 0,
+            )
+        except Exception:
+            pass
+
+        return analysis or "이미지 분석 결과가 비어 있습니다."
 
     async def _build_image_system_prompt(self) -> str:
         """v9.5.1: 이미지 분석용 시스템 프롬프트 (보유종목 + 브리핑 컨텍스트).
@@ -1259,7 +1782,18 @@ class RemoteClaudeMixin:
             return
 
         # Telegram 네트워크 오류는 자동 수정 대상 아님
-        skip_patterns = ["Timed out", "Network", "Connection", "ReadTimeout", "WriteTimeout"]
+        skip_patterns = [
+            "Timed out",
+            "Network",
+            "Connection",
+            "ReadTimeout",
+            "WriteTimeout",
+            "message is not modified",
+            "query is too old",
+            "callback query is too old",
+            "invalid callback data",
+            "message to edit not found",
+        ]
         combined = f"{error_source} {error_str}".lower()
         if any(p.lower() in combined for p in skip_patterns):
             return

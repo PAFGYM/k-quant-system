@@ -1,6 +1,7 @@
 """Admin, favorites, agents, v3.6 features."""
 from __future__ import annotations
 
+from kstock import APP_NAME, DISPLAY_VERSION, SYSTEM_NAME
 from kstock.bot.bot_imports import *  # noqa: F403
 
 
@@ -101,7 +102,7 @@ class AdminExtrasMixin:
     ) -> None:
         """🛠 관리자 메뉴 버튼 — 인라인 버튼으로 관리 기능 제공."""
         await update.message.reply_text(
-            "\U0001f6e0 관리자 모드 v9.1\n\n"
+            f"\U0001f6e0 관리자 모드 {DISPLAY_VERSION}\n\n"
             "아래 버튼을 눌러주세요.",
             reply_markup=InlineKeyboardMarkup(_admin_buttons()),
         )
@@ -198,7 +199,7 @@ class AdminExtrasMixin:
             context.user_data.pop("admin_mode", None)
             context.user_data.pop("admin_faq_type", None)
             await safe_edit_or_reply(query,
-                "\U0001f6e0 관리자 모드 v9.1\n\n"
+                f"\U0001f6e0 관리자 모드 {DISPLAY_VERSION}\n\n"
                 "아래 버튼을 눌러주세요.",
                 reply_markup=InlineKeyboardMarkup(_admin_buttons()),
             )
@@ -422,7 +423,7 @@ class AdminExtrasMixin:
             await safe_edit_or_reply(query,
                 f"🔧 시스템 제어\n{'━' * 22}\n\n"
                 f"상태: {status_line}\n"
-                f"버전: v9.1",
+                f"버전: {DISPLAY_VERSION}",
                 reply_markup=InlineKeyboardMarkup(sys_buttons),
             )
             return
@@ -574,7 +575,7 @@ class AdminExtrasMixin:
             ws_subs = len(self.ws.get_subscriptions())
 
             await safe_edit_or_reply(query,
-                f"\U0001f4ca 봇 상태 v9.1\n\n"
+                f"\U0001f4ca 봇 상태 {DISPLAY_VERSION}\n\n"
                 f"\u2705 가동: {hours}시간 {mins}분\n"
                 f"\U0001f4b0 보유종목: {len(holdings)}개\n"
                 f"\U0001f916 AI 채팅: {chat_count}회/50\n"
@@ -1103,7 +1104,7 @@ class AdminExtrasMixin:
         """v9.5.5 사용설명서 — 텍스트 메뉴에서 진입."""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         text = (
-            "📖 K-Quant v11.0 사용설명서\n"
+            f"📖 {APP_NAME} 사용설명서\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "AI 투자 비서 + ML 예측 + 24채널 학습\n\n"
             "🔹 기본 사용법\n"
@@ -1397,6 +1398,50 @@ class AdminExtrasMixin:
 
         return count
 
+    def _build_action_console_preview(self) -> list[str]:
+        """대시보드 상단용 매수/보유/매도 미리보기."""
+        try:
+            from kstock.bot.investment_managers import MANAGER_THRESHOLDS
+        except Exception:
+            MANAGER_THRESHOLDS = {}
+
+        holdings = self.db.get_active_holdings() or []
+        ranked: list[tuple[int, str]] = []
+
+        for h in holdings:
+            ticker = h.get("ticker", "")
+            name = (h.get("name", "") or ticker)[:8]
+            holding_type = h.get("holding_type", "swing")
+            buy_price = float(h.get("buy_price", 0) or 0)
+            current_price = float(h.get("current_price", 0) or 0)
+            if buy_price <= 0:
+                continue
+            pnl = ((current_price - buy_price) / buy_price * 100) if current_price > 0 else 0.0
+            thresholds = MANAGER_THRESHOLDS.get(
+                holding_type, MANAGER_THRESHOLDS.get("swing", {}),
+            )
+            stop_loss = float(thresholds.get("stop_loss", -7.0) or -7.0)
+            take_profit = float(thresholds.get("take_profit_1", 10.0) or 10.0)
+
+            verdict = "보유 유지"
+            urgency = 1
+            if pnl <= stop_loss + 0.7:
+                verdict = "매도 타이밍 점검"
+                urgency = 4
+            elif pnl >= take_profit:
+                verdict = "분할매도 구간"
+                urgency = 3
+            elif holding_type in {"position", "long_term", "tenbagger"} and pnl <= max(-3.0, stop_loss * 0.5):
+                verdict = "보유/추매 체크"
+                urgency = 2
+            elif holding_type == "scalp":
+                verdict = "당일 추세 확인"
+
+            ranked.append((urgency, f"- {name}: {verdict} ({pnl:+.1f}%)"))
+
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return [line for _, line in ranked[:3]]
+
     async def _build_dashboard_view(
         self, category: str = "", page: int = 0,
     ) -> tuple[str, InlineKeyboardMarkup]:
@@ -1423,6 +1468,10 @@ class AdminExtrasMixin:
             f"💎 장기: {counts.get('long_term', 0)}",
             f"📦 미분류: {counts.get('unclassified', 0)}",
         ]
+        action_preview = self._build_action_console_preview()
+        if action_preview:
+            lines.append("\n📋 액션 콘솔")
+            lines.extend(action_preview)
 
         # 보유종목 미리보기 (최대 5개, 가격 조회)
         if counts.get("holding", 0) > 0:
@@ -1483,21 +1532,24 @@ class AdminExtrasMixin:
         buttons.append(row2)
         buttons.append(row3)
 
-        # 매수 추천 + 매니저 + AI토론
+        # 액션 콘솔 + 매수 추천 + 매니저
         action_row = [
+            InlineKeyboardButton(
+                "📋 액션콘솔", callback_data="menu:daily_actions",
+            ),
             InlineKeyboardButton(
                 "📈 매수추천", callback_data="fav:buy_scan",
             ),
             InlineKeyboardButton(
                 "👨‍💼 매니저", callback_data="fav:managers",
             ),
-            InlineKeyboardButton(
-                "🎙️ AI토론", callback_data="menu:debate",
-            ),
         ]
         buttons.append(action_row)
 
         action_row2 = [
+            InlineKeyboardButton(
+                "🎙️ AI토론", callback_data="menu:debate",
+            ),
             InlineKeyboardButton(
                 "➕ 추가", callback_data="fav:add_mode",
             ),
@@ -2385,14 +2437,12 @@ class AdminExtrasMixin:
                 ],
             ])
             try:
+                from kstock.bot.news_action import format_stock_news_brief
                 from kstock.ingest.naver_finance import get_stock_news
                 news = await get_stock_news(ticker, limit=5)
                 if news:
-                    lines = [f"📰 {name} 최근 뉴스\n"]
-                    for i, n in enumerate(news[:5], 1):
-                        lines.append(f"{i}. {n['title']}")
-                        lines.append(f"   {n.get('date', '')} | {n.get('source', '')}")
-                    await safe_edit_or_reply(query, "\n".join(lines), reply_markup=nav_kb)
+                    text = format_stock_news_brief(name, news[:5])
+                    await safe_edit_or_reply(query, text, reply_markup=nav_kb)
                 else:
                     await safe_edit_or_reply(query, f"📰 {name}: 최근 뉴스가 없습니다.", reply_markup=nav_kb)
             except Exception:
@@ -2862,7 +2912,7 @@ class AdminExtrasMixin:
             )
         elif payload == "v8doc":
             # v11.0: 버전 설명서 PDF 생성 및 전송
-            await safe_edit_or_reply(query, "📋 v11.0 기능 설명서 PDF 생성 중...")
+            await safe_edit_or_reply(query, f"📋 {DISPLAY_VERSION} 기능 설명서 PDF 생성 중...")
             try:
                 import subprocess as _sp
                 _here = os.path.abspath(__file__)
@@ -2889,7 +2939,7 @@ class AdminExtrasMixin:
                         await query.message.reply_document(
                             document=f,
                             filename="K-Quant_v110_Features.pdf",
-                            caption="📋 K-Quant System v11.0 기능 설명서",
+                            caption=f"📋 {SYSTEM_NAME} 기능 설명서",
                         )
                 else:
                     await query.message.reply_text(
@@ -3070,6 +3120,8 @@ class AdminExtrasMixin:
         """오늘의 할 일 — 수동 접근."""
         await update.message.reply_text("📋 오늘의 할 일 생성 중...")
         try:
+            from kstock.bot.investment_managers import build_daily_action_shortcuts
+
             macro = None
             try:
                 macro_client = MacroClient()
@@ -3081,14 +3133,23 @@ class AdminExtrasMixin:
                 actions,
                 alert_mode=getattr(self, "_alert_mode", "normal"),
             )
-            buttons = []
-            for act in actions[:5]:
-                goto = act.get("goto")
-                if goto:
-                    buttons.append([InlineKeyboardButton(
-                        f"{act['emoji']} {act['title'][:20]}",
-                        callback_data=f"goto:{goto}",
-                    )])
+            buttons = make_shortcut_rows(build_daily_action_shortcuts(actions, max_buttons=5))
+            manager_shortcuts = []
+            seen_secondary = set()
+            for action in actions:
+                callback_data = str(action.get("secondary_callback", "") or "")
+                manager_label = str(action.get("manager_label", "") or "").strip()
+                if not callback_data or not manager_label or callback_data in seen_secondary:
+                    continue
+                seen_secondary.add(callback_data)
+                manager_shortcuts.append({
+                    "label": manager_label,
+                    "callback_data": callback_data,
+                })
+                if len(manager_shortcuts) >= 4:
+                    break
+            if manager_shortcuts:
+                buttons.extend(make_shortcut_rows(manager_shortcuts))
             buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
             await send_long_message(
                 update.message, text,
@@ -3341,5 +3402,3 @@ class AdminExtrasMixin:
         await query.message.reply_text(
             report[:4000], reply_markup=InlineKeyboardMarkup(buttons),
         )
-
-

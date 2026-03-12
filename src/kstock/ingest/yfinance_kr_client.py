@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from kstock.core.market_calendar import is_kr_market_open
 from kstock.core.tz import KST
 
 if TYPE_CHECKING:
@@ -51,6 +52,15 @@ def _yf_ticker(code: str, market: str = "KOSPI") -> str:
     """Convert Korean stock code to yfinance symbol."""
     suffix = ".KS" if market.upper() == "KOSPI" else ".KQ"
     return f"{code}{suffix}"
+
+
+def _is_kr_live_session() -> bool:
+    """한국 정규장 시간에는 더 신선한 네이버 가격을 우선 사용한다."""
+    now = datetime.now(KST)
+    if not is_kr_market_open(now.date()):
+        return False
+    minutes = now.hour * 60 + now.minute
+    return 9 * 60 <= minutes <= 15 * 60 + 30
 
 
 @dataclass
@@ -181,6 +191,11 @@ class YFinanceKRClient:
     async def get_current_price(self, code: str, market: str = "KOSPI") -> float:
         """Get current price from yfinance (v4.0: circuit breaker + Naver fallback)."""
         symbol = _yf_ticker(code, market)
+
+        if _is_kr_live_session():
+            live_price = await self._naver_fallback_price(code)
+            if live_price > 0:
+                return live_price
 
         # 서킷 브레이커 체크
         if _yf_breaker and not _yf_breaker.can_execute():

@@ -279,14 +279,17 @@ class AutoTrainer:
     4. 학습 히스토리 추적
     """
 
-    def __init__(self, db=None, yf_client=None) -> None:
+    def __init__(self, db=None, yf_client=None, load_persisted_state: bool | None = None) -> None:
         self.db = db
         self.yf_client = yf_client
         self.monitor = ModelMonitor(db)
         self._last_train_date: date | None = None
         self._current_weights = (0.35, 0.30, 0.35)
         self._history: list[TrainHistory] = []
-        self._load_history()
+        if load_persisted_state is None:
+            load_persisted_state = db is not None or yf_client is not None
+        if load_persisted_state:
+            self._load_history()
 
     def _load_history(self) -> None:
         """디스크에서 학습 히스토리 로드."""

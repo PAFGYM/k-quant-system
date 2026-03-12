@@ -102,6 +102,7 @@ from kstock.bot.account_reader import (
     compare_screenshots,
     format_screenshot_summary,
     format_screenshot_reminder,
+    has_meaningful_account_data,
 )
 from kstock.bot.diagnosis import batch_diagnose, format_diagnosis_report
 from kstock.bot.account_diagnosis import (
@@ -297,6 +298,26 @@ def make_feedback_row(menu_name: str) -> list:
     ]
 
 
+def make_shortcut_rows(shortcuts: list[dict[str, str]], columns: int = 2) -> list[list]:
+    """바로가기 메타데이터를 텔레그램 인라인 버튼 행으로 변환."""
+    from telegram import InlineKeyboardButton
+
+    rows: list[list] = []
+    row: list = []
+    for item in shortcuts:
+        label = str(item.get("label", "") or "").strip()
+        callback_data = str(item.get("callback_data", "") or "").strip()
+        if not label or not callback_data:
+            continue
+        row.append(InlineKeyboardButton(label[:40], callback_data=callback_data[:64]))
+        if len(row) >= max(1, columns):
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return rows
+
+
 async def send_long_message(
     target, text: str, reply_markup=None, page_size: int = 3800,
 ) -> None:
@@ -350,7 +371,9 @@ async def safe_edit_or_reply(query, text: str, reply_markup=None) -> None:
     """
     try:
         await query.edit_message_text(text, reply_markup=reply_markup)
-    except Exception:
+    except Exception as e:
+        if "message is not modified" in str(e).lower():
+            return
         try:
             await query.message.reply_text(text, reply_markup=reply_markup)
         except Exception:
@@ -429,5 +452,3 @@ def _today() -> str:
 # Export all names (including _ prefixed helpers) for mixin imports
 import sys as _sys_mod
 __all__ = [_n for _n in dir(_sys_mod.modules[__name__]) if not _n.startswith('__')]
-
-

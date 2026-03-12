@@ -1209,6 +1209,9 @@ class TradingMixin:
                                 "quantity": h.get("quantity", 0),
                                 "pnl_pct": h.get("profit_pct", 0),
                                 "eval_amount": h.get("eval_amount", 0),
+                                "purchase_type": h.get("purchase_type", ""),
+                                "is_margin": h.get("is_margin", 0),
+                                "margin_type": h.get("margin_type", ""),
                             }
                             for h in items
                         ]
@@ -1230,6 +1233,8 @@ class TradingMixin:
         for h in holdings:
             ticker = h.get("ticker", "")
             if ticker and re.match(r'^\d{6}$', ticker) and h.get("name"):
+                purchase_type = str(h.get("purchase_type", "") or "").strip()
+                is_margin, margin_type = detect_margin_purchase(h)
                 try:
                     self.db.upsert_holding(
                         ticker=ticker,
@@ -1239,6 +1244,9 @@ class TradingMixin:
                         current_price=h.get("current_price", 0),
                         pnl_pct=h.get("pnl_pct", 0),
                         eval_amount=h.get("eval_amount", 0),
+                        purchase_type=purchase_type,
+                        is_margin=h.get("is_margin", is_margin),
+                        margin_type=h.get("margin_type", margin_type or ""),
                     )
                     synced = True
                 except Exception:
@@ -1370,16 +1378,18 @@ class TradingMixin:
 
             emoji = "\U0001f7e2" if pnl > 0 else "\U0001f534" if pnl < 0 else "\u26aa"
             pnl_sign_s = "+" if pnl_amount >= 0 else ""
+            purchase_type = str(h.get("purchase_type", "") or "").strip()
 
             # 신용 표시
             margin_tag = ""
             if h.get("_is_margin_display") or h.get("is_margin") or h.get("margin_type"):
                 margin_tag = " \U0001f4b3"
+            purchase_tag = f" [{purchase_type}]" if purchase_type else ""
 
             qty_text = f" {qty}주" if qty > 0 else ""
             # ticker 있으면 표시, 없으면 생략
             ticker_text = f"({ticker})" if ticker else ""
-            line = f"{emoji} {name}{ticker_text}{qty_text}{margin_tag}\n"
+            line = f"{emoji} {name}{ticker_text}{qty_text}{purchase_tag}{margin_tag}\n"
             line += f"   매수 {bp:,.0f}원 \u2192 현재 {cp:,.0f}원\n"
 
             if eval_amt > 0:
@@ -3271,4 +3281,3 @@ class TradingMixin:
             logger.error("Auto debrief trigger failed: %s", e, exc_info=True)
 
     # == Scheduled Jobs ======================================================
-

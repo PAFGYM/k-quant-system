@@ -55,6 +55,16 @@ class TestClassifyTriggerType:
         assert ttype == "global"
         assert impact == "HIGH"
 
+    def test_gtc_keyword_is_expo_trigger(self):
+        ttype, impact = classify_trigger_type("엔비디아 GTC 2026 차세대 AI 칩 공개")
+        assert ttype == "expo"
+        assert impact == "HIGH"
+
+    def test_interbattery_keyword_is_expo_trigger(self):
+        ttype, impact = classify_trigger_type("인터배터리 2026에서 차세대 전고체 배터리 공개")
+        assert ttype == "expo"
+        assert impact == "HIGH"
+
     def test_earnings_trigger(self):
         ttype, impact = classify_trigger_type("텔레칩스 실적 서프라이즈 매출 급증")
         assert ttype == "earnings"
@@ -88,6 +98,12 @@ class TestDetectSector:
         # "우주" → space, "양자" → quantum
         sectors = detect_sector_for_text("우주 양자통신 위성 발사")
         assert len(sectors) >= 2
+
+    def test_industry_event_keywords_are_detected(self):
+        sectors = detect_sector_for_text("서울모빌리티쇼에서 자율주행 SDV 공개")
+        assert "autonomous_driving" in sectors
+        sectors = detect_sector_for_text("서울 ADEX에서 위성·방산 체계 공개")
+        assert "space_aerospace" in sectors
 
 
 # ---------------------------------------------------------------------------

@@ -17,9 +17,12 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 import httpx
+
+from kstock.core.token_tracker import get_db, track_usage_global
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +243,21 @@ class AIRouter:
         # [v3.6.4] Prompt Caching 통계
         self._cache_hits: int = 0
         self._cache_tokens_saved: int = 0
+        self._daily_soft_budget_usd = self._load_budget_limit(
+            "AI_DAILY_SOFT_BUDGET_USD", 1.5,
+        )
+        self._monthly_soft_budget_usd = self._load_budget_limit(
+            "AI_MONTHLY_SOFT_BUDGET_USD", 35.0,
+        )
         self._init_providers()
+
+    @staticmethod
+    def _load_budget_limit(env_name: str, default: float) -> float:
+        try:
+            value = float(os.getenv(env_name, str(default)).strip())
+            return value if value > 0 else default
+        except Exception:
+            return default
 
     def _init_providers(self) -> None:
         """환경변수에서 API 키 로드 + 프로바이더 초기화."""
@@ -317,13 +334,16 @@ class AIRouter:
         provider_name = routing["provider"]
         model_tier = routing["model_tier"]
         fallback = routing.get("fallback")
+        model_tier, max_tokens = self._apply_cost_guard(
+            task, provider_name, model_tier, max_tokens,
+        )
 
         # 1차: 지정된 프로바이더
         provider = self.providers.get(provider_name)
         if provider and provider.available:
             try:
                 result = await self._call_provider(
-                    provider_name, model_tier, prompt,
+                    provider_name, model_tier, prompt, task=task,
                     system=system, max_tokens=max_tokens,
                     temperature=temperature, response_format=response_format,
                 )
@@ -340,7 +360,7 @@ class AIRouter:
                 try:
                     logger.info("Falling back to %s for task '%s'", fallback, task)
                     result = await self._call_provider(
-                        fallback, model_tier, prompt,
+                        fallback, model_tier, prompt, task=task,
                         system=system, max_tokens=max_tokens,
                         temperature=temperature, response_format=response_format,
                     )
@@ -355,7 +375,7 @@ class AIRouter:
             if prov.available and name not in (provider_name, fallback):
                 try:
                     return await self._call_provider(
-                        name, model_tier, prompt,
+                        name, model_tier, prompt, task=task,
                         system=system, max_tokens=max_tokens,
                         temperature=temperature, response_format=response_format,
                     )
@@ -373,6 +393,7 @@ class AIRouter:
         model_tier: str,
         prompt: str,
         *,
+        task: str,
         system: str = "",
         max_tokens: int = 1000,
         temperature: float = 0.3,
@@ -385,18 +406,18 @@ class AIRouter:
         start = time.monotonic()
         try:
             if provider_name == "claude":
-                result = await self._call_claude(
+                result, usage = await self._call_claude(
                     provider.api_key, model, prompt,
                     system=system, max_tokens=max_tokens, temperature=temperature,
                 )
             elif provider_name == "gpt":
-                result = await self._call_gpt(
+                result, usage = await self._call_gpt(
                     provider.api_key, model, prompt,
                     system=system, max_tokens=max_tokens, temperature=temperature,
                     response_format=response_format,
                 )
             elif provider_name == "gemini":
-                result = await self._call_gemini(
+                result, usage = await self._call_gemini(
                     provider.api_key, model, prompt,
                     system=system, max_tokens=max_tokens, temperature=temperature,
                 )
@@ -407,6 +428,7 @@ class AIRouter:
             stats = self.stats[provider_name]
             stats.calls += 1
             stats.total_latency_ms += elapsed
+            self._track_usage(provider_name, model, task, usage, elapsed)
             logger.debug(
                 "AI %s/%s responded in %.0fms (%d chars)",
                 provider_name, model, elapsed, len(result),
@@ -417,10 +439,94 @@ class AIRouter:
             self.stats[provider_name].total_latency_ms += elapsed
             raise
 
+    def _apply_cost_guard(
+        self,
+        task: str,
+        provider_name: str,
+        model_tier: str,
+        max_tokens: int,
+    ) -> tuple[str, int]:
+        """비용이 높아질 때 저비용 모델/토큰 상한으로 부드럽게 강등한다."""
+        db = get_db()
+        if db is None:
+            return model_tier, max_tokens
+
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            year_month = datetime.now().strftime("%Y-%m")
+            daily_cost = float((db.get_daily_api_usage(today) or {}).get("total_cost", 0) or 0)
+            monthly_cost = float((db.get_monthly_api_usage(year_month) or {}).get("total_cost", 0) or 0)
+        except Exception:
+            logger.debug("AI budget guard skipped", exc_info=True)
+            return model_tier, max_tokens
+
+        interactive_tasks = {"chat", "deep_analysis", "strategy_synthesis", "vision_ocr"}
+        capped_tokens = max_tokens
+        capped_tier = model_tier
+
+        nearing_limit = (
+            daily_cost >= self._daily_soft_budget_usd * 0.7
+            or monthly_cost >= self._monthly_soft_budget_usd * 0.7
+        )
+        over_limit = (
+            daily_cost >= self._daily_soft_budget_usd
+            or monthly_cost >= self._monthly_soft_budget_usd
+        )
+
+        if nearing_limit:
+            capped_tokens = min(
+                capped_tokens,
+                900 if task in interactive_tasks else 650,
+            )
+        if over_limit:
+            if capped_tier == "standard" and task != "vision_ocr":
+                capped_tier = "fast"
+            capped_tokens = min(
+                capped_tokens,
+                700 if task in interactive_tasks else 450,
+            )
+
+        if (capped_tier, capped_tokens) != (model_tier, max_tokens):
+            logger.info(
+                "AI budget guard applied: task=%s provider=%s tier %s->%s tokens %d->%d",
+                task,
+                provider_name,
+                model_tier,
+                capped_tier,
+                max_tokens,
+                capped_tokens,
+            )
+        return capped_tier, capped_tokens
+
+    def _track_usage(
+        self,
+        provider_name: str,
+        model: str,
+        task: str,
+        usage: dict[str, int],
+        elapsed_ms: float,
+    ) -> None:
+        """라우터 경유 호출도 공통 비용 테이블에 기록한다."""
+        if not usage:
+            return
+        try:
+            track_usage_global(
+                provider=provider_name,
+                model=model,
+                function_name=f"ai_router:{task}",
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                cache_read_tokens=usage.get("cache_read_tokens", 0),
+                cache_write_tokens=usage.get("cache_write_tokens", 0),
+                latency_ms=elapsed_ms,
+            )
+        except Exception:
+            logger.debug("AI usage tracking failed", exc_info=True)
+
     async def _call_claude(
         self, api_key: str, model: str, prompt: str, *,
         system: str = "", max_tokens: int = 1000, temperature: float = 0.3,
-    ) -> str:
+    ) -> tuple[str, dict[str, int]]:
         """Anthropic Claude API 호출 (Prompt Caching 적용)."""
         payload: dict[str, Any] = {
             "model": model,
@@ -458,13 +564,19 @@ class AIRouter:
         if cache_read > 0:
             self._cache_hits += 1
             self._cache_tokens_saved += cache_read
-        return data["content"][0]["text"]
+        usage_dict = {
+            "input_tokens": usage.get("input_tokens", 0) or 0,
+            "output_tokens": usage.get("output_tokens", 0) or 0,
+            "cache_read_tokens": cache_read or 0,
+            "cache_write_tokens": cache_write or 0,
+        }
+        return data["content"][0]["text"], usage_dict
 
     async def _call_gpt(
         self, api_key: str, model: str, prompt: str, *,
         system: str = "", max_tokens: int = 1000, temperature: float = 0.3,
         response_format: str = "text",
-    ) -> str:
+    ) -> tuple[str, dict[str, int]]:
         """OpenAI GPT API 호출."""
         messages = []
         if system:
@@ -495,12 +607,18 @@ class AIRouter:
         usage = data.get("usage", {})
         self.stats["gpt"].tokens_in += usage.get("prompt_tokens", 0)
         self.stats["gpt"].tokens_out += usage.get("completion_tokens", 0)
-        return data["choices"][0]["message"]["content"]
+        usage_dict = {
+            "input_tokens": usage.get("prompt_tokens", 0) or 0,
+            "output_tokens": usage.get("completion_tokens", 0) or 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+        }
+        return data["choices"][0]["message"]["content"], usage_dict
 
     async def _call_gemini(
         self, api_key: str, model: str, prompt: str, *,
         system: str = "", max_tokens: int = 1000, temperature: float = 0.3,
-    ) -> str:
+    ) -> tuple[str, dict[str, int]]:
         """Google Gemini API 호출."""
         contents = []
         if system:
@@ -534,8 +652,19 @@ class AIRouter:
         if candidates:
             parts = candidates[0].get("content", {}).get("parts", [])
             if parts:
-                return parts[0].get("text", "")
-        return ""
+                usage_dict = {
+                    "input_tokens": usage.get("promptTokenCount", 0) or 0,
+                    "output_tokens": usage.get("candidatesTokenCount", 0) or 0,
+                    "cache_read_tokens": usage.get("cachedContentTokenCount", 0) or 0,
+                    "cache_write_tokens": 0,
+                }
+                return parts[0].get("text", ""), usage_dict
+        return "", {
+            "input_tokens": usage.get("promptTokenCount", 0) or 0,
+            "output_tokens": usage.get("candidatesTokenCount", 0) or 0,
+            "cache_read_tokens": usage.get("cachedContentTokenCount", 0) or 0,
+            "cache_write_tokens": 0,
+        }
 
     # ── Vision (Claude Only) ────────────────────────────────────────────────
 

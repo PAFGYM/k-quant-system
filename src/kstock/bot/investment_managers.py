@@ -1,4 +1,4 @@
-"""4명의 전설적 투자자 AI 매니저 시스템.
+"""5명의 전설적 투자자 AI 매니저 시스템.
 
 각 매니저는 holding_type에 매칭되어 해당 투자 유형에 특화된
 분석·코칭·알림 메시지를 제공한다.
@@ -1364,6 +1364,567 @@ def compute_recovery_score(tech, day_change: float = 0) -> int:
     return min(score, 100)
 
 
+MANAGER_ROLE_GUIDES: dict[str, dict[str, str]] = {
+    "scalp": {
+        "label": "초단기 돌파",
+        "focus": "거래량·20일선 돌파·당일 수급",
+        "action": "돌파 확인 후 빠른 추세 추종",
+    },
+    "swing": {
+        "label": "눌림목 반등",
+        "focus": "과매도·밴드 하단·반전 신호",
+        "action": "반등 확인 후 2~3회 분할 진입",
+    },
+    "position": {
+        "label": "중기 성장",
+        "focus": "성장 점수·수급·실적 지속성",
+        "action": "1~3개월 관점으로 비중 확대",
+    },
+    "long_term": {
+        "label": "품질 가치",
+        "focus": "ROE·부채·밸류·안전마진",
+        "action": "내재가치 할인 구간 장기 분할",
+    },
+    "tenbagger": {
+        "label": "미래 촉매",
+        "focus": "소형~중형 시총·정책·산업 이벤트",
+        "action": "큰 촉매 전 씨앗 포지션 구축",
+    },
+}
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_text(value) -> str:
+    text = str(value or "").strip()
+    return text
+
+
+def _format_market_cap_label(market_cap: float) -> str:
+    cap = _safe_float(market_cap, 0.0)
+    if cap <= 0:
+        return ""
+    if cap >= 1_0000_0000_0000:
+        return f"{cap / 1_0000_0000_0000:.1f}조"
+    return f"{cap / 1_0000_0000:.0f}억"
+
+
+def _extract_scan_profile(scan_result) -> dict | None:
+    """ScanResult/유사 객체를 매니저 발굴용 공통 프로필로 정규화."""
+    tech = getattr(scan_result, "tech", None) or getattr(scan_result, "indicators", None)
+    score = getattr(scan_result, "score", None)
+    if tech is None or score is None:
+        return None
+
+    info = getattr(scan_result, "info", None)
+    flow = getattr(scan_result, "flow", None)
+    listing_market = _safe_text(getattr(info, "market", ""))
+
+    price = _safe_float(getattr(info, "current_price", 0))
+    market_cap = _safe_float(getattr(info, "market_cap", 0))
+    per = _safe_float(getattr(info, "per", 0))
+    roe = _safe_float(getattr(info, "roe", 0))
+    debt_ratio = _safe_float(getattr(info, "debt_ratio", 0))
+    consensus_target = _safe_float(getattr(info, "consensus_target", 0))
+    target_upside = (
+        ((consensus_target - price) / price) * 100
+        if consensus_target > 0 and price > 0 else 0.0
+    )
+    day_change = _safe_float(
+        getattr(scan_result, "day_change_pct", None),
+        default=_safe_float(getattr(scan_result, "day_change", 0)),
+    )
+    drop_from_high = (
+        ((price - tech.high_52w) / tech.high_52w) * 100
+        if tech.high_52w > 0 and price > 0 else 0.0
+    )
+    foreign_days = int(_safe_float(getattr(flow, "foreign_net_buy_days", 0)))
+    inst_days = int(_safe_float(getattr(flow, "institution_net_buy_days", 0)))
+
+    crowd_signal = ""
+    if tech.volume_ratio >= 3.5 and foreign_days <= 0 and inst_days <= 0:
+        crowd_signal = "개미 과열 경계"
+    elif tech.volume_ratio >= 2.0 and (foreign_days >= 2 or inst_days >= 2):
+        crowd_signal = "진성 수급 동행"
+    elif tech.volume_ratio >= 2.5 and price > 0 and day_change >= 7.0:
+        crowd_signal = "리딩방 급행 주의"
+
+    return {
+        "ticker": getattr(scan_result, "ticker", ""),
+        "name": getattr(scan_result, "name", ""),
+        "price": price,
+        "day_change": day_change,
+        "rsi": _safe_float(getattr(tech, "rsi", 0)),
+        "vol_ratio": _safe_float(getattr(tech, "volume_ratio", 0)) * 100,
+        "bb_pctb": _safe_float(getattr(tech, "bb_pctb", 0.5)),
+        "macd_cross": int(_safe_float(getattr(tech, "macd_signal_cross", 0))),
+        "drop_from_high": drop_from_high,
+        "recovery_score": compute_recovery_score(tech, day_change),
+        "composite": _safe_float(getattr(score, "composite", 0)),
+        "signal": getattr(score, "signal", ""),
+        "confidence_score": _safe_float(getattr(scan_result, "confidence_score", 0)),
+        "market_cap": market_cap,
+        "market_cap_label": _format_market_cap_label(market_cap),
+        "listing_market": listing_market,
+        "per": per,
+        "roe": roe,
+        "debt_ratio": debt_ratio,
+        "target_upside": target_upside,
+        "foreign_days": foreign_days,
+        "inst_days": inst_days,
+        "avg_trade_value": _safe_float(getattr(flow, "avg_trade_value_krw", 0)),
+        "return_3m": _safe_float(getattr(tech, "return_3m_pct", 0)),
+        "weekly_trend": getattr(tech, "weekly_trend", "neutral"),
+        "mtf_aligned": bool(getattr(tech, "mtf_aligned", False)),
+        "ma20": _safe_float(getattr(tech, "ma20", 0)),
+        "rsi_divergence": int(_safe_float(getattr(tech, "rsi_divergence", 0))),
+        "crowd_signal": crowd_signal,
+        "flow_signal": "",
+        "short_ratio": 0.0,
+        "short_balance_ratio": 0.0,
+        "short_pattern_codes": [],
+        "short_pattern_labels": [],
+        "short_timing_action": "",
+    }
+
+
+def extract_scan_profile(scan_result) -> dict | None:
+    """공용 ScanResult 정규화 래퍼."""
+    return _extract_scan_profile(scan_result)
+
+
+def _append_reason(reasons: list[str], condition: bool, text: str) -> None:
+    if condition and text not in reasons:
+        reasons.append(text)
+
+
+def _evaluate_manager_candidate(manager_key: str, p: dict) -> tuple[bool, float, list[str], str]:
+    """매니저별 적합도 점수와 핵심 이유 산출."""
+    reasons: list[str] = []
+    score = 0.0
+    price_above_ma20 = p["price"] > 0 and p["ma20"] > 0 and p["price"] >= p["ma20"]
+
+    if manager_key == "scalp":
+        if p["vol_ratio"] >= 180:
+            score += min(26.0, (p["vol_ratio"] - 150) / 6)
+            _append_reason(reasons, True, f"거래량 {p['vol_ratio']:.0f}% 급증")
+        if 45 <= p["rsi"] <= 68:
+            score += 18.0
+            _append_reason(reasons, True, f"RSI {p['rsi']:.0f} 모멘텀")
+        elif 40 <= p["rsi"] <= 72:
+            score += 8.0
+        if price_above_ma20:
+            score += 14.0
+            _append_reason(reasons, True, "20일선 상회")
+        if p["macd_cross"] > 0:
+            score += 10.0
+            _append_reason(reasons, True, "MACD 골든크로스")
+        if p["foreign_days"] > 0 and p["inst_days"] > 0:
+            score += 10.0
+            _append_reason(reasons, True, "외인·기관 동시 순매수")
+        elif p["foreign_days"] > 0 or p["inst_days"] > 0:
+            score += 4.0
+        if p["return_3m"] >= 8:
+            score += 10.0
+            _append_reason(reasons, True, f"3개월 RS {p['return_3m']:+.1f}%")
+        if p["crowd_signal"] == "개미 과열 경계":
+            score -= 10.0
+        action = "돌파 캔들 확인 후 당일 추세 추종"
+        match = score >= 56 and p["vol_ratio"] >= 180 and 40 <= p["rsi"] <= 72
+
+    elif manager_key == "swing":
+        if 28 <= p["rsi"] <= 52:
+            score += max(10.0, 20.0 - abs(38.0 - p["rsi"]) * 0.5)
+            _append_reason(reasons, True, f"RSI {p['rsi']:.0f} 눌림 구간")
+        if p["bb_pctb"] <= 0.45:
+            score += max(0.0, 18.0 - p["bb_pctb"] * 20)
+            _append_reason(reasons, True, f"BB 하단 {p['bb_pctb']:.2f}")
+        if p["macd_cross"] > 0 or p["rsi_divergence"] > 0:
+            score += 14.0
+            _append_reason(reasons, True, "반전 시그널 포착")
+        if p["drop_from_high"] <= -12:
+            score += min(14.0, abs(p["drop_from_high"]) * 0.5)
+            _append_reason(reasons, True, f"고점대비 {p['drop_from_high']:.0f}%")
+        if p["recovery_score"] >= 35:
+            score += 12.0
+            _append_reason(reasons, True, f"회복점수 {p['recovery_score']:.0f}")
+        if p["inst_days"] >= 1:
+            score += 8.0
+            _append_reason(reasons, True, f"기관 순매수 {p['inst_days']}일")
+        if p["crowd_signal"] == "개미 과열 경계":
+            score -= 8.0
+        action = "반등 확인 후 2~3회 분할 진입"
+        match = (
+            score >= 54
+            and 25 <= p["rsi"] <= 55
+            and p["bb_pctb"] <= 0.55
+            and (p["macd_cross"] > 0 or p["recovery_score"] >= 35 or p["rsi_divergence"] > 0)
+        )
+
+    elif manager_key == "position":
+        if p["composite"] >= 68:
+            score += min(24.0, (p["composite"] - 60) * 0.9)
+            _append_reason(reasons, True, f"종합점수 {p['composite']:.1f}")
+        if p["roe"] >= 12:
+            score += min(15.0, p["roe"] * 0.7)
+            _append_reason(reasons, True, f"ROE {p['roe']:.1f}%")
+        if 0 < p["debt_ratio"] <= 130:
+            score += 12.0
+            _append_reason(reasons, True, f"부채비율 {p['debt_ratio']:.0f}%")
+        if 0 < p["per"] <= 24:
+            score += 10.0
+            _append_reason(reasons, True, f"PER {p['per']:.1f}배")
+        if p["target_upside"] >= 10:
+            score += min(12.0, p["target_upside"] * 0.4)
+            _append_reason(reasons, True, f"목표가 괴리 {p['target_upside']:+.1f}%")
+        if p["foreign_days"] >= 2 or p["inst_days"] >= 2:
+            score += 8.0
+            _append_reason(reasons, True, "중기 수급 동행")
+        if p["mtf_aligned"] or p["weekly_trend"] == "up":
+            score += 8.0
+            _append_reason(reasons, True, "주봉 추세 우상향")
+        action = "실적/스토리 유지 전제 1~3개월 보유"
+        match = (
+            score >= 60
+            and p["composite"] >= 68
+            and p["roe"] >= 10
+            and 0 < p["debt_ratio"] <= 150
+        )
+
+    elif manager_key == "long_term":
+        if p["roe"] >= 15:
+            score += min(18.0, p["roe"] * 0.8)
+            _append_reason(reasons, True, f"ROE {p['roe']:.1f}%")
+        if 0 < p["debt_ratio"] <= 80:
+            score += 16.0
+            _append_reason(reasons, True, f"부채비율 {p['debt_ratio']:.0f}%")
+        if 4 <= p["per"] <= 18:
+            score += 14.0
+            _append_reason(reasons, True, f"PER {p['per']:.1f}배")
+        if p["composite"] >= 65:
+            score += min(16.0, (p["composite"] - 60) * 0.7)
+            _append_reason(reasons, True, f"종합점수 {p['composite']:.1f}")
+        if p["target_upside"] >= 8:
+            score += min(10.0, p["target_upside"] * 0.35)
+            _append_reason(reasons, True, f"안전마진 {p['target_upside']:+.1f}%")
+        if p["market_cap"] >= 100_0000_0000:
+            score += 6.0
+            _append_reason(reasons, True, "중대형 품질주")
+        if p["weekly_trend"] == "down":
+            score -= 6.0
+        action = "가치 할인 구간에서 천천히 장기 분할"
+        match = (
+            score >= 62
+            and p["roe"] >= 15
+            and 0 < p["debt_ratio"] <= 90
+            and 3 <= p["per"] <= 20
+            and p["composite"] >= 62
+        )
+
+    elif manager_key == "tenbagger":
+        listing_market = p.get("listing_market", "")
+        if listing_market == "KOSDAQ":
+            score += 10.0
+            _append_reason(reasons, True, "코스닥 선행 축")
+        elif listing_market == "KOSPI" and 0 < p["market_cap"] <= 3_0000_0000_0000:
+            score += 4.0
+            _append_reason(reasons, True, "중소형 코스피")
+        if 700_0000_0000 <= p["market_cap"] <= 2_0000_0000_0000:
+            size_score = 18.0
+            score += size_score
+            _append_reason(reasons, True, "국내 스몰캡 핵심 구간")
+        elif 0 < p["market_cap"] <= 5_0000_0000_0000:
+            size_score = 12.0
+            score += size_score
+            _append_reason(reasons, True, "시총 5조 미만")
+        elif 0 < p["market_cap"] < 500_0000_0000:
+            score -= 8.0
+            _append_reason(reasons, True, "초저유동성 주의")
+        if p["composite"] >= 62:
+            score += min(20.0, (p["composite"] - 55) * 0.9)
+            _append_reason(reasons, True, f"종합점수 {p['composite']:.1f}")
+        if p["roe"] >= 8:
+            score += min(12.0, p["roe"] * 0.6)
+            _append_reason(reasons, True, f"ROE {p['roe']:.1f}%")
+        if p["target_upside"] >= 15:
+            score += min(12.0, p["target_upside"] * 0.35)
+            _append_reason(reasons, True, f"상승 여력 {p['target_upside']:+.1f}%")
+        if p["return_3m"] >= 10:
+            score += min(12.0, p["return_3m"] * 0.5)
+            _append_reason(reasons, True, f"3개월 모멘텀 {p['return_3m']:+.1f}%")
+        if p["foreign_days"] >= 2 or p["inst_days"] >= 2:
+            score += 8.0
+            _append_reason(reasons, True, "초기 수급 유입")
+        if p["crowd_signal"] == "개미 과열 경계":
+            score -= 6.0
+        action = "정책·산업 이벤트 전 씨앗 포지션 구축"
+        match = (
+            score >= 58
+            and p["composite"] >= 60
+            and 0 < p["market_cap"] <= 5_0000_0000_0000
+            and p["rsi"] <= 72
+        )
+
+    else:
+        return False, 0.0, [], ""
+
+    if p["crowd_signal"]:
+        _append_reason(reasons, True, p["crowd_signal"])
+    return match, round(max(0.0, min(99.0, score)), 1), reasons[:4], action
+
+
+def enrich_watchlist_candidate(manager_key: str, candidate: dict) -> dict:
+    """watchlist dict를 매니저 역할 기준으로 보강."""
+    enriched = dict(candidate)
+    default_composite = 50.0
+    default_composite += _safe_float(candidate.get("recovery_score", 0)) * 0.2
+    default_composite += max(0.0, _safe_float(candidate.get("vol_ratio", 0)) - 120.0) * 0.03
+    default_composite -= max(0.0, abs(_safe_float(candidate.get("day_change", 0))) - 12.0) * 0.5
+    price = _safe_float(candidate.get("price", 0))
+    ma20 = _safe_float(candidate.get("ma20", price if price > 0 else 0))
+    profile = {
+        "ticker": candidate.get("ticker", ""),
+        "name": candidate.get("name", ""),
+        "price": price,
+        "day_change": _safe_float(candidate.get("day_change", 0)),
+        "rsi": _safe_float(candidate.get("rsi", 0)),
+        "vol_ratio": _safe_float(candidate.get("vol_ratio", 0)),
+        "bb_pctb": _safe_float(candidate.get("bb_pctb", 0.5)),
+        "macd_cross": int(_safe_float(candidate.get("macd_cross", 0))),
+        "drop_from_high": _safe_float(candidate.get("drop_from_high", 0)),
+        "recovery_score": _safe_float(candidate.get("recovery_score", 0)),
+        "composite": round(max(0.0, min(95.0, default_composite)), 1),
+        "signal": candidate.get("signal", ""),
+        "confidence_score": _safe_float(candidate.get("confidence_score", 0)),
+        "market_cap": _safe_float(candidate.get("market_cap", 0)),
+        "market_cap_label": candidate.get(
+            "market_cap_label",
+            _format_market_cap_label(candidate.get("market_cap", 0)),
+        ),
+        "listing_market": candidate.get("listing_market") or candidate.get("market", ""),
+        "per": _safe_float(candidate.get("per", 0)),
+        "roe": _safe_float(candidate.get("roe", 0)),
+        "debt_ratio": _safe_float(candidate.get("debt_ratio", 0)),
+        "target_upside": _safe_float(candidate.get("target_upside", 0)),
+        "foreign_days": int(_safe_float(candidate.get("foreign_days", 0))),
+        "inst_days": int(_safe_float(candidate.get("inst_days", 0))),
+        "avg_trade_value": _safe_float(candidate.get("avg_trade_value", 0)),
+        "return_3m": _safe_float(candidate.get("return_3m", 0)),
+        "weekly_trend": candidate.get(
+            "weekly_trend",
+            "up" if price > 0 and ma20 > 0 and price >= ma20 else "neutral",
+        ),
+        "mtf_aligned": bool(candidate.get("mtf_aligned", False)),
+        "ma20": ma20,
+        "rsi_divergence": int(_safe_float(candidate.get("rsi_divergence", 0))),
+        "crowd_signal": candidate.get("crowd_signal", ""),
+        "flow_signal": candidate.get("flow_signal", ""),
+        "short_ratio": _safe_float(candidate.get("short_ratio", 0)),
+        "short_balance_ratio": _safe_float(candidate.get("short_balance_ratio", 0)),
+        "short_pattern_codes": list(candidate.get("short_pattern_codes") or []),
+        "short_pattern_labels": list(candidate.get("short_pattern_labels") or []),
+        "short_timing_action": candidate.get("short_timing_action", ""),
+    }
+    _, fit_score, fit_reasons, action_hint = _evaluate_manager_candidate(manager_key, profile)
+    guide = MANAGER_ROLE_GUIDES.get(manager_key, {})
+    enriched.update(profile)
+    enriched.update({
+        "lane": guide.get("label", manager_key),
+        "focus": guide.get("focus", ""),
+        "fit_score": fit_score,
+        "fit_reasons": fit_reasons,
+        "action_hint": action_hint,
+    })
+    return enriched
+
+
+def format_manager_action_digest(
+    picks_by_manager: dict[str, list[dict]],
+    *,
+    title: str = "🎯 오늘의 제안 레이더",
+    market_context: str = "",
+    max_per_manager: int = 2,
+    fast_event_lines: list[str] | None = None,
+    herd_lines: list[str] | None = None,
+    crowd_lines: list[str] | None = None,
+) -> str:
+    """매니저별 행동 중심 제안 메시지 포맷."""
+    lines = [title, "━" * 20]
+    if market_context:
+        lines.append(f"시장: {market_context}")
+
+    has_pick = False
+    for manager_key in MANAGERS:
+        picks = picks_by_manager.get(manager_key) or []
+        if not picks:
+            continue
+        has_pick = True
+        manager = MANAGERS[manager_key]
+        guide = MANAGER_ROLE_GUIDES.get(manager_key, {})
+        lines.append("")
+        lines.append(
+            f"{manager['emoji']} {manager['title']} | "
+            f"{guide.get('label', '')} | {guide.get('focus', '')}"
+        )
+        for idx, pick in enumerate(picks[:max_per_manager], 1):
+            price = pick.get("price", 0)
+            price_text = f"{price:,.0f}원" if price > 0 else "가격 미확인"
+            change = pick.get("day_change", 0)
+            change_text = f" {change:+.1f}%" if change else ""
+            lines.append(
+                f"{idx}. {pick.get('name', '')} ({pick.get('ticker', '')}) | "
+                f"적합도 {pick.get('fit_score', 0):.0f} | {price_text}{change_text}"
+            )
+            lines.append(
+                f"   RSI {pick.get('rsi', 0):.0f} | 거래량 {pick.get('vol_ratio', 0):.0f}% "
+                f"| 종합 {pick.get('composite', 0):.1f}"
+            )
+            reasons = " · ".join(pick.get("fit_reasons") or []) or "핵심 신호 집계 중"
+            lines.append(f"   이유: {reasons}")
+            if manager_key == "tenbagger":
+                domestic_bits = []
+                listing_market = pick.get("listing_market", "")
+                market_cap_label = pick.get("market_cap_label", "")
+                entry_stage = pick.get("entry_stage", "")
+                if listing_market:
+                    domestic_bits.append(listing_market)
+                if market_cap_label:
+                    domestic_bits.append(f"시총 {market_cap_label}")
+                if entry_stage:
+                    domestic_bits.append(f"단계 {entry_stage}")
+                if domestic_bits:
+                    lines.append(f"   국내축: {' | '.join(domestic_bits)}")
+            fast_parts = []
+            if pick.get("event_tags"):
+                fast_parts.append("이벤트 " + "/".join(pick["event_tags"][:2]))
+            if pick.get("youtube_mentions", 0):
+                fast_parts.append(f"유튜브 {pick['youtube_mentions']}회")
+            if pick.get("flow_signal"):
+                fast_parts.append(str(pick["flow_signal"]))
+            if pick.get("short_pattern_labels"):
+                fast_parts.append("숏패턴 " + "/".join(pick["short_pattern_labels"][:2]))
+            elif pick.get("short_timing_action"):
+                fast_parts.append(f"숏커버 {pick['short_timing_action']}")
+            if pick.get("news_hits", 0):
+                fast_parts.append(f"뉴스 {pick['news_hits']}건")
+            if pick.get("community_hits", 0):
+                fast_parts.append(f"커뮤니티 {pick['community_hits']}건")
+            if pick.get("crowd_signal"):
+                fast_parts.append(pick["crowd_signal"])
+            if fast_parts:
+                lines.append(f"   빠른신호: {' · '.join(fast_parts[:6])}")
+            action = pick.get("action_hint") or guide.get("action", "")
+            if action:
+                lines.append(f"   행동: {action}")
+
+    tenbagger_radar = [
+        pick
+        for pick in (picks_by_manager.get("tenbagger") or [])
+        if (pick.get("listing_market") or pick.get("market")) in {"KOSPI", "KOSDAQ", "KRX"}
+    ]
+    if tenbagger_radar:
+        lines.append("")
+        lines.append("🇰🇷 국내 스몰캡 레이더")
+        for pick in tenbagger_radar[:3]:
+            label = pick.get("market_cap_label") or "시총 미확인"
+            stage = pick.get("entry_stage") or "관찰"
+            listing_market = pick.get("listing_market") or pick.get("market") or "KRX"
+            events = "/".join(pick.get("event_tags") or []) or "촉매 탐색"
+            lines.append(
+                f"- {pick.get('name', '')} | {listing_market} {label} | {stage} | {events}"
+            )
+
+    if fast_event_lines:
+        lines.append("")
+        lines.append("🛰 이벤트 레이더")
+        for line in fast_event_lines[:4]:
+            lines.append(f"- {line}")
+
+    if herd_lines:
+        lines.append("")
+        lines.append("👥 군집 레이더")
+        for line in herd_lines[:3]:
+            lines.append(f"- {line}")
+    elif crowd_lines:
+        lines.append("")
+        lines.append("👥 군집 레이더")
+        for line in crowd_lines[:3]:
+            lines.append(f"- {line}")
+
+    return "\n".join(lines) if has_pick else ""
+
+
+def build_manager_shortcuts(
+    picks_by_manager: dict[str, list[dict]],
+    *,
+    max_buttons: int = 5,
+) -> list[dict[str, str]]:
+    """매니저 레이더 메시지용 바로가기 메타데이터."""
+    shortcuts: list[dict[str, str]] = []
+    for manager_key in MANAGERS:
+        picks = picks_by_manager.get(manager_key) or []
+        if not picks:
+            continue
+        manager = MANAGERS.get(manager_key, {})
+        top_pick = picks[0]
+        hint = ""
+        if manager_key == "tenbagger" and top_pick.get("entry_stage"):
+            hint = str(top_pick.get("entry_stage", ""))
+        elif top_pick.get("event_tags"):
+            hint = str((top_pick.get("event_tags") or [""])[0])
+        elif top_pick.get("crowd_signal"):
+            hint = str(top_pick.get("crowd_signal", ""))
+        label = f"{manager.get('emoji', '📌')} {manager.get('title', manager_key)}"
+        if hint:
+            label += f" · {hint}"
+        shortcuts.append({
+            "label": label[:36],
+            "callback_data": f"mgr_tab:{manager_key}",
+        })
+        if len(shortcuts) >= max_buttons:
+            break
+    return shortcuts
+
+
+def build_daily_action_shortcuts(
+    actions: list[dict],
+    *,
+    max_buttons: int = 6,
+) -> list[dict[str, str]]:
+    """액션 콘솔 메시지용 핵심 버튼 메타데이터."""
+    priority_emoji = {
+        "urgent": "🔴",
+        "caution": "🟡",
+        "opportunity": "🟢",
+        "check": "⚪",
+    }
+    shortcuts: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for action in actions:
+        callback_data = str(action.get("callback_data", "") or "")
+        if not callback_data or callback_data in seen:
+            continue
+        seen.add(callback_data)
+        label = str(action.get("button_label", "") or "").strip()
+        if not label:
+            label = f"{action.get('name', '')}: {action.get('action', '')}".strip(": ")
+        label = f"{priority_emoji.get(action.get('priority', ''), '📌')} {label}".strip()
+        shortcuts.append({
+            "label": label[:36],
+            "callback_data": callback_data,
+        })
+        if len(shortcuts) >= max_buttons:
+            break
+    return shortcuts
+
+
 # ── 매니저 관심종목 매수 스캔 ──────────────────────────────
 
 async def scan_manager_domain(
@@ -1410,6 +1971,16 @@ async def scan_manager_domain(
         macd_cross = w.get("macd_cross", 0)
         drop_from_high = w.get("drop_from_high", 0)
         recovery_score = w.get("recovery_score", 0)
+        composite = w.get("composite", 0)
+        fit_score = w.get("fit_score", 0)
+        target_upside = w.get("target_upside", 0)
+        foreign_days = w.get("foreign_days", 0)
+        inst_days = w.get("inst_days", 0)
+        fit_reasons = w.get("fit_reasons") or []
+        event_tags = w.get("event_tags") or []
+        crowd_signal = w.get("crowd_signal", "")
+        youtube_mentions = w.get("youtube_mentions", 0)
+        news_hits = w.get("news_hits", 0)
 
         line = f"- {w.get('name', '')} ({w.get('ticker', '')})"
         if price > 0:
@@ -1420,6 +1991,10 @@ async def scan_manager_domain(
             line += f", RSI {rsi:.0f}"
         if vol_ratio > 0:
             line += f", 거래량비 {vol_ratio:.0f}%"
+        if fit_score > 0:
+            line += f", 적합도 {fit_score:.0f}"
+        if composite > 0:
+            line += f", 종합 {composite:.1f}"
         if 0 <= bb_pctb <= 1:
             line += f", BB {bb_pctb:.2f}"
         if macd_cross != 0:
@@ -1428,6 +2003,29 @@ async def scan_manager_domain(
             line += f", 고점대비 {drop_from_high:.0f}%"
         if recovery_score > 0:
             line += f", 회복점수 {recovery_score:.0f}"
+        if target_upside > 0:
+            line += f", 목표가괴리 {target_upside:+.1f}%"
+        if foreign_days or inst_days:
+            line += f", 수급 외인 {foreign_days:+d}/기관 {inst_days:+d}"
+        if fit_reasons:
+            line += f", 핵심신호 {'/'.join(fit_reasons[:2])}"
+        if event_tags:
+            line += f", 이벤트 {'/'.join(event_tags[:2])}"
+        if youtube_mentions:
+            line += f", 유튜브 {youtube_mentions}회"
+        if news_hits:
+            line += f", 뉴스 {news_hits}건"
+        if crowd_signal:
+            line += f", 군집 {crowd_signal}"
+        listing_market = w.get("listing_market", "")
+        market_cap_label = w.get("market_cap_label", "")
+        entry_stage = w.get("entry_stage", "")
+        if listing_market:
+            line += f", 시장 {listing_market}"
+        if market_cap_label:
+            line += f", 시총 {market_cap_label}"
+        if entry_stage:
+            line += f", 단계 {entry_stage}"
         stocks_text += line + "\n"
 
     if not stocks_text.strip():
@@ -1457,13 +2055,23 @@ async def scan_manager_domain(
     system_prompt = (
         f"너는 {manager['name']}의 투자 철학을 따르는 '{manager['title']}'이다.\n"
         f"{manager['persona']}\n"
+        f"[이번 역할]\n"
+        f"- 너의 레인: {MANAGER_ROLE_GUIDES.get(manager_key, {}).get('label', manager_key)}\n"
+        f"- 너의 초점: {MANAGER_ROLE_GUIDES.get(manager_key, {}).get('focus', '')}\n"
+        f"- 다른 매니저의 역할(예: 단타가 장기 설명, 장기가 초단타 설명) 침범 금지.\n"
         f"{situation}\n"
         f"[필수 규칙]\n"
         f"호칭: 주호님. 볼드(**) 사용 금지. 이모지로 구분.\n"
         f"제공된 가격 데이터만 사용. 학습 데이터의 과거 가격 절대 금지.\n"
         f"관심종목 중에서 지금 매수 타이밍인 종목을 골라 추천.\n"
         f"추천 종목이 없으면 '현재 매수 타이밍 종목 없음'이라고 답해.\n"
-        f"추천 시: 종목명, 매수 이유(2줄), 단타/스윙 적합 여부 제시.\n"
+        f"추천 시 최대 2개만 제시.\n"
+        f"추천 시 형식:\n"
+        f"1. 종목명(티커)\n"
+        f"- 역할 적합성: 왜 이 매니저 레인에 맞는지\n"
+        f"- 지금 보는 이유: 숫자 2개 이상 포함\n"
+        f"- 리스크: 한 줄\n"
+        f"- 행동: 바로 진입/분할 진입/관망 중 하나\n"
         f"가격은 제공된 데이터만 사용. 지지선/목표가/손절가 추측 금지.\n"
     )
 
@@ -1913,24 +2521,24 @@ def format_threshold_suggestions(all_suggestions: dict[str, dict]) -> str:
 
 MANAGER_DISCOVERY_CRITERIA: dict[str, str] = {
     "scalp": (
-        "거래량 20일평균 300%+ AND RSI 40~65 AND "
-        "당일등락 +2%이상 AND 시가총액 3000억+ 종목"
+        "거래량 급증 + 20일선 상회 + RSI 모멘텀 + "
+        "당일/단기 수급이 붙는 돌파 종목"
     ),
     "swing": (
-        "RSI <35 AND BB하단(0.2이하) AND "
-        "기관 3일+ 연속 순매수 AND 정배열 종목"
+        "RSI 눌림 + BB 하단 + MACD/다이버전스 + "
+        "고점 대비 조정이 끝나가는 반등 종목"
     ),
     "position": (
-        "PEG <1.0 AND ROE >15% AND "
-        "매출성장 >10% AND 부채비율 <100% 종목"
+        "종합점수·ROE·밸류·중기 수급이 함께 버티는 "
+        "1~3개월 성장 스토리 종목"
     ),
     "long_term": (
-        "ROE >15% AND 부채비율 <80% AND FCF 양(+) AND "
-        "PBR <1.5 AND 배당수익률 >2% 종목"
+        "ROE 높고 부채 낮고 밸류 부담이 덜한 "
+        "장기 복리형 품질 가치주"
     ),
     "tenbagger": (
-        "시총 5조미만 AND TAM CAGR >30% AND "
-        "정책수혜(원전/양자/로봇/우주/AI) AND 기술해자 보유 종목"
+        "시총 5조 미만 + 미래 이벤트/정책/산업 촉매를 "
+        "먹을 수 있는 초장기 후보"
     ),
 }
 
@@ -1951,66 +2559,34 @@ def filter_discovery_candidates(
     candidates = []
 
     for r in scan_results:
-        ticker = getattr(r, "ticker", "")
+        profile = _extract_scan_profile(r)
+        if not profile:
+            continue
+        ticker = profile["ticker"]
         if ticker in exclude:
             continue
-        tech = getattr(r, "indicators", None)
-        if tech is None:
+        match, fit_score, fit_reasons, action_hint = _evaluate_manager_candidate(
+            manager_key, profile,
+        )
+        if not match:
             continue
-        score = getattr(r, "score", None)
-        rsi = getattr(tech, "rsi", 50)
-        vol_ratio = getattr(tech, "volume_ratio", 1.0)
-        bb_pctb = getattr(tech, "bb_pctb", 0.5)
-        price = getattr(tech, "close", 0) or 0
-        day_change = getattr(r, "day_change_pct", 0.0) or 0.0
+        guide = MANAGER_ROLE_GUIDES.get(manager_key, {})
+        candidate = dict(profile)
+        candidate.update({
+            "lane": guide.get("label", manager_key),
+            "focus": guide.get("focus", ""),
+            "fit_score": fit_score,
+            "fit_reasons": fit_reasons,
+            "action_hint": action_hint,
+        })
+        candidates.append(candidate)
 
-        match = False
-        if manager_key == "scalp":
-            match = vol_ratio >= 3.0 and 40 <= rsi <= 65 and day_change >= 2.0
-        elif manager_key == "swing":
-            match = rsi < 35 and bb_pctb < 0.2
-        elif manager_key == "position":
-            # 기본 기술적 필터: 점수 높은 mid-term 후보
-            match = (
-                score is not None
-                and getattr(score, "composite", 0) >= 60
-                and rsi < 60
-            )
-        elif manager_key == "long_term":
-            match = (
-                score is not None
-                and getattr(score, "composite", 0) >= 55
-                and rsi < 55
-            )
-        elif manager_key == "tenbagger":
-            # 텐배거: 고점 대비 조정 중 + 종합점수 양호한 소형주
-            match = (
-                score is not None
-                and getattr(score, "composite", 0) >= 50
-                and rsi < 60
-            )
-
-        if match:
-            candidates.append({
-                "ticker": ticker,
-                "name": getattr(r, "name", ""),
-                "price": price,
-                "day_change": day_change,
-                "rsi": rsi,
-                "vol_ratio": vol_ratio * 100,
-                "bb_pctb": bb_pctb,
-                "macd_cross": getattr(tech, "macd_signal_cross", 0),
-                "drop_from_high": 0,
-                "recovery_score": 0,
-            })
-
-    # 점수 높은 순 정렬 (vol_ratio for scalp, RSI for swing)
-    if manager_key == "scalp":
-        candidates.sort(key=lambda c: -c["vol_ratio"])
-    elif manager_key == "swing":
-        candidates.sort(key=lambda c: c["rsi"])
-    else:
-        candidates.sort(key=lambda c: -c.get("rsi", 50))
+    candidates.sort(key=lambda c: (
+        -c.get("fit_score", 0),
+        -c.get("composite", 0),
+        -c.get("confidence_score", 0),
+        -c.get("vol_ratio", 0),
+    ))
 
     return candidates[:10]
 

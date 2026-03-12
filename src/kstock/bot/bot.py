@@ -11,6 +11,7 @@ import time
 
 from dotenv import load_dotenv
 
+from kstock import APP_NAME
 from kstock.bot.mixins import (
     CoreHandlersMixin,
     MenusKisMixin,
@@ -35,12 +36,12 @@ class KQuantBot(
     ControlMixin,
     RemoteClaudeMixin,
 ):
-    """K-Quant v11.0 Telegram Bot — Multi-AI + Real-time + Modular + Control."""
+    """Latest K-Quant Telegram Bot — Multi-AI + Real-time + Modular + Control."""
     pass
 
 
 def main() -> None:
-    """Entry point: build and run the K-Quant v11.0 Telegram bot with auto-restart."""
+    """Entry point: build and run the latest K-Quant Telegram bot."""
     load_dotenv(override=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -66,7 +67,7 @@ def main() -> None:
 
             app = bot.build_app()
             bot.schedule_jobs(app)
-            logger.info("K-Quant v11.0 bot starting (polling)...")
+            logger.info("%s bot starting (polling)...", APP_NAME)
             app.run_polling(drop_pending_updates=True)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")

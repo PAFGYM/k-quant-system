@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from unittest.mock import AsyncMock
 
 from kstock.ingest.data_router import DataRouter, DataSource
 
@@ -239,3 +240,21 @@ class TestGetConnectionMessage:
         router = DataRouter(kis_broker=kis_disconnected)
         msg = router.get_connection_message()
         assert "\ub04a\uacbc\uc5b4\uc694" in msg  # "끊겼어요"
+
+
+@pytest.mark.asyncio
+async def test_get_price_prefers_naver_during_live_session():
+    class LiveYF:
+        get_current_price = AsyncMock(return_value=1000.0)
+
+    class LiveNaver:
+        get_current_price = AsyncMock(return_value=1100.0)
+
+    router = DataRouter(kis_broker=None, yf_client=LiveYF(), db=None)
+    router._get_naver_client = lambda: LiveNaver()
+    router._is_kr_live_session = lambda: True
+
+    price = await router.get_price("005930")
+
+    assert price == 1100.0
+    assert router.last_source_used == "naver"

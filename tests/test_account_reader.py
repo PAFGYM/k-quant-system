@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from kstock import DISPLAY_VERSION
 from kstock.bot.account_reader import (
     _detect_media_type,
     _normalize_parsed,
@@ -15,6 +16,7 @@ from kstock.bot.account_reader import (
     evaluate_diagnosis_accuracy,
     format_screenshot_reminder,
     format_screenshot_summary,
+    has_meaningful_account_data,
 )
 
 
@@ -30,6 +32,7 @@ def _holding(
     current_price: float = 62000,
     profit_pct: float = 3.33,
     eval_amount: float = 620000,
+    purchase_type: str = "",
 ) -> dict:
     return {
         "name": name,
@@ -39,6 +42,7 @@ def _holding(
         "current_price": current_price,
         "profit_pct": profit_pct,
         "eval_amount": eval_amount,
+        "purchase_type": purchase_type,
     }
 
 
@@ -124,6 +128,21 @@ class TestCompareScreenshots:
         cur = _snapshot(cash=750000)
         result = compare_screenshots(cur, prev)
         assert result["cash_change"] == -250000
+
+    def test_purchase_type_is_tracked_separately(self):
+        """같은 종목이어도 현금/신용 포지션은 별도 변화로 판단한다."""
+        prev = _snapshot([
+            _holding(ticker="005930", name="삼성전자", purchase_type="현금", profit_pct=1.0),
+            _holding(ticker="005930", name="삼성전자", purchase_type="신용", profit_pct=-1.0),
+        ])
+        cur = _snapshot([
+            _holding(ticker="005930", name="삼성전자", purchase_type="현금", profit_pct=4.0),
+        ])
+        result = compare_screenshots(cur, prev)
+        assert len(result["improvements"]) == 1
+        assert result["improvements"][0]["purchase_type"] == "현금"
+        assert len(result["sold"]) == 1
+        assert result["sold"][0]["purchase_type"] == "신용"
 
     def test_empty_portfolios(self):
         """Both portfolios empty yields all-empty result."""
@@ -273,6 +292,25 @@ class TestEvaluateDiagnosisAccuracy:
         assert results[0]["correct"] is True  # up predicted, up actual
         assert results[1]["correct"] is True  # down predicted, down actual
 
+    def test_accuracy_prefers_matching_purchase_type(self):
+        """진단에 purchase_type이 있으면 동일 포지션에 매칭한다."""
+        diags = [
+            {
+                "ticker": "005930",
+                "name": "삼성전자",
+                "purchase_type": "신용",
+                "direction": "down",
+                "confidence": 70,
+            },
+        ]
+        holdings = [
+            _holding(ticker="005930", purchase_type="현금", profit_pct=5.0),
+            _holding(ticker="005930", purchase_type="신용", profit_pct=-3.0),
+        ]
+        results = evaluate_diagnosis_accuracy(diags, holdings)
+        assert results[0]["correct"] is True
+        assert results[0]["purchase_type"] == "신용"
+
 
 # ===========================================================================
 # format_screenshot_summary
@@ -292,7 +330,14 @@ class TestFormatScreenshotSummary:
         assert "삼성전자" in text
         assert "005930" in text
         assert "포트폴리오 건강 점수" in text
-        assert "K-Quant v3.5" in text
+        assert f"K-Quant {DISPLAY_VERSION}" in text
+
+    def test_summary_shows_purchase_type(self):
+        parsed = _snapshot([
+            _holding(name="삼성전자", ticker="005930", purchase_type="신용", profit_pct=3.0),
+        ])
+        text = format_screenshot_summary(parsed)
+        assert "[신용]" in text
 
     def test_summary_with_comparison(self):
         """When comparison is provided, change section is included."""
@@ -331,6 +376,30 @@ class TestFormatScreenshotSummary:
         parsed = _snapshot()
         text = format_screenshot_summary(parsed)
         assert "보유 종목이 없습니다" in text
+
+
+class TestHasMeaningfulAccountData:
+    """Tests for OCR empty-result guard."""
+
+    def test_true_when_holdings_exist(self):
+        parsed = _snapshot([_holding()])
+        assert has_meaningful_account_data(parsed) is True
+
+    def test_true_when_cash_only_exists(self):
+        parsed = _snapshot([], cash=250000)
+        assert has_meaningful_account_data(parsed) is True
+
+    def test_false_when_all_values_are_zero(self):
+        parsed = {
+            "holdings": [],
+            "summary": {
+                "total_eval": 0,
+                "total_profit": 0,
+                "total_profit_pct": 0,
+                "cash": 0,
+            },
+        }
+        assert has_meaningful_account_data(parsed) is False
 
 
 # ===========================================================================

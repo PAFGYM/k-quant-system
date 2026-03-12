@@ -1,4 +1,4 @@
-"""Account screenshot reader via Claude Vision API - K-Quant v3.5.
+"""Account screenshot reader via AI Vision API - K-Quant v13.
 
 Reads stock brokerage account screenshots using Claude's vision capabilities,
 extracts holdings and summary data, compares with previous snapshots, and
@@ -17,12 +17,14 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 from collections import Counter
 from datetime import datetime
 from typing import Any
 
 import httpx
 
+from kstock import APP_NAME
 from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
@@ -39,13 +41,13 @@ _VISION_PROMPT = (
     "각 보유 종목의 종목명, 종목코드(6자리 숫자, 화면에 있으면), 보유수량, 평균매수가(매입가), "
     "현재가, 수익률(%), 평가손익, 평가금액, 구분(purchase_type)을 추출.\n"
     "종목코드가 화면에 없으면 ticker는 빈 문자열로.\n"
-    "상단 요약에서 매입금액, 평가금액, 평가손익, 수익률, 순자산도 추출.\n\n"
+    "상단 요약에서 매입금액, 평가금액, 평가손익, 수익률, 예수금(현금)도 추출.\n\n"
     "반드시 아래 JSON 형식으로만 응답:\n"
     '{"holdings": [{"name": "종목명", "ticker": "종목코드", "quantity": 수량, "avg_price": 매입가, '
     '"current_price": 현재가, "profit_pct": 수익률, "eval_amount": 평가금액, '
     '"profit_amount": 평가손익, "purchase_type": "현금/유융/신용 등"}], '
     '"summary": {"total_eval": 총평가금액, "total_profit": 총평가손익, '
-    '"total_profit_pct": 총수익률, "total_buy": 총매입금액}}'
+    '"total_profit_pct": 총수익률, "cash": 예수금, "total_buy": 총매입금액}}'
 )
 
 _EMPTY_RESULT: dict[str, Any] = {
@@ -93,6 +95,22 @@ _SECTOR_MAP: dict[str, str] = {
 }
 
 
+def _normalize_purchase_type(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _holding_identity_key(holding: dict[str, Any]) -> tuple[str, str]:
+    return (
+        str(holding.get("ticker", "") or holding.get("name", "") or "").strip(),
+        _normalize_purchase_type(holding.get("purchase_type", "")),
+    )
+
+
+def _purchase_tag(item: dict[str, Any]) -> str:
+    purchase_type = _normalize_purchase_type(item.get("purchase_type", ""))
+    return f" [{purchase_type}]" if purchase_type else ""
+
+
 # ---------------------------------------------------------------------------
 # Core API call
 # ---------------------------------------------------------------------------
@@ -115,14 +133,11 @@ async def parse_account_screenshot(
         logger.warning("Empty image bytes provided")
         return _make_empty_result()
 
-    if not anthropic_key:
-        logger.warning("No Anthropic API key provided")
-        return _make_empty_result()
-
     image_b64 = base64.standard_b64encode(image_bytes).decode("ascii")
 
     # Detect media type from magic bytes
     media_type = _detect_media_type(image_bytes)
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
 
     payload = {
         "model": "claude-sonnet-4-20250514",
@@ -149,6 +164,16 @@ async def parse_account_screenshot(
     }
 
     try:
+        if not anthropic_key and openai_key:
+            logger.warning(
+                "Anthropic API key missing, falling back to OpenAI Vision for screenshot OCR",
+            )
+            return await _parse_with_openai_vision(image_b64, media_type, openai_key)
+
+        if not anthropic_key:
+            logger.warning("No Anthropic API key provided")
+            return _make_empty_result()
+
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
@@ -161,6 +186,16 @@ async def parse_account_screenshot(
             )
 
             if resp.status_code != 200:
+                if _should_try_openai_vision_fallback(
+                    status_code=resp.status_code,
+                    body=resp.text,
+                    openai_key=openai_key,
+                ):
+                    logger.warning(
+                        "Claude Vision API returned %d; falling back to OpenAI Vision",
+                        resp.status_code,
+                    )
+                    return await _parse_with_openai_vision(image_b64, media_type, openai_key)
                 logger.error(
                     "Claude Vision API returned %d: %s",
                     resp.status_code,
@@ -173,9 +208,15 @@ async def parse_account_screenshot(
             return _parse_vision_response(text)
 
     except httpx.TimeoutException:
+        if openai_key:
+            logger.warning("Claude Vision timed out, falling back to OpenAI Vision")
+            return await _parse_with_openai_vision(image_b64, media_type, openai_key)
         logger.error("Claude Vision API request timed out")
         return _make_empty_result()
     except httpx.HTTPError as exc:
+        if openai_key:
+            logger.warning("Claude Vision HTTP error (%s), falling back to OpenAI Vision", exc)
+            return await _parse_with_openai_vision(image_b64, media_type, openai_key)
         logger.error("Claude Vision API HTTP error: %s", exc)
         return _make_empty_result()
     except Exception as exc:
@@ -200,51 +241,60 @@ def compare_screenshots(
     Returns:
         Dict with keys: improvements, worsened, sold, new_buys, cash_change.
     """
-    cur_holdings = {h["ticker"]: h for h in current.get("holdings", [])}
-    prev_holdings = {h["ticker"]: h for h in previous.get("holdings", [])}
+    cur_holdings = {
+        _holding_identity_key(h): h for h in current.get("holdings", [])
+        if _holding_identity_key(h)[0]
+    }
+    prev_holdings = {
+        _holding_identity_key(h): h for h in previous.get("holdings", [])
+        if _holding_identity_key(h)[0]
+    }
 
     cur_tickers = set(cur_holdings.keys())
     prev_tickers = set(prev_holdings.keys())
 
     new_buys: list[dict[str, Any]] = []
-    for ticker in cur_tickers - prev_tickers:
-        h = cur_holdings[ticker]
+    for key in cur_tickers - prev_tickers:
+        h = cur_holdings[key]
         new_buys.append({
             "name": h.get("name", ""),
-            "ticker": ticker,
+            "ticker": h.get("ticker", ""),
             "quantity": h.get("quantity", 0),
             "avg_price": h.get("avg_price", 0),
             "current_price": h.get("current_price", 0),
             "eval_amount": h.get("eval_amount", 0),
+            "purchase_type": _normalize_purchase_type(h.get("purchase_type", "")),
         })
 
     sold: list[dict[str, Any]] = []
-    for ticker in prev_tickers - cur_tickers:
-        h = prev_holdings[ticker]
+    for key in prev_tickers - cur_tickers:
+        h = prev_holdings[key]
         sold.append({
             "name": h.get("name", ""),
-            "ticker": ticker,
+            "ticker": h.get("ticker", ""),
             "quantity": h.get("quantity", 0),
             "avg_price": h.get("avg_price", 0),
             "last_price": h.get("current_price", 0),
             "profit_pct": h.get("profit_pct", 0.0),
+            "purchase_type": _normalize_purchase_type(h.get("purchase_type", "")),
         })
 
     improvements: list[dict[str, Any]] = []
     worsened: list[dict[str, Any]] = []
-    for ticker in cur_tickers & prev_tickers:
-        cur_h = cur_holdings[ticker]
-        prev_h = prev_holdings[ticker]
+    for key in cur_tickers & prev_tickers:
+        cur_h = cur_holdings[key]
+        prev_h = prev_holdings[key]
         cur_pct = _to_float(cur_h.get("profit_pct", 0))
         prev_pct = _to_float(prev_h.get("profit_pct", 0))
         change = cur_pct - prev_pct
 
         entry = {
             "name": cur_h.get("name", ""),
-            "ticker": ticker,
+            "ticker": cur_h.get("ticker", ""),
             "prev_profit_pct": prev_pct,
             "cur_profit_pct": cur_pct,
             "change_pct": round(change, 2),
+            "purchase_type": _normalize_purchase_type(cur_h.get("purchase_type", "")),
         }
 
         if change > 0.01:
@@ -408,15 +458,31 @@ def evaluate_diagnosis_accuracy(
         List of accuracy result dicts with keys:
             ticker, name, predicted, actual, correct (bool), confidence.
     """
-    cur_map = {h["ticker"]: h for h in current_holdings}
+    cur_map = {
+        _holding_identity_key(h): h for h in current_holdings if _holding_identity_key(h)[0]
+    }
+    ticker_map = {
+        str(h.get("ticker", "") or "").strip(): h
+        for h in current_holdings if str(h.get("ticker", "") or "").strip()
+    }
+    name_map = {
+        str(h.get("name", "") or "").strip(): h
+        for h in current_holdings if str(h.get("name", "") or "").strip()
+    }
     results: list[dict[str, Any]] = []
 
     for diag in prev_diagnoses:
         ticker = diag.get("ticker", "")
+        name = diag.get("name", "")
+        purchase_type = _normalize_purchase_type(diag.get("purchase_type", ""))
         predicted = diag.get("direction", "hold")
         confidence = diag.get("confidence", 50)
 
-        cur_h = cur_map.get(ticker)
+        cur_h = cur_map.get((str(ticker or name or "").strip(), purchase_type))
+        if cur_h is None and ticker:
+            cur_h = ticker_map.get(str(ticker).strip())
+        if cur_h is None and name:
+            cur_h = name_map.get(str(name).strip())
         if cur_h is None:
             # Stock was sold - consider direction as "down" if predicted down,
             # or unknown
@@ -435,11 +501,12 @@ def evaluate_diagnosis_accuracy(
 
         results.append({
             "ticker": ticker,
-            "name": diag.get("name", ""),
+            "name": name,
             "predicted": predicted,
             "actual": actual,
             "correct": correct,
             "confidence": confidence,
+            "purchase_type": purchase_type,
         })
 
     return results
@@ -501,10 +568,11 @@ def format_screenshot_summary(
             cur_price = _to_float(h.get("current_price", 0))
             pct = _to_float(h.get("profit_pct", 0))
             eval_amt = _to_float(h.get("eval_amount", 0))
+            purchase_tag = _purchase_tag(h)
 
             emoji = "\U0001f7e2" if pct > 0 else "\U0001f534" if pct < 0 else "\U0001f7e1"
-
-            lines.append(f"{emoji} {name} ({ticker})")
+            ticker_text = f" ({ticker})" if ticker else ""
+            lines.append(f"{emoji} {name}{ticker_text}{purchase_tag}")
             lines.append(f"   {qty}주 | 평균 {avg_price:,.0f}원 -> {cur_price:,.0f}원")
             lines.append(f"   수익률 {pct:+.2f}% | 평가 {eval_amt:,.0f}원")
             lines.append("")
@@ -539,7 +607,7 @@ def format_screenshot_summary(
             lines.append("\U0001f7e2 개선 종목")
             for item in improvements[:5]:
                 lines.append(
-                    f"   {item['name']}: {item['prev_profit_pct']:+.2f}% -> "
+                    f"   {item['name']}{_purchase_tag(item)}: {item['prev_profit_pct']:+.2f}% -> "
                     f"{item['cur_profit_pct']:+.2f}% ({item['change_pct']:+.2f}%p)"
                 )
             lines.append("")
@@ -548,7 +616,7 @@ def format_screenshot_summary(
             lines.append("\U0001f534 악화 종목")
             for item in worsened[:5]:
                 lines.append(
-                    f"   {item['name']}: {item['prev_profit_pct']:+.2f}% -> "
+                    f"   {item['name']}{_purchase_tag(item)}: {item['prev_profit_pct']:+.2f}% -> "
                     f"{item['cur_profit_pct']:+.2f}% ({item['change_pct']:+.2f}%p)"
                 )
             lines.append("")
@@ -557,7 +625,7 @@ def format_screenshot_summary(
             lines.append("\U0001f195 신규 매수")
             for item in new_buys:
                 lines.append(
-                    f"   {item['name']} ({item['ticker']}) "
+                    f"   {item['name']}{_purchase_tag(item)} ({item['ticker']}) "
                     f"{item['quantity']}주 @ {_to_float(item['avg_price']):,.0f}원"
                 )
             lines.append("")
@@ -573,7 +641,7 @@ def format_screenshot_summary(
                 for item in profit_sold:
                     pct = _to_float(item.get("profit_pct", 0))
                     lines.append(
-                        f"   \U0001f7e2 {item['name']} ({item['ticker']}) "
+                        f"   \U0001f7e2 {item['name']}{_purchase_tag(item)} ({item['ticker']}) "
                         f"수익률 {pct:+.2f}%"
                     )
                 lines.append("")
@@ -583,7 +651,7 @@ def format_screenshot_summary(
                 for item in loss_sold:
                     pct = _to_float(item.get("profit_pct", 0))
                     lines.append(
-                        f"   \U0001f534 {item['name']} ({item['ticker']}) "
+                        f"   \U0001f534 {item['name']}{_purchase_tag(item)} ({item['ticker']}) "
                         f"수익률 {pct:+.2f}%"
                     )
                 lines.append("")
@@ -592,7 +660,7 @@ def format_screenshot_summary(
                 lines.append("\U0001f7e1 본전 매도")
                 for item in even_sold:
                     lines.append(
-                        f"   \U0001f7e1 {item['name']} ({item['ticker']}) "
+                        f"   \U0001f7e1 {item['name']}{_purchase_tag(item)} ({item['ticker']}) "
                         f"수익률 0.00%"
                     )
                 lines.append("")
@@ -626,7 +694,7 @@ def format_screenshot_summary(
             lines.append("")
 
     lines.append(f"\U0001f551 {now}")
-    lines.append("K-Quant v3.5")
+    lines.append(APP_NAME)
 
     return "\n".join(lines)
 
@@ -658,6 +726,24 @@ def format_screenshot_reminder() -> str:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
+def has_meaningful_account_data(parsed: dict[str, Any]) -> bool:
+    """스크린샷 OCR 결과가 비정상적인 올제로 응답인지 판별한다."""
+    holdings = parsed.get("holdings", []) if isinstance(parsed, dict) else []
+    if any(
+        str(item.get("name", "") or "").strip()
+        or str(item.get("ticker", "") or "").strip()
+        for item in holdings
+        if isinstance(item, dict)
+    ):
+        return True
+
+    summary = parsed.get("summary", {}) if isinstance(parsed, dict) else {}
+    for key in ("total_eval", "total_profit", "total_profit_pct", "cash", "total_buy"):
+        if abs(_to_float(summary.get(key, 0))) > 0.0:
+            return True
+    return False
+
 def _make_empty_result() -> dict[str, Any]:
     """Return a fresh empty result dict (avoid mutating the module-level constant)."""
     return {
@@ -669,6 +755,97 @@ def _make_empty_result() -> dict[str, Any]:
             "cash": 0,
         },
     }
+
+
+def _should_try_openai_vision_fallback(
+    *,
+    status_code: int,
+    body: str,
+    openai_key: str,
+) -> bool:
+    """Anthropic Vision 실패 시 OpenAI Vision 우회가 가능한지 판단한다."""
+    if not openai_key:
+        return False
+
+    body_lower = (body or "").lower()
+    fallback_markers = (
+        "credit balance is too low",
+        "insufficient_quota",
+        "rate limit",
+        "overloaded",
+        "temporarily unavailable",
+        "service unavailable",
+    )
+    if any(marker in body_lower for marker in fallback_markers):
+        return True
+    return status_code in {408, 409, 429, 500, 502, 503, 504}
+
+
+async def _parse_with_openai_vision(
+    image_b64: str,
+    media_type: str,
+    openai_key: str,
+) -> dict[str, Any]:
+    """OpenAI Vision으로 계좌 스크린샷을 보조 OCR한다."""
+    if not openai_key:
+        return _make_empty_result()
+
+    payload = {
+        "model": os.getenv("OPENAI_VISION_MODEL", "gpt-4o"),
+        "response_format": {"type": "json_object"},
+        "max_tokens": 2000,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _VISION_PROMPT},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{media_type};base64,{image_b64}",
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openai_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+        if resp.status_code != 200:
+            logger.error(
+                "OpenAI Vision API returned %d: %s",
+                resp.status_code,
+                resp.text[:300],
+            )
+            return _make_empty_result()
+
+        data = resp.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict)
+            )
+        return _parse_vision_response(str(content))
+    except httpx.TimeoutException:
+        logger.error("OpenAI Vision API request timed out")
+        return _make_empty_result()
+    except httpx.HTTPError as exc:
+        logger.error("OpenAI Vision API HTTP error: %s", exc)
+        return _make_empty_result()
+    except Exception as exc:
+        logger.error("Unexpected error calling OpenAI Vision API: %s", exc, exc_info=True)
+        return _make_empty_result()
 
 
 def _detect_media_type(image_bytes: bytes) -> str:

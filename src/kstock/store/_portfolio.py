@@ -14,6 +14,8 @@ HOLDING_THRESHOLDS: dict[str, dict[str, float]] = {
     "auto":      {"stop": -0.05, "t1": 0.03, "t2": 0.07},
 }
 
+_MARGIN_KEYWORDS = ("유융", "유옹", "신용", "담보")
+
 
 def _calc_thresholds(
     buy_price: float, holding_type: str = "auto",
@@ -25,6 +27,28 @@ def _calc_thresholds(
         round(buy_price * (1 + th["t2"]), 0),
         round(buy_price * (1 + th["stop"]), 0),
     )
+
+
+def _normalize_purchase_type(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def _normalize_margin_fields(
+    purchase_type: str | None,
+    is_margin: int | bool | None = None,
+    margin_type: str | None = None,
+) -> tuple[str, int, str]:
+    purchase_type = _normalize_purchase_type(purchase_type)
+    margin_type = _normalize_purchase_type(margin_type)
+    inferred_margin = any(k in purchase_type for k in _MARGIN_KEYWORDS) or any(
+        k in margin_type for k in _MARGIN_KEYWORDS
+    )
+    is_margin_flag = 1 if inferred_margin or bool(is_margin) else 0
+    if is_margin_flag and not margin_type and inferred_margin:
+        margin_type = purchase_type
+    if not is_margin_flag:
+        margin_type = ""
+    return purchase_type, is_margin_flag, margin_type
 
 
 class PortfolioMixin:
@@ -73,20 +97,29 @@ class PortfolioMixin:
     def add_holding(
         self, ticker: str, name: str, buy_price: float,
         holding_type: str = "auto",
+        *,
+        purchase_type: str = "",
+        is_margin: int | bool | None = None,
+        margin_type: str = "",
     ) -> int:
         now = datetime.utcnow().isoformat()
         target_1, target_2, stop_price = _calc_thresholds(buy_price, holding_type)
+        purchase_type, is_margin_value, margin_type = _normalize_margin_fields(
+            purchase_type, is_margin, margin_type,
+        )
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO holdings
                     (ticker, name, buy_price, current_price, buy_date,
                      target_1, target_2, stop_price, status, sold_pct, pnl_pct,
-                     holding_type, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, 0, ?, ?, ?)
+                     holding_type, purchase_type, is_margin, margin_type,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, 0, ?, ?, ?, ?, ?, ?)
                 """,
                 (ticker, name, buy_price, buy_price, now[:10],
-                 target_1, target_2, stop_price, holding_type, now, now),
+                 target_1, target_2, stop_price, holding_type,
+                 purchase_type, is_margin_value, margin_type, now, now),
             )
             return cursor.lastrowid
 
@@ -108,26 +141,97 @@ class PortfolioMixin:
             ).fetchone()
         return dict(row) if row else None
 
-    def get_holding_by_ticker(self, ticker: str) -> dict | None:
+    def get_holding_by_ticker(
+        self, ticker: str, purchase_type: str | None = None,
+    ) -> dict | None:
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM holdings WHERE ticker=? AND status='active' "
-                "ORDER BY created_at DESC LIMIT 1",
-                (ticker,),
-            ).fetchone()
+            if purchase_type is None:
+                row = conn.execute(
+                    "SELECT * FROM holdings WHERE ticker=? AND status='active' "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (ticker,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM holdings WHERE ticker=? AND status='active' "
+                    "AND COALESCE(purchase_type, '')=? "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (ticker, _normalize_purchase_type(purchase_type)),
+                ).fetchone()
         return dict(row) if row else None
 
-    def get_holding_by_name(self, name: str) -> dict | None:
+    def get_holding_by_name(
+        self, name: str, purchase_type: str | None = None,
+    ) -> dict | None:
         """종목명으로 active 보유종목 조회 (ticker 없을 때 fallback)."""
         if not name:
             return None
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM holdings WHERE name=? AND status='active' "
-                "ORDER BY created_at DESC LIMIT 1",
-                (name,),
-            ).fetchone()
+            if purchase_type is None:
+                row = conn.execute(
+                    "SELECT * FROM holdings WHERE name=? AND status='active' "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (name,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM holdings WHERE name=? AND status='active' "
+                    "AND COALESCE(purchase_type, '')=? "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (name, _normalize_purchase_type(purchase_type)),
+                ).fetchone()
         return dict(row) if row else None
+
+    def _get_holding_candidates(self, ticker: str, name: str, status: str) -> list[dict]:
+        clauses: list[str] = []
+        params: list[str] = []
+        if ticker:
+            clauses.append("ticker=?")
+            params.append(ticker)
+        if name:
+            clauses.append("name=?")
+            params.append(name)
+        if not clauses:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM holdings WHERE status=? AND ({' OR '.join(clauses)}) "
+                "ORDER BY updated_at DESC, created_at DESC",
+                [status, *params],
+            ).fetchall()
+        seen: set[int] = set()
+        results: list[dict] = []
+        for row in rows:
+            data = dict(row)
+            if data["id"] in seen:
+                continue
+            seen.add(data["id"])
+            results.append(data)
+        return results
+
+    def _find_matching_holding(
+        self, ticker: str, name: str, purchase_type: str = "",
+    ) -> dict | None:
+        purchase_type = _normalize_purchase_type(purchase_type)
+        candidates = self._get_holding_candidates(ticker, name, status="active")
+        if not candidates:
+            return None
+        if purchase_type:
+            for row in candidates:
+                if _normalize_purchase_type(row.get("purchase_type")) == purchase_type:
+                    return row
+            for row in candidates:
+                if not _normalize_purchase_type(row.get("purchase_type")):
+                    return row
+            return None
+        blank_matches = [
+            row for row in candidates if not _normalize_purchase_type(row.get("purchase_type"))
+        ]
+        if len(blank_matches) == 1:
+            return blank_matches[0]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
 
     def upsert_holding(
         self,
@@ -139,6 +243,9 @@ class PortfolioMixin:
         pnl_pct: float = 0,
         eval_amount: float = 0,
         holding_type: str = "auto",
+        purchase_type: str = "",
+        is_margin: int | bool | None = None,
+        margin_type: str = "",
     ) -> int:
         """스크린샷에서 파싱한 보유종목을 holdings DB에 upsert.
 
@@ -146,32 +253,42 @@ class PortfolioMixin:
         없으면 신규 등록.
         ticker가 비어있으면 name으로 조회.
         """
-        existing = None
-        if ticker:
-            existing = self.get_holding_by_ticker(ticker)
-        if not existing and name:
-            existing = self.get_holding_by_name(name)
-        # sold/삭제된 종목이 있으면 재등록하지 않음
-        if not existing and ticker:
-            with self._connect() as conn:
-                sold_row = conn.execute(
-                    "SELECT id FROM holdings WHERE ticker=? AND status='sold' "
-                    "ORDER BY updated_at DESC LIMIT 1",
-                    (ticker,),
-                ).fetchone()
-                if sold_row:
-                    return sold_row["id"]
+        purchase_type, is_margin_value, margin_type = _normalize_margin_fields(
+            purchase_type, is_margin, margin_type,
+        )
+        existing = self._find_matching_holding(ticker, name, purchase_type)
+        has_position_data = any(
+            float(v or 0) > 0 for v in (buy_price, current_price, eval_amount)
+        ) or int(quantity or 0) > 0
+        if not existing and not has_position_data:
+            sold_candidates = self._get_holding_candidates(ticker, name, status="sold")
+            for row in sold_candidates:
+                if purchase_type and _normalize_purchase_type(row.get("purchase_type")) != purchase_type:
+                    continue
+                return row["id"]
         now = datetime.utcnow().isoformat()
         if existing:
-            with self._connect() as conn:
-                conn.execute(
-                    """UPDATE holdings SET
-                        current_price=?, pnl_pct=?, quantity=?,
-                        eval_amount=?, name=?, updated_at=?
-                    WHERE id=?""",
-                    (current_price, pnl_pct, quantity, eval_amount,
-                     name, now, existing["id"]),
-                )
+            updates: dict[str, object] = {
+                "current_price": current_price,
+                "pnl_pct": pnl_pct,
+                "quantity": quantity,
+                "eval_amount": eval_amount,
+                "name": name,
+            }
+            if buy_price and not float(existing.get("buy_price", 0) or 0):
+                target_1, target_2, stop_price = _calc_thresholds(buy_price, holding_type)
+                updates.update({
+                    "buy_price": buy_price,
+                    "target_1": target_1,
+                    "target_2": target_2,
+                    "stop_price": stop_price,
+                })
+            if purchase_type:
+                updates["purchase_type"] = purchase_type
+            if purchase_type or margin_type or is_margin is not None:
+                updates["is_margin"] = is_margin_value
+                updates["margin_type"] = margin_type
+            self.update_holding(existing["id"], **updates)
             return existing["id"]
         else:
             if buy_price:
@@ -184,12 +301,13 @@ class PortfolioMixin:
                         (ticker, name, buy_price, current_price, quantity,
                          eval_amount, buy_date, target_1, target_2, stop_price,
                          status, sold_pct, pnl_pct, holding_type,
+                         purchase_type, is_margin, margin_type,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?,
-                            ?, ?)""",
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, ?)""",
                     (ticker, name, buy_price, current_price, quantity,
                      eval_amount, now[:10], target_1, target_2, stop_price,
-                     pnl_pct, holding_type, now, now),
+                     pnl_pct, holding_type, purchase_type, is_margin_value,
+                     margin_type, now, now),
                 )
                 return cursor.lastrowid
 
@@ -762,6 +880,8 @@ class PortfolioMixin:
                      current_return, notes, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 0, ?, ?, ?)
                 ON CONFLICT(ticker, market) DO UPDATE SET
+                    name=excluded.name,
+                    sector=excluded.sector,
                     tenbagger_score=excluded.tenbagger_score,
                     tam_score=excluded.tam_score,
                     policy_score=excluded.policy_score,
@@ -770,7 +890,9 @@ class PortfolioMixin:
                     discovery_score=excluded.discovery_score,
                     momentum_score=excluded.momentum_score,
                     consensus_score=excluded.consensus_score,
+                    ai_consensus=excluded.ai_consensus,
                     current_price=excluded.current_price,
+                    notes=excluded.notes,
                     updated_at=excluded.updated_at
                 """,
                 (

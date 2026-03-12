@@ -19,6 +19,8 @@ from typing import Any
 
 import httpx
 
+from kstock import APP_NAME
+
 logger = logging.getLogger(__name__)
 
 USER_NAME = "주호님"
@@ -606,7 +608,7 @@ def format_diagnosis_report(
     lines.extend([
         "",
         "\u2500" * 25,
-        "\U0001f916 Powered by Claude AI + K-Quant v3.0",
+        f"\U0001f916 Powered by Claude AI + {APP_NAME}",
     ])
 
     return "\n".join(lines)

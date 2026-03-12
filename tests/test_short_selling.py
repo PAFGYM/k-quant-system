@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from kstock import DISPLAY_VERSION
 from kstock.signal.short_selling import (
     ShortSellingData,
     ShortSellingSignal,
@@ -986,7 +987,7 @@ class TestWeeklyReportSections:
         content = generate_report_content(data)
         assert "1. 주간 시장 요약" in content
         assert "7. 30억 로드맵" in content
-        assert "K-Quant v3.5 AI" in content
+        assert f"K-Quant {DISPLAY_VERSION} AI" in content
 
 
 # ===========================================================================

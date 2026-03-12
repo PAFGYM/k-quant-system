@@ -10,8 +10,10 @@ from unittest.mock import patch
 import pytest
 
 from kstock.bot.chat_handler import (
+    classify_chat_route,
     format_ai_greeting,
     handle_ai_question,
+    should_use_lightweight_chat,
 )
 from kstock.bot.context_builder import (
     build_system_prompt,
@@ -96,6 +98,23 @@ class TestHandleAiQuestion:
         assert "ANTHROPIC_API_KEY" in result
 
 
+class TestLightweightChatRouting:
+    def test_short_general_question_uses_lightweight_route(self) -> None:
+        assert should_use_lightweight_chat("오늘 뉴스 요약해줘")
+
+    def test_stock_question_stays_on_full_route(self) -> None:
+        assert not should_use_lightweight_chat("삼성전자 지금 매수 타이밍일까?")
+
+    def test_single_stock_question_uses_balanced_route(self) -> None:
+        assert classify_chat_route("코루 지수가 안 좋은데 씨에스윈드 주가는 어때?") == "balanced"
+
+    def test_portfolio_strategy_question_uses_deep_route(self) -> None:
+        assert classify_chat_route("내 포트폴리오 비중 리밸런싱 전략과 환율 영향까지 같이 분석해줘") == "deep"
+
+    def test_short_summary_request_uses_light_route(self) -> None:
+        assert classify_chat_route("오늘 시장 짧게 요약해줘") == "light"
+
+
 # ===========================================================================
 # context_builder tests
 # ===========================================================================
@@ -155,6 +174,16 @@ class TestGetMarketContext:
         result = get_market_context({"sp500": 0.5})
         assert "S&P500" in result
         assert "나스닥" not in result
+
+    def test_includes_domestic_leverage_etfs(self) -> None:
+        result = get_market_context({
+            "kodex_leverage_price": 18230,
+            "kodex_leverage_change_pct": -5.2,
+            "kodex_inverse2x_price": 2845,
+            "kodex_inverse2x_change_pct": 4.7,
+        })
+        assert "KODEX 레버리지" in result
+        assert "인버스2X" in result
 
 
 class TestGetPortfolioContext:

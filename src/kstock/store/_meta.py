@@ -550,6 +550,7 @@ class MetaMixin:
         current_price: float = 0,
         profit_pct: float = 0,
         eval_amount: float = 0,
+        purchase_type: str = "",
         diagnosis: str = "",
         diagnosis_action: str = "",
         diagnosis_msg: str = "",
@@ -561,13 +562,13 @@ class MetaMixin:
                 """
                 INSERT INTO screenshot_holdings
                     (screenshot_id, ticker, name, quantity, avg_price,
-                     current_price, profit_pct, eval_amount,
+                     current_price, profit_pct, eval_amount, purchase_type,
                      diagnosis, diagnosis_action, diagnosis_msg,
                      is_margin, margin_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (screenshot_id, ticker, name, quantity, avg_price,
-                 current_price, profit_pct, eval_amount,
+                 current_price, profit_pct, eval_amount, purchase_type,
                  diagnosis, diagnosis_action, diagnosis_msg,
                  is_margin, margin_type),
             )

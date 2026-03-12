@@ -298,6 +298,56 @@ YOUTUBE_FEEDS: list[dict] = [
     },
 ]
 
+_YOUTUBE_PRIORITY_KEYWORDS = {
+    "라이브": 6,
+    "live": 6,
+    "생방송": 6,
+    "시황": 5,
+    "장전": 5,
+    "장중": 5,
+    "장마감": 5,
+    "마감시황": 5,
+    "브리핑": 4,
+    "오프닝벨": 4,
+    "개장": 4,
+    "급등": 4,
+    "테마": 4,
+    "fomc": 4,
+    "cpi": 4,
+    "반도체": 3,
+    "2차전지": 3,
+    "바이오": 3,
+    "로봇": 3,
+    "원전": 3,
+    "양자": 3,
+    "우주": 3,
+    "ai": 3,
+}
+
+
+def _youtube_priority_score(item: NewsItem) -> int:
+    """시황/라이브/테마성 영상을 우선 학습하기 위한 점수."""
+    title = str(getattr(item, "title", "") or "").lower()
+    source = str(getattr(item, "source", "") or "").lower()
+    category = str(getattr(item, "category", "") or "")
+    score = 0
+    for keyword, weight in _YOUTUBE_PRIORITY_KEYWORDS.items():
+        if keyword.lower() in title:
+            score += weight
+    if "youtube_broker" in category:
+        score += 4
+    elif "youtube_news" in category:
+        score += 3
+    elif "youtube_us_market" in category:
+        score += 2
+    if any(name.lower() in title for name in TRACKED_ANALYSTS):
+        score += 4
+    if "라이브" in title or "live" in title:
+        score += 2
+    if any(channel.lower() in source for channel in ("삼프로", "증권", "각도기", "biz", "경제tv")):
+        score += 1
+    return score
+
 # ── 긴급 이벤트 키워드 ────────────────────────────────────
 
 URGENT_KEYWORDS_KO = [
@@ -800,6 +850,46 @@ def group_similar_news(items: list[NewsItem], threshold: float = 0.4) -> list[li
         groups.append(group)
 
     return groups
+
+
+def merge_related_topic_groups(groups: list[list[NewsItem]]) -> list[list[NewsItem]]:
+    """대표 제목 기준으로 같은 사건군 그룹을 한 번 더 합친다.
+
+    1차 그룹핑 후에도 제목 표현이 달라 여러 묶음으로 남는 경우가 있어,
+    같은 토픽 클러스터/유사 대표 제목이면 한 그룹으로 병합한다.
+    """
+    if not groups:
+        return []
+
+    merged: list[list[NewsItem]] = []
+    used: set[int] = set()
+
+    for i, group in enumerate(groups):
+        if i in used:
+            continue
+        combined = list(group)
+        used.add(i)
+        rep_title = group[0].title if group else ""
+
+        for j, other in enumerate(groups):
+            if j in used or not other:
+                continue
+            other_title = other[0].title
+            if _same_topic_cluster(rep_title, other_title) or _title_similarity(rep_title, other_title) >= 0.22:
+                combined.extend(other)
+                used.add(j)
+
+        deduped: list[NewsItem] = []
+        seen = set()
+        for item in sorted(combined, key=lambda x: (x.impact_score, x.title), reverse=True):
+            key = item.url or item.title
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        merged.append(deduped)
+
+    return merged
 
 
 async def analyze_urgent_news(groups: list[list[NewsItem]], db=None) -> str:
@@ -1612,8 +1702,9 @@ async def batch_deep_youtube_analysis(
     from kstock.ingest.global_news import fetch_global_news
 
     # YouTube 영상만 수집
-    items = await fetch_global_news(max_per_feed=10)
+    items = await fetch_global_news(max_per_feed=10, hours_lookback=hours_lookback)
     yt_items = [it for it in items if it.video_id]
+    yt_items.sort(key=_youtube_priority_score, reverse=True)
 
     if not yt_items:
         logger.info("batch_deep_youtube: no YouTube items found")
@@ -1631,8 +1722,14 @@ async def batch_deep_youtube_analysis(
         if db:
             try:
                 if db.check_youtube_processed(item.video_id):
-                    skipped += 1
-                    continue
+                    should_upgrade = True
+                    if hasattr(db, "should_upgrade_youtube_intelligence"):
+                        should_upgrade = db.should_upgrade_youtube_intelligence(
+                            item.video_id,
+                        )
+                    if not should_upgrade:
+                        skipped += 1
+                        continue
             except Exception:
                 pass
 
@@ -1682,8 +1779,7 @@ async def summarize_transcript_structured(
     import json as _json
 
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return empty
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
 
     text = transcript[:5000]
 
@@ -1727,6 +1823,16 @@ async def summarize_transcript_structured(
             '}\n'
         )
 
+    if not api_key and openai_key:
+        logger.warning(
+            "Anthropic key unavailable for structured summary '%s'; using OpenAI fallback",
+            title[:30],
+        )
+        return await _summarize_structured_with_openai(prompt, title, empty)
+
+    if not api_key:
+        return empty
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
@@ -1744,6 +1850,17 @@ async def summarize_transcript_structured(
                 },
             )
             if resp.status_code != 200:
+                if _should_try_openai_summary_fallback(
+                    status_code=resp.status_code,
+                    body=resp.text,
+                    openai_key=openai_key,
+                ):
+                    logger.warning(
+                        "Structured summary Anthropic error %d for '%s'; using OpenAI fallback",
+                        resp.status_code,
+                        title[:30],
+                    )
+                    return await _summarize_structured_with_openai(prompt, title, empty)
                 logger.warning(
                     "Structured summary API error %d for '%s': %s",
                     resp.status_code, title[:30],
@@ -1824,9 +1941,157 @@ async def summarize_transcript_structured(
             }
 
     except Exception as e:
+        if openai_key:
+            logger.warning(
+                "Structured summary generation failed for '%s', trying OpenAI fallback: %s",
+                title[:30] if title else "unknown",
+                e,
+            )
+            return await _summarize_structured_with_openai(prompt, title, empty)
         logger.warning(
             "Structured summary generation failed for '%s': %s",
             title[:30] if title else "unknown", e, exc_info=True,
+        )
+        return empty
+
+
+def _should_try_openai_summary_fallback(
+    *,
+    status_code: int,
+    body: str,
+    openai_key: str,
+) -> bool:
+    """Anthropic 구조화 요약 실패 시 OpenAI 폴백 여부를 판단한다."""
+    if not openai_key:
+        return False
+
+    body_lower = (body or "").lower()
+    fallback_markers = (
+        "credit balance is too low",
+        "insufficient_quota",
+        "rate limit",
+        "overloaded",
+        "temporarily unavailable",
+        "service unavailable",
+    )
+    if any(marker in body_lower for marker in fallback_markers):
+        return True
+    return status_code in {408, 409, 429, 500, 502, 503, 504}
+
+
+async def _summarize_structured_with_openai(
+    prompt: str,
+    title: str,
+    empty: dict,
+) -> dict:
+    """OpenAI 경량 모델로 유튜브/뉴스 구조화 요약을 보조 생성한다."""
+    import httpx
+    import json as _json
+
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not openai_key:
+        return empty
+
+    model = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {openai_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "response_format": {"type": "json_object"},
+                    "max_tokens": 1200,
+                    "temperature": 0.2,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+
+        if resp.status_code != 200:
+            logger.warning(
+                "OpenAI structured summary API error %d for '%s': %s",
+                resp.status_code,
+                title[:30],
+                resp.text[:200] if resp.text else "no body",
+            )
+            return empty
+
+        data = resp.json()
+        raw_text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(raw_text, list):
+            raw_text = "".join(
+                part.get("text", "")
+                for part in raw_text
+                if isinstance(part, dict)
+            )
+        raw_text = str(raw_text).strip()
+
+        try:
+            from kstock.core.token_tracker import track_usage_global
+            usage = data.get("usage", {})
+            track_usage_global(
+                provider="gpt",
+                model=model,
+                function_name="youtube_summary_structured_openai_fallback",
+                input_tokens=usage.get("prompt_tokens", 0) or 0,
+                output_tokens=usage.get("completion_tokens", 0) or 0,
+            )
+        except Exception:
+            pass
+
+        json_text = raw_text
+        if "```" in json_text:
+            m = re.search(r"```(?:json)?\s*(.*?)```", json_text, re.DOTALL)
+            if m:
+                json_text = m.group(1)
+        data = _json.loads(json_text) if json_text.startswith("{") else {}
+        if not data:
+            return {**empty, "raw_summary": raw_text[:200], "full_summary": raw_text}
+
+        full_summary = data.get("full_summary", "")
+        summary_lines = full_summary.split("\n")
+        raw_summary = "\n".join(summary_lines[:3]) if summary_lines else full_summary[:200]
+
+        conf = 0.5
+        if data.get("mentioned_tickers"):
+            conf += 0.2
+        if data.get("mentioned_sectors"):
+            conf += 0.1
+        if data.get("key_numbers"):
+            conf += 0.1
+        if data.get("investment_implications"):
+            conf += 0.1
+
+        mentioned_tickers = data.get("mentioned_tickers", [])
+        if not isinstance(mentioned_tickers, list):
+            mentioned_tickers = []
+        mentioned_sectors = data.get("mentioned_sectors", [])
+        if not isinstance(mentioned_sectors, list):
+            mentioned_sectors = []
+        key_numbers = data.get("key_numbers", [])
+        if not isinstance(key_numbers, list):
+            key_numbers = []
+
+        return {
+            "full_summary": full_summary,
+            "mentioned_tickers": mentioned_tickers,
+            "mentioned_sectors": mentioned_sectors,
+            "market_outlook": data.get("market_outlook", ""),
+            "key_numbers": key_numbers,
+            "investment_implications": data.get("investment_implications", ""),
+            "raw_summary": raw_summary,
+            "confidence": min(conf, 1.0),
+        }
+    except Exception as e:
+        logger.warning(
+            "OpenAI structured summary fallback failed for '%s': %s",
+            title[:30] if title else "unknown",
+            e,
+            exc_info=True,
         )
         return empty
 
@@ -2026,6 +2291,7 @@ async def enrich_youtube_summaries(
         db: SQLiteStore instance (있으면 youtube_intelligence 저장)
     """
     yt_items = [it for it in items if it.video_id]
+    yt_items.sort(key=_youtube_priority_score, reverse=True)
     if not yt_items:
         return items
 
@@ -2259,6 +2525,7 @@ async def batch_youtube_tiered(
     # RSS에서 최근 영상 수집
     items = await fetch_global_news(max_per_feed=5, hours_lookback=hours_lookback)
     yt_items = [it for it in items if it.video_id]
+    yt_items.sort(key=_youtube_priority_score, reverse=True)
 
     if not yt_items:
         logger.info("batch_youtube_tiered: no YouTube items found")

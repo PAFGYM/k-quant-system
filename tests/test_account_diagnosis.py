@@ -1,6 +1,7 @@
 """Tests for bot/account_diagnosis.py - Portfolio-level 8-item diagnosis."""
 
 import pytest
+from kstock import DISPLAY_VERSION
 from kstock.bot.account_diagnosis import (
     DiagnosisItem,
     AccountDiagnosis,
@@ -507,7 +508,7 @@ class TestFormatDiagnosisReport:
     def test_v3_branding(self):
         diag = diagnose_account([])
         text = format_diagnosis_report(diag)
-        assert "K-Quant v3.5" in text
+        assert f"K-Quant {DISPLAY_VERSION}" in text
 
 
 # ---------------------------------------------------------------------------

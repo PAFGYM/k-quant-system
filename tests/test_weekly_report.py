@@ -8,6 +8,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from kstock import DISPLAY_VERSION
 from kstock.bot.weekly_report import (
     _get_week_range,
     collect_weekly_data,
@@ -177,7 +178,7 @@ class TestGenerateContent:
         data = collect_weekly_data(store_with_data)
         content = generate_report_content(data)
         assert "K-Quant 주간 투자 보고서" in content
-        assert "K-Quant v3.5 AI" in content
+        assert f"K-Quant {DISPLAY_VERSION} AI" in content
 
     def test_contains_footer(self, store_with_data):
         data = collect_weekly_data(store_with_data)

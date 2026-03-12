@@ -405,6 +405,111 @@ def check_data_staleness(db_path: str | Path, max_hours: int = 2) -> HealthCheck
     return check
 
 
+_MANAGER_PIPELINE_SPECS: dict[str, dict[str, float | str]] = {
+    "manager_briefings": {"label": "매니저 브리핑", "max_age_hours": 48.0},
+    "manager_watchlist_scan": {"label": "매니저 워치리스트 스캔", "max_age_hours": 48.0},
+    "manager_discovery": {"label": "매니저 발굴 스캔", "max_age_hours": 48.0},
+    "manager_reflection": {"label": "매니저 회고", "max_age_hours": 24.0 * 9},
+}
+_HEALTHY_JOB_STATUSES = {"success", "skip"}
+
+
+def check_manager_pipeline(db_path: str | Path) -> HealthCheck:
+    """매니저 관련 핵심 잡들이 최근 정상 실행됐는지 확인한다."""
+    check = HealthCheck(
+        name="manager_pipeline",
+        checked_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    try:
+        db_path = Path(db_path)
+        if not db_path.exists():
+            check.status = "error"
+            check.message = f"DB 파일이 존재하지 않습니다: {db_path}"
+            return check
+
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            missing: list[str] = []
+            stale: list[str] = []
+            failed: list[str] = []
+            healthy: list[str] = []
+            now = datetime.now()
+
+            for job_name, spec in _MANAGER_PIPELINE_SPECS.items():
+                label = str(spec["label"])
+                max_age_hours = float(spec["max_age_hours"])
+                row = conn.execute(
+                    "SELECT status, ended_at, started_at, message "
+                    "FROM job_runs WHERE job_name=? "
+                    "ORDER BY COALESCE(ended_at, started_at) DESC LIMIT 1",
+                    (job_name,),
+                ).fetchone()
+                if not row:
+                    missing.append(label)
+                    continue
+
+                status = (row["status"] or "").lower()
+                ended_at = row["ended_at"] or row["started_at"] or ""
+                if status not in _HEALTHY_JOB_STATUSES:
+                    failed.append(f"{label}={status or 'unknown'}")
+                    continue
+
+                if not ended_at:
+                    stale.append(f"{label}(시간없음)")
+                    continue
+
+                try:
+                    last_run = datetime.fromisoformat(str(ended_at))
+                except ValueError:
+                    stale.append(f"{label}(시간파싱실패)")
+                    continue
+
+                if last_run.tzinfo is not None:
+                    now_ref = datetime.now(last_run.tzinfo)
+                else:
+                    now_ref = now
+                age_hours = (now_ref - last_run).total_seconds() / 3600.0
+
+                if age_hours > max_age_hours * 1.5:
+                    failed.append(f"{label} {age_hours:.0f}시간")
+                elif age_hours > max_age_hours:
+                    stale.append(f"{label} {age_hours:.0f}시간")
+                else:
+                    healthy.append(label)
+
+            if failed:
+                check.status = "error"
+                detail = ", ".join(failed[:3])
+                check.message = f"매니저 파이프라인 이상: {detail}"
+            elif stale or missing:
+                check.status = "warning"
+                parts: list[str] = []
+                if stale:
+                    parts.append("지연=" + ", ".join(stale[:2]))
+                if missing:
+                    parts.append("미실행=" + ", ".join(missing[:2]))
+                check.message = "매니저 파이프라인 점검 필요: " + " | ".join(parts)
+            else:
+                check.status = "ok"
+                check.message = (
+                    "매니저 파이프라인 정상: "
+                    + ", ".join(healthy[:3])
+                )
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as exc:
+        check.status = "warning"
+        check.message = f"매니저 파이프라인 확인 중 테이블 접근 불가: {exc}"
+        logger.warning("매니저 파이프라인 테이블 확인 실패: %s", exc)
+    except Exception as exc:
+        check.status = "error"
+        check.message = f"매니저 파이프라인 확인 실패: {exc}"
+        logger.exception("매니저 파이프라인 헬스체크 실패")
+
+    return check
+
+
 def check_db_size(db_path: str | Path) -> float:
     """DB 파일 크기를 MB 단위로 반환. 실패 시 -1.0."""
     try:
@@ -471,6 +576,16 @@ def run_health_checks(db_path: Optional[str | Path] = None) -> list[HealthCheck]
             logger.exception("데이터 최신성 체크 실행 실패: %s", exc)
             checks.append(HealthCheck(
                 name="data_staleness", status="error",
+                message=f"체크 실행 실패: {exc}",
+                checked_at=datetime.now().isoformat(timespec="seconds"),
+            ))
+
+        try:
+            checks.append(check_manager_pipeline(db_path))
+        except Exception as exc:
+            logger.exception("매니저 파이프라인 체크 실행 실패: %s", exc)
+            checks.append(HealthCheck(
+                name="manager_pipeline", status="error",
                 message=f"체크 실행 실패: {exc}",
                 checked_at=datetime.now().isoformat(timespec="seconds"),
             ))

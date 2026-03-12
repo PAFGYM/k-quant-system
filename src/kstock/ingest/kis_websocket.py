@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -155,10 +156,23 @@ class KISWebSocket:
         self._ws = None
         self._connected = False
         self._subscriptions: set[str] = set()
+        self._desired_subscriptions: set[str] = set()
         self._prices: dict[str, RealtimePrice] = {}
         self._orderbooks: dict[str, Orderbook] = {}
         self._callbacks: list[Callable] = []
         self._recv_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
+        self._connect_lock: asyncio.Lock | None = None
+        self._last_message_ts: float = 0.0
+        self._receive_error_count: int = 0
+        self._last_receive_error_log_ts: float = 0.0
+        self._last_receive_error_text: str = ""
+        self._last_disconnect_reason: str = ""
+
+    def _get_connect_lock(self) -> asyncio.Lock:
+        if self._connect_lock is None:
+            self._connect_lock = asyncio.Lock()
+        return self._connect_lock
 
     @property
     def is_connected(self) -> bool:
@@ -205,28 +219,47 @@ class KISWebSocket:
             logger.warning("KIS API keys not configured")
             return False
 
-        try:
-            approval_key = await self.get_approval_key()
-            if not approval_key:
+        async with self._get_connect_lock():
+            if self._connected and self._ws:
+                return True
+
+            try:
+                approval_key = await self.get_approval_key()
+                if not approval_key:
+                    return False
+
+                ws_url = WS_URL_VIRTUAL if self._is_virtual else WS_URL_REAL
+                # KIS 서버는 표준 ping/pong 응답이 불안정해 ping timeout 로그가 잦다.
+                self._ws = await websockets.connect(
+                    ws_url,
+                    ping_interval=None,
+                    close_timeout=3,
+                    max_queue=512,
+                )
+                self._connected = True
+                self._last_message_ts = time.time()
+                self._receive_error_count = 0
+                self._last_disconnect_reason = ""
+                logger.info("KIS WebSocket connected to %s", ws_url)
+
+                # 수신 루프 시작
+                self._recv_task = asyncio.create_task(self._receive_loop())
+                return True
+
+            except Exception as e:
+                logger.error("WebSocket connection failed: %s", e)
+                self._connected = False
+                self._ws = None
                 return False
-
-            ws_url = WS_URL_VIRTUAL if self._is_virtual else WS_URL_REAL
-            self._ws = await websockets.connect(ws_url, ping_interval=30)
-            self._connected = True
-            logger.info("KIS WebSocket connected to %s", ws_url)
-
-            # 수신 루프 시작
-            self._recv_task = asyncio.create_task(self._receive_loop())
-            return True
-
-        except Exception as e:
-            logger.error("WebSocket connection failed: %s", e)
-            self._connected = False
-            return False
 
     async def disconnect(self) -> None:
         """WebSocket 연결 해제."""
         self._connected = False
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._reconnect_task
+            self._reconnect_task = None
         if self._recv_task:
             self._recv_task.cancel()
             try:
@@ -236,7 +269,9 @@ class KISWebSocket:
             except Exception:
                 logger.debug("disconnect: recv_task cleanup failed", exc_info=True)
         if self._ws:
-            await self._ws.close()
+            with contextlib.suppress(Exception):
+                await self._ws.close()
+        self._ws = None
         self._subscriptions.clear()
         self._approval_key = None
         logger.info("KIS WebSocket disconnected")
@@ -248,6 +283,7 @@ class KISWebSocket:
             ticker: 종목코드 (6자리)
             tr_type: "price"(체결), "orderbook"(호가), "both"(둘 다)
         """
+        self._desired_subscriptions.add(ticker)
         if not self._connected or not self._ws:
             logger.warning("WebSocket not connected")
             return False
@@ -264,6 +300,7 @@ class KISWebSocket:
 
     async def unsubscribe(self, ticker: str) -> bool:
         """종목 구독 해제."""
+        self._desired_subscriptions.discard(ticker)
         if not self._connected or not self._ws:
             return False
         await self._send_unsubscribe(TR_REALTIME_PRICE, ticker)
@@ -323,6 +360,7 @@ class KISWebSocket:
         while self._connected and self._ws:
             try:
                 raw = await asyncio.wait_for(self._ws.recv(), timeout=30)
+                self._last_message_ts = time.time()
                 if isinstance(raw, bytes):
                     raw = raw.decode("utf-8", errors="replace")
 
@@ -341,15 +379,93 @@ class KISWebSocket:
                 self._parse_realtime_data(raw)
 
             except asyncio.TimeoutError:
-                # 타임아웃은 정상 — 데이터 없을 때
+                # 수신이 오래 끊기면 연결 손실로 보고 재연결한다.
+                if time.time() - self._last_message_ts > 90:
+                    await self._handle_connection_loss("receive heartbeat timeout")
+                    break
                 continue
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("WebSocket receive error: %s", e)
-                if not self._connected:
-                    break
-                await asyncio.sleep(1)
+                await self._handle_connection_loss(str(e))
+                break
+
+    async def _handle_connection_loss(self, reason: str) -> None:
+        """수신 루프 단절 시 연결을 정리하고 백오프 재연결을 예약한다."""
+        if not self._connected and not self._ws:
+            return
+
+        self._receive_error_count += 1
+        self._last_disconnect_reason = reason
+        self._log_receive_issue(reason)
+        self._connected = False
+        self._subscriptions.clear()
+
+        ws = self._ws
+        self._ws = None
+        if ws is not None:
+            with contextlib.suppress(Exception):
+                await ws.close()
+
+        if self._reconnect_task and not self._reconnect_task.done():
+            return
+        self._reconnect_task = asyncio.create_task(self._reconnect_after_backoff())
+
+    def _log_receive_issue(self, reason: str) -> None:
+        """동일한 WebSocket 오류를 레이트리밋해 로그 소음을 줄인다."""
+        now = time.time()
+        normalized = reason.strip() or "unknown websocket error"
+        should_log = (
+            normalized != self._last_receive_error_text
+            or now - self._last_receive_error_log_ts >= 30
+            or self._receive_error_count <= 2
+        )
+        if should_log:
+            delay = min(60, 5 * (2 ** max(self._receive_error_count - 1, 0)))
+            logger.warning(
+                "WebSocket receive issue: %s | reconnect in ~%ds (count=%d)",
+                normalized,
+                delay,
+                self._receive_error_count,
+            )
+            self._last_receive_error_text = normalized
+            self._last_receive_error_log_ts = now
+
+    async def _reconnect_after_backoff(self) -> None:
+        """지수 백오프로 WebSocket을 재연결하고 구독을 복원한다."""
+        current_task = asyncio.current_task()
+        try:
+            while not self._connected:
+                delay = min(60, 5 * (2 ** max(self._receive_error_count - 1, 0)))
+                await asyncio.sleep(delay)
+                if self._connected:
+                    return
+                ok = await self.connect()
+                if ok:
+                    await self._restore_subscriptions()
+                    return
+                self._receive_error_count += 1
+                self._log_receive_issue(
+                    self._last_disconnect_reason or "reconnect connect() failed",
+                )
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self._reconnect_task is current_task:
+                self._reconnect_task = None
+
+    async def _restore_subscriptions(self) -> None:
+        """자동 재연결 후 이전 구독을 다시 복원한다."""
+        if not self._connected or not self._ws or not self._desired_subscriptions:
+            return
+
+        restored = 0
+        for ticker in sorted(self._desired_subscriptions):
+            ok = await self.subscribe(ticker)
+            if ok:
+                restored += 1
+            await asyncio.sleep(0.03)
+        logger.info("KIS WebSocket reconnected: restored %d tickers", restored)
 
     def _parse_realtime_data(self, raw: str) -> None:
         """실시간 데이터 파싱 (파이프 구분 형식)."""
@@ -602,7 +718,9 @@ class KISWebSocket:
     def get_status(self) -> str:
         """WebSocket 상태 문자열."""
         if not self._connected:
-            return "❌ WebSocket 미연결"
+            reason = f" | 최근 이슈: {self._last_disconnect_reason[:40]}" if self._last_disconnect_reason else ""
+            desired = len(self._desired_subscriptions)
+            return f"❌ WebSocket 미연결 | 대기구독 {desired}종목{reason}"
         mode = "🔧 모의" if self._is_virtual else "🔴 실전"
         subs = len(self._subscriptions)
         prices = len(self._prices)

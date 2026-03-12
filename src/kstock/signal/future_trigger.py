@@ -1,4 +1,4 @@
-"""Future technology trigger monitoring and entry evaluation - K-Quant v3.5.
+"""Future technology trigger monitoring and entry evaluation - K-Quant v13.0.
 
 Monitors news keywords, classifies trigger types (policy, corporate, global,
 earnings), matches beneficiary stocks, and evaluates entry conditions.
@@ -44,6 +44,18 @@ TRIGGER_TYPES = {
             "국가전략", "국책사업", "정부지원", "우주항공청",
         ],
     },
+    "expo": {
+        "label": "산업 이벤트",
+        "impact": "HIGH",
+        "description": "전시회/컨퍼런스/행사 촉매",
+        "keywords": [
+            "CES", "MWC", "GTC", "COMPUTEX",
+            "INTERBATTERY", "인터배터리",
+            "SEMICON KOREA", "세미콘코리아",
+            "서울모빌리티쇼", "ADEX", "서울 ADEX",
+            "KIMES", "SID", "월드IT쇼",
+        ],
+    },
     "corporate": {
         "label": "기업 트리거",
         "impact": "MEDIUM",
@@ -59,7 +71,7 @@ TRIGGER_TYPES = {
         "description": "글로벌 기술/시장 이벤트",
         "keywords": [
             "테슬라", "스페이스X", "구글", "아이온큐", "엔비디아",
-            "FSD", "스타십", "양자우월성", "CES", "MWC",
+            "FSD", "스타십", "양자우월성",
         ],
     },
     "earnings": {

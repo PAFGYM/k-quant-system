@@ -1,6 +1,27 @@
 """Tests for RemoteClaudeMixin — Claude Code remote execution."""
+import os
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+
+class _FakeResponse:
+    def __init__(self, status_code, json_data=None, text=""):
+        self.status_code = status_code
+        self._json_data = json_data or {}
+        self.text = text
+
+    def json(self):
+        return self._json_data
+
+
+class _FakeClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+
+    async def post(self, *args, **kwargs):
+        if not self._responses:
+            raise AssertionError("No fake responses left")
+        return self._responses.pop(0)
 
 
 class TestRemoteClaudeConstants(unittest.TestCase):
@@ -155,6 +176,199 @@ class TestAuthorizationCheck(unittest.TestCase):
         update = MagicMock()
         update.effective_chat.id = 6247622742  # int
         assert mixin._is_authorized_chat(update)
+
+
+class TestRemoteClaudeFallbacks(unittest.IsolatedAsyncioTestCase):
+    def _make_mixin(self):
+        from kstock.bot.mixins.remote_claude import RemoteClaudeMixin
+
+        class DummyRemoteClaude(RemoteClaudeMixin):
+            pass
+
+        mixin = DummyRemoteClaude()
+        mixin.anthropic_key = "anthropic-test"
+        mixin.db = MagicMock()
+        mixin.db.get_active_holdings.return_value = []
+        mixin.db.get_macro_snapshot.return_value = {}
+        mixin._detect_stock_query = MagicMock(return_value=None)
+        mixin._build_text_chat_system_prompt = AsyncMock(return_value="system prompt")
+        mixin._build_image_system_prompt = AsyncMock(return_value="image system")
+        return mixin
+
+    def _make_update(self, reply_count=2):
+        placeholder = MagicMock()
+        placeholder.delete = AsyncMock()
+        placeholder.edit_text = AsyncMock()
+        reply_side_effect = [placeholder] + [MagicMock() for _ in range(reply_count - 1)]
+
+        update = MagicMock()
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock(side_effect=reply_side_effect)
+        return update
+
+    def _make_context(self, tier="bujang"):
+        context = MagicMock()
+        context.user_data = {"claude_tier": tier}
+        return context
+
+    async def test_direct_chat_falls_back_to_openai_when_anthropic_returns_400(self):
+        from kstock.bot.mixins import remote_claude
+
+        mixin = self._make_mixin()
+        update = self._make_update()
+        context = self._make_context()
+        fake_client = _FakeClient([
+            _FakeResponse(
+                400,
+                text='{"error":{"message":"Your credit balance is too low to access the Anthropic API"}}',
+            ),
+            _FakeResponse(
+                200,
+                json_data={
+                    "choices": [
+                        {"message": {"content": "씨에스윈드는 방산/풍력 수주 확인이 우선입니다."}}
+                    ],
+                    "usage": {"prompt_tokens": 123, "completion_tokens": 45},
+                },
+            ),
+        ])
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "openai-test"}, clear=False):
+            with patch.object(remote_claude, "_get_api_client", return_value=fake_client):
+                with patch.object(remote_claude, "get_reply_markup", return_value=None):
+                    await mixin._claude_direct_chat(
+                        update,
+                        context,
+                        "코루 지수가 엄청안좋은데 씨에스윈드 주가는 어떻게 될것 같아?",
+                        tier=mixin._CLAUDE_TIERS["bujang"],
+                    )
+
+        final_text = update.message.reply_text.await_args_list[-1].args[0]
+        assert "API 오류" not in final_text
+        assert "보조 엔진으로 우회" in final_text
+        assert "씨에스윈드" in final_text
+
+    async def test_image_analysis_falls_back_to_openai_when_anthropic_returns_400(self):
+        from kstock.bot.mixins import remote_claude
+
+        mixin = self._make_mixin()
+        update = self._make_update()
+        context = self._make_context()
+        fake_client = _FakeClient([
+            _FakeResponse(
+                400,
+                text='{"error":{"message":"Your credit balance is too low to access the Anthropic API"}}',
+            ),
+            _FakeResponse(
+                200,
+                json_data={
+                    "choices": [
+                        {"message": {"content": "이미지상 핵심은 보유 비중 조절과 손절 기준 재확인입니다."}}
+                    ],
+                    "usage": {"prompt_tokens": 98, "completion_tokens": 37},
+                },
+            ),
+        ])
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "openai-test"}, clear=False):
+            with patch.object(remote_claude, "_get_api_client", return_value=fake_client):
+                await mixin._analyze_image_with_text(
+                    update,
+                    context,
+                    "이 스크린샷 해석해줘",
+                    img_b64="ZmFrZS1pbWFnZQ==",
+                )
+
+        final_text = update.message.reply_text.await_args_list[-1].args[0]
+        assert "API 오류" not in final_text
+        assert "보조 엔진으로 우회" in final_text
+        assert "보유 비중 조절" in final_text
+
+
+class TestRemoteClaudeHelpers(unittest.TestCase):
+    def test_extract_provider_error_message_from_json(self):
+        from kstock.bot.mixins.remote_claude import _extract_provider_error_message
+
+        msg = _extract_provider_error_message(
+            '{"error":{"message":"Your credit balance is too low to access the Anthropic API"}}'
+        )
+        assert "credit balance is too low" in msg
+
+    def test_should_try_openai_chat_fallback_on_credit_error(self):
+        from kstock.bot.mixins.remote_claude import _should_try_openai_chat_fallback
+
+        assert _should_try_openai_chat_fallback(
+            status_code=400,
+            body='{"error":{"message":"Your credit balance is too low to access the Anthropic API"}}',
+            openai_key="openai-test",
+        )
+
+    def test_ceo_tier_defaults_to_sonnet_safe_mode(self):
+        from kstock.bot.mixins.remote_claude import RemoteClaudeMixin
+
+        tier = RemoteClaudeMixin._CLAUDE_TIERS["daepyo"]
+        assert tier["model"] == "claude-sonnet-4-5-20250929"
+        assert tier["max_tokens"] == 1800
+
+    def test_consume_ceo_cli_model_uses_sonnet_without_arm(self):
+        from kstock.bot.mixins.remote_claude import RemoteClaudeMixin
+
+        mixin = RemoteClaudeMixin()
+        context = MagicMock()
+        context.user_data = {}
+
+        model, used_opus = mixin._consume_ceo_cli_model(context)
+
+        assert model == "sonnet"
+        assert used_opus is False
+
+    def test_consume_ceo_cli_model_uses_opus_once_when_armed(self):
+        from kstock.bot.mixins.remote_claude import RemoteClaudeMixin
+
+        mixin = RemoteClaudeMixin()
+        context = MagicMock()
+        context.user_data = {"ceo_opus_armed_until": 9999999999}
+
+        model, used_opus = mixin._consume_ceo_cli_model(context)
+        assert model == "opus"
+        assert used_opus is True
+        assert "ceo_opus_armed_until" not in context.user_data
+
+        model, used_opus = mixin._consume_ceo_cli_model(context)
+        assert model == "sonnet"
+        assert used_opus is False
+
+    def test_should_allow_claude_web_search_only_when_explicit(self):
+        from kstock.bot.mixins.remote_claude import _should_allow_claude_web_search
+
+        assert _should_allow_claude_web_search("최신 뉴스 검색해줘")
+        assert _should_allow_claude_web_search("web search로 확인해줘")
+        assert not _should_allow_claude_web_search("git status 보고 정리해줘")
+        assert not _should_allow_claude_web_search("테스트 실패 원인만 분석해줘")
+
+    def test_build_claude_cli_env_strips_direct_anthropic_auth(self):
+        from kstock.bot.mixins.remote_claude import _build_claude_cli_env
+
+        original = {
+            "CLAUDECODE": "1",
+            "ANTHROPIC_API_KEY": "secret",
+            "ANTHROPIC_AUTH_TOKEN": "secret-token",
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "OPENAI_API_KEY": "keep-me",
+            "CLAUDE_CODE_MAX_BUDGET_USD": "0.5",
+        }
+        with patch.dict(os.environ, original, clear=True):
+            env = _build_claude_cli_env()
+
+        assert "CLAUDECODE" not in env
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "ANTHROPIC_AUTH_TOKEN" not in env
+        assert "ANTHROPIC_BASE_URL" not in env
+        assert "CLAUDE_CODE_USE_BEDROCK" not in env
+        assert env["OPENAI_API_KEY"] == "keep-me"
+        assert env["CLAUDE_CODE_MAX_BUDGET_USD"] == "0.5"
+        assert env["PYTHONPATH"] == "src"
 
 
 if __name__ == "__main__":
