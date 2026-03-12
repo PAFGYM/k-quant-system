@@ -92,6 +92,11 @@ class MacroSnapshot:
     nikkei_change_pct: float = 0.0  # 닛케이225
     hsi_change_pct: float = 0.0     # 항셍지수
     us2y_change_pct: float = 0.0    # 미국 2년물 변화율
+    # v13: FRED 신용 스트레스 지표
+    hy_spread: float = 0.0           # ICE BofA HY OAS (%)
+    hy_spread_prev: float = 0.0      # 전일 HY OAS
+    nfci: float = 0.0                # Chicago Fed NFCI
+    nfci_prev: float = 0.0           # 전주 NFCI
 
 
 def _snapshot_to_json(snap: MacroSnapshot) -> str:
@@ -274,6 +279,47 @@ class MacroClient:
             logger.debug("SQLite macro cache load failed: %s", e)
             return None
 
+    def _fetch_fred_data(self) -> dict:
+        """FRED API에서 HY Spread + NFCI 조회. 실패 시 빈 dict."""
+        if not self.fred_api_key:
+            return {}
+        try:
+            from fredapi import Fred
+            fred = Fred(api_key=self.fred_api_key)
+
+            result = {}
+            # HY Spread (daily, %)
+            try:
+                hy = fred.get_series("BAMLH0A0HYM2", observation_start="2025-01-01")
+                hy = hy.dropna()
+                if len(hy) >= 2:
+                    result["hy_spread"] = round(float(hy.iloc[-1]), 2)
+                    result["hy_spread_prev"] = round(float(hy.iloc[-2]), 2)
+                elif len(hy) == 1:
+                    result["hy_spread"] = round(float(hy.iloc[-1]), 2)
+            except Exception as e:
+                logger.debug("FRED HY Spread fetch failed: %s", e)
+
+            # NFCI (weekly)
+            try:
+                nf = fred.get_series("NFCI", observation_start="2025-01-01")
+                nf = nf.dropna()
+                if len(nf) >= 2:
+                    result["nfci"] = round(float(nf.iloc[-1]), 4)
+                    result["nfci_prev"] = round(float(nf.iloc[-2]), 4)
+                elif len(nf) == 1:
+                    result["nfci"] = round(float(nf.iloc[-1]), 4)
+            except Exception as e:
+                logger.debug("FRED NFCI fetch failed: %s", e)
+
+            return result
+        except ImportError:
+            logger.warning("fredapi not installed, skipping FRED data")
+            return {}
+        except Exception as e:
+            logger.warning("FRED fetch failed: %s", e)
+            return {}
+
     def _fetch_live_snapshot(self) -> MacroSnapshot:
         """Fetch live macro data from yfinance (runs in thread pool)."""
         # Batch download all tickers at once - much faster than individual calls
@@ -412,6 +458,9 @@ class MacroClient:
         except Exception as e:
             logger.debug("Korean vol computation in macro: %s", e)
 
+        # v13: FRED 신용 스트레스 지표
+        fred_data = self._fetch_fred_data()
+
         regime = self._classify_regime(spx_change, vix, usdkrw_change, wti_change)
 
         # Fear & Greed composite score (0=극도공포, 100=극도탐욕)
@@ -483,6 +532,11 @@ class MacroClient:
             hsi_change_pct=round(hsi_change, 2),
             us2y=round(us2y_val, 2),
             us2y_change_pct=round(us2y_chg, 2),
+            # v13: FRED 신용 스트레스
+            hy_spread=fred_data.get("hy_spread", 0.0),
+            hy_spread_prev=fred_data.get("hy_spread_prev", 0.0),
+            nfci=fred_data.get("nfci", 0.0),
+            nfci_prev=fred_data.get("nfci_prev", 0.0),
         )
 
     @staticmethod

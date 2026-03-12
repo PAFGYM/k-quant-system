@@ -624,6 +624,10 @@ class RiskContext:
     # 레짐 (이미 계산된 경우)
     regime_mode: str = ""  # bubble_attack/attack/balanced/defense
 
+    # v13: FRED 신용 스트레스
+    hy_spread: float = 0.0
+    nfci: float = 0.0
+
     # alert mode
     alert_mode: str = "normal"  # normal/elevated/wartime
 
@@ -643,6 +647,8 @@ class RiskContext:
             korea_risk_score=_safe_get(d, "korea_risk_score", 0.0),
             regime_mode=str(_safe_get(d, "regime_mode", "")),
             alert_mode=str(_safe_get(d, "alert_mode", "normal")),
+            hy_spread=_safe_get(d, "hy_spread", 0.0),
+            nfci=_safe_get(d, "nfci", 0.0),
         )
 
     @classmethod
@@ -654,6 +660,8 @@ class RiskContext:
             usdkrw=getattr(snap, "usdkrw", 0.0) or 0.0,
             usdkrw_change_pct=getattr(snap, "usdkrw_change_pct", 0.0) or 0.0,
             fear_greed=getattr(snap, "fear_greed_score", 50.0) or 50.0,
+            hy_spread=getattr(snap, "hy_spread", 0.0) or 0.0,
+            nfci=getattr(snap, "nfci", 0.0) or 0.0,
         )
 
 
@@ -740,6 +748,37 @@ class RiskEngine:
             rd.source_flags.append("global_shock_high")
         if ctx.korea_open_risk_score >= 70:
             rd.source_flags.append("korea_open_risk_high")
+
+        # 3.5) FRED 신용 스트레스 (HY Spread + NFCI)
+        if ctx.hy_spread > 0 or ctx.nfci != 0:
+            try:
+                from kstock.core.risk_config import get_risk_thresholds
+                cs = get_risk_thresholds().credit_stress
+            except Exception:
+                from kstock.core.risk_config import CreditStressThresholds
+                cs = CreditStressThresholds()
+
+            hy_up = ctx.hy_spread >= cs.hy_warning   # HY 상방 확정
+            nfci_up = ctx.nfci >= cs.nfci_warning     # NFCI 상방 확정
+
+            if hy_up and nfci_up:
+                # 둘 다 상방 확정 → 매수 차단 + 현금 확보
+                rd.block_new_buy = True
+                rd.cash_floor_pct = max(rd.cash_floor_pct, 25.0)
+                rd.max_position_pct = min(rd.max_position_pct, 75.0)
+                rd.reasons.append(
+                    f"신용 스트레스(HY {ctx.hy_spread:.1f}%/NFCI {ctx.nfci:+.2f})")
+                rd.source_flags.append("credit_stress_confirmed")
+            elif hy_up:
+                rd.reasons.append(f"HY 스프레드 경고({ctx.hy_spread:.1f}%)")
+                rd.source_flags.append("hy_spread_elevated")
+            elif nfci_up:
+                rd.reasons.append(f"NFCI 긴축 진입({ctx.nfci:+.2f})")
+                rd.source_flags.append("nfci_tightening")
+            elif (ctx.hy_spread > 0 and ctx.hy_spread < cs.hy_watch
+                  and ctx.nfci < cs.nfci_watch):
+                # 둘 다 안정 → 하락장이면 매수 기회
+                rd.source_flags.append("credit_dip_opportunity")
 
         # 4) alert_mode 반영
         if ctx.alert_mode == "wartime":

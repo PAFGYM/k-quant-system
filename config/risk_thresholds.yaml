@@ -49,6 +49,15 @@ usdkrw_change:
   alert_pct: 1.0
   shock_pct: 1.5
 
+# v13: FRED 신용 스트레스 임계값
+credit_stress:
+  hy_watch: 3.5         # HY Spread 경계 시작 (%)
+  hy_warning: 4.5       # HY Spread 경고 → 복합 매수 차단
+  hy_danger: 6.0        # HY Spread 위험
+  nfci_watch: -0.3      # NFCI 긴축 방향 주의
+  nfci_warning: 0.0     # NFCI 금융 긴축 진입
+  nfci_danger: 0.5      # NFCI 심각한 긴축
+
 position_limits:
   max_single_weight: 0.30
   max_sector_weight: 0.50

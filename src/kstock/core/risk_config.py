@@ -73,6 +73,17 @@ class ShockThresholds:
 
 
 @dataclass(frozen=True)
+class CreditStressThresholds:
+    """v13: FRED 신용 스트레스 임계값."""
+    hy_watch: float = 3.5       # HY Spread 경계
+    hy_warning: float = 4.5     # HY Spread 경고 (매수 차단 복합)
+    hy_danger: float = 6.0      # HY Spread 위험
+    nfci_watch: float = -0.3    # NFCI 긴축 방향 주의
+    nfci_warning: float = 0.0   # NFCI 금융 긴축 진입
+    nfci_danger: float = 0.5    # NFCI 심각한 긴축
+
+
+@dataclass(frozen=True)
 class PositionLimits:
     max_single_weight: float = 0.30
     max_sector_weight: float = 0.50
@@ -102,6 +113,8 @@ class RiskThresholds:
     usdkrw_change: ShockThresholds = field(
         default_factory=lambda: ShockThresholds(0.5, 1.0, 1.5))
     position_limits: PositionLimits = field(default_factory=PositionLimits)
+    credit_stress: CreditStressThresholds = field(
+        default_factory=CreditStressThresholds)
     adaptive_intervals: Dict[str, Dict[str, int]] = field(
         default_factory=dict)
 
@@ -138,6 +151,10 @@ def load_risk_thresholds(path: Path | None = None) -> RiskThresholds:
     if "position_limits" in raw:
         rt.position_limits = PositionLimits(
             **{k: float(v) for k, v in raw["position_limits"].items()})
+
+    if "credit_stress" in raw:
+        rt.credit_stress = CreditStressThresholds(
+            **{k: float(v) for k, v in raw["credit_stress"].items()})
 
     rt.adaptive_intervals = raw.get("adaptive_intervals", {})
 
