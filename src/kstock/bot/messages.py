@@ -1689,7 +1689,7 @@ def format_daily_actions(
 
     if coach_lines:
         lines.append("🧭 자동 코치")
-        for raw in coach_lines[:5]:
+        for raw in coach_lines[:6]:
             line = str(raw or "").strip()
             if not line:
                 continue

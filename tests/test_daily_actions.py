@@ -19,6 +19,12 @@ def test_build_daily_candidate_actions_promotes_top_non_holding_picks():
 
     mixin = SchedulerMixin.__new__(SchedulerMixin)
     mixin._last_scan_results = [object()]
+    mixin._build_personalized_lane_bias = MagicMock(
+        return_value=(
+            {"scalp": 1.0, "swing": 1.0, "position": 1.0, "long_term": 1.0, "tenbagger": 1.0},
+            [],
+        )
+    )
     mixin._enrich_manager_candidates_with_flow_short_context = MagicMock(side_effect=lambda data, macro: data)
     mixin._build_manager_fast_context = MagicMock(return_value={})
     mixin._enrich_manager_candidates_with_fast_context = MagicMock(side_effect=lambda data, fast_context: data)
@@ -82,6 +88,12 @@ def test_build_daily_action_coach_lines_summarizes_market_and_top_actions():
 
     mixin = SchedulerMixin.__new__(SchedulerMixin)
     mixin.db = MagicMock()
+    mixin._build_personalized_lane_bias = MagicMock(
+        return_value=(
+            {"scalp": 1.0, "swing": 1.0, "position": 1.0, "long_term": 1.0, "tenbagger": 1.0},
+            ["개인화 우선 레인: 스윙 매니저, 포지션 매니저"],
+        )
+    )
     mixin._build_downside_playbook = MagicMock(
         return_value=MagicMock(
             strong_stocks=[SimpleNamespace(name="강한주")],
@@ -117,3 +129,58 @@ def test_build_daily_action_coach_lines_summarizes_market_and_top_actions():
     assert any("1순위: 씨에스윈드" in line for line in lines)
     assert any("신규 후보: 텐배거주" in line for line in lines)
     assert any("회피:" in line for line in lines)
+    assert any("개인화 우선 레인:" in line for line in lines)
+
+
+def test_build_daily_candidate_actions_applies_personal_lane_bias():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin._last_scan_results = [object()]
+    mixin._build_personalized_lane_bias = MagicMock(
+        return_value=(
+            {"scalp": 1.0, "swing": 1.20, "position": 1.0, "long_term": 1.0, "tenbagger": 0.85},
+            ["개인화 우선 레인: 스윙 매니저, 포지션 매니저"],
+        )
+    )
+    mixin._enrich_manager_candidates_with_flow_short_context = MagicMock(side_effect=lambda data, macro: data)
+    mixin._build_manager_fast_context = MagicMock(return_value={})
+    mixin._enrich_manager_candidates_with_fast_context = MagicMock(side_effect=lambda data, fast_context: data)
+
+    with patch(
+        "kstock.bot.investment_managers.filter_discovery_candidates",
+        side_effect=lambda scan_results, manager_key, exclude: {
+            "tenbagger": [
+                {
+                    "ticker": "222222",
+                    "name": "텐배거주",
+                    "fit_score": 86,
+                    "composite": 78,
+                    "confidence_score": 0.74,
+                    "fit_reasons": ["국내 스몰캡 핵심 구간"],
+                    "action_hint": "씨앗 포지션 구축",
+                },
+            ],
+            "swing": [
+                {
+                    "ticker": "333333",
+                    "name": "스윙주",
+                    "fit_score": 80,
+                    "composite": 76,
+                    "confidence_score": 0.72,
+                    "fit_reasons": ["눌림목 반등"],
+                    "action_hint": "반등 확인 후 분할 진입",
+                },
+            ],
+        }.get(manager_key, []),
+    ):
+        actions = mixin._build_daily_candidate_actions(
+            holdings=[],
+            macro=_make_macro(),
+            playbook=None,
+            alert_mode="normal",
+        )
+
+    assert len(actions) >= 2
+    assert actions[0]["ticker"] == "333333"
+    assert "주호님 스타일과 잘 맞음" in actions[0]["reason"]

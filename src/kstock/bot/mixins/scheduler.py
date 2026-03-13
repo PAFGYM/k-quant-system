@@ -2956,6 +2956,125 @@ class SchedulerMixin:
         actions.sort(key=lambda a: order.get(a.get("priority", ""), 4))
         return actions
 
+    def _load_recent_manager_scorecards(self) -> dict[str, dict]:
+        """매니저별 최신 성적표 스냅샷."""
+        db = getattr(self, "db", None)
+        if db is None:
+            return {}
+        try:
+            with db._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT m.manager_key, m.total_recs, m.evaluated_recs,
+                           m.hit_rate, m.avg_return_5d, m.weight_adj
+                    FROM manager_scorecard m
+                    JOIN (
+                        SELECT manager_key, MAX(calculated_at) AS latest_ts
+                        FROM manager_scorecard
+                        GROUP BY manager_key
+                    ) latest
+                      ON latest.manager_key = m.manager_key
+                     AND latest.latest_ts = m.calculated_at
+                    """
+                ).fetchall()
+            return {str(row["manager_key"]): dict(row) for row in rows}
+        except Exception:
+            logger.debug("load_recent_manager_scorecards failed", exc_info=True)
+            return {}
+
+    def _build_personalized_lane_bias(
+        self,
+        holdings: list[dict] | None = None,
+    ) -> tuple[dict[str, float], list[str]]:
+        """사용자 스타일/성과/보유 편중을 매니저 레인 바이어스로 변환."""
+        lane_bias = {
+            "scalp": 1.0,
+            "swing": 1.0,
+            "position": 1.0,
+            "long_term": 1.0,
+            "tenbagger": 1.0,
+        }
+        lines: list[str] = []
+
+        profile = {}
+        try:
+            from kstock.bot.learning_engine import get_user_operator_profile
+
+            profile = get_user_operator_profile(getattr(self, "db", None))
+        except Exception:
+            logger.debug("build_personalized_lane_bias profile load failed", exc_info=True)
+
+        dominant_style = str(profile.get("dominant_style", "") or "").strip()
+        style_biases = {
+            "scalper": {"scalp": 1.10, "swing": 1.03, "position": 0.94, "long_term": 0.90, "tenbagger": 0.90},
+            "swing": {"scalp": 0.97, "swing": 1.12, "position": 1.07, "long_term": 0.94, "tenbagger": 1.02},
+            "position": {"scalp": 0.92, "swing": 1.03, "position": 1.12, "long_term": 1.04, "tenbagger": 1.04},
+            "long_term": {"scalp": 0.88, "swing": 0.95, "position": 1.04, "long_term": 1.12, "tenbagger": 1.08},
+        }
+        for key, multiplier in style_biases.get(dominant_style, {}).items():
+            lane_bias[key] *= multiplier
+
+        focus_topics = list(profile.get("primary_focus") or [])
+        if "텐베거" in focus_topics:
+            lane_bias["tenbagger"] *= 1.08
+        if "매수" in focus_topics:
+            lane_bias["swing"] *= 1.03
+            lane_bias["position"] *= 1.03
+        if "시장" in focus_topics:
+            lane_bias["position"] *= 1.02
+            lane_bias["long_term"] *= 1.02
+
+        scorecards = self._load_recent_manager_scorecards()
+        for key, card in scorecards.items():
+            weight_adj = float(card.get("weight_adj", 1.0) or 1.0)
+            lane_bias[key] *= max(0.88, min(1.12, weight_adj))
+            evaluated = int(card.get("evaluated_recs", 0) or 0)
+            hit_rate = float(card.get("hit_rate", 0) or 0)
+            if evaluated >= 5 and hit_rate >= 60:
+                lane_bias[key] *= 1.05
+            elif evaluated >= 5 and hit_rate < 40:
+                lane_bias[key] *= 0.90
+
+        if holdings:
+            counts: dict[str, int] = {}
+            for holding in holdings:
+                lane = self._normalize_morning_holding_type(
+                    holding.get("holding_type", "") or holding.get("horizon", "")
+                )
+                if lane not in lane_bias:
+                    continue
+                counts[lane] = counts.get(lane, 0) + 1
+            total = sum(counts.values())
+            if total >= 3 and counts:
+                dominant_lane, dominant_count = max(counts.items(), key=lambda item: item[1])
+                if dominant_count / total >= 0.6:
+                    lane_bias[dominant_lane] *= 0.94
+                    try:
+                        from kstock.bot.investment_managers import MANAGERS
+
+                        lane_label = str(MANAGERS.get(dominant_lane, {}).get("title", dominant_lane))
+                    except Exception:
+                        lane_label = dominant_lane
+                    lines.append(f"현재 {lane_label} 편중이라 같은 레인은 선별 강화")
+
+        for key in list(lane_bias):
+            lane_bias[key] = round(max(0.75, min(1.30, lane_bias[key])), 3)
+
+        try:
+            from kstock.bot.investment_managers import MANAGERS
+
+            top_lanes = sorted(lane_bias.items(), key=lambda item: item[1], reverse=True)[:2]
+            if top_lanes:
+                labels = [
+                    str(MANAGERS.get(key, {}).get("title", key))
+                    for key, _ in top_lanes
+                ]
+                lines.insert(0, f"개인화 우선 레인: {', '.join(labels)}")
+        except Exception:
+            logger.debug("build_personalized_lane_bias label build failed", exc_info=True)
+
+        return lane_bias, lines[:2]
+
     def _build_daily_candidate_actions(
         self,
         *,
@@ -3012,13 +3131,12 @@ class SchedulerMixin:
             getattr(item, "ticker", "")
             for item in list(getattr(playbook, "short_squeeze_watch", []) or [])
         }
-        lane_bias = {
-            "scalp": 0.92 if alert_mode == "wartime" else 1.00,
-            "swing": 0.96 if alert_mode == "wartime" else 1.02,
-            "position": 1.05,
-            "long_term": 1.01,
-            "tenbagger": 1.08,
-        }
+        lane_bias, _ = self._build_personalized_lane_bias(holdings=holdings)
+        lane_bias["scalp"] *= 0.92 if alert_mode == "wartime" else 1.00
+        lane_bias["swing"] *= 0.96 if alert_mode == "wartime" else 1.02
+        lane_bias["position"] *= 1.05
+        lane_bias["long_term"] *= 1.01
+        lane_bias["tenbagger"] *= 1.08
         memory_focus_lines = list(getattr(operator_memory, "manager_focus", []) or [])
         if any("리버모어" in line for line in memory_focus_lines):
             lane_bias["scalp"] *= 1.04
@@ -3041,7 +3159,12 @@ class SchedulerMixin:
             confidence = float(top_pick.get("confidence_score", 0) or 0)
             ticker = str(top_pick.get("ticker", "") or "")
             rank_score = (fit_score * 1.8) + (composite * 0.4) + (confidence * 12.0)
-            rank_score *= lane_bias.get(mgr_key, 1.0)
+            personal_bias = float(lane_bias.get(mgr_key, 1.0) or 1.0)
+            rank_score *= personal_bias
+            if personal_bias >= 1.08:
+                top_pick["personal_reason"] = "주호님 스타일과 잘 맞음"
+            elif personal_bias <= 0.92:
+                top_pick["personal_reason"] = "지금은 우선순위 낮음"
             if ticker in strong_tickers:
                 rank_score += 6.0
             if ticker in squeeze_tickers:
@@ -3063,6 +3186,9 @@ class SchedulerMixin:
             name = str(pick.get("name", "") or ticker)[:8]
 
             reason_bits = list(pick.get("fit_reasons") or [])[:2]
+            personal_reason = str(pick.get("personal_reason", "") or "").strip()
+            if personal_reason:
+                reason_bits.insert(0, personal_reason)
             flow_signal = str(pick.get("flow_signal", "") or "").strip()
             if flow_signal:
                 reason_bits.append(flow_signal)
@@ -3141,13 +3267,6 @@ class SchedulerMixin:
         except Exception:
             logger.debug("daily action coach memory build failed", exc_info=True)
 
-        for line in self._build_personal_operator_lines(limit=2):
-            clean = str(line or "").strip()
-            if clean.startswith("- "):
-                clean = clean[2:]
-            if clean:
-                lines.append(clean)
-
         top_urgent = next((a for a in actions if a.get("priority") in {"urgent", "caution"}), None)
         if top_urgent:
             lines.append(f"1순위: {top_urgent.get('name', '')} → {top_urgent.get('action', '')}")
@@ -3166,6 +3285,23 @@ class SchedulerMixin:
                 buy_line += f" ({manager_label})"
             lines.append(buy_line)
 
+        for line in self._build_personal_operator_lines(limit=1):
+            clean = str(line or "").strip()
+            if clean.startswith("- "):
+                clean = clean[2:]
+            if clean:
+                lines.append(clean)
+
+        try:
+            holdings = self.db.get_active_holdings() or []
+        except Exception:
+            holdings = []
+        _, bias_lines = self._build_personalized_lane_bias(holdings=holdings)
+        for line in bias_lines[:1]:
+            clean = str(line or "").strip()
+            if clean:
+                lines.append(clean)
+
         if playbook and getattr(playbook, "strong_stocks", None):
             names = ", ".join(
                 getattr(item, "name", "")
@@ -3175,7 +3311,7 @@ class SchedulerMixin:
             if names:
                 lines.append(f"강세 축: {names}")
 
-        return list(dict.fromkeys(line for line in lines if line))[:5]
+        return list(dict.fromkeys(line for line in lines if line))[:6]
 
     async def _send_daily_actions(self, context, macro) -> None:
         """오늘의 할 일 메시지 전송."""
