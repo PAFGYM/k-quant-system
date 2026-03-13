@@ -2968,6 +2968,12 @@ class SchedulerMixin:
             actions=actions,
             allocation_context=allocation_context,
         )
+        actions = self._attach_holding_priority_summary(
+            holdings=holdings,
+            actions=actions,
+            allocation_context=allocation_context,
+            scorecards=scorecards,
+        )
 
         # 정렬
         order = {"urgent": 0, "caution": 1, "opportunity": 2, "check": 3}
@@ -3782,6 +3788,98 @@ class SchedulerMixin:
 
         return actions
 
+    def _attach_holding_priority_summary(
+        self,
+        *,
+        holdings: list[dict],
+        actions: list[dict],
+        allocation_context: dict,
+        scorecards: dict[str, dict],
+    ) -> list[dict]:
+        """보유 종목을 유지/추가/축소/교체 순으로 요약한 랭킹 카드를 붙인다."""
+        if not holdings:
+            return actions
+
+        total_value = float(allocation_context.get("total_value", 0) or 0)
+        current_cash_pct = float(allocation_context.get("current_cash_pct", 0) or 0)
+        cash_floor_pct = float(allocation_context.get("cash_floor_pct", 0) or 0)
+        action_map: dict[str, list[dict]] = {}
+        for action in actions:
+            ticker = str(action.get("ticker", "") or "").strip()
+            if ticker:
+                action_map.setdefault(ticker, []).append(action)
+
+        ranked: list[tuple[int, str]] = []
+        for holding in holdings:
+            ticker = str(holding.get("ticker", "") or "").strip()
+            if not ticker:
+                continue
+            name = str(holding.get("name", "") or ticker).strip()[:8]
+            holding_type = self._normalize_morning_holding_type(
+                holding.get("holding_type", "") or holding.get("horizon", "")
+            )
+            buy_price = float(holding.get("buy_price", 0) or holding.get("avg_price", 0) or 0)
+            current_price = float(holding.get("current_price", 0) or 0)
+            pnl = float(holding.get("pnl_pct", 0) or holding.get("profit_pct", 0) or 0)
+            if buy_price > 0 and current_price > 0 and abs(pnl) < 0.01:
+                pnl = (current_price - buy_price) / buy_price * 100.0
+            eval_amount = float(
+                holding.get("eval_amount", 0)
+                or current_price * float(holding.get("quantity", 0) or 0)
+                or 0
+            )
+            weight_pct = round((eval_amount / total_value) * 100.0, 1) if total_value > 0 else 0.0
+            manager_weight = float(scorecards.get(holding_type, {}).get("weight_adj", 1.0) or 1.0)
+            holding_actions = action_map.get(ticker, [])
+            action_names = {str(action.get("action", "") or "").strip() for action in holding_actions}
+
+            label = "유지"
+            severity = 10
+            if "손절 필요" in action_names or "교체매도 후보" in action_names:
+                label = "교체"
+                severity = 100
+            elif "분할익절 우선" in action_names or "1차 익절 검토" in action_names:
+                label = "축소"
+                severity = 80
+            elif "추매 후보" in action_names:
+                label = "추가"
+                severity = 70
+            elif pnl <= -2.5 and manager_weight <= 0.92:
+                label = "축소"
+                severity = 68
+            elif current_cash_pct >= cash_floor_pct + 8.0 and pnl >= -1.5 and manager_weight >= 1.05 and weight_pct <= 6.0:
+                label = "추가"
+                severity = 58
+            elif pnl >= 8.0:
+                label = "축소"
+                severity = 64
+
+            priority = severity
+            if label == "추가":
+                priority += int(max(manager_weight - 1.0, 0.0) * 20)
+            if label in {"교체", "축소"}:
+                priority += int(max(1.0 - manager_weight, 0.0) * 15)
+
+            ranked.append((priority, f"{label} {name}"))
+
+        if not ranked:
+            return actions
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        summary = " > ".join(label for _, label in ranked[:3])
+        next_step = "교체/축소부터 처리 후 추가 후보는 남은 현금과 분할 매수 규칙으로 집행"
+        actions.append({
+            "priority": "check",
+            "ticker": "",
+            "name": "보유 랭킹",
+            "action": "유지/추가/축소 순서",
+            "reason": summary,
+            "holding_rank_summary": summary,
+            "callback_data": "fav:tab:holding:0",
+            "next_step": next_step,
+        })
+        return actions
+
     def _build_daily_candidate_actions(
         self,
         *,
@@ -4070,6 +4168,16 @@ class SchedulerMixin:
                 rotation_pairs.append(f"{source}->{name}")
         if rotation_pairs:
             lines.append(f"교체 우선: {rotation_pairs[0]}")
+        holding_rank_summary = next(
+            (
+                str(action.get("holding_rank_summary", "") or "").strip()
+                for action in actions
+                if str(action.get("holding_rank_summary", "") or "").strip()
+            ),
+            "",
+        )
+        if holding_rank_summary:
+            lines.append(f"보유 랭킹: {holding_rank_summary}")
         _, bias_lines = self._build_personalized_lane_bias(holdings=holdings)
         for line in bias_lines[:1]:
             clean = str(line or "").strip()

@@ -241,9 +241,11 @@ def test_generate_daily_actions_links_rotation_candidate_when_cash_tight():
 
     weak_action = next(a for a in actions if a["ticker"] == "083650" and a["action"] == "교체매도 후보")
     candidate = next(a for a in actions if a["ticker"] == "017670")
+    ranking = next(a for a in actions if a["name"] == "보유 랭킹")
     assert "교체 1순위 SK텔레콤" in weak_action["next_step"]
     assert "교체매수 우선" in candidate["next_step"]
     assert "교체재원 비에이치아이" in candidate["allocation_summary"]
+    assert "교체 비에이치아이" in ranking["reason"]
 
 
 def test_build_daily_candidate_actions_applies_personal_lane_bias():
@@ -519,8 +521,15 @@ def test_build_daily_action_coach_lines_highlights_rotation_pair():
             "weight_pct": 3.0,
             "budget_krw": 3_000_000,
         },
+        {
+            "priority": "check",
+            "name": "보유 랭킹",
+            "action": "유지/추가/축소 순서",
+            "holding_rank_summary": "교체 비에이치아이 > 추가 SK텔레콤 > 유지 우진",
+        },
     ]
 
     lines = mixin._build_daily_action_coach_lines(actions, _make_macro())
 
     assert any("교체 우선: 비에이치아이->SK텔레콤" in line for line in lines)
+    assert any("보유 랭킹: 교체 비에이치아이 > 추가 SK텔레콤 > 유지 우진" in line for line in lines)
