@@ -247,15 +247,16 @@ async def run_and_record_multi_agent(
         # 신호 성과 추적 기록
         try:
             from kstock.core.tz import KST
-            db.save_signal_performance(
-                signal_source="multi_agent",
-                signal_type="analysis",
-                ticker=ticker,
-                name=name,
-                signal_date=datetime.now(KST).strftime("%Y-%m-%d"),
-                signal_score=report.combined_score,
-                signal_price=price,
-            )
+            if report.verdict == "매수" and report.combined_score >= 160:
+                db.save_signal_performance(
+                    signal_source="multi_agent",
+                    signal_type="buy",
+                    ticker=ticker,
+                    name=name,
+                    signal_date=datetime.now(KST).strftime("%Y-%m-%d"),
+                    signal_score=report.combined_score,
+                    signal_price=price,
+                )
         except Exception:
             pass
 

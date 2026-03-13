@@ -84,3 +84,51 @@ def test_compute_system_score_uses_job_runs_when_event_log_is_empty(tmp_path):
 
     assert result["details"]["uptime"]["job_success_rate"] == 75.0
     assert result["uptime"] == 7.0
+
+
+class SmallSampleScoreDB(DummyScoreDB):
+    def get_signal_source_stats(self):
+        return [{"total": 7, "evaluated": 4, "hits": 0}]
+
+
+def test_compute_system_score_blends_small_signal_sample(tmp_path):
+    db = SmallSampleScoreDB(tmp_path / "score.db")
+
+    result = compute_system_score(db)
+
+    assert result["signal"] == 7.5
+    assert result["details"]["signal"]["sample_adjusted"] is True
+    assert result["details"]["signal"]["msg"] == "표본 부족 보정 적용"
+
+
+class ManagerLearningDB(DummyScoreDB):
+    def __init__(self, db_path):
+        super().__init__(db_path)
+        conn = sqlite3.connect(self._db_path)
+        conn.execute(
+            """
+            CREATE TABLE manager_scorecard (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                manager_key TEXT,
+                calculated_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO manager_scorecard (manager_key, calculated_at) VALUES (?, ?)",
+            ("swing", datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        conn.close()
+
+    def get_signal_source_stats(self):
+        return []
+
+
+def test_compute_system_score_accepts_manager_scorecard_as_learning_signal(tmp_path):
+    db = ManagerLearningDB(tmp_path / "score.db")
+
+    result = compute_system_score(db)
+
+    assert result["details"]["learning"]["weight_adjustment"] is True
+    assert result["details"]["learning"]["weight_adjustment_source"] == "manager_scorecard"

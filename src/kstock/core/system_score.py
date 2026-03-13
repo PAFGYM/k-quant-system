@@ -21,6 +21,19 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _hit_rate_to_signal_score(hit_rate: float) -> float:
+    """적중률을 25점 만점 신호 점수로 변환."""
+    if hit_rate >= 80:
+        return 25.0
+    if hit_rate >= 60:
+        return 18.0 + (hit_rate - 60) / 20 * 7
+    if hit_rate >= 40:
+        return 10.0 + (hit_rate - 40) / 20 * 8
+    if hit_rate >= 20:
+        return 5.0 + (hit_rate - 20) / 20 * 5
+    return hit_rate / 20 * 5
+
+
 def _count_sql(db: Any, sql: str, params: tuple = ()) -> int:
     """간단한 COUNT 쿼리를 안전하게 실행."""
     try:
@@ -120,24 +133,24 @@ def _score_signals(db: Any) -> tuple[float, dict]:
                 "msg": "평가 대기 중인 신호만 존재",
             }
         hit_rate = (total_hits / total_evaluated * 100) if total_evaluated > 0 else 0
+        raw_score = _hit_rate_to_signal_score(hit_rate)
 
-        # 적중률 → 점수 변환 (80%=25점, 60%=18점, 40%=10점, 20%=5점)
-        if hit_rate >= 80:
-            score = 25.0
-        elif hit_rate >= 60:
-            score = 18.0 + (hit_rate - 60) / 20 * 7
-        elif hit_rate >= 40:
-            score = 10.0 + (hit_rate - 40) / 20 * 8
-        elif hit_rate >= 20:
-            score = 5.0 + (hit_rate - 20) / 20 * 5
-        else:
-            score = hit_rate / 20 * 5
-
-        return score, {
+        details = {
             "hit_rate": round(hit_rate, 1),
             "total_signals": total_signals,
             "hits": total_hits,
         }
+        if total_evaluated < 10:
+            baseline = 12.5
+            sample_confidence = min(1.0, total_evaluated / 10.0)
+            blended_score = raw_score * sample_confidence + baseline * (1.0 - sample_confidence)
+            details["sample_adjusted"] = True
+            details["evaluated"] = total_evaluated
+            details["msg"] = "표본 부족 보정 적용"
+            return round(blended_score, 1), details
+
+        details["evaluated"] = total_evaluated
+        return raw_score, details
     except Exception as e:
         logger.debug("신호 점수 계산 실패: %s", e)
         return 12.5, {"msg": "계산 오류", "error": str(e)}
@@ -210,11 +223,22 @@ def _score_learning(db: Any) -> tuple[float, dict]:
 
         # 1) 신호 가중치 조정 이력 존재? (+5)
         stats = db.get_signal_source_stats()
+        manager_scorecard_rows = _count_sql(
+            db,
+            "SELECT COUNT(*) FROM manager_scorecard "
+            "WHERE calculated_at >= datetime('now','-30 day')",
+        )
         if stats:
             score += 5.0
             details["weight_adjustment"] = True
+            details["weight_adjustment_source"] = "signal_source_stats"
+        elif manager_scorecard_rows > 0:
+            score += 5.0
+            details["weight_adjustment"] = True
+            details["weight_adjustment_source"] = "manager_scorecard"
         else:
             details["weight_adjustment"] = False
+            details["weight_adjustment_source"] = "none"
 
         # 2) 매매 복기 생성? (+5)
         debriefs = db.get_trade_debriefs(limit=10)

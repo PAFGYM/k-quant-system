@@ -246,6 +246,22 @@ class TestStrategyJ:
         assert result is not None
         assert result.strategy == "J"
 
+    def test_mean_reversion_breakout_rejects_weak_volume_or_below_ma20(self):
+        tech = _make_tech(
+            rsi=52,
+            macd_cross=1,
+            ema_50=102000,
+            ema_200=98000,
+            weekly_trend="up",
+            mtf_aligned=True,
+            volume_ratio=1.6,
+            bb_squeeze=True,
+            return_3m_pct=8.0,
+            ma20=103500,
+        )
+        result = evaluate_strategy_j("005930", "삼성전자", tech, _make_macro(regime="neutral"))
+        assert result is None
+
     def test_mean_reversion_breakout_rejects_weak_trend_setup(self):
         tech = _make_tech(
             rsi=48,
