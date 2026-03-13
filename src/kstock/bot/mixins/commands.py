@@ -3680,8 +3680,64 @@ class CommandsMixin:
             self._persist_chat_id(update)
             stats = self.db.get_strategy_stats(limit=20)
             if not stats:
-                await update.message.reply_text(
-                    "\U0001f4ca 추천 성적 데이터가 아직 없습니다.",
+                perf = {}
+                pred = {}
+                ml_perf = []
+                recent_alerts = []
+                try:
+                    perf = self.db.get_strategy_performance() or {}
+                except Exception:
+                    logger.debug("cmd_stats strategy_performance fallback failed", exc_info=True)
+                try:
+                    pred = self.db.get_prediction_accuracy(days=7) or {}
+                except Exception:
+                    logger.debug("cmd_stats prediction_accuracy fallback failed", exc_info=True)
+                try:
+                    ml_perf = self.db.get_ml_performance(limit=3) or []
+                except Exception:
+                    logger.debug("cmd_stats ml_performance fallback failed", exc_info=True)
+                try:
+                    recent_alerts = self.db.get_recent_alerts(20) or []
+                except Exception:
+                    logger.debug("cmd_stats recent_alerts fallback failed", exc_info=True)
+
+                lines = ["\U0001f4ca 운영 통계 브리프", ""]
+                if perf and any(k != "summary" for k in perf):
+                    lines.append(format_strategy_performance(perf))
+                else:
+                    lines.append("전략별 승률 집계는 아직 누적 중입니다.")
+
+                total_pred = int(pred.get("total", 0) or 0)
+                accuracy = float(pred.get("accuracy_pct", 0) or 0)
+                lines.extend(
+                    [
+                        "",
+                        f"\U0001f514 최근 알림: {len(recent_alerts)}건",
+                        f"\U0001f3af 최근 7일 평가: {total_pred}건"
+                        + (f" | 정확도 {accuracy:.1f}%" if total_pred > 0 else ""),
+                    ]
+                )
+
+                if ml_perf:
+                    latest = ml_perf[0]
+                    model = latest.get("model_version", "-")
+                    val_score = latest.get("val_score")
+                    feat = latest.get("features_used", 0)
+                    if val_score is not None:
+                        lines.append(
+                            f"\U0001f916 최신 ML: {model} | 검증 {float(val_score):.2f} | 특성 {feat}개"
+                        )
+
+                lines.extend(
+                    [
+                        "",
+                        "전략 통계가 비어도 운영 상태는 계속 추적 중입니다.",
+                    ]
+                )
+                await send_long_bot_message(
+                    context.bot,
+                    update.effective_chat.id,
+                    "\n".join(lines),
                     reply_markup=get_reply_markup(context),
                 )
                 return

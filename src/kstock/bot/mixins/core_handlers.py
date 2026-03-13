@@ -574,6 +574,13 @@ class CoreHandlersMixin:
             first=60,
             name="health_check",
         )
+        # v13.1: 장중 조용한 구간 상태 브리프 (15분마다, 실제 발송은 잡 내부에서 게이트)
+        jq.run_repeating(
+            self.job_quiet_status_brief,
+            interval=900,
+            first=180,
+            name="quiet_status_brief",
+        )
         # v4.3: 주간 매매일지 AI 복기 (일요일 10:00)
         jq.run_daily(
             self.job_weekly_journal_review,
@@ -707,6 +714,7 @@ class CoreHandlersMixin:
             "lstm_retrain(Sun 03:00), "
             "risk_monitor(%ds), news_monitor(%ds), "
             "global_news(%ds), us_futures(%ds), "
+            "quiet_status_brief(15m gated), "
             "surge_threshold(%.1f%%), "
             "alert_mode(%s), "
             "signal_eval(weekday 16:20), learning_report(Sat 11:00), "
@@ -1200,6 +1208,8 @@ class CoreHandlersMixin:
             "📊 분석": self._menu_analysis_hub,
             "📈 시황": self._menu_market_status,
             "💰 잔고": self._menu_balance,
+            "📊 통계": self.cmd_stats,
+            "📈 성과": self.cmd_performance,
             "⭐ 즐겨찾기": self._menu_favorites,
             "🖥 원격접속": self._menu_remote_access,
             "🤖 에이전트": self._menu_agent_chat,
@@ -1239,6 +1249,13 @@ class CoreHandlersMixin:
                 "분석": "📊 분석",
                 "시황": "📈 시황",
                 "잔고": "💰 잔고",
+                "통계": "📊 통계",
+                "성적표": "📊 통계",
+                "추천성적표": "📊 통계",
+                "stats": "📊 통계",
+                "성과": "📈 성과",
+                "수익률": "📈 성과",
+                "performance": "📈 성과",
                 "즐겨찾기": "⭐ 즐겨찾기",
                 "클로드": "💻 클로드",
                 "에이전트": "🤖 에이전트",

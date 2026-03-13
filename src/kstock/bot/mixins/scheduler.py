@@ -172,6 +172,153 @@ class SchedulerMixin:
             logger.debug("count_recent_alerts failed", exc_info=True)
             return 0
 
+    def _get_latest_alert_timestamp(self, limit: int = 120) -> datetime | None:
+        """최근 알림 시각 반환. 조용한 구간 감시에 사용."""
+        try:
+            recent = self.db.get_recent_alerts(limit=limit) or []
+            latest_dt: datetime | None = None
+            for alert in recent:
+                created_at = str(alert.get("created_at", "") or "").strip()
+                if not created_at:
+                    continue
+                try:
+                    created_dt = datetime.fromisoformat(created_at.replace("Z", ""))
+                except Exception:
+                    continue
+                if latest_dt is None or created_dt > latest_dt:
+                    latest_dt = created_dt
+            return latest_dt
+        except Exception:
+            logger.debug("_get_latest_alert_timestamp failed", exc_info=True)
+            return None
+
+    def _should_send_quiet_brief(
+        self,
+        now_kst: datetime,
+        *,
+        silence_minutes: int = 45,
+    ) -> bool:
+        """최근 알림이 없을 때만 상태 브리프를 보낸다."""
+        try:
+            last_brief = self.db.get_meta("last_quiet_status_brief_at")
+            if last_brief:
+                try:
+                    last_brief_dt = datetime.fromisoformat(last_brief.replace("Z", ""))
+                    if (now_kst - last_brief_dt).total_seconds() < silence_minutes * 60:
+                        return False
+                except Exception:
+                    logger.debug("_should_send_quiet_brief last_brief parse failed", exc_info=True)
+
+            latest_alert_dt = self._get_latest_alert_timestamp(limit=160)
+            if latest_alert_dt and (datetime.utcnow() - latest_alert_dt).total_seconds() < silence_minutes * 60:
+                return False
+
+            return True
+        except Exception:
+            logger.debug("_should_send_quiet_brief failed", exc_info=True)
+            return False
+
+    async def job_quiet_status_brief(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """알림이 조용한 구간에 짧은 상태 브리프 발송."""
+        if not self.chat_id:
+            return
+
+        now = datetime.now(KST)
+        if not is_kr_market_open(now.date()):
+            return
+
+        brief_start = now.replace(hour=8, minute=50, second=0, microsecond=0)
+        brief_end = now.replace(hour=15, minute=40, second=0, microsecond=0)
+        if not (brief_start <= now <= brief_end):
+            return
+
+        if not self._should_send_quiet_brief(now):
+            return
+
+        try:
+            macro = await asyncio.wait_for(self.macro_client.get_snapshot(), timeout=20)
+            signal_emoji, signal_label = self._market_signal(macro)
+
+            results = list(getattr(self, "_last_scan_results", []) or [])
+            if not results:
+                results = await self._scan_all_stocks(
+                    max_tickers=12,
+                    cache_ttl=_INTRADAY_SCAN_CACHE_TTL,
+                    busy_ok=True,
+                )
+
+            top_pick = None
+            for candidate in results:
+                if getattr(candidate.score, "signal", "") in ("STRONG_BUY", "BUY", "WATCH", "MILD_BUY"):
+                    top_pick = candidate
+                    break
+            if top_pick is None and results:
+                top_pick = results[0]
+
+            holdings = self.db.get_active_holdings() or []
+            recent_alerts = self._count_recent_alerts(hours=1)
+
+            lines = [
+                "📡 조용해서 보내드리는 상태 브리프",
+                "",
+                f"{signal_emoji} 시장 판단: {signal_label}",
+                f"VIX {float(getattr(macro, 'vix', 0) or 0):.1f} | 환율 {float(getattr(macro, 'usdkrw', 0) or 0):,.0f}원",
+                f"🔔 최근 60분 알림: {recent_alerts}건",
+                f"💼 보유 감시 중: {len(holdings)}종목",
+            ]
+
+            if top_pick is not None:
+                change_pct = float(getattr(getattr(top_pick, "info", None), "change_pct", 0) or 0)
+                score = float(getattr(getattr(top_pick, "score", None), "composite", 0) or 0)
+                signal = getattr(getattr(top_pick, "score", None), "signal", "HOLD")
+                lines.extend(
+                    [
+                        "",
+                        f"🎯 지금 보는 1순위: {top_pick.name} ({top_pick.ticker})",
+                        f"등락 {change_pct:+.1f}% | 점수 {score:.0f} | 신호 {signal}",
+                    ]
+                )
+
+            lines.extend(
+                [
+                    "",
+                    "메시지가 조용해도 감시는 계속 진행 중입니다.",
+                ]
+            )
+
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📋 오늘 행동", callback_data="menu:daily_actions"),
+                    InlineKeyboardButton("💰 잔고", callback_data="bal:0"),
+                ],
+                [
+                    InlineKeyboardButton("📈 시황", callback_data="quick_q:market"),
+                    InlineKeyboardButton("📊 통계", callback_data="quick_q:portfolio"),
+                ],
+            ])
+            await context.bot.send_message(
+                chat_id=self.chat_id,
+                text="\n".join(lines),
+                reply_markup=keyboard,
+            )
+            self.db.set_meta("last_quiet_status_brief_at", now.isoformat())
+            self.db.upsert_job_run(
+                "quiet_status_brief",
+                _today(),
+                status="success",
+                message=f"top={getattr(top_pick, 'ticker', '')}",
+            )
+        except Exception as e:
+            logger.error("Quiet status brief failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "quiet_status_brief",
+                _today(),
+                status="error",
+                message=str(e),
+            )
+
     async def _allow_alert_emit(
         self,
         alert_type: str,
@@ -8536,14 +8683,28 @@ class SchedulerMixin:
             )
 
             # 1. RSS 뉴스 수집
-            items = await fetch_global_news(max_per_feed=5)
+            items = await asyncio.wait_for(
+                fetch_global_news(max_per_feed=5),
+                timeout=75,
+            )
             if items:
                 # 1-1. 영문 제목 → 한글 번역
-                items = await translate_titles_to_korean(items)
+                try:
+                    items = await asyncio.wait_for(
+                        translate_titles_to_korean(items),
+                        timeout=30,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Global news title translation timed out; keep original titles")
 
                 # 1-2. YouTube 영상 자막 기반 내용 요약 (v8.2)
                 try:
-                    items = await enrich_youtube_summaries(items, max_summaries=5, db=self.db)
+                    items = await asyncio.wait_for(
+                        enrich_youtube_summaries(items, max_summaries=5, db=self.db),
+                        timeout=45,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("YouTube summary enrichment timed out; skip enrichment")
                 except Exception as e:
                     logger.debug("YouTube summary enrichment failed: %s", e)
 
@@ -8592,8 +8753,14 @@ class SchedulerMixin:
                     if new_groups:
                         # AI 분석 포함 리치 알림 생성
                         try:
-                            alert_msg = await analyze_urgent_news(
-                                new_groups, db=self.db,
+                            alert_msg = await asyncio.wait_for(
+                                analyze_urgent_news(new_groups, db=self.db),
+                                timeout=45,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning("AI urgent news analysis timed out, fallback")
+                            alert_msg = format_urgent_alert(
+                                [g[0] for g in new_groups],
                             )
                         except Exception as e:
                             logger.warning("AI news analysis failed, fallback: %s", e)
@@ -8699,6 +8866,8 @@ class SchedulerMixin:
                 if cleaned > 0:
                     logger.info("Old news cleaned: %d rows", cleaned)
 
+        except asyncio.TimeoutError:
+            logger.warning("Global news collect timed out and was skipped safely")
         except Exception as e:
             logger.error("Global news collect failed: %s", e, exc_info=True)
 
