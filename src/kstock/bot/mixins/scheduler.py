@@ -1291,16 +1291,21 @@ class SchedulerMixin:
             ))
         return candidates_by_manager
 
-    def _build_manager_herd_lines(self, scan_results: list, limit: int = 3) -> list[str]:
+    def _build_manager_herd_signals(
+        self,
+        scan_results: list,
+        limit: int = 3,
+    ) -> tuple[dict[str, dict], list[str]]:
         """리딩방/세력형 군집 신호를 상위 종목에 대해 빠르게 추정."""
         try:
             from kstock.signal.herd_detector import scan_herd_all
         except Exception:
-            return []
+            return {}, []
 
+        ohlcv_cache = getattr(self, "_ohlcv_cache", {}) or {}
         herd_data = []
         for result in scan_results[:12]:
-            ohlcv = self._ohlcv_cache.get(getattr(result, "ticker", ""))
+            ohlcv = ohlcv_cache.get(getattr(result, "ticker", ""))
             if ohlcv is None or ohlcv.empty or len(ohlcv) < 20:
                 continue
             try:
@@ -1338,13 +1343,137 @@ class SchedulerMixin:
             })
 
         signals = scan_herd_all(herd_data)
+        signal_map: dict[str, dict] = {}
         lines = []
+        for signal in signals:
+            signal_map[signal.ticker] = {
+                "ticker": signal.ticker,
+                "name": signal.name,
+                "pattern": signal.pattern,
+                "danger_level": signal.danger_level,
+                "score_adj": signal.score_adj,
+                "volume_ratio": signal.volume_ratio,
+                "inst_flow": signal.inst_flow,
+                "foreign_flow": signal.foreign_flow,
+                "reasons": list(signal.reasons or []),
+                "message": signal.message,
+            }
         for signal in signals[:limit]:
+            reason = signal.reasons[0] if signal.reasons else f"거래량 {signal.volume_ratio:.1f}배"
             lines.append(
                 f"{signal.name} ({signal.ticker}) | {signal.pattern} | "
-                f"거래량 {signal.volume_ratio:.1f}배"
+                f"{reason}"
             )
+        return signal_map, lines
+
+    def _build_manager_herd_lines(self, scan_results: list, limit: int = 3) -> list[str]:
+        """리딩방/세력형 군집 신호 요약 라인."""
+        _, lines = self._build_manager_herd_signals(scan_results, limit=limit)
         return lines
+
+    def _enrich_manager_candidates_with_herd_context(
+        self,
+        candidates_by_manager: dict[str, list[dict]],
+        herd_signal_map: dict[str, dict],
+    ) -> dict[str, list[dict]]:
+        """세력/리딩방 패턴을 추천 점수와 행동 문구에 직접 반영."""
+        if not herd_signal_map:
+            return candidates_by_manager
+
+        positive_patterns = {"세력 매집 초기", "진성 세력"}
+        negative_patterns = {"개미떼 유입", "리딩방 급락"}
+
+        def _merge_action(base_action: str, extra_action: str) -> str:
+            base = str(base_action or "").strip()
+            extra = str(extra_action or "").strip()
+            if not extra:
+                return base
+            if not base:
+                return extra
+            if extra in base:
+                return base
+            return f"{base} / {extra}"
+
+        for manager_key, candidates in candidates_by_manager.items():
+            for candidate in candidates:
+                ticker = str(candidate.get("ticker", "") or "")
+                signal = herd_signal_map.get(ticker)
+                if not signal:
+                    continue
+
+                pattern = str(signal.get("pattern", "") or "")
+                danger_level = str(signal.get("danger_level", "") or "")
+                score_adj = float(signal.get("score_adj", 0) or 0)
+                reasons = list(candidate.get("fit_reasons") or [])
+                base_fit = float(candidate.get("fit_score", 0) or 0)
+                adj = 0.0
+
+                candidate["herd_pattern"] = pattern
+                candidate["herd_danger_level"] = danger_level
+                candidate["herd_score_adj"] = score_adj
+                candidate["herd_volume_ratio"] = float(signal.get("volume_ratio", 0) or 0)
+                candidate["herd_reasons"] = list(signal.get("reasons") or [])
+
+                if pattern == "진성 세력":
+                    adj += 8.0 if manager_key in {"scalp", "position", "tenbagger"} else 6.0
+                    reasons.append("진성 세력")
+                    if not candidate.get("crowd_signal"):
+                        candidate["crowd_signal"] = "진성 수급 동행"
+                    candidate["action_hint"] = _merge_action(
+                        candidate.get("action_hint", ""),
+                        "진성 수급 유지 구간만 눌림 분할",
+                    )
+                elif pattern == "세력 매집 초기":
+                    adj += 9.0 if manager_key in {"swing", "position", "tenbagger"} else 5.0
+                    reasons.append("세력 매집 초기")
+                    candidate["action_hint"] = _merge_action(
+                        candidate.get("action_hint", ""),
+                        "급등 추격보다 눌림 씨앗 분할",
+                    )
+                elif pattern == "개미떼 유입":
+                    adj -= 10.0 if manager_key in {"scalp", "swing", "tenbagger"} else 6.0
+                    reasons.append("개미떼 유입")
+                    candidate["crowd_signal"] = "개미 과열 경계"
+                    candidate["action_hint"] = _merge_action(
+                        candidate.get("action_hint", ""),
+                        "거래량 과열 진정 전 추격 금지",
+                    )
+                elif pattern == "리딩방 급락":
+                    adj -= 14.0 if manager_key in {"scalp", "swing", "tenbagger"} else 10.0
+                    reasons.append("리딩방 급락")
+                    candidate["crowd_signal"] = "리딩방 급락 경계"
+                    candidate["action_hint"] = _merge_action(
+                        candidate.get("action_hint", ""),
+                        "반등 유혹보다 종가 회복 확인",
+                    )
+
+                herd_reasons = list(signal.get("reasons") or [])
+                if herd_reasons:
+                    reasons.append(herd_reasons[0])
+
+                if pattern in positive_patterns and score_adj > 0:
+                    adj += min(4.0, score_adj / 8.0)
+                elif pattern in negative_patterns and score_adj < 0:
+                    adj -= min(4.0, abs(score_adj) / 10.0)
+
+                seen: set[str] = set()
+                deduped: list[str] = []
+                for reason in reasons:
+                    text = str(reason or "").strip()
+                    if not text or text in seen:
+                        continue
+                    seen.add(text)
+                    deduped.append(text)
+                candidate["fit_reasons"] = deduped[:5]
+                candidate["fit_score"] = round(max(0.0, min(99.0, base_fit + adj)), 1)
+
+            candidates.sort(key=lambda item: (
+                -float(item.get("fit_score", 0) or 0),
+                -float(item.get("composite", 0) or 0),
+                -float(item.get("confidence_score", 0) or 0),
+            ))
+
+        return candidates_by_manager
 
     def _get_ticker_tactical_context(self, ticker: str, name: str = "", macro=None) -> dict:
         """외인/기관·공매도·숏커버 문맥을 종목 단위로 요약."""
@@ -2121,12 +2250,19 @@ class SchedulerMixin:
             by_manager = self._enrich_manager_candidates_with_fast_context(
                 by_manager, fast_context,
             )
+            herd_signal_map, herd_lines = self._build_manager_herd_signals(
+                list(getattr(self, "_last_scan_results", None) or []),
+            )
+            by_manager = self._enrich_manager_candidates_with_herd_context(
+                by_manager, herd_signal_map,
+            )
 
             digest = format_manager_action_digest(
                 by_manager,
                 title="🎯 오늘의 매니저 제안",
                 market_context=market_text,
                 fast_event_lines=fast_context.get("event_lines"),
+                herd_lines=herd_lines,
                 crowd_lines=fast_context.get("crowd_lines"),
             )
             if digest:
@@ -2389,6 +2525,10 @@ class SchedulerMixin:
         fast_context = self._build_manager_fast_context(by_manager)
         by_manager = self._enrich_manager_candidates_with_fast_context(
             by_manager, fast_context,
+        )
+        herd_signal_map, _ = self._build_manager_herd_signals(results)
+        by_manager = self._enrich_manager_candidates_with_herd_context(
+            by_manager, herd_signal_map,
         )
 
         strong_tickers = {
@@ -7719,7 +7859,10 @@ class SchedulerMixin:
             candidates_by_manager = self._enrich_manager_candidates_with_fast_context(
                 candidates_by_manager, fast_context,
             )
-            herd_lines = self._build_manager_herd_lines(results)
+            herd_signal_map, herd_lines = self._build_manager_herd_signals(results)
+            candidates_by_manager = self._enrich_manager_candidates_with_herd_context(
+                candidates_by_manager, herd_signal_map,
+            )
             digest = format_manager_action_digest(
                 candidates_by_manager,
                 title="🔍 매니저 신규 발굴 레이더",

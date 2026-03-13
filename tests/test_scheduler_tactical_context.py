@@ -84,6 +84,69 @@ def test_enrich_manager_candidates_with_flow_short_context_updates_score_and_rea
     assert "숏커버" in candidate["action_hint"]
 
 
+def test_enrich_manager_candidates_with_herd_context_updates_score_and_action():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    candidates = {
+        "tenbagger": [
+            {
+                "ticker": "333333",
+                "name": "매집주",
+                "fit_score": 66.0,
+                "fit_reasons": ["국내 스몰캡 핵심 구간"],
+                "action_hint": "정책·산업 이벤트 전 씨앗 포지션 구축",
+                "composite": 74.0,
+                "confidence_score": 0.81,
+            }
+        ],
+        "swing": [
+            {
+                "ticker": "444444",
+                "name": "과열주",
+                "fit_score": 61.0,
+                "fit_reasons": ["거래량 280% 급증"],
+                "action_hint": "반등 확인 후 2~3회 분할 진입",
+                "composite": 58.0,
+                "confidence_score": 0.67,
+            }
+        ],
+    }
+    herd_signal_map = {
+        "333333": {
+            "pattern": "세력 매집 초기",
+            "danger_level": "안전",
+            "score_adj": 25,
+            "volume_ratio": 2.4,
+            "reasons": ["기관 연속매수 4일", "거래량 2.4배"],
+        },
+        "444444": {
+            "pattern": "리딩방 급락",
+            "danger_level": "위험",
+            "score_adj": -30,
+            "volume_ratio": 3.8,
+            "reasons": ["5일 급등 후 당일 급락", "세력 물량 떠넘기기 의심"],
+        },
+    }
+
+    enriched = SchedulerMixin._enrich_manager_candidates_with_herd_context(
+        mixin, candidates, herd_signal_map,
+    )
+
+    strong = enriched["tenbagger"][0]
+    weak = enriched["swing"][0]
+
+    assert strong["fit_score"] > 66.0
+    assert "세력 매집 초기" in strong["fit_reasons"]
+    assert "눌림 씨앗 분할" in strong["action_hint"]
+    assert strong["herd_pattern"] == "세력 매집 초기"
+
+    assert weak["fit_score"] < 61.0
+    assert weak["crowd_signal"] == "리딩방 급락 경계"
+    assert "리딩방 급락" in weak["fit_reasons"]
+    assert "종가 회복 확인" in weak["action_hint"]
+
+
 def test_backfill_profile_day_change_uses_cached_ohlcv_when_intraday_change_missing():
     from kstock.bot.mixins.scheduler import SchedulerMixin
 

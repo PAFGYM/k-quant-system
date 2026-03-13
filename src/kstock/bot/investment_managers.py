@@ -1809,6 +1809,10 @@ def format_manager_action_digest(
                 fast_parts.append("이벤트 " + "/".join(pick["event_tags"][:2]))
             if pick.get("youtube_mentions", 0):
                 fast_parts.append(f"유튜브 {pick['youtube_mentions']}회")
+            if pick.get("community_hits", 0):
+                fast_parts.append(f"커뮤니티 {pick['community_hits']}건")
+            if pick.get("herd_pattern"):
+                fast_parts.append(f"군집 {pick['herd_pattern']}")
             if pick.get("flow_signal"):
                 fast_parts.append(str(pick["flow_signal"]))
             if pick.get("short_pattern_labels"):
@@ -1817,8 +1821,6 @@ def format_manager_action_digest(
                 fast_parts.append(f"숏커버 {pick['short_timing_action']}")
             if pick.get("news_hits", 0):
                 fast_parts.append(f"뉴스 {pick['news_hits']}건")
-            if pick.get("community_hits", 0):
-                fast_parts.append(f"커뮤니티 {pick['community_hits']}건")
             if pick.get("crowd_signal"):
                 fast_parts.append(pick["crowd_signal"])
             if fast_parts:

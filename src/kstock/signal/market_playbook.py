@@ -94,6 +94,7 @@ def _score_resilient_candidate(candidate: dict, benchmark_drop: float) -> tuple[
     foreign_days = _safe_int(candidate.get("foreign_days", 0))
     inst_days = _safe_int(candidate.get("inst_days", 0))
     crowd_signal = str(candidate.get("crowd_signal", "") or "")
+    herd_pattern = str(candidate.get("herd_pattern", "") or "")
     event_tags = candidate.get("event_tags") or []
     market_cap = _safe_float(candidate.get("market_cap", 0.0))
     flow_signal = str(candidate.get("flow_signal", "") or "")
@@ -117,6 +118,17 @@ def _score_resilient_candidate(candidate: dict, benchmark_drop: float) -> tuple[
         reasons.append("장중 플러스 유지")
     elif day_change >= -1.0:
         score += 5.0
+
+    if herd_pattern == "진성 세력":
+        score += 12.0
+        reasons.append("진성 세력")
+    elif herd_pattern == "세력 매집 초기":
+        score += 8.0
+        reasons.append("세력 매집 초기")
+    elif herd_pattern == "개미떼 유입":
+        score -= 10.0
+    elif herd_pattern == "리딩방 급락":
+        score -= 14.0
 
     if return_3m >= 20:
         score += 18.0
@@ -178,6 +190,7 @@ def _score_avoid_candidate(candidate: dict, benchmark_drop: float) -> tuple[floa
     day_change = _safe_float(candidate.get("day_change", 0.0))
     return_3m = _safe_float(candidate.get("return_3m", 0.0))
     crowd_signal = str(candidate.get("crowd_signal", "") or "")
+    herd_pattern = str(candidate.get("herd_pattern", "") or "")
     vol_ratio = _safe_float(candidate.get("vol_ratio", 0.0))
     foreign_days = _safe_int(candidate.get("foreign_days", 0))
     inst_days = _safe_int(candidate.get("inst_days", 0))
@@ -189,6 +202,12 @@ def _score_avoid_candidate(candidate: dict, benchmark_drop: float) -> tuple[floa
 
     score = 0.0
     reasons: list[str] = []
+    if herd_pattern == "리딩방 급락":
+        score += 16.0
+        reasons.append("리딩방 급락")
+    elif herd_pattern == "개미떼 유입":
+        score += 12.0
+        reasons.append("개미떼 유입")
     if crowd_signal in _DANGEROUS_CROWD:
         score += 18.0
         reasons.append(crowd_signal)

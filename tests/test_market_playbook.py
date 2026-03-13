@@ -50,6 +50,7 @@ def test_build_downside_playbook_flags_crisis_and_strong_stock():
             "event_tags": ["GTC"],
             "market_cap": 1_2000_0000_0000,
             "flow_signal": "외인+기관 순유입",
+            "herd_pattern": "진성 세력",
             "short_pattern_codes": ["short_covering"],
             "short_ratio": 12.5,
         },
@@ -63,6 +64,7 @@ def test_build_downside_playbook_flags_crisis_and_strong_stock():
             "inst_days": 0,
             "vol_ratio": 320.0,
             "crowd_signal": "리딩방 급행 주의",
+            "herd_pattern": "리딩방 급락",
             "market_cap": 250_0000_0000,
             "flow_signal": "외인+기관 동반 이탈",
             "short_pattern_codes": ["short_buildup"],
@@ -83,10 +85,12 @@ def test_build_downside_playbook_flags_crisis_and_strong_stock():
     assert any("레버리지" in trigger for trigger in playbook.triggers)
     assert playbook.strong_stocks
     assert playbook.strong_stocks[0].ticker == "111111"
+    assert "진성 세력" in playbook.strong_stocks[0].thesis
     assert playbook.short_squeeze_watch
     assert playbook.short_squeeze_watch[0].ticker == "111111"
     assert playbook.avoid_stocks
     assert playbook.avoid_stocks[0].ticker == "222222"
+    assert "리딩방 급락" in playbook.avoid_stocks[0].thesis
     assert any("패시브" in line or "비차익" in line for line in playbook.flow_lines)
     assert any("유가 쇼크" in line for line in playbook.flow_lines)
 
