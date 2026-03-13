@@ -101,6 +101,7 @@ def _attach_mixin_attrs(
     anthropic_key: str | None = "test-api-key",
     briefing_v2_return: str | None = "좋은 아침입니다 주호님!",
     briefing_v2_side_effect: Exception | None = None,
+    master_briefing_return: str = "아침 마스터 브리핑",
 ) -> None:
     """Populate a bare SchedulerMixin instance with mocked collaborators."""
     mixin.chat_id = 6247622742
@@ -118,6 +119,9 @@ def _attach_mixin_attrs(
         mixin._generate_morning_briefing_v2 = AsyncMock(
             return_value=briefing_v2_return,
         )
+    mixin._build_morning_master_briefing = AsyncMock(
+        return_value=master_briefing_return,
+    )
 
 
 # The functions imported via bot_imports land in the scheduler module namespace.
@@ -135,22 +139,26 @@ class TestMorningBriefingSendsMessage:
     @pytest.mark.asyncio
     async def test_morning_briefing_sends_message(self) -> None:
         regime = _make_regime_result()
-        formatted = "포맷된 브리핑 텍스트입니다."
+        formatted = "아침 마스터 브리핑"
         context = _make_context()
 
         with patch(f"{_PATCH_PREFIX}.detect_regime", return_value=regime), \
-             patch(f"{_PATCH_PREFIX}.format_claude_briefing", return_value=formatted), \
              patch(f"{_PATCH_PREFIX}._today", return_value="2026-02-25"):
             from kstock.bot.mixins.scheduler import SchedulerMixin
 
             mixin = SchedulerMixin.__new__(SchedulerMixin)
-            _attach_mixin_attrs(mixin, holdings=[_make_holding()])
+            _attach_mixin_attrs(
+                mixin,
+                holdings=[_make_holding()],
+                master_briefing_return=formatted,
+            )
             await mixin.job_morning_briefing(context)
 
         assert context.bot.send_message.call_count >= 1
         call_kw = context.bot.send_message.call_args_list[0].kwargs
         assert call_kw["chat_id"] == 6247622742
         assert call_kw["text"] == formatted
+        mixin._build_morning_master_briefing.assert_awaited_once()
 
 
 class TestMorningBriefingNoHoldings:
@@ -159,16 +167,19 @@ class TestMorningBriefingNoHoldings:
     @pytest.mark.asyncio
     async def test_morning_briefing_no_holdings(self) -> None:
         regime = _make_regime_result()
-        formatted = "보유종목 없음 브리핑"
+        formatted = "보유종목 없음 마스터 브리핑"
         context = _make_context()
 
         with patch(f"{_PATCH_PREFIX}.detect_regime", return_value=regime), \
-             patch(f"{_PATCH_PREFIX}.format_claude_briefing", return_value=formatted), \
              patch(f"{_PATCH_PREFIX}._today", return_value="2026-02-25"):
             from kstock.bot.mixins.scheduler import SchedulerMixin
 
             mixin = SchedulerMixin.__new__(SchedulerMixin)
-            _attach_mixin_attrs(mixin, holdings=[])
+            _attach_mixin_attrs(
+                mixin,
+                holdings=[],
+                master_briefing_return=formatted,
+            )
             await mixin.job_morning_briefing(context)
 
         assert context.bot.send_message.call_count >= 1
@@ -183,16 +194,19 @@ class TestMorningBriefingWeekendNotSkipped:
     @pytest.mark.asyncio
     async def test_morning_briefing_runs_on_any_day(self) -> None:
         regime = _make_regime_result()
-        formatted = "주말 브리핑 테스트"
+        formatted = "주말 마스터 브리핑"
         context = _make_context()
 
         with patch(f"{_PATCH_PREFIX}.detect_regime", return_value=regime), \
-             patch(f"{_PATCH_PREFIX}.format_claude_briefing", return_value=formatted), \
              patch(f"{_PATCH_PREFIX}._today", return_value="2026-02-22"):  # Sunday
             from kstock.bot.mixins.scheduler import SchedulerMixin
 
             mixin = SchedulerMixin.__new__(SchedulerMixin)
-            _attach_mixin_attrs(mixin, holdings=[_make_holding()])
+            _attach_mixin_attrs(
+                mixin,
+                holdings=[_make_holding()],
+                master_briefing_return=formatted,
+            )
             await mixin.job_morning_briefing(context)
 
         # No weekend skip -- message is still sent
@@ -200,37 +214,34 @@ class TestMorningBriefingWeekendNotSkipped:
 
 
 class TestMorningBriefingApiFailure:
-    """When _generate_morning_briefing_v2 returns None (no API key) or raises,
-    the method should fall back to format_market_status."""
+    """When AI briefing is unavailable or errors, the morning flow still sends a message."""
 
     @pytest.mark.asyncio
     async def test_fallback_when_briefing_v2_returns_none(self) -> None:
-        """anthropic_key is None -> _generate_morning_briefing_v2 returns None
-        -> falls back to format_market_status."""
+        """anthropic_key is None이어도 아침 마스터 브리핑은 전송되어야 한다."""
         regime = _make_regime_result()
         fallback = "☀️ 오전 브리핑\n\nS&P500 +0.45%"
         context = _make_context()
 
         with patch(f"{_PATCH_PREFIX}.detect_regime", return_value=regime), \
              patch(f"{_PATCH_PREFIX}.format_market_status", return_value="S&P500 +0.45%") as mock_fms, \
-             patch(f"{_PATCH_PREFIX}.format_claude_briefing") as mock_fcb, \
              patch(f"{_PATCH_PREFIX}._today", return_value="2026-02-25"):
             from kstock.bot.mixins.scheduler import SchedulerMixin
 
             mixin = SchedulerMixin.__new__(SchedulerMixin)
             _attach_mixin_attrs(
-                mixin, anthropic_key=None, briefing_v2_return=None,
+                mixin,
+                anthropic_key=None,
+                briefing_v2_return=None,
+                master_briefing_return="마스터 fallback",
             )
             await mixin.job_morning_briefing(context)
 
-        # format_claude_briefing should NOT have been called (briefing_text is falsy)
-        mock_fcb.assert_not_called()
-        # format_market_status should have been used instead
-        mock_fms.assert_called_once()
+        mock_fms.assert_not_called()
         # Message was still sent
         assert context.bot.send_message.call_count >= 1
         sent = context.bot.send_message.call_args_list[0].kwargs["text"]
-        assert "오전 브리핑" in sent
+        assert "마스터" in sent
 
     @pytest.mark.asyncio
     async def test_fallback_when_exception_raised(self) -> None:

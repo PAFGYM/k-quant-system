@@ -55,6 +55,7 @@ async def test_claude_api_failure():
     mixin.macro_client = MagicMock()
     mixin.macro_client.get_snapshot = AsyncMock(return_value=macro)
     mixin._generate_morning_briefing_v2 = AsyncMock(return_value=None)
+    mixin._build_morning_master_briefing = AsyncMock(return_value="아침 마스터 브리핑")
 
     context = MagicMock()
     context.bot.send_message = AsyncMock()
@@ -74,7 +75,7 @@ async def test_claude_api_failure():
     # Fallback message should have been sent
     assert context.bot.send_message.call_count >= 1
     text = context.bot.send_message.call_args_list[0].kwargs["text"]
-    assert "오전 브리핑" in text or "시장" in text
+    assert "마스터 브리핑" in text or "시장" in text
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +135,7 @@ async def test_empty_holdings_morning_briefing():
     )
     mixin.macro_client.get_snapshot = AsyncMock(return_value=macro)
     mixin._generate_morning_briefing_v2 = AsyncMock(return_value=None)
+    mixin._build_morning_master_briefing = AsyncMock(return_value="빈 보유 마스터 브리핑")
 
     context = MagicMock()
     context.bot.send_message = AsyncMock()

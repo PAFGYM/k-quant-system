@@ -663,26 +663,36 @@ class SchedulerMixin:
 
             # 보유종목별 투자 기간 판단 포함 브리핑 생성
             briefing_text = await self._generate_morning_briefing_v2(macro, regime_mode)
-            if briefing_text:
-                # 신호등을 AI 브리핑 앞에 추가
-                signal_line = f"오늘 국내 시장 전망: {signal_emoji} {signal_label}"
-                msg = format_claude_briefing(f"{signal_line}\n{'━' * 22}\n{briefing_text}")
-            else:
-                msg = (
-                    f"☀️ 오전 브리핑\n"
-                    f"오늘 국내 시장 전망: {signal_emoji} {signal_label}\n\n"
-                    + format_market_status(
-                        macro, regime_mode,
-                        alert_mode=getattr(self, '_alert_mode', 'normal'),
-                    )
+            try:
+                msg = await self._build_morning_master_briefing(
+                    macro,
+                    regime_mode,
+                    ai_briefing=briefing_text or "",
                 )
+            except Exception:
+                logger.debug("Morning master briefing failed", exc_info=True)
+                if briefing_text:
+                    signal_line = f"오늘 국내 시장 전망: {signal_emoji} {signal_label}"
+                    msg = format_claude_briefing(f"{signal_line}\n{'━' * 22}\n{briefing_text}")
+                else:
+                    msg = (
+                        f"☀️ 오전 브리핑\n"
+                        f"오늘 국내 시장 전망: {signal_emoji} {signal_label}\n\n"
+                        + format_market_status(
+                            macro, regime_mode,
+                            alert_mode=getattr(self, '_alert_mode', 'normal'),
+                        )
+                    )
 
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             morning_buttons = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("📊 차트", callback_data="vchart:menu"),
-                    InlineKeyboardButton("🔬 섹터", callback_data="sdive:menu"),
+                    InlineKeyboardButton("📋 오늘 행동", callback_data="menu:daily_actions"),
                     InlineKeyboardButton("💼 잔고", callback_data="bal:0"),
+                ],
+                [
+                    InlineKeyboardButton("🤖 포트폴리오", callback_data="quick_q:portfolio"),
+                    InlineKeyboardButton("📊 시장분석", callback_data="quick_q:market"),
                 ],
                 [
                     InlineKeyboardButton("👍", callback_data="fb:like:모닝브리핑"),
@@ -702,24 +712,20 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("Failed to save morning briefing to DB", exc_info=True)
 
-            # v9.5: 통합 상태 헤더 발송 (매니저 브리핑 전 전체 상황 요약)
             try:
-                from kstock.bot.unified_state import build_unified_state, format_unified_header
-                unified = await build_unified_state(self.db, macro_client=self.macro_client)
-                header = format_unified_header(unified)
-                if header and len(header) > 20:
-                    await send_long_bot_message(context.bot, self.chat_id, header)
+                self.db.upsert_job_run(
+                    "preopen_action_report",
+                    _today(),
+                    status="success",
+                    message="merged into morning_briefing",
+                )
             except Exception:
-                logger.debug("Unified state header failed", exc_info=True)
+                logger.debug("Failed to mark preopen_action_report as merged", exc_info=True)
 
-            # v3.9: 매니저별 보유종목 분석 (holding_type별 그룹핑)
-            await self._send_manager_briefings(context, macro)
-
-            # v8.6: 매니저 관심종목 매수 스캔
-            await self._send_manager_watchlist_scan(context, macro)
-
-            # v8.5: 오늘의 할 일 (Daily Action Planner)
+            # 행동 메시지를 먼저 보내고 세부 매니저 브리핑을 뒤에 붙인다.
             await self._send_daily_actions(context, macro)
+            await self._send_manager_briefings(context, macro)
+            await self._send_manager_watchlist_scan(context, macro)
 
             self.db.upsert_job_run("morning_briefing", _today(), status="success")
             logger.info("Morning briefing sent")
@@ -1597,6 +1603,359 @@ class SchedulerMixin:
                 "callback_data": f"fav:stock:{pick.ticker}",
             })
         return shortcuts
+
+    @staticmethod
+    def _normalize_morning_holding_type(raw: str) -> str:
+        """보유전략 키를 매니저/임계값 기준 키로 정규화한다."""
+        value = str(raw or "").strip()
+        mapping = {
+            "danta": "scalp",
+            "dangi": "swing",
+            "junggi": "position",
+            "janggi": "long_term",
+            "long": "long_term",
+            "mid": "position",
+            "short": "swing",
+        }
+        return mapping.get(value, value or "auto")
+
+    @staticmethod
+    def _compact_morning_ai_lines(text: str, limit: int = 4) -> list[str]:
+        """AI 브리핑 전문에서 아침 메인 메시지에 넣을 핵심 줄만 추린다."""
+        if not text:
+            return []
+        lines: list[str] = []
+        seen: set[str] = set()
+        for raw in str(text).splitlines():
+            line = str(raw or "").strip()
+            if (
+                not line
+                or line.startswith("☀️")
+                or line.startswith("🕘")
+                or "Powered by" in line
+                or set(line) <= {"━", "─", "=", " "}
+            ):
+                continue
+            key = "".join(ch.lower() for ch in line if ch.isalnum())
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            if len(line) > 90:
+                line = line[:87].rstrip() + "..."
+            lines.append(f"- {line}")
+            if len(lines) >= limit:
+                break
+        return lines
+
+    @staticmethod
+    def _infer_morning_market_impact(text: str) -> str:
+        """밤새 이슈가 국내장에 미칠 가능성 높은 영향을 짧게 추정한다."""
+        lower = str(text or "").lower()
+        if any(keyword in lower for keyword in ("iran", "israel", "hormuz", "호르무즈", "공습", "전쟁", "유가")):
+            return "정유·방산 강세 가능, 항공·화학·지수 레버리지는 부담"
+        if any(keyword in lower for keyword in ("fed", "fomc", "powell", "yield", "금리", "채권")):
+            return "성장주 변동성 확대, 금융·현금흐름주 상대 우위"
+        if any(keyword in lower for keyword in ("nvidia", "gtc", "ces", "mwc", "ai", "hbm", "광통신")):
+            return "AI·반도체·광통신 이벤트 관심, 추격보다 강한 종목 선별"
+        if any(keyword in lower for keyword in ("china", "stimulus", "부양", "내수", "소비")):
+            return "중국 소비·화장품·철강 일부 수혜 가능"
+        if any(keyword in lower for keyword in ("ship", "shipping", "수출", "수주", "조선", "운임")):
+            return "조선·전력기기·기계주 수출 기대 점검"
+        if any(keyword in lower for keyword in ("tariff", "관세", "제재", "sanction")):
+            return "수출주 변동성 확대, 공급망 수혜주 선별 필요"
+        return "국내장은 수급과 환율 확인이 우선"
+
+    def _collect_morning_news_lines(self) -> list[str]:
+        """밤새 핵심 뉴스와 방송을 메인 브리핑용 짧은 줄로 묶는다."""
+        lines: list[str] = []
+        seen: set[str] = set()
+
+        try:
+            getter = getattr(self.db, "get_recent_global_news", None)
+            items = getter(limit=10, hours=12) if callable(getter) else []
+            if not isinstance(items, list):
+                items = []
+            items = sorted(
+                items,
+                key=lambda item: (
+                    0 if item.get("is_urgent") else 1,
+                    str(item.get("published_at", "") or item.get("created_at", "")),
+                ),
+            )
+            for item in items:
+                title = str(item.get("title", "") or "").strip()
+                if not title:
+                    continue
+                norm = "".join(ch.lower() for ch in title if ch.isalnum())
+                if not norm or norm in seen:
+                    continue
+                seen.add(norm)
+                impact = self._infer_morning_market_impact(title)
+                short_title = title if len(title) <= 48 else title[:45].rstrip() + "..."
+                lines.append(f"- {short_title} → {impact}")
+                if len(lines) >= 3:
+                    break
+        except Exception:
+            logger.debug("collect_morning_news_lines global_news failed", exc_info=True)
+
+        try:
+            getter = getattr(self.db, "get_recent_youtube_intelligence", None)
+            items = getter(hours=12, limit=4) if callable(getter) else []
+            if not isinstance(items, list):
+                items = []
+            for item in items:
+                source = str(item.get("source", "") or "YouTube").strip()
+                outlook = str(item.get("market_outlook", "") or "").strip()
+                summary = str(item.get("full_summary", "") or "").strip()
+                text = outlook or summary
+                if not text:
+                    continue
+                norm = "".join(ch.lower() for ch in text[:80] if ch.isalnum())
+                if not norm or norm in seen:
+                    continue
+                seen.add(norm)
+                short_text = text if len(text) <= 44 else text[:41].rstrip() + "..."
+                lines.append(f"- [{source}] {short_text}")
+                if len(lines) >= 5:
+                    break
+        except Exception:
+            logger.debug("collect_morning_news_lines youtube failed", exc_info=True)
+
+        return lines
+
+    def _build_morning_market_impact_lines(self, macro, playbook) -> list[str]:
+        """거시/플레이북 기준으로 오늘 국내 증시에 미칠 영향 정리."""
+        lines: list[str] = []
+
+        wti_change = float(getattr(macro, "wti_change_pct", 0) or 0)
+        usdkrw_change = float(getattr(macro, "usdkrw_change_pct", 0) or 0)
+        ewy_change = float(getattr(macro, "ewy_change_pct", 0) or 0)
+        koru_change = float(getattr(macro, "koru_change_pct", 0) or 0)
+        vix = float(getattr(macro, "vix", 0) or 0)
+        vix_change = float(getattr(macro, "vix_change_pct", 0) or 0)
+        es_change = float(getattr(macro, "es_futures_change_pct", 0) or 0)
+        nq_change = float(getattr(macro, "nq_futures_change_pct", 0) or 0)
+
+        if wti_change >= 4.0 and usdkrw_change >= 0.5:
+            lines.append(
+                f"- 유가 {wti_change:+.1f}% + 원달러 {usdkrw_change:+.1f}% → "
+                "수입물가 부담, 정유·방산 상대강세 가능"
+            )
+        elif wti_change >= 3.0:
+            lines.append(f"- 유가 급등 {wti_change:+.1f}% → 항공·화학 부담, 에너지 체인 점검")
+
+        if ewy_change <= -1.0 or koru_change <= -5.0:
+            lines.append(
+                f"- EWY {ewy_change:+.1f}% / KORU {koru_change:+.1f}% → "
+                "외인 리스크오프 압력 먼저 확인"
+            )
+
+        if vix >= 24 or vix_change >= 10:
+            lines.append(f"- VIX {vix:.1f} ({vix_change:+.1f}%) → 시초 추격매수보다 변동성 소화 확인")
+
+        if es_change <= -0.8 or nq_change <= -1.0:
+            lines.append(
+                f"- 미국선물 ES {es_change:+.1f}% / NQ {nq_change:+.1f}% → "
+                "국내 성장주 갭하락 가능성"
+            )
+
+        if playbook:
+            if getattr(playbook, "triggers", None):
+                lines.append(f"- 리스크 신호: {', '.join(playbook.triggers[:3])}")
+            for flow_line in list(getattr(playbook, "flow_lines", []) or [])[:2]:
+                if flow_line:
+                    lines.append(f"- {flow_line}")
+
+        return lines or ["- 해외 변수보다 국내 수급과 환율 반응을 먼저 확인하세요."]
+
+    def _build_morning_action_lines(self, macro, regime_mode: dict, playbook) -> list[str]:
+        """오늘 바로 실행할 행동 지침을 짧게 정리한다."""
+        lines: list[str] = []
+        mode_label = str(regime_mode.get("label", "") or getattr(playbook, "headline", "") or "").strip()
+
+        if playbook and getattr(playbook, "summary", ""):
+            lines.append(f"- 기본 태세: {playbook.summary}")
+            for tactic in list(getattr(playbook, "tactics", []) or [])[:3]:
+                lines.append(f"- {tactic}")
+        elif mode_label:
+            lines.append(f"- 기본 태세: {mode_label} 구간입니다. 추격보다 선별이 우선입니다.")
+
+        if playbook and getattr(playbook, "strong_stocks", None):
+            picks = ", ".join(
+                f"{pick.name}({pick.relative_resilience:+.1f})"
+                for pick in list(playbook.strong_stocks)[:3]
+            )
+            if picks:
+                lines.append(f"- 이런 장에 강한 후보: {picks}")
+
+        if playbook and getattr(playbook, "short_squeeze_watch", None):
+            picks = ", ".join(
+                f"{pick.name}({pick.score:.0f})"
+                for pick in list(playbook.short_squeeze_watch)[:2]
+            )
+            if picks:
+                lines.append(f"- 숏커버 감시: {picks}")
+
+        try:
+            from kstock.bot.investment_managers import get_manager_label
+
+            getter = getattr(self.db, "get_recent_manager_stances", None)
+            stances = getter(hours=24) if callable(getter) else {}
+            if isinstance(stances, dict):
+                for key in ("scalp", "swing", "position", "long_term", "tenbagger"):
+                    stance = str(stances.get(key, "") or "").strip()
+                    if not stance:
+                        continue
+                    short = self._compact_morning_ai_lines(stance, limit=1)
+                    if short:
+                        lines.append(f"- {get_manager_label(key)}: {short[0][2:]}")
+                    if len(lines) >= 6:
+                        break
+        except Exception:
+            logger.debug("build_morning_action_lines stances failed", exc_info=True)
+
+        return lines or ["- 시초 30분은 추격보다 강한 종목의 눌림과 수급만 확인하세요."]
+
+    async def _build_morning_holdings_lines(self) -> list[str]:
+        """보유 종목 진단을 아침 메인 브리핑에 맞게 짧게 압축한다."""
+        try:
+            holdings = self.db.get_active_holdings() or []
+        except Exception:
+            logger.debug("build_morning_holdings_lines holdings load failed", exc_info=True)
+            holdings = []
+
+        if not holdings:
+            return ["- 보유 종목 없음. 오늘은 현금 보존과 강한 종목 관찰이 우선입니다."]
+
+        try:
+            from kstock.bot.account_reader import compute_portfolio_score
+            from kstock.bot.investment_managers import get_manager_label
+            from kstock.store._portfolio import HOLDING_THRESHOLDS
+        except Exception:
+            logger.debug("build_morning_holdings_lines imports failed", exc_info=True)
+            return ["- 보유 종목 요약을 불러오지 못했습니다. 잔고 메뉴에서 다시 확인해주세요."]
+
+        pnl_values: list[float] = []
+        lines: list[str] = []
+        health = compute_portfolio_score(holdings)
+        for holding in holdings[:4]:
+            ticker = str(holding.get("ticker", "") or "").strip()
+            buy_price = float(holding.get("buy_price", 0) or holding.get("avg_price", 0) or 0)
+            current_price = float(holding.get("current_price", 0) or 0)
+            if ticker and current_price <= 0 and buy_price > 0:
+                try:
+                    live_price = await self._get_price(ticker, base_price=buy_price)
+                    if isinstance(live_price, (int, float)) and live_price > 0:
+                        current_price = float(live_price)
+                except Exception:
+                    logger.debug("morning holdings live price failed for %s", ticker, exc_info=True)
+
+            pnl_pct = float(holding.get("pnl_pct", 0) or holding.get("profit_pct", 0) or 0)
+            if buy_price > 0 and current_price > 0:
+                pnl_pct = (current_price - buy_price) / buy_price * 100
+            pnl_values.append(pnl_pct)
+
+            holding_type = self._normalize_morning_holding_type(
+                holding.get("holding_type", "") or holding.get("horizon", ""),
+            )
+            thresholds = HOLDING_THRESHOLDS.get(holding_type, HOLDING_THRESHOLDS["auto"])
+            stop_pct = abs(float(thresholds.get("stop", -0.05)) * 100)
+            t1_pct = float(thresholds.get("t1", 0.03)) * 100
+            t2_pct = float(thresholds.get("t2", 0.07)) * 100
+
+            if pnl_pct <= -stop_pct:
+                action = "손절선 재확인"
+                reason = f"손절 -{stop_pct:.0f}% 이탈 구간"
+            elif pnl_pct >= t2_pct * 0.85:
+                action = "익절/트레일링"
+                reason = f"2차 목표 +{t2_pct:.0f}%권"
+            elif pnl_pct >= t1_pct:
+                action = "보유 + 분할익절 준비"
+                reason = f"1차 목표 +{t1_pct:.0f}% 도달"
+            elif pnl_pct >= -1.0:
+                action = "보유 유지"
+                reason = "시초 흔들림보다 종가 유지력 확인"
+            else:
+                action = "손절선 전 재평가"
+                reason = f"손절 -{stop_pct:.0f}% 전 수급 재확인"
+
+            manager_label = get_manager_label(holding_type)
+            name = str(holding.get("name", "") or ticker)
+            purchase_type = str(holding.get("purchase_type", "") or "").strip()
+            purchase_tag = ""
+            if purchase_type and purchase_type not in {"현금", "보통"}:
+                purchase_tag = f" [{purchase_type}]"
+
+            lines.append(
+                f"- {name}{purchase_tag} {pnl_pct:+.1f}% | {manager_label} | {action}"
+            )
+            lines.append(
+                f"  {reason} · 손절 -{stop_pct:.0f}% / 1차 +{t1_pct:.0f}%"
+            )
+
+        avg_pnl = sum(pnl_values) / len(pnl_values) if pnl_values else 0.0
+        summary = f"- 보유 {len(holdings)}종목 | 건강점수 {health}/100 | 평균 {avg_pnl:+.1f}%"
+        if len(holdings) > 4:
+            lines.append(f"- 외 {len(holdings) - 4}종목은 잔고/포트폴리오 조언에서 상세 확인")
+        return [summary] + lines
+
+    async def _build_morning_master_briefing(
+        self,
+        macro,
+        regime_mode: dict,
+        *,
+        ai_briefing: str = "",
+    ) -> str:
+        """밤새 이슈 + 국내 영향 + 오늘 행동 + 보유 진단을 묶은 아침 통합 브리핑."""
+        signal_emoji, signal_label = self._market_signal(macro)
+        playbook = self._build_downside_playbook(macro)
+        news_lines = self._collect_morning_news_lines()
+        impact_lines = self._build_morning_market_impact_lines(macro, playbook)
+        action_lines = self._build_morning_action_lines(macro, regime_mode, playbook)
+        holding_lines = await self._build_morning_holdings_lines()
+        ai_lines = self._compact_morning_ai_lines(ai_briefing, limit=4)
+
+        lines = [
+            "☀️ 아침 마스터 브리핑",
+            "━" * 24,
+            f"오늘 국내 시장: {signal_emoji} {signal_label}",
+        ]
+        if playbook and getattr(playbook, "headline", ""):
+            lines.append(
+                f"{playbook.headline} | 위험점수 {float(getattr(playbook, 'risk_score', 0) or 0):.0f}"
+            )
+        elif regime_mode.get("label"):
+            lines.append(f"{regime_mode.get('label')}")
+
+        lines.extend([
+            "",
+            "🌙 밤새 일어난 일",
+            *(news_lines or ["- 밤새 핵심 뉴스는 제한적입니다. 오늘은 수급과 환율부터 확인하세요."]),
+            "",
+            "🇰🇷 국내 증시 영향",
+            *impact_lines,
+            "",
+            "🧭 아침 행동 코칭",
+            *action_lines,
+            "",
+            "💼 내 보유 종목 코칭",
+            *holding_lines,
+        ])
+
+        if ai_lines:
+            lines.extend([
+                "",
+                "🤖 AI 보조 코멘트",
+                *ai_lines,
+            ])
+
+        lines.extend([
+            "",
+            "━" * 24,
+            f"🕘 {datetime.now(KST).strftime('%Y-%m-%d %H:%M KST')}",
+            "🤖 K-Quant v13.0 | 아침 통합 브리핑",
+        ])
+        return "\n".join(lines)
 
     async def _send_manager_watchlist_scan(self, context, macro) -> None:
         """매니저별 관심종목 매수 스캔 — 기술적 데이터 보강 후 AI 분석."""
@@ -8500,6 +8859,29 @@ class SchedulerMixin:
                     except Exception:
                         pass
 
+                consensus_payload = None
+                try:
+                    raw_consensus = stock.get("ai_consensus", "")
+                    if raw_consensus:
+                        import json as _json
+                        parsed = _json.loads(raw_consensus)
+                        if isinstance(parsed, dict) and parsed:
+                            consensus_payload = parsed
+                except Exception:
+                    logger.debug("tenbagger_rescore ai_consensus parse failed for %s", ticker, exc_info=True)
+
+                catalyst_texts: list[str] = []
+                try:
+                    catalysts = self.db.get_tenbagger_catalysts(ticker=ticker, status="pending")
+                    if isinstance(catalysts, list):
+                        catalyst_texts = [
+                            str(item.get("description", "") or "").strip()
+                            for item in catalysts
+                            if str(item.get("description", "") or "").strip()
+                        ]
+                except Exception:
+                    logger.debug("tenbagger_rescore catalyst load failed for %s", ticker, exc_info=True)
+
                 score = compute_tenbagger_score(
                     ticker=ticker,
                     name=name,
@@ -8508,8 +8890,9 @@ class SchedulerMixin:
                     foreign_buy_days_in_20=foreign_days,
                     institution_buy_days_in_20=inst_days,
                     foreign_ratio_change=foreign_change,
-                    consensus_data={"ai_avg": stock.get("consensus_score", 50)},
+                    consensus_data=consensus_payload or {"ai_avg": stock.get("consensus_score", 50)},
                     current_price=stock.get("current_price", 0),
+                    catalysts=catalyst_texts,
                 )
 
                 # DB 업데이트
