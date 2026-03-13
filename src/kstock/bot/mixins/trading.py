@@ -1511,26 +1511,30 @@ class TradingMixin:
 
         # 전시/위기 상황 헤더
         if alert_mode == "wartime":
-            lines.append(
-                "\U0001f534 전시 경계 모드 \u2014 국내 증시 전반 하락장\n"
-                "   손절 강화(-5%) | 신규 매수 자제 | 현금 비중 확대"
-            )
+            lines.extend([
+                "\U0001f534 전시 경계 모드",
+                "국내 증시 전반 하락장",
+                "손절 강화(-5%) · 신규 매수 자제 · 현금 비중 확대",
+                "",
+            ])
         elif alert_mode == "elevated":
-            lines.append(
-                "\U0001f7e0 경계 모드 \u2014 변동성 확대 구간\n"
-                "   손절 기준 -6% | 분할 매수 권장"
-            )
+            lines.extend([
+                "\U0001f7e0 경계 모드",
+                "변동성 확대 구간",
+                "손절 기준 -6% · 분할 매수 권장",
+                "",
+            ])
 
         lines.extend([
-            f"\U0001f4b5 총 평가금액: {total_eval:,.0f}원",
-            f"\U0001f4b4 총 투자금액: {total_invested:,.0f}원",
-            f"\U0001f4b0 총 손익: {pnl_arrow} {pnl_sign}{total_pnl:,.0f}원 ({pnl_sign}{total_pnl_rate:.2f}%)",
+            f"\U0001f4b5 총 평가금액  {total_eval:,.0f}원",
+            f"\U0001f4b8 총 투자금액  {total_invested:,.0f}원",
+            f"\U0001f4b0 총 손익      {pnl_arrow} {pnl_sign}{total_pnl:,.0f}원 ({pnl_sign}{total_pnl_rate:.2f}%)",
         ])
         if margin_count > 0:
-            lines.append(f"\U0001f4b3 신용/마진: {margin_count}종목 ({margin_eval:,.0f}원)")
-        lines.extend(["", f"보유종목 ({len(holdings)}개)", "\u2500" * 25])
+            lines.append(f"\U0001f4b3 신용/마진   {margin_count}종목 · {margin_eval:,.0f}원")
+        lines.extend(["", f"\U0001f4e6 보유종목 {len(holdings)}개", "\u2500" * 25])
 
-        for h in holdings:
+        for idx, h in enumerate(holdings):
             name = h.get("name", "")
             ticker = h.get("ticker", "")
             qty = int(h.get("quantity", 0) or 0)
@@ -1554,49 +1558,75 @@ class TradingMixin:
             purchase_type = str(h.get("purchase_type", "") or "").strip()
 
             # 신용 표시
-            margin_tag = ""
+            margin_label = ""
             if h.get("_is_margin_display") or h.get("is_margin") or h.get("margin_type"):
-                margin_tag = " \U0001f4b3"
-            purchase_tag = f" [{purchase_type}]" if purchase_type else ""
+                margin_label = "신용/마진"
 
-            qty_text = f" {qty}주" if qty > 0 else ""
-            # ticker 있으면 표시, 없으면 생략
-            ticker_text = f"({ticker})" if ticker else ""
-            line = f"{emoji} {name}{ticker_text}{qty_text}{purchase_tag}{margin_tag}\n"
-            line += f"   매수 {bp:,.0f}원 \u2192 현재 {cp:,.0f}원\n"
+            header = f"{emoji} {name}"
+            if ticker:
+                header += f" ({ticker})"
+            badges: list[str] = []
+            if qty > 0:
+                badges.append(f"{qty}주")
+            if purchase_type:
+                badges.append(purchase_type)
+            if margin_label:
+                badges.append(margin_label)
 
+            block = [header]
+            if badges:
+                block.append(f"   {' · '.join(badges)}")
+            block.append(f"   매수 {bp:,.0f}원 / 현재 {cp:,.0f}원")
             if eval_amt > 0:
-                line += f"   평가 {eval_amt:,.0f}원"
+                block.append(f"   평가 {eval_amt:,.0f}원")
                 if pnl_amount != 0:
-                    line += f" | 손익 {pnl_sign_s}{pnl_amount:,.0f}원 ({pnl:+.1f}%)"
+                    block.append(f"   손익 {pnl_sign_s}{pnl_amount:,.0f}원 ({pnl:+.1f}%)")
                 else:
-                    line += f" | 수익률 {pnl:+.1f}%"
+                    block.append(f"   수익률 {pnl:+.1f}%")
             elif pnl_amount != 0:
-                line += f"   손익 {pnl_sign_s}{pnl_amount:,.0f}원 ({pnl:+.1f}%)"
+                block.append(f"   손익 {pnl_sign_s}{pnl_amount:,.0f}원 ({pnl:+.1f}%)")
             else:
-                line += f"   수익률 {pnl:+.1f}%"
+                block.append(f"   수익률 {pnl:+.1f}%")
 
             if day_chg_pct != 0:
                 day_emoji = "\U0001f4c8" if day_chg_pct > 0 else "\U0001f4c9"
                 day_sign = "+" if day_chg_pct > 0 else ""
-                line += f"\n   오늘 {day_emoji} {day_sign}{day_chg:,.0f}원 ({day_sign}{day_chg_pct:.1f}%)"
+                block.append(
+                    f"   오늘 {day_emoji} {day_sign}{day_chg:,.0f}원 ({day_sign}{day_chg_pct:.1f}%)"
+                )
 
             manager_label, manager_tip = self._manager_coaching_text(h)
-            line += f"\n   {manager_label} | {manager_tip}"
+            block.extend([
+                "",
+                f"   {manager_label}",
+                f"   {manager_tip}",
+            ])
 
             # 상황별 종목 액션 가이드
             if alert_mode == "wartime":
                 stop_price = bp * 0.95
                 action_tag = self._wartime_holding_action(pnl, h)
-                line += f"\n   {action_tag} | 전시 손절: {stop_price:,.0f}원"
+                action_tag = action_tag.replace(" — ", " · ")
+                block.extend([
+                    f"   {action_tag}",
+                    f"   전시 손절 {stop_price:,.0f}원",
+                ])
             elif alert_mode == "elevated":
                 stop_price = bp * 0.94
                 if pnl < -5:
-                    line += f"\n   \u26a0\ufe0f 손절 검토 | 경계 손절: {stop_price:,.0f}원"
+                    block.extend([
+                        "   \u26a0\ufe0f 손절 검토",
+                        f"   경계 손절 {stop_price:,.0f}원",
+                    ])
                 elif pnl < 0:
-                    line += f"\n   \U0001f6e1 보유 관망 | 경계 손절: {stop_price:,.0f}원"
+                    block.extend([
+                        "   \U0001f6e1 보유 관망",
+                        f"   경계 손절 {stop_price:,.0f}원",
+                    ])
 
-            lines.append(line)
+            lines.append("\n".join(block))
+            if idx != len(holdings) - 1:
+                lines.append("")
         return lines
 
     @staticmethod

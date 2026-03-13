@@ -157,3 +157,41 @@ def test_build_balance_buttons_maps_auto_to_real_manager(tmp_path):
 
     analysis_button = buttons[1][0]
     assert analysis_button.callback_data == "mgr:swing:083650"
+
+
+def test_format_balance_lines_is_scannable_block_layout(tmp_path):
+    from kstock.bot.mixins.trading import TradingMixin
+
+    mixin = TradingMixin.__new__(TradingMixin)
+    mixin.db = _FakeDB(tmp_path)
+    mixin._alert_mode = "wartime"
+
+    lines = mixin._format_balance_lines(
+        [
+            {
+                "ticker": "112610",
+                "name": "씨에스윈드",
+                "quantity": 1760,
+                "buy_price": 56_700,
+                "current_price": 55_400,
+                "pnl_pct": -2.3,
+                "eval_amount": 96_800_000,
+                "purchase_type": "유융",
+                "is_margin": 1,
+                "stop_price": 53_865,
+                "holding_type": "auto",
+                "day_change_pct": -1.1,
+                "day_change": -600,
+            }
+        ],
+        total_eval=204_989_950,
+        total_invested=208_074_082,
+    )
+
+    text = "\n".join(lines)
+    assert "📦 보유종목 1개" in text
+    assert "씨에스윈드 (112610)" in text
+    assert "1760주 · 유융 · 신용/마진" in text
+    assert "매수 56,700원 / 현재 55,400원" in text
+    assert "🔥 스윙 매니저" in text
+    assert "전시 손절 53,865원" in text
