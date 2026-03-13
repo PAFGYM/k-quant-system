@@ -1912,6 +1912,22 @@ class SchedulerMixin:
         news_lines = self._collect_morning_news_lines()
         impact_lines = self._build_morning_market_impact_lines(macro, playbook)
         action_lines = self._build_morning_action_lines(macro, regime_mode, playbook)
+        operator_lines: list[str] = []
+        try:
+            from kstock.signal.krx_operator_memory import (
+                build_krx_operator_memory,
+                format_operator_memory_lines,
+            )
+
+            operator_memory = build_krx_operator_memory(
+                self.db,
+                macro,
+                playbook=playbook,
+                regime_mode=regime_mode,
+            )
+            operator_lines = format_operator_memory_lines(operator_memory)
+        except Exception:
+            logger.debug("build_morning_master_briefing operator memory failed", exc_info=True)
         holding_lines = await self._build_morning_holdings_lines()
         ai_lines = self._compact_morning_ai_lines(ai_briefing, limit=4)
 
@@ -1937,6 +1953,16 @@ class SchedulerMixin:
             "",
             "🧭 아침 행동 코칭",
             *action_lines,
+        ])
+
+        if operator_lines:
+            lines.extend([
+                "",
+                "🧠 한국장 패턴 메모",
+                *operator_lines,
+            ])
+
+        lines.extend([
             "",
             "💼 내 보유 종목 코칭",
             *holding_lines,
