@@ -208,6 +208,26 @@ class SchedulerMixin:
                 logger.debug("alert budget notice failed", exc_info=True)
         return False
 
+    def _persist_manager_stances(
+        self,
+        picks_by_manager: dict[str, list[dict]],
+        *,
+        market_context: str = "",
+    ) -> None:
+        """매니저 레이더 상위 후보를 최근 stance 캐시에 저장한다."""
+        try:
+            from kstock.bot.investment_managers import build_manager_stance_snapshots
+
+            snapshots = build_manager_stance_snapshots(
+                picks_by_manager,
+                market_context=market_context,
+            )
+            for manager_key, stance in snapshots.items():
+                if stance:
+                    self.db.save_manager_stance(manager_key, stance)
+        except Exception:
+            logger.debug("persist_manager_stances failed", exc_info=True)
+
     # ── 경계 모드 관리 메서드 ──────────────────────────────
     def _get_alert_config(self) -> dict:
         """현재 경계 모드의 설정값 반환."""
@@ -1679,6 +1699,7 @@ class SchedulerMixin:
                 crowd_lines=fast_context.get("crowd_lines"),
             )
             if digest:
+                self._persist_manager_stances(by_manager, market_context=market_text)
                 buttons = make_shortcut_rows([
                     {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},
                     {"label": "👨‍💼 전체 매니저", "callback_data": "fav:managers"},
@@ -7051,6 +7072,10 @@ class SchedulerMixin:
                 crowd_lines=fast_context.get("crowd_lines"),
             )
             if digest:
+                self._persist_manager_stances(
+                    candidates_by_manager,
+                    market_context=market_text,
+                )
                 header = "단타/스윙/포지션/장기/텐베거 레인을 분리해 상위 후보만 추렸습니다.\n\n"
                 buttons = make_shortcut_rows([
                     {"label": "📋 액션콘솔", "callback_data": "menu:daily_actions"},

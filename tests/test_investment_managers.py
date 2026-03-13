@@ -4,6 +4,7 @@ from kstock.bot.bot_imports import ScanResult
 from kstock.bot.investment_managers import (
     build_daily_action_shortcuts,
     build_manager_shortcuts,
+    build_manager_stance_snapshots,
     enrich_watchlist_candidate,
     filter_discovery_candidates,
     format_manager_action_digest,
@@ -244,6 +245,24 @@ def test_build_manager_shortcuts_reflects_top_hint():
     assert any(item["callback_data"] == "mgr_tab:scalp" for item in shortcuts)
     assert any("GTC" in item["label"] for item in shortcuts)
     assert any("선점 구간" in item["label"] for item in shortcuts)
+
+
+def test_build_manager_stance_snapshots_uses_top_pick_reason_and_action():
+    snapshots = build_manager_stance_snapshots({
+        "tenbagger": [{
+            "ticker": "222222",
+            "name": "미래주",
+            "fit_score": 84,
+            "fit_reasons": ["이벤트 AI", "유튜브 4회"],
+            "action_hint": "정책·산업 이벤트 전 씨앗 포지션 구축",
+        }],
+    }, market_context="방어장")
+
+    stance = snapshots["tenbagger"]
+    assert "방어장" in stance
+    assert "미래주(222222)" in stance
+    assert "적합도 84" in stance
+    assert "정책·산업 이벤트 전 씨앗 포지션 구축" in stance
 
 
 def test_build_daily_action_shortcuts_prefers_button_label_and_dedupes():
