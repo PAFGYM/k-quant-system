@@ -142,7 +142,7 @@ class TestLightweightChatRouting:
             monthly_cost=5.0,
         )
         assert route == "light"
-        assert mode == "hard"
+        assert mode == "global_hard"
 
     def test_budget_guard_downgrades_deep_after_daily_limit(self) -> None:
         route, mode = _apply_chat_budget_guard(
