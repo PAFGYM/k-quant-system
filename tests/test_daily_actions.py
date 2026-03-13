@@ -246,3 +246,61 @@ def test_build_daily_candidate_actions_attaches_allocation_hint():
     assert "권장 비중" in actions[0]["allocation_summary"]
     assert "현금 바닥" in actions[0]["allocation_summary"]
     assert "씨앗" in actions[0]["allocation_split"]
+
+
+def test_build_daily_candidate_actions_penalizes_sector_overlap():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin.db = MagicMock()
+    mixin.db.get_portfolio_snapshots.return_value = [
+        {
+            "total_value": 200_000_000,
+            "cash": 20_000_000,
+        },
+    ]
+    mixin._last_scan_results = [object()]
+    mixin._build_personalized_lane_bias = MagicMock(
+        return_value=(
+            {"scalp": 1.0, "swing": 1.0, "position": 1.0, "long_term": 1.0, "tenbagger": 1.0},
+            [],
+        )
+    )
+    mixin._enrich_manager_candidates_with_flow_short_context = MagicMock(side_effect=lambda data, macro: data)
+    mixin._build_manager_fast_context = MagicMock(return_value={})
+    mixin._enrich_manager_candidates_with_fast_context = MagicMock(side_effect=lambda data, fast_context: data)
+    mixin._build_manager_herd_signals = MagicMock(return_value=({}, []))
+    mixin._enrich_manager_candidates_with_herd_context = MagicMock(side_effect=lambda data, herd_map: data)
+    mixin._enrich_manager_candidates_with_operator_memory = MagicMock(
+        return_value=(
+            {
+                "position": [{
+                    "ticker": "105840",
+                    "name": "우진",
+                    "price": 30_000,
+                    "fit_score": 84,
+                    "composite": 76,
+                    "confidence_score": 0.70,
+                    "fit_reasons": ["원전 계측기", "정책 수혜"],
+                    "action_hint": "실적/스토리 유지 전제 1~3개월 보유",
+                    "day_change": 1.2,
+                }],
+            },
+            SimpleNamespace(manager_focus=[]),
+        )
+    )
+
+    with patch(
+        "kstock.bot.investment_managers.filter_discovery_candidates",
+        side_effect=lambda scan_results, manager_key, exclude: [{"ticker": "105840"}] if manager_key == "position" else [],
+    ):
+        actions = mixin._build_daily_candidate_actions(
+            holdings=[{"ticker": "083650", "name": "비에이치아이", "eval_amount": 110_000_000, "holding_type": "position"}],
+            macro=_make_macro(),
+            playbook=None,
+            alert_mode="normal",
+        )
+
+    assert actions
+    assert "원전/전력" in actions[0]["allocation_summary"]
+    assert "편중" in actions[0]["next_step"] or "비중 높음" in actions[0]["next_step"]

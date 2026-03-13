@@ -3083,6 +3083,53 @@ class SchedulerMixin:
         alert_mode: str,
     ) -> dict:
         """액션콘솔용 개인화 비중/현금 운용 컨텍스트."""
+        sector_keyword_map = {
+            "원전/전력": ["원전", "SMR", "전력", "터빈", "원자로", "계측"],
+            "방산/우주": ["방산", "미사일", "우주", "위성", "항공", "드론"],
+            "풍력/재생에너지": ["풍력", "재생에너지", "수소", "태양광", "그린에너지"],
+            "조선/해운": ["조선", "선박", "해운", "LNG", "운임"],
+            "반도체": ["반도체", "HBM", "메모리", "파운드리", "DRAM", "NAND"],
+            "2차전지": ["2차전지", "배터리", "양극재", "음극재", "전해질", "분리막"],
+            "바이오": ["바이오", "제약", "신약", "항체", "세포"],
+        }
+
+        def _infer_sector(ticker: str, name: str, extra_texts: list[str] | None = None) -> str:
+            try:
+                from kstock.signal.concentration_alert import SECTOR_MAP as _SECTOR_MAP
+            except Exception:
+                _SECTOR_MAP = {}
+            try:
+                from kstock.signal.future_tech import get_all_watchlist_tickers
+
+                future_map = get_all_watchlist_tickers()
+            except Exception:
+                future_map = {}
+
+            ticker = str(ticker or "").strip()
+            if ticker and ticker in _SECTOR_MAP:
+                return str(_SECTOR_MAP[ticker])
+            if ticker and ticker in future_map:
+                sector_name = str(future_map[ticker].get("sector_name", "") or "").strip()
+                if sector_name:
+                    return sector_name
+
+            merged = " ".join(
+                part for part in [str(name or "").strip(), *(extra_texts or [])] if str(part or "").strip()
+            ).lower()
+            for sector, keywords in sector_keyword_map.items():
+                if any(keyword.lower() in merged for keyword in keywords):
+                    return sector
+
+            manual_map = {
+                "083650": "원전/전력",  # 비에이치아이
+                "105840": "원전/전력",  # 우진
+                "112610": "풍력/재생에너지",  # 씨에스윈드
+                "034020": "원전/전력",  # 두산에너빌리티
+                "047810": "방산/우주",  # 한국항공우주
+                "047050": "원전/전력",  # 포스코인터내셔널? avoid wrong maybe not used
+            }
+            return manual_map.get(ticker, "기타")
+
         total_value = 0.0
         cash = 0.0
         cash_known = False
@@ -3116,6 +3163,7 @@ class SchedulerMixin:
 
         holdings_value = 0.0
         lane_exposure: dict[str, float] = {}
+        sector_exposure: dict[str, float] = {}
         for holding in holdings:
             eval_amount = float(
                 holding.get("eval_amount", 0)
@@ -3128,6 +3176,12 @@ class SchedulerMixin:
             )
             if lane:
                 lane_exposure[lane] = lane_exposure.get(lane, 0.0) + eval_amount
+            sector = _infer_sector(
+                str(holding.get("ticker", "") or ""),
+                str(holding.get("name", "") or ""),
+                [str(holding.get("theme", "") or ""), str(holding.get("sector", "") or "")],
+            )
+            sector_exposure[sector] = sector_exposure.get(sector, 0.0) + eval_amount
 
         if total_value <= 0:
             total_value = holdings_value + (cash if cash_known else 0.0)
@@ -3162,6 +3216,11 @@ class SchedulerMixin:
             for key, value in lane_exposure.items()
             if total_value > 0 and value > 0
         }
+        sector_exposure_pct = {
+            key: round((value / total_value) * 100.0, 1)
+            for key, value in sector_exposure.items()
+            if total_value > 0 and value > 0
+        }
 
         return {
             "total_value": total_value,
@@ -3171,6 +3230,8 @@ class SchedulerMixin:
             "cash_floor_pct": round(cash_floor_pct, 1),
             "new_buy_allowed": bool(policy.get("new_buy_allowed", True)),
             "lane_exposure_pct": lane_exposure_pct,
+            "sector_exposure_pct": sector_exposure_pct,
+            "infer_sector": _infer_sector,
         }
 
     def _build_candidate_allocation_hint(
@@ -3226,6 +3287,32 @@ class SchedulerMixin:
             lane_cap_pct *= 0.65
         elif lane_exposure_pct >= lane_cap_pct:
             lane_cap_pct *= 0.82
+
+        infer_sector = allocation_context.get("infer_sector")
+        candidate_sector = ""
+        if callable(infer_sector):
+            candidate_sector = str(
+                infer_sector(
+                    str(pick.get("ticker", "") or ""),
+                    str(pick.get("name", "") or ""),
+                    [
+                        " ".join(list(pick.get("fit_reasons") or [])),
+                        " ".join(list(pick.get("event_tags") or [])),
+                        str(pick.get("flow_signal", "") or ""),
+                    ],
+                )
+            ).strip()
+        sector_exposure_pct = float(
+            allocation_context.get("sector_exposure_pct", {}).get(candidate_sector, 0.0) or 0.0
+        )
+        sector_note = ""
+        if candidate_sector and candidate_sector != "기타":
+            if sector_exposure_pct >= 45.0:
+                lane_cap_pct *= 0.62
+                sector_note = f"{candidate_sector} 비중 높음"
+            elif sector_exposure_pct >= 30.0:
+                lane_cap_pct *= 0.78
+                sector_note = f"{candidate_sector} 편중 주의"
 
         from kstock.core.position_sizer import PositionSizer, plan_split_entry
 
@@ -3294,15 +3381,21 @@ class SchedulerMixin:
         summary = f"권장 비중 {target_weight_pct:.1f}% · 기준 예산 {budget_krw:,.0f}원"
         if cash_floor_pct > 0:
             summary += f" · 현금 바닥 {cash_floor_pct:.0f}%"
+        if candidate_sector and candidate_sector != "기타":
+            summary += f" · {candidate_sector}"
 
         return {
             "weight_pct": target_weight_pct,
             "budget_krw": budget_krw,
             "cash_floor_pct": cash_floor_pct,
             "current_cash_pct": current_cash_pct,
+            "candidate_sector": candidate_sector,
+            "sector_exposure_pct": sector_exposure_pct,
             "allocation_summary": summary,
             "allocation_split": split_label,
-            "allocation_note": cash_note,
+            "allocation_note": " · ".join(
+                part for part in [cash_note, sector_note] if str(part or "").strip()
+            ),
         }
 
     def _build_daily_candidate_actions(
@@ -3416,6 +3509,9 @@ class SchedulerMixin:
             )
             if allocation_hint:
                 top_pick.update(allocation_hint)
+                sector_note = str(top_pick.get("allocation_note", "") or "").strip()
+                if "편중" in sector_note or "비중 높음" in sector_note:
+                    rank_score -= 4.0
             ranked.append((rank_score, mgr_key, top_pick))
 
         ranked.sort(key=lambda row: row[0], reverse=True)
