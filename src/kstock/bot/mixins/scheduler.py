@@ -28,6 +28,8 @@ except Exception:
 
 # 레짐 변경 쿨다운 (초)
 _RESCHEDULE_COOLDOWN = 300  # 5분
+_INTRADAY_SCAN_CACHE_TTL = 120
+_INTRADAY_SCAN_MAX_TICKERS = 24
 
 
 def _get_vix_regime(vix: float) -> str:
@@ -2833,7 +2835,22 @@ class SchedulerMixin:
                 h.get("ticker", ""): h for h in self._holdings_cache if h.get("ticker")
             }
         try:
-            results = await self._scan_all_stocks()
+            backoff_until = getattr(self, "_scan_backoff_until", None)
+            if backoff_until and now < backoff_until:
+                results = list(getattr(self, "_last_scan_results", []) or [])
+                logger.warning(
+                    "Intraday monitor backoff active until %s — cached results reused (%d)",
+                    backoff_until.isoformat(),
+                    len(results),
+                )
+                if not results:
+                    return
+            else:
+                results = await self._scan_all_stocks(
+                    max_tickers=_INTRADAY_SCAN_MAX_TICKERS,
+                    cache_ttl=_INTRADAY_SCAN_CACHE_TTL,
+                    busy_ok=True,
+                )
             self._last_scan_results = results
             self._scan_cache_time = now
             macro = await self.macro_client.get_snapshot()
@@ -2866,6 +2883,16 @@ class SchedulerMixin:
 
             logger.info("Intraday monitor: %d stocks scanned", len(results))
         except Exception as e:
+            err_text = str(e).lower()
+            if (
+                "too many open files" in err_text
+                or "unable to open database file" in err_text
+            ):
+                self._scan_backoff_until = now + timedelta(minutes=4)
+                logger.warning(
+                    "Intraday monitor overloaded — backing off until %s",
+                    self._scan_backoff_until.isoformat(),
+                )
             logger.error("Intraday monitor error: %s", e, exc_info=True)
 
     async def _check_manager_alerts(self, bot) -> None:

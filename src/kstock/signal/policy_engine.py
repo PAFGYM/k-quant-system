@@ -5,6 +5,7 @@ Supports both legacy events format and enhanced yearly_patterns + annual_policie
 
 from __future__ import annotations
 
+import copy
 import logging
 from datetime import date, datetime
 from pathlib import Path
@@ -15,14 +16,22 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_PATH = Path("config/policy_calendar.yaml")
 _CRISIS_PATH = Path("config/crisis_events.yaml")
+_CONFIG_CACHE: dict[str, tuple[float, float, dict]] = {}
 
 
 def _load_config(path: Path | None = None) -> dict:
     p = path or _DEFAULT_PATH
+    main_mtime = p.stat().st_mtime if p.exists() else -1.0
+    crisis_mtime = _CRISIS_PATH.stat().st_mtime if _CRISIS_PATH.exists() else -1.0
+    cache_key = str(p.resolve())
+    cached = _CONFIG_CACHE.get(cache_key)
+    if cached and cached[0] == main_mtime and cached[1] == crisis_mtime:
+        return copy.deepcopy(cached[2])
+
     if not p.exists():
         config: dict = {"events": [], "leading_sectors": {"tier1": [], "tier2": []}}
     else:
-        with open(p) as f:
+        with open(p, encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
 
     # crisis_events.yaml 에서 활성 위기 이벤트 병합
@@ -37,6 +46,7 @@ def _load_config(path: Path | None = None) -> dict:
     except Exception as e:
         logger.debug("Crisis events load failed: %s", e)
 
+    _CONFIG_CACHE[cache_key] = (main_mtime, crisis_mtime, copy.deepcopy(config))
     return config
 
 

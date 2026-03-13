@@ -4,6 +4,15 @@ from __future__ import annotations
 from kstock.bot.bot_imports import *  # noqa: F403
 
 
+def _normalize_menu_label(text: str) -> str:
+    """이모지/공백이 없는 간단한 메뉴 별칭도 인식한다."""
+    import re
+
+    if not text:
+        return ""
+    return re.sub(r"[^0-9A-Za-z가-힣]+", "", text).lower()
+
+
 class CoreHandlersMixin:
     def __init__(self) -> None:
         # v3.6: 보안 검증
@@ -36,7 +45,10 @@ class CoreHandlersMixin:
         self.all_tickers = _all_tickers(self.universe_config)
         self._last_scan_results: list = []
         self._scan_cache_time: datetime | None = None
+        self._scan_lock = None
+        self._scan_backoff_until: datetime | None = None
         self._sector_strengths: list = []
+        self._sector_strengths_time: float = 0.0
         self._ohlcv_cache: dict = {}      # {ticker: DataFrame}
         self._ohlcv_cache_time: float = 0  # v9.3.3: 캐시 생성 시각 (monotonic)
         # v3.0: KIS broker + data router
@@ -1220,7 +1232,26 @@ class CoreHandlersMixin:
             "📋 오늘의 할 일": self._menu_daily_actions,
             # v9.6.2: 이전 하위호환 메뉴 삭제 (v9.0 이후 Reply Keyboard만 사용)
         }
+        resolved_text = text
         handler = handlers.get(text)
+        if not handler:
+            alias_map = {
+                "분석": "📊 분석",
+                "시황": "📈 시황",
+                "잔고": "💰 잔고",
+                "즐겨찾기": "⭐ 즐겨찾기",
+                "클로드": "💻 클로드",
+                "에이전트": "🤖 에이전트",
+                "리포트": "📋 리포트",
+                "ai비서": "💬 AI비서",
+                "aI비서": "💬 AI비서",
+                "더보기": "⚙️ 더보기",
+                "온보딩": "📖 온보딩",
+                "오늘의할일": "📋 오늘의 할 일",
+            }
+            normalized = _normalize_menu_label(text)
+            resolved_text = alias_map.get(normalized, text)
+            handler = handlers.get(resolved_text)
         if handler:
             # 메뉴 이동 시 진행 중인 상태 클리어
             context.user_data.pop("kis_setup", None)
@@ -1233,7 +1264,7 @@ class CoreHandlersMixin:
                 "💬 AI비서", "📋 리포트", "⚙️ 더보기",
                 "📖 온보딩", "📋 오늘의 할 일",
             }
-            if text not in _claude_safe_buttons:
+            if text not in _claude_safe_buttons and resolved_text not in _claude_safe_buttons:
                 context.user_data.pop("claude_mode", None)
                 context.user_data.pop("claude_turn", None)
                 context.user_data.pop("claude_tier", None)
@@ -1245,7 +1276,7 @@ class CoreHandlersMixin:
                 "💬 AI비서": "ai_chat", "📋 리포트": "reports",
                 "⚙️ 더보기": "more",
             }
-            tip_key = _tip_map.get(text)
+            tip_key = _tip_map.get(resolved_text)
             if tip_key:
                 await self._maybe_show_tip(update, context, tip_key)
             try:

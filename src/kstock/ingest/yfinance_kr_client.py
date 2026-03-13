@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -36,6 +37,7 @@ except Exception:
 _price_cache: dict[str, tuple[datetime, pd.DataFrame]] = {}
 _info_cache: dict[str, tuple[datetime, dict]] = {}
 _CACHE_TTL = timedelta(minutes=10)
+_YF_IO_SEMAPHORE = threading.BoundedSemaphore(value=2)
 
 
 def _is_cache_stale_date(cached_time: datetime) -> bool:
@@ -138,8 +140,9 @@ class YFinanceKRClient:
     @staticmethod
     def _fetch_ohlcv_sync(symbol: str, period: str) -> pd.DataFrame:
         """Synchronous yfinance fetch - runs in thread pool."""
-        ticker = yf.Ticker(symbol)
-        return ticker.history(period=period)
+        with _YF_IO_SEMAPHORE:
+            ticker = yf.Ticker(symbol)
+            return ticker.history(period=period)
 
     async def get_stock_info(self, code: str, name: str = "", market: str = "KOSPI") -> dict:
         """Fetch fundamental info from yfinance."""
@@ -185,8 +188,9 @@ class YFinanceKRClient:
     @staticmethod
     def _fetch_info_sync(symbol: str) -> dict:
         """Synchronous yfinance info fetch - runs in thread pool."""
-        ticker = yf.Ticker(symbol)
-        return ticker.info or {}
+        with _YF_IO_SEMAPHORE:
+            ticker = yf.Ticker(symbol)
+            return ticker.info or {}
 
     async def get_current_price(self, code: str, market: str = "KOSPI") -> float:
         """Get current price from yfinance (v4.0: circuit breaker + Naver fallback)."""
@@ -290,9 +294,16 @@ class YFinanceKRClient:
 
         result = {}
         try:
-            data = await asyncio.to_thread(
-                yf.download, symbols, period=period, group_by="ticker", progress=False
-            )
+            def _download() -> pd.DataFrame:
+                with _YF_IO_SEMAPHORE:
+                    return yf.download(
+                        symbols,
+                        period=period,
+                        group_by="ticker",
+                        progress=False,
+                    )
+
+            data = await asyncio.to_thread(_download)
             now = datetime.now(KST)
             for symbol in symbols:
                 try:

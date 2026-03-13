@@ -8,92 +8,202 @@ from kstock.bot.bot_imports import *  # noqa: F403
 
 
 _OHLCV_CACHE_TTL = 600  # v9.3.3: 스캔 OHLCV 캐시 10분
+_INTRADAY_SCAN_CACHE_TTL = 120
+_INTRADAY_SCAN_MAX_TICKERS = 24
+_SECTOR_STRENGTH_CACHE_TTL = 900
 
 
 class CommandsMixin:
-    async def _scan_all_stocks(self) -> list:
+    def _build_scan_universe(self, max_tickers: int | None = None) -> list[dict]:
+        """우선순위 유니버스를 구성해 장중 과부하를 줄인다."""
+        priority_codes: list[str] = []
+
+        try:
+            for h in self.db.get_active_holdings():
+                code = h.get("ticker", "")
+                if code:
+                    priority_codes.append(code)
+        except Exception:
+            logger.debug("_build_scan_universe holdings failed", exc_info=True)
+
+        try:
+            for w in self.db.get_watchlist():
+                code = w.get("ticker", "")
+                if code:
+                    priority_codes.append(code)
+        except Exception:
+            logger.debug("_build_scan_universe watchlist failed", exc_info=True)
+
+        for r in list(getattr(self, "_last_scan_results", []) or [])[:12]:
+            code = getattr(r, "ticker", "")
+            if code:
+                priority_codes.append(code)
+
+        code_to_item = {item["code"]: item for item in self.all_tickers}
+        seen: set[str] = set()
+        ordered: list[dict] = []
+
+        for code in priority_codes:
+            item = code_to_item.get(code)
+            if item and code not in seen:
+                seen.add(code)
+                ordered.append(item)
+
+        for item in self.all_tickers:
+            code = item["code"]
+            if code not in seen:
+                seen.add(code)
+                ordered.append(item)
+
+        if max_tickers is not None:
+            return ordered[:max(1, max_tickers)]
+        return ordered
+
+    def _is_scan_cache_fresh(self, ttl_seconds: int | None = None) -> bool:
+        if ttl_seconds is None or ttl_seconds <= 0:
+            return False
+        cache_time = getattr(self, "_scan_cache_time", None)
+        results = getattr(self, "_last_scan_results", None)
+        if not cache_time or not results:
+            return False
+        return (datetime.now(KST) - cache_time).total_seconds() < ttl_seconds
+
+    async def _scan_all_stocks(
+        self,
+        max_tickers: int | None = None,
+        cache_ttl: int | None = None,
+        busy_ok: bool = True,
+    ) -> list:
         import time as _t
+        import asyncio
+
+        backoff_until = getattr(self, "_scan_backoff_until", None)
+        if (
+            backoff_until
+            and datetime.now(KST) < backoff_until
+            and getattr(self, "_last_scan_results", None)
+        ):
+            logger.warning(
+                "Scan backoff active until %s — cached results reused",
+                backoff_until.isoformat(),
+            )
+            return list(self._last_scan_results)
+
+        if self._is_scan_cache_fresh(cache_ttl):
+            return list(self._last_scan_results)
+
+        if not hasattr(self, "_scan_lock") or self._scan_lock is None:
+            self._scan_lock = asyncio.Lock()
+
+        if self._scan_lock.locked():
+            if busy_ok and getattr(self, "_last_scan_results", None):
+                logger.info("Scan busy — cached results reused (%d)", len(self._last_scan_results))
+                return list(self._last_scan_results)
+            async with self._scan_lock:
+                return list(getattr(self, "_last_scan_results", []) or [])
+
+        async with self._scan_lock:
+            if self._is_scan_cache_fresh(cache_ttl):
+                return list(self._last_scan_results)
+
         # v9.3.3: 캐시가 10분 이상 경과했으면 초기화
-        if _t.monotonic() - getattr(self, '_ohlcv_cache_time', 0) > _OHLCV_CACHE_TTL:
-            self._ohlcv_cache.clear()
-            self._ohlcv_cache_time = _t.monotonic()
+            if _t.monotonic() - getattr(self, '_ohlcv_cache_time', 0) > _OHLCV_CACHE_TTL:
+                self._ohlcv_cache.clear()
+                self._ohlcv_cache_time = _t.monotonic()
         # v9.6.3: 캐시 크기 제한 (500종목 초과 시 정리)
-        if len(self._ohlcv_cache) > 500:
-            self._ohlcv_cache.clear()
-            self._ohlcv_cache_time = _t.monotonic()
+            if len(self._ohlcv_cache) > 500:
+                self._ohlcv_cache.clear()
+                self._ohlcv_cache_time = _t.monotonic()
 
-        macro = await self.macro_client.get_snapshot()
-        await self._update_sector_strengths()
+            macro = await self.macro_client.get_snapshot()
+            sector_cache_age = _t.monotonic() - getattr(self, "_sector_strengths_time", 0)
+            if not getattr(self, "_sector_strengths", None) or sector_cache_age > _SECTOR_STRENGTH_CACHE_TTL:
+                await self._update_sector_strengths()
+                self._sector_strengths_time = _t.monotonic()
 
-        # First pass: collect all 3-month returns for RS ranking
-        all_returns = []
-        pre_results = []
-        for stock in self.all_tickers:
+            scan_universe = self._build_scan_universe(max_tickers=max_tickers)
+
+            batched_ohlcv = {}
             try:
-                ohlcv = await self.yf_client.get_ohlcv(
-                    stock["code"], stock.get("market", "KOSPI")
-                )
-                if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
-                    self._ohlcv_cache[stock["code"]] = ohlcv
-                    close = ohlcv["close"].astype(float)
-                    lookback_3m = min(60, len(close) - 1)
-                    if lookback_3m > 0:
-                        ret = (close.iloc[-1] - close.iloc[-lookback_3m - 1]) / close.iloc[-lookback_3m - 1] * 100
-                        all_returns.append(float(ret))
-                        pre_results.append((stock, float(ret)))
+                batched_ohlcv = await self.yf_client.batch_download(scan_universe, period="6mo")
+            except Exception:
+                logger.debug("batch_download pre-scan failed", exc_info=True)
+
+            # First pass: collect all 3-month returns for RS ranking
+            all_returns = []
+            pre_results = []
+            for stock in scan_universe:
+                try:
+                    ohlcv = batched_ohlcv.get(stock["code"])
+                    if ohlcv is None or ohlcv.empty:
+                        ohlcv = await self.yf_client.get_ohlcv(
+                            stock["code"], stock.get("market", "KOSPI")
+                        )
+                    if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
+                        self._ohlcv_cache[stock["code"]] = ohlcv
+                        close = ohlcv["close"].astype(float)
+                        lookback_3m = min(60, len(close) - 1)
+                        if lookback_3m > 0:
+                            ret = (close.iloc[-1] - close.iloc[-lookback_3m - 1]) / close.iloc[-lookback_3m - 1] * 100
+                            all_returns.append(float(ret))
+                            pre_results.append((stock, float(ret)))
+                        else:
+                            pre_results.append((stock, 0.0))
                     else:
                         pre_results.append((stock, 0.0))
-                else:
+                except Exception:
+                    logger.debug("_run_scan pre-scan failed for %s", stock.get("code"), exc_info=True)
                     pre_results.append((stock, 0.0))
-            except Exception:
-                logger.debug("_run_scan pre-scan failed for %s", stock.get("code"), exc_info=True)
-                pre_results.append((stock, 0.0))
 
-        # v10.0: 사이클당 1회 한국 시장 데이터 수집 (전 종목 공유)
-        _ml_market_cache = {}
-        try:
-            _ml_market_cache["credit"] = self.db.get_credit_balance(days=3)
-            _ml_market_cache["program"] = self.db.get_program_trading(days=3)
-            _ml_market_cache["etf"] = self.db.get_etf_flow(days=3)
-            _ml_market_cache["youtube"] = self.db.get_youtube_mentioned_tickers(hours=48)
-            _ml_market_cache["news"] = self.db.get_recent_global_news(hours=48) if hasattr(self.db, "get_recent_global_news") else []
-            # 한국형 리스크 1회 계산
+            # v10.0: 사이클당 1회 한국 시장 데이터 수집 (전 종목 공유)
+            _ml_market_cache = {}
             try:
-                from kstock.signal.korea_risk import assess_korea_risk
-                kr = assess_korea_risk(
-                    credit_data=_ml_market_cache.get("credit"),
-                    etf_data=_ml_market_cache.get("etf"),
-                    program_data=_ml_market_cache.get("program"),
-                    vix=macro.vix if macro else 0,
-                    usdkrw=macro.usdkrw if macro else 0,
-                )
-                _ml_market_cache["korea_risk_score"] = kr.total_risk
+                _ml_market_cache["credit"] = self.db.get_credit_balance(days=3)
+                _ml_market_cache["program"] = self.db.get_program_trading(days=3)
+                _ml_market_cache["etf"] = self.db.get_etf_flow(days=3)
+                _ml_market_cache["youtube"] = self.db.get_youtube_mentioned_tickers(hours=48)
+                _ml_market_cache["news"] = self.db.get_recent_global_news(hours=48) if hasattr(self.db, "get_recent_global_news") else []
+                # 한국형 리스크 1회 계산
+                try:
+                    from kstock.signal.korea_risk import assess_korea_risk
+                    kr = assess_korea_risk(
+                        credit_data=_ml_market_cache.get("credit"),
+                        etf_data=_ml_market_cache.get("etf"),
+                        program_data=_ml_market_cache.get("program"),
+                        vix=macro.vix if macro else 0,
+                        usdkrw=macro.usdkrw if macro else 0,
+                    )
+                    _ml_market_cache["korea_risk_score"] = kr.total_risk
+                except Exception:
+                    logger.debug("korea_risk assessment failed", exc_info=True)
+                    _ml_market_cache["korea_risk_score"] = 0.0
             except Exception:
-                logger.debug("korea_risk assessment failed", exc_info=True)
-                _ml_market_cache["korea_risk_score"] = 0.0
-        except Exception:
-            logger.debug("ML market cache collection failed", exc_info=True)
+                logger.debug("ML market cache collection failed", exc_info=True)
 
-        # Second pass: full analysis with RS rank
-        results = []
-        for stock, ret_3m in pre_results:
-            try:
-                rs_rank, _ = compute_relative_strength_rank(ret_3m, all_returns)
-                r = await self._analyze_stock(
-                    stock["code"], stock["name"], macro,
-                    market=stock.get("market", "KOSPI"),
-                    sector=stock.get("sector", ""),
-                    category=stock.get("category", ""),
-                    rs_rank=rs_rank,
-                    rs_total=len(all_returns),
-                    ml_market_cache=_ml_market_cache,
-                )
-                if r:
-                    results.append(r)
-            except Exception as e:
-                logger.error("Scan error %s: %s", stock.get("code"), e)
-        results.sort(key=lambda r: r.score.composite, reverse=True)
-        return results
+            # Second pass: full analysis with RS rank
+            results = []
+            for stock, ret_3m in pre_results:
+                try:
+                    rs_rank, _ = compute_relative_strength_rank(ret_3m, all_returns)
+                    r = await self._analyze_stock(
+                        stock["code"], stock["name"], macro,
+                        market=stock.get("market", "KOSPI"),
+                        sector=stock.get("sector", ""),
+                        category=stock.get("category", ""),
+                        rs_rank=rs_rank,
+                        rs_total=len(all_returns),
+                        ml_market_cache=_ml_market_cache,
+                    )
+                    if r:
+                        results.append(r)
+                except Exception as e:
+                    logger.error("Scan error %s: %s", stock.get("code"), e)
+            results.sort(key=lambda r: r.score.composite, reverse=True)
+            self._last_scan_results = results
+            self._scan_cache_time = datetime.now(KST)
+            self._scan_backoff_until = None
+            logger.info("Scan complete: %d/%d tickers", len(results), len(scan_universe))
+            return results
 
     async def _analyze_stock(
         self, ticker: str, name: str, macro: MacroSnapshot,

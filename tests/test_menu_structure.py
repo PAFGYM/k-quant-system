@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kstock.bot.bot_imports import MAIN_MENU, MORE_MENU
+from kstock.bot.mixins.core_handlers import _normalize_menu_label
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +82,13 @@ class TestHandlerDispatch:
         from kstock.bot.bot import KQuantBot
         bot = KQuantBot.__new__(KQuantBot)
         assert hasattr(bot, "_action_notification_toggle")
+
+
+class TestMenuAliases:
+    def test_plain_korean_alias_normalization(self):
+        assert _normalize_menu_label("📊 분석") == "분석"
+        assert _normalize_menu_label("💰 잔고") == "잔고"
+        assert _normalize_menu_label("클로드") == "클로드"
 
 
 # ---------------------------------------------------------------------------
