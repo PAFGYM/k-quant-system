@@ -1565,6 +1565,7 @@ class SchedulerMixin:
             if not profile:
                 continue
             ticker = profile.get("ticker", "")
+            profile["day_change"] = self._backfill_profile_day_change(profile)
             if ticker == "122630":
                 leverage_change = float(profile.get("day_change", 0) or 0)
             elif ticker == "252670":
@@ -1583,6 +1584,47 @@ class SchedulerMixin:
             inverse_change_pct=inverse_change,
             program_data=(program_rows[0] if program_rows else None),
         )
+
+    def _backfill_profile_day_change(self, profile: dict) -> float:
+        """프로필의 당일 등락률이 비면 OHLCV 캐시 기준으로 보정."""
+        current = float(profile.get("day_change", 0) or 0)
+        if abs(current) >= 0.05:
+            return round(current, 1)
+
+        ticker = str(profile.get("ticker", "") or "").strip()
+        price = float(profile.get("price", 0) or 0)
+        if not ticker or price <= 0:
+            return round(current, 1)
+
+        try:
+            import pandas as _pd
+
+            ohlcv = getattr(self, "_ohlcv_cache", {}).get(ticker)
+            if ohlcv is None or getattr(ohlcv, "empty", True) or "close" not in ohlcv.columns:
+                return round(current, 1)
+
+            closes = _pd.to_numeric(ohlcv["close"], errors="coerce").dropna()
+            if closes.empty:
+                return round(current, 1)
+
+            prev_close = float(closes.iloc[-1])
+            if "date" in ohlcv.columns:
+                dates = _pd.to_datetime(ohlcv["date"], errors="coerce")
+            else:
+                dates = _pd.to_datetime(ohlcv.index, errors="coerce")
+            if len(closes) >= 2 and len(dates) >= 1:
+                last_date = dates.iloc[-1] if hasattr(dates, "iloc") else dates[-1]
+                if getattr(last_date, "date", lambda: None)() == datetime.now(KST).date():
+                    prev_close = float(closes.iloc[-2])
+
+            if prev_close <= 0:
+                return round(current, 1)
+
+            derived = ((price - prev_close) / prev_close) * 100
+            return round(derived, 1)
+        except Exception:
+            logger.debug("backfill profile day_change failed for %s", ticker, exc_info=True)
+            return round(current, 1)
 
     @staticmethod
     def _playbook_shortcuts(playbook) -> list[dict[str, str]]:

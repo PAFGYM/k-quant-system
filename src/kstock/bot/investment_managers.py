@@ -1439,7 +1439,10 @@ def _extract_scan_profile(scan_result) -> dict | None:
     )
     day_change = _safe_float(
         getattr(scan_result, "day_change_pct", None),
-        default=_safe_float(getattr(scan_result, "day_change", 0)),
+        default=_safe_float(
+            getattr(scan_result, "day_change", None),
+            default=_safe_float(getattr(info, "change_pct", 0)),
+        ),
     )
     drop_from_high = (
         ((price - tech.high_52w) / tech.high_52w) * 100

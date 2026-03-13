@@ -1,6 +1,6 @@
 """Tests for scheduler tactical flow/short context enrichment."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -82,3 +82,31 @@ def test_enrich_manager_candidates_with_flow_short_context_updates_score_and_rea
     assert "숏커버링" in candidate["fit_reasons"]
     assert "숏스퀴즈" in candidate["fit_reasons"]
     assert "숏커버" in candidate["action_hint"]
+
+
+def test_backfill_profile_day_change_uses_cached_ohlcv_when_intraday_change_missing():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin._ohlcv_cache = {
+        "039200": pd.DataFrame(
+            {
+                "date": ["2026-03-12", "2026-03-13"],
+                "close": [52000, 53000],
+            }
+        )
+    }
+
+    profile = {
+        "ticker": "039200",
+        "price": 58300,
+        "day_change": 0.0,
+    }
+
+    with patch("kstock.bot.mixins.scheduler.datetime") as mock_dt:
+        mock_now = MagicMock()
+        mock_now.date.return_value = pd.Timestamp("2026-03-13").date()
+        mock_dt.now.return_value = mock_now
+        day_change = SchedulerMixin._backfill_profile_day_change(mixin, profile)
+
+    assert day_change == 12.1
