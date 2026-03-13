@@ -1711,6 +1711,12 @@ def format_daily_actions(
                 lines.append(f"    \u2514 {manager_label} | {reason}")
             else:
                 lines.append(f"    \u2514 {reason}")
+            allocation_summary = str(item.get("allocation_summary", "") or "").strip()
+            if allocation_summary:
+                lines.append(f"    \u2514 {allocation_summary}")
+            allocation_split = str(item.get("allocation_split", "") or "").strip()
+            if allocation_split:
+                lines.append(f"    \u2514 분할: {allocation_split}")
             next_step = str(item.get("next_step", "") or "").strip()
             if next_step:
                 lines.append(f"    \u2514 다음 행동: {next_step}")

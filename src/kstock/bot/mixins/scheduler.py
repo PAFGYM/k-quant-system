@@ -3075,6 +3075,234 @@ class SchedulerMixin:
 
         return lane_bias, lines[:2]
 
+    def _load_daily_allocation_context(
+        self,
+        *,
+        holdings: list[dict],
+        macro,
+        alert_mode: str,
+    ) -> dict:
+        """액션콘솔용 개인화 비중/현금 운용 컨텍스트."""
+        total_value = 0.0
+        cash = 0.0
+        cash_known = False
+
+        try:
+            snapshots = (getattr(self, "db", None) and self.db.get_portfolio_snapshots(limit=1)) or []
+        except Exception:
+            logger.debug("daily allocation context snapshot load failed", exc_info=True)
+            snapshots = []
+
+        latest_snapshot = snapshots[0] if snapshots else {}
+        if latest_snapshot:
+            total_value = float(latest_snapshot.get("total_value", 0) or 0)
+            if latest_snapshot.get("cash") is not None:
+                cash = float(latest_snapshot.get("cash", 0) or 0)
+                cash_known = True
+
+        if getattr(self, "db", None) is not None and (total_value <= 0 or not cash_known):
+            try:
+                screenshot = self.db.get_latest_screenshot() or {}
+            except Exception:
+                logger.debug("daily allocation context screenshot load failed", exc_info=True)
+                screenshot = {}
+            if total_value <= 0:
+                total_value = float(screenshot.get("total_eval", 0) or 0)
+            if not cash_known and screenshot:
+                cash = float(screenshot.get("cash", 0) or 0)
+                cash_known = True
+
+        holdings_value = 0.0
+        lane_exposure: dict[str, float] = {}
+        for holding in holdings:
+            eval_amount = float(
+                holding.get("eval_amount", 0)
+                or (float(holding.get("current_price", 0) or 0) * float(holding.get("quantity", 0) or 0))
+                or 0
+            )
+            holdings_value += eval_amount
+            lane = self._normalize_morning_holding_type(
+                holding.get("holding_type", "") or holding.get("horizon", "")
+            )
+            if lane:
+                lane_exposure[lane] = lane_exposure.get(lane, 0.0) + eval_amount
+
+        if total_value <= 0:
+            total_value = holdings_value + (cash if cash_known else 0.0)
+        if total_value <= 0:
+            total_value = 200_000_000.0
+
+        if not cash_known:
+            cash = max(total_value - holdings_value, 0.0)
+            cash_known = cash > 0
+
+        current_cash_pct = (cash / total_value * 100.0) if total_value > 0 and cash >= 0 else 0.0
+
+        try:
+            from kstock.core.risk_policy import vix_adjusted_policy
+
+            policy = vix_adjusted_policy(float(getattr(macro, "vix", 20.0) or 20.0))
+        except Exception:
+            logger.debug("daily allocation context risk policy failed", exc_info=True)
+            policy = {
+                "cash_floor_pct": 15.0,
+                "new_buy_allowed": True,
+            }
+
+        cash_floor_pct = float(policy.get("cash_floor_pct", 15.0) or 15.0)
+        if alert_mode == "wartime":
+            cash_floor_pct = max(cash_floor_pct, 25.0)
+        elif alert_mode == "elevated":
+            cash_floor_pct = max(cash_floor_pct, 20.0)
+
+        lane_exposure_pct = {
+            key: round((value / total_value) * 100.0, 1)
+            for key, value in lane_exposure.items()
+            if total_value > 0 and value > 0
+        }
+
+        return {
+            "total_value": total_value,
+            "cash": cash,
+            "cash_known": cash_known,
+            "current_cash_pct": round(current_cash_pct, 1),
+            "cash_floor_pct": round(cash_floor_pct, 1),
+            "new_buy_allowed": bool(policy.get("new_buy_allowed", True)),
+            "lane_exposure_pct": lane_exposure_pct,
+        }
+
+    def _build_candidate_allocation_hint(
+        self,
+        *,
+        pick: dict,
+        mgr_key: str,
+        holdings: list[dict],
+        alert_mode: str,
+        allocation_context: dict,
+        manager_weight: float,
+    ) -> dict:
+        """후보별 초개인화 비중/현금/분할매수 힌트."""
+        current_price = float(
+            pick.get("price", 0)
+            or pick.get("current_price", 0)
+            or 0
+        )
+        total_value = float(allocation_context.get("total_value", 0) or 0)
+        if current_price <= 0 or total_value <= 0:
+            return {}
+
+        atr_defaults = {
+            "scalp": 1.8,
+            "swing": 2.4,
+            "position": 2.0,
+            "long_term": 1.6,
+            "tenbagger": 3.2,
+        }
+        atr_pct = float(
+            pick.get("atr_pct", 0)
+            or atr_defaults.get(mgr_key, 2.0)
+        )
+        day_change = abs(float(pick.get("day_change", 0) or 0))
+        if day_change > 0:
+            atr_pct = max(atr_pct, min(6.0, day_change * 0.6))
+
+        lane_caps = {
+            "scalp": 4.0,
+            "swing": 6.5,
+            "position": 8.5,
+            "long_term": 10.0,
+            "tenbagger": 5.5,
+        }
+        lane_cap_pct = float(lane_caps.get(mgr_key, 6.0))
+        if alert_mode == "wartime":
+            lane_cap_pct *= 0.75 if mgr_key in {"scalp", "swing"} else 0.88
+        elif alert_mode == "elevated":
+            lane_cap_pct *= 0.90
+
+        lane_exposure_pct = float(allocation_context.get("lane_exposure_pct", {}).get(mgr_key, 0.0) or 0.0)
+        if lane_exposure_pct >= lane_cap_pct * 1.5:
+            lane_cap_pct *= 0.65
+        elif lane_exposure_pct >= lane_cap_pct:
+            lane_cap_pct *= 0.82
+
+        from kstock.core.position_sizer import PositionSizer, plan_split_entry
+
+        sizer = PositionSizer(account_value=total_value, alert_mode=alert_mode)
+        conviction = sizer.calculate_conviction_size(
+            ticker=str(pick.get("ticker", "") or ""),
+            current_price=current_price,
+            composite_score=float(pick.get("composite", 0) or 0),
+            ensemble_confidence=float(pick.get("confidence_score", 0) or 0),
+            ensemble_agreement=min(1.0, 0.45 + (len(list(pick.get("fit_reasons") or [])) * 0.1)),
+            manager_weight=manager_weight,
+            atr_pct=atr_pct,
+            existing_weight=0.0,
+            sector_weight=min(0.60, lane_exposure_pct / 100.0),
+            name=str(pick.get("name", "") or ""),
+            holding_type=mgr_key,
+            shock_override_to_scalp=(alert_mode == "wartime" and mgr_key in {"scalp", "swing"}),
+        )
+
+        target_weight_pct = min(float(conviction.weight_pct or 0), lane_cap_pct)
+        target_weight_pct = max(1.5, round(target_weight_pct, 1))
+        budget_krw = round(total_value * (target_weight_pct / 100.0), -4)
+
+        current_cash_pct = float(allocation_context.get("current_cash_pct", 0) or 0)
+        cash_floor_pct = float(allocation_context.get("cash_floor_pct", 0) or 0)
+        cash_note = ""
+        if allocation_context.get("cash_known"):
+            if current_cash_pct <= cash_floor_pct + 1.0:
+                target_weight_pct = min(target_weight_pct, 2.5 if mgr_key == "tenbagger" else 3.5)
+                budget_krw = round(total_value * (target_weight_pct / 100.0), -4)
+                cash_note = "현금 부족: 교체매수/씨앗만"
+            elif current_cash_pct <= cash_floor_pct + 5.0:
+                target_weight_pct = min(target_weight_pct, 4.5 if mgr_key in {"position", "long_term"} else 3.5)
+                budget_krw = round(total_value * (target_weight_pct / 100.0), -4)
+                cash_note = "현금 여력 제한: 1차만"
+
+        if not bool(allocation_context.get("new_buy_allowed", True)):
+            target_weight_pct = min(target_weight_pct, 2.0)
+            budget_krw = round(total_value * (target_weight_pct / 100.0), -4)
+            cash_note = "리스크 모드: 씨앗 포지션만"
+
+        shares = max(1, int(budget_krw / current_price)) if budget_krw > 0 and current_price > 0 else 0
+        split_plan = plan_split_entry(
+            ticker=str(pick.get("ticker", "") or ""),
+            name=str(pick.get("name", "") or ""),
+            current_price=current_price,
+            atr_pct=atr_pct,
+            total_shares=shares,
+            holding_type=mgr_key,
+        )
+        entry_weights: list[float] = []
+        for entry in list(split_plan.entries or [])[:3]:
+            entry_value = float(entry.get("shares", 0) or 0) * float(entry.get("price", current_price) or current_price)
+            if total_value > 0 and entry_value > 0:
+                entry_weights.append(round(entry_value / total_value * 100.0, 1))
+
+        split_label = ""
+        if len(entry_weights) >= 3:
+            split_label = (
+                f"씨앗 {entry_weights[0]:.1f}% · 눌림 {entry_weights[1]:.1f}% · "
+                f"확인 {entry_weights[2]:.1f}%"
+            )
+        elif entry_weights:
+            split_label = " · ".join(f"{weight:.1f}%" for weight in entry_weights)
+
+        summary = f"권장 비중 {target_weight_pct:.1f}% · 기준 예산 {budget_krw:,.0f}원"
+        if cash_floor_pct > 0:
+            summary += f" · 현금 바닥 {cash_floor_pct:.0f}%"
+
+        return {
+            "weight_pct": target_weight_pct,
+            "budget_krw": budget_krw,
+            "cash_floor_pct": cash_floor_pct,
+            "current_cash_pct": current_cash_pct,
+            "allocation_summary": summary,
+            "allocation_split": split_label,
+            "allocation_note": cash_note,
+        }
+
     def _build_daily_candidate_actions(
         self,
         *,
@@ -3132,6 +3360,12 @@ class SchedulerMixin:
             for item in list(getattr(playbook, "short_squeeze_watch", []) or [])
         }
         lane_bias, _ = self._build_personalized_lane_bias(holdings=holdings)
+        scorecards = self._load_recent_manager_scorecards()
+        allocation_context = self._load_daily_allocation_context(
+            holdings=holdings,
+            macro=macro,
+            alert_mode=alert_mode,
+        )
         lane_bias["scalp"] *= 0.92 if alert_mode == "wartime" else 1.00
         lane_bias["swing"] *= 0.96 if alert_mode == "wartime" else 1.02
         lane_bias["position"] *= 1.05
@@ -3161,6 +3395,7 @@ class SchedulerMixin:
             rank_score = (fit_score * 1.8) + (composite * 0.4) + (confidence * 12.0)
             personal_bias = float(lane_bias.get(mgr_key, 1.0) or 1.0)
             rank_score *= personal_bias
+            manager_weight = float(scorecards.get(mgr_key, {}).get("weight_adj", 1.0) or 1.0)
             if personal_bias >= 1.08:
                 top_pick["personal_reason"] = "주호님 스타일과 잘 맞음"
             elif personal_bias <= 0.92:
@@ -3169,6 +3404,16 @@ class SchedulerMixin:
                 rank_score += 6.0
             if ticker in squeeze_tickers:
                 rank_score += 4.0
+            allocation_hint = self._build_candidate_allocation_hint(
+                pick=top_pick,
+                mgr_key=mgr_key,
+                holdings=holdings,
+                alert_mode=alert_mode,
+                allocation_context=allocation_context,
+                manager_weight=manager_weight,
+            )
+            if allocation_hint:
+                top_pick.update(allocation_hint)
             ranked.append((rank_score, mgr_key, top_pick))
 
         ranked.sort(key=lambda row: row[0], reverse=True)
@@ -3216,6 +3461,12 @@ class SchedulerMixin:
             else:
                 next_step = "시초 변동성 소화 후 분할 접근"
 
+            allocation_summary = str(pick.get("allocation_summary", "") or "").strip()
+            allocation_split = str(pick.get("allocation_split", "") or "").strip()
+            allocation_note = str(pick.get("allocation_note", "") or "").strip()
+            if allocation_note:
+                next_step = f"{next_step} · {allocation_note}" if next_step else allocation_note
+
             actions.append({
                 "priority": priority,
                 "ticker": ticker,
@@ -3228,6 +3479,8 @@ class SchedulerMixin:
                 "secondary_callback": f"mgr_tab:{mgr_key}",
                 "button_label": f"{manager.get('emoji', '📌')} {name} 후보",
                 "next_step": next_step,
+                "allocation_summary": allocation_summary,
+                "allocation_split": allocation_split,
             })
             if len(actions) >= 3:
                 break
@@ -3301,6 +3554,13 @@ class SchedulerMixin:
             clean = str(line or "").strip()
             if clean:
                 lines.append(clean)
+
+        actions_with_alloc = [a for a in actions if str(a.get("allocation_summary", "") or "").strip()]
+        if actions_with_alloc:
+            top_alloc = actions_with_alloc[0]
+            alloc_line = str(top_alloc.get("allocation_summary", "") or "").strip()
+            if alloc_line:
+                lines.append(f"오늘 예산: {alloc_line}")
 
         if playbook and getattr(playbook, "strong_stocks", None):
             names = ", ".join(

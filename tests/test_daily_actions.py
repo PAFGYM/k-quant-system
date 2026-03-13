@@ -184,3 +184,62 @@ def test_build_daily_candidate_actions_applies_personal_lane_bias():
     assert len(actions) >= 2
     assert actions[0]["ticker"] == "333333"
     assert "주호님 스타일과 잘 맞음" in actions[0]["reason"]
+
+
+def test_build_daily_candidate_actions_attaches_allocation_hint():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin.db = MagicMock()
+    mixin.db.get_portfolio_snapshots.return_value = [
+        {
+            "total_value": 200_000_000,
+            "cash": 60_000_000,
+        },
+    ]
+    mixin._last_scan_results = [object()]
+    mixin._build_personalized_lane_bias = MagicMock(
+        return_value=(
+            {"scalp": 1.0, "swing": 1.12, "position": 1.0, "long_term": 1.0, "tenbagger": 1.0},
+            ["개인화 우선 레인: 스윙 매니저, 포지션 매니저"],
+        )
+    )
+    mixin._enrich_manager_candidates_with_flow_short_context = MagicMock(side_effect=lambda data, macro: data)
+    mixin._build_manager_fast_context = MagicMock(return_value={})
+    mixin._enrich_manager_candidates_with_fast_context = MagicMock(side_effect=lambda data, fast_context: data)
+    mixin._build_manager_herd_signals = MagicMock(return_value=({}, []))
+    mixin._enrich_manager_candidates_with_herd_context = MagicMock(side_effect=lambda data, herd_map: data)
+    mixin._enrich_manager_candidates_with_operator_memory = MagicMock(
+        return_value=(
+            {
+                "swing": [{
+                    "ticker": "333333",
+                    "name": "스윙주",
+                    "price": 50_000,
+                    "fit_score": 82,
+                    "composite": 74,
+                    "confidence_score": 0.72,
+                    "fit_reasons": ["눌림목 반등", "기관 순매수"],
+                    "action_hint": "반등 확인 후 분할 진입",
+                    "day_change": 1.8,
+                }],
+            },
+            SimpleNamespace(manager_focus=[]),
+        )
+    )
+
+    with patch(
+        "kstock.bot.investment_managers.filter_discovery_candidates",
+        side_effect=lambda scan_results, manager_key, exclude: [{"ticker": "333333"}] if manager_key == "swing" else [],
+    ):
+        actions = mixin._build_daily_candidate_actions(
+            holdings=[],
+            macro=_make_macro(),
+            playbook=None,
+            alert_mode="normal",
+        )
+
+    assert actions
+    assert "권장 비중" in actions[0]["allocation_summary"]
+    assert "현금 바닥" in actions[0]["allocation_summary"]
+    assert "씨앗" in actions[0]["allocation_split"]

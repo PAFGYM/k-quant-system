@@ -354,3 +354,21 @@ def test_format_daily_actions_renders_coach_lines_and_next_step():
     assert "기본 태세: 변동성 소화 후 강한 종목 선별" in text
     assert "회피: 지수 레버리지 추격" in text
     assert "다음 행동: 시초 추격 대신 2회 분할 접근" in text
+
+
+def test_format_daily_actions_renders_allocation_lines():
+    text = format_daily_actions(
+        [
+            {
+                "priority": "opportunity",
+                "name": "성장주",
+                "action": "씨앗 포지션 검토",
+                "reason": "정책 이벤트 · 초기 수급 유입",
+                "allocation_summary": "권장 비중 5.0% · 기준 예산 10,000,000원 · 현금 바닥 20%",
+                "allocation_split": "씨앗 2.5% · 눌림 1.5% · 확인 1.0%",
+            },
+        ],
+    )
+
+    assert "권장 비중 5.0%" in text
+    assert "분할: 씨앗 2.5%" in text
