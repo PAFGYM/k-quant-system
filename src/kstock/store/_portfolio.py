@@ -589,7 +589,8 @@ class PortfolioMixin:
     def get_portfolio_snapshots(self, limit: int = 30) -> list[dict]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM portfolio_snapshots ORDER BY date DESC LIMIT ?",
+                "SELECT * FROM portfolio_snapshots "
+                "ORDER BY date DESC, created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]

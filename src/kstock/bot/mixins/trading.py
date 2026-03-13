@@ -1166,57 +1166,164 @@ class TradingMixin:
         for item in self.all_tickers:
             if item["name"] == name:
                 return item["code"]
+        # 1-2. 텐베거/확장 설정에서 추가 탐색
+        try:
+            cfg_path = Path("config/tenbagger.yaml")
+            if cfg_path.exists():
+                cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                for item in cfg.get("korea_universe", []) or []:
+                    if item.get("name") == name and item.get("code"):
+                        return str(item["code"])
+                for item in cfg.get("excluded", []) or []:
+                    if item.get("name") == name and item.get("code"):
+                        return str(item["code"])
+        except Exception:
+            logger.debug("_resolve_ticker_from_name tenbagger lookup failed", exc_info=True)
         # 2. DB 보유종목에서 이름+ticker 매치
         existing = self.db.get_holding_by_name(name)
         if existing and existing.get("ticker"):
             return existing["ticker"]
         return ""
 
+    @staticmethod
+    def _parse_iso_ts(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _has_meaningful_screenshot_items(items: list[dict]) -> bool:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            has_identity = bool(str(item.get("name", "") or "").strip()) or bool(
+                str(item.get("ticker", "") or "").strip()
+            )
+            has_value = any(
+                float(item.get(key, 0) or 0) > 0
+                for key in ("quantity", "avg_price", "current_price", "eval_amount")
+            )
+            if has_identity and has_value:
+                return True
+        return False
+
+    def _manager_lane_for_holding(self, holding: dict | None) -> str:
+        """잔고/코칭용 매니저 lane 정규화."""
+        raw = str(
+            (holding or {}).get("holding_type")
+            or (holding or {}).get("horizon")
+            or "auto"
+        ).strip()
+        if raw in {"scalp", "swing", "position", "long_term", "tenbagger"}:
+            return raw
+        purchase_type = str((holding or {}).get("purchase_type", "") or "")
+        pnl_pct = float((holding or {}).get("pnl_pct", 0) or 0)
+        if "유융" in purchase_type or "신용" in purchase_type:
+            return "swing"
+        if pnl_pct >= 20:
+            return "position"
+        return "swing"
+
+    def _manager_coaching_text(self, holding: dict) -> tuple[str, str]:
+        lane = self._manager_lane_for_holding(holding)
+        label_map = {
+            "scalp": "⚡ 단타 매니저",
+            "swing": "🔥 스윙 매니저",
+            "position": "📊 포지션 매니저",
+            "long_term": "💎 장기 매니저",
+            "tenbagger": "🚀 텐베거 매니저",
+        }
+        pnl = float(holding.get("pnl_pct", 0) or 0)
+        current_price = float(holding.get("current_price", 0) or 0)
+        target_1 = float(holding.get("target_1", 0) or 0)
+        target_2 = float(holding.get("target_2", 0) or 0)
+        stop_price = float(holding.get("stop_price", 0) or 0)
+
+        if stop_price > 0 and current_price > 0 and current_price <= stop_price:
+            message = f"손절선 근접, 축소·교체 우선 (손절 {stop_price:,.0f}원)"
+        elif target_2 > 0 and current_price >= target_2:
+            message = f"2차 목표권, 추세 유지면 분할익절 검토 (목표 {target_2:,.0f}원)"
+        elif target_1 > 0 and current_price >= target_1:
+            message = f"1차 목표권, 일부 익절 또는 본전컷 상향 (목표 {target_1:,.0f}원)"
+        elif lane == "long_term":
+            message = "스토리 훼손 전까지 핵심 보유, 급락만 경계"
+        elif lane == "tenbagger":
+            message = "촉매·정책·이벤트 유지 여부를 계속 추적"
+        elif lane == "position":
+            message = "중기 추세 유지 여부 점검, 눌림 시만 추가"
+        elif lane == "scalp":
+            message = "장중 추세 약해지면 빠르게 비중 축소"
+        elif pnl < 0:
+            message = "반등 확인 전 추매 금지, 교체 후보와 비교"
+        else:
+            message = "추세 유지 확인 후 보유, 눌림 구간만 분할 대응"
+
+        return label_map.get(lane, "📌 종합 매니저"), message
+
     async def _load_holdings_with_fallback(self) -> list[dict]:
         """보유종목 로드 (DB 우선, 없으면 스크린샷 fallback → DB 동기화).
 
         [v3.5.5] 빈 ticker를 유니버스에서 해결 시도.
         [v3.6.2] 스크린샷 fallback 시 holdings DB에 자동 동기화.
-        [v3.10] sold 이력이 있으면 스크린샷 fallback 스킵 (삭제 종목 부활 방지).
+        [v13.1] 최신 스크린샷이 sold 이력보다 최신이면 잔고 복구 허용.
         """
         holdings = self.db.get_active_holdings()
+        restored_from_screenshot = False
+        screenshot_items: list[dict] = []
+        screenshot: dict = {}
         if not holdings:
-            # sold 이력이 있으면 유저가 의도적으로 삭제한 것 → fallback 스킵
-            has_sold = False
+            try:
+                screenshot = self.db.get_latest_screenshot() or {}
+                if screenshot:
+                    import json
+
+                    raw = screenshot.get("holdings_json", "")
+                    screenshot_items = json.loads(raw) if isinstance(raw, str) and raw else []
+            except Exception as e:
+                logger.warning("Screenshot holdings fallback failed: %s", e)
+                screenshot_items = []
+
+            latest_sold_at = None
             try:
                 with self.db._connect() as conn:
                     row = conn.execute(
-                        "SELECT COUNT(*) as cnt FROM holdings WHERE status='sold'"
+                        "SELECT MAX(COALESCE(updated_at, created_at, buy_date)) AS sold_ts "
+                        "FROM holdings WHERE status='sold'"
                     ).fetchone()
-                    has_sold = (row["cnt"] if row else 0) > 0
+                    latest_sold_at = self._parse_iso_ts((row["sold_ts"] if row else None))
             except Exception:
-                logger.debug("_get_kis_holdings sold check DB query failed", exc_info=True)
-            if has_sold:
-                return []
-            try:
-                screenshot = self.db.get_latest_screenshot()
-                if screenshot:
-                    import json
-                    raw = screenshot.get("holdings_json", "")
-                    items = json.loads(raw) if isinstance(raw, str) and raw else []
-                    if items:
-                        holdings = [
-                            {
-                                "ticker": h.get("ticker", ""),
-                                "name": h.get("name", ""),
-                                "buy_price": h.get("avg_price", 0),
-                                "current_price": h.get("current_price", 0),
-                                "quantity": h.get("quantity", 0),
-                                "pnl_pct": h.get("profit_pct", 0),
-                                "eval_amount": h.get("eval_amount", 0),
-                                "purchase_type": h.get("purchase_type", ""),
-                                "is_margin": h.get("is_margin", 0),
-                                "margin_type": h.get("margin_type", ""),
-                            }
-                            for h in items
-                        ]
-            except Exception as e:
-                logger.warning("Screenshot holdings fallback failed: %s", e)
+                logger.debug("_load_holdings_with_fallback sold timestamp query failed", exc_info=True)
+
+            screenshot_ts = self._parse_iso_ts(
+                screenshot.get("recognized_at") or screenshot.get("created_at") or ""
+            )
+            can_restore_from_screenshot = self._has_meaningful_screenshot_items(screenshot_items) and (
+                latest_sold_at is None
+                or screenshot_ts is None
+                or screenshot_ts >= latest_sold_at
+            )
+            if can_restore_from_screenshot:
+                holdings = [
+                    {
+                        "ticker": h.get("ticker", ""),
+                        "name": h.get("name", ""),
+                        "buy_price": h.get("avg_price", 0),
+                        "current_price": h.get("current_price", 0),
+                        "quantity": h.get("quantity", 0),
+                        "pnl_pct": h.get("profit_pct", 0),
+                        "eval_amount": h.get("eval_amount", 0),
+                        "purchase_type": h.get("purchase_type", ""),
+                        "is_margin": h.get("is_margin", 0),
+                        "margin_type": h.get("margin_type", ""),
+                        "holding_type": h.get("holding_type", "auto"),
+                    }
+                    for h in screenshot_items
+                    if isinstance(h, dict)
+                ]
+                restored_from_screenshot = bool(holdings)
 
         # [v3.5.5] 빈 ticker를 유니버스에서 해결 시도
         for h in holdings:
@@ -1230,6 +1337,7 @@ class TradingMixin:
         # [v3.6.3 FIX] 한국 종목코드(6자리 숫자)만 동기화 — 미국주식 오등록 방지
         import re
         synced = False
+        synced_count = 0
         for h in holdings:
             ticker = h.get("ticker", "")
             if ticker and re.match(r'^\d{6}$', ticker) and h.get("name"):
@@ -1244,15 +1352,80 @@ class TradingMixin:
                         current_price=h.get("current_price", 0),
                         pnl_pct=h.get("pnl_pct", 0),
                         eval_amount=h.get("eval_amount", 0),
+                        holding_type=h.get("holding_type", "auto") or "auto",
                         purchase_type=purchase_type,
                         is_margin=h.get("is_margin", is_margin),
                         margin_type=h.get("margin_type", margin_type or ""),
                     )
                     synced = True
+                    synced_count += 1
                 except Exception:
                     logger.debug("_get_kis_holdings DB sync failed for %s", h.get("ticker"), exc_info=True)
         if synced:
-            logger.debug("Holdings synced to DB: %d items", len(holdings))
+            logger.debug("Holdings synced to DB: %d items", synced_count)
+            try:
+                db_holdings = self.db.get_active_holdings()
+                if db_holdings:
+                    holdings = db_holdings
+            except Exception:
+                logger.debug("_load_holdings_with_fallback active holdings reload failed", exc_info=True)
+
+        if restored_from_screenshot and screenshot:
+            try:
+                snapshots = self.db.get_portfolio_snapshots(limit=1)
+                latest_snapshot = snapshots[0] if snapshots else {}
+                latest_snapshot_value = float(latest_snapshot.get("total_value", 0) or 0)
+                latest_snapshot_count = int(latest_snapshot.get("holdings_count", 0) or 0)
+                latest_snapshot_at = self._parse_iso_ts(
+                    latest_snapshot.get("created_at") or latest_snapshot.get("date") or ""
+                )
+                screenshot_ts = self._parse_iso_ts(
+                    screenshot.get("recognized_at") or screenshot.get("created_at") or ""
+                )
+                screenshot_total = float(screenshot.get("total_eval", 0) or 0)
+                computed_total = sum(
+                    float(item.get("eval_amount", 0) or 0)
+                    or (
+                        float(item.get("current_price", 0) or 0)
+                        * int(item.get("quantity", 0) or 0)
+                    )
+                    for item in (screenshot_items or holdings)
+                    if isinstance(item, dict)
+                )
+                if computed_total > 0:
+                    gap_ratio = abs(screenshot_total - computed_total) / computed_total if screenshot_total else 1.0
+                    if screenshot_total <= 0 or gap_ratio >= 0.25:
+                        screenshot_total = computed_total
+                screenshot_cash = float(screenshot.get("cash", 0) or 0)
+                needs_snapshot_sync = (
+                    screenshot_total > 0
+                    and (
+                        not latest_snapshot
+                        or latest_snapshot_value <= 0
+                        or latest_snapshot_count <= 0
+                        or (
+                            screenshot_ts is not None
+                            and latest_snapshot_at is not None
+                            and screenshot_ts > latest_snapshot_at
+                        )
+                    )
+                )
+                if needs_snapshot_sync:
+                    snapshot_date = (
+                        screenshot_ts.astimezone(KST).strftime("%Y-%m-%d")
+                        if screenshot_ts is not None and screenshot_ts.tzinfo is not None
+                        else (screenshot_ts.strftime("%Y-%m-%d") if screenshot_ts else datetime.now(KST).strftime("%Y-%m-%d"))
+                    )
+                    self.db.add_portfolio_snapshot(
+                        date_str=snapshot_date,
+                        total_value=screenshot_total,
+                        cash=screenshot_cash,
+                        holdings_count=len(holdings),
+                        total_pnl_pct=float(screenshot.get("total_profit_pct", 0) or 0),
+                        holdings_json=json.dumps(screenshot_items or holdings, ensure_ascii=False),
+                    )
+            except Exception:
+                logger.debug("_load_holdings_with_fallback portfolio snapshot sync failed", exc_info=True)
 
         return holdings
 
@@ -1408,6 +1581,9 @@ class TradingMixin:
                 day_sign = "+" if day_chg_pct > 0 else ""
                 line += f"\n   오늘 {day_emoji} {day_sign}{day_chg:,.0f}원 ({day_sign}{day_chg_pct:.1f}%)"
 
+            manager_label, manager_tip = self._manager_coaching_text(h)
+            line += f"\n   {manager_label} | {manager_tip}"
+
             # 상황별 종목 액션 가이드
             if alert_mode == "wartime":
                 stop_price = bp * 0.95
@@ -1470,12 +1646,13 @@ class TradingMixin:
         for h in holdings[:5]:
             ticker = h.get("ticker", "")
             hname = h.get("name", ticker)
-            ht = h.get("holding_type", "swing")
+            ht = self._manager_lane_for_holding(h)
             if ticker:
                 # 매니저 아이콘 매핑
                 mgr_emoji = {
                     "scalp": "⚡", "swing": "🔥",
                     "position": "📊", "long_term": "💎",
+                    "tenbagger": "🚀",
                 }.get(ht, "📌")
                 row = [
                     InlineKeyboardButton(

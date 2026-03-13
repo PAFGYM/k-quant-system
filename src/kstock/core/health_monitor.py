@@ -414,6 +414,21 @@ _MANAGER_PIPELINE_SPECS: dict[str, dict[str, float | str]] = {
 _HEALTHY_JOB_STATUSES = {"success", "skip"}
 
 
+def _manager_jobs_expected_now() -> bool:
+    """매니저 잡이 현재 시점에 실제로 기대되는 시간대인지 판단한다."""
+    try:
+        from kstock.core.market_calendar import is_kr_market_open
+        from kstock.core.tz import KST
+
+        now_kst = datetime.now(KST)
+        if not is_kr_market_open(now_kst.date()):
+            return False
+        return (now_kst.hour, now_kst.minute) >= (7, 20)
+    except Exception:
+        logger.debug("manager jobs expected check failed", exc_info=True)
+        return True
+
+
 def check_manager_pipeline(db_path: str | Path) -> HealthCheck:
     """매니저 관련 핵심 잡들이 최근 정상 실행됐는지 확인한다."""
     check = HealthCheck(
@@ -435,6 +450,7 @@ def check_manager_pipeline(db_path: str | Path) -> HealthCheck:
             failed: list[str] = []
             healthy: list[str] = []
             now = datetime.now()
+            jobs_expected_now = _manager_jobs_expected_now()
 
             for job_name, spec in _MANAGER_PIPELINE_SPECS.items():
                 label = str(spec["label"])
@@ -446,7 +462,8 @@ def check_manager_pipeline(db_path: str | Path) -> HealthCheck:
                     (job_name,),
                 ).fetchone()
                 if not row:
-                    missing.append(label)
+                    if jobs_expected_now:
+                        missing.append(label)
                     continue
 
                 status = (row["status"] or "").lower()
@@ -490,6 +507,9 @@ def check_manager_pipeline(db_path: str | Path) -> HealthCheck:
                 if missing:
                     parts.append("미실행=" + ", ".join(missing[:2]))
                 check.message = "매니저 파이프라인 점검 필요: " + " | ".join(parts)
+            elif not jobs_expected_now and not healthy:
+                check.status = "ok"
+                check.message = "매니저 파이프라인 대기: 휴장/프리마켓 시간"
             else:
                 check.status = "ok"
                 check.message = (

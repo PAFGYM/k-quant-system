@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+
+class _FakeDB:
+    def __init__(self, tmp_path: Path) -> None:
+        self.db_file = tmp_path / "holdings.db"
+        self._make_schema()
+        self.active_holdings: list[dict] = []
+        self.snapshots: list[dict] = []
+        self.latest_screenshot = {
+            "recognized_at": "2026-03-13T15:26:03.862983",
+            "created_at": "2026-03-13T15:26:03.862983",
+            "total_eval": 103_925_550,
+            "cash": 34_855_921,
+            "total_profit_pct": -1.82,
+            "holdings_json": json.dumps(
+                [
+                    {
+                        "name": "비에이치아이",
+                        "ticker": "",
+                        "quantity": 812,
+                        "avg_price": 104_886,
+                        "current_price": 102_900,
+                        "profit_pct": -2.12,
+                        "eval_amount": 83_554_800,
+                        "purchase_type": "현금",
+                    },
+                    {
+                        "name": "우진",
+                        "ticker": "",
+                        "quantity": 827,
+                        "avg_price": 27_950,
+                        "current_price": 28_250,
+                        "profit_pct": 0.84,
+                        "eval_amount": 23_362_750,
+                        "purchase_type": "현금",
+                    },
+                    {
+                        "name": "씨에스윈드",
+                        "ticker": "",
+                        "quantity": 1_760,
+                        "avg_price": 56_700,
+                        "current_price": 55_000,
+                        "profit_pct": -3.24,
+                        "eval_amount": 96_800_000,
+                        "purchase_type": "유융",
+                    },
+                ],
+                ensure_ascii=False,
+            ),
+        }
+
+    def _make_schema(self) -> None:
+        conn = sqlite3.connect(str(self.db_file))
+        conn.execute(
+            """
+            CREATE TABLE holdings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT,
+                name TEXT,
+                status TEXT,
+                buy_date TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                purchase_type TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO holdings (ticker, name, status, buy_date, created_at, updated_at, purchase_type)
+            VALUES ('247540', '에코프로비엠', 'sold', '2026-03-10', '2026-03-12T07:00:00', '2026-03-12T07:00:00', '현금')
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def _connect(self):
+        conn = sqlite3.connect(str(self.db_file))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def get_active_holdings(self) -> list[dict]:
+        return list(self.active_holdings)
+
+    def get_latest_screenshot(self) -> dict:
+        return dict(self.latest_screenshot)
+
+    def get_holding_by_name(self, name: str) -> dict | None:
+        for row in self.active_holdings:
+            if row.get("name") == name:
+                return row
+        return None
+
+    def upsert_holding(self, **kwargs):
+        self.active_holdings.append(
+            {
+                "ticker": kwargs["ticker"],
+                "name": kwargs["name"],
+                "quantity": kwargs.get("quantity", 0),
+                "buy_price": kwargs.get("buy_price", 0),
+                "current_price": kwargs.get("current_price", 0),
+                "pnl_pct": kwargs.get("pnl_pct", 0),
+                "eval_amount": kwargs.get("eval_amount", 0),
+                "holding_type": kwargs.get("holding_type", "auto"),
+                "purchase_type": kwargs.get("purchase_type", ""),
+                "is_margin": kwargs.get("is_margin", 0),
+                "margin_type": kwargs.get("margin_type", ""),
+            }
+        )
+        return len(self.active_holdings)
+
+    def get_portfolio_snapshots(self, limit: int = 1) -> list[dict]:
+        return list(self.snapshots[:limit])
+
+    def add_portfolio_snapshot(self, **kwargs):
+        self.snapshots.insert(0, dict(kwargs))
+        return len(self.snapshots)
+
+
+@pytest.mark.asyncio
+async def test_load_holdings_with_fallback_restores_newer_screenshot(tmp_path):
+    from kstock.bot.mixins.trading import TradingMixin
+
+    mixin = TradingMixin.__new__(TradingMixin)
+    mixin.db = _FakeDB(tmp_path)
+    mixin.all_tickers = [
+        {"code": "083650", "name": "비에이치아이"},
+        {"code": "105840", "name": "우진"},
+        {"code": "112610", "name": "씨에스윈드"},
+    ]
+
+    holdings = await mixin._load_holdings_with_fallback()
+
+    assert [h["ticker"] for h in holdings] == ["083650", "105840", "112610"]
+    assert len(mixin.db.active_holdings) == 3
+    assert mixin.db.snapshots
+    assert mixin.db.snapshots[0]["total_value"] == 203_717_550
+    assert mixin.db.snapshots[0]["holdings_count"] == 3
+
+
+def test_build_balance_buttons_maps_auto_to_real_manager(tmp_path):
+    from kstock.bot.mixins.trading import TradingMixin
+
+    mixin = TradingMixin.__new__(TradingMixin)
+    mixin.db = _FakeDB(tmp_path)
+
+    buttons = mixin._build_balance_buttons(
+        [{"ticker": "083650", "name": "비에이치아이", "holding_type": "auto"}]
+    )
+
+    analysis_button = buttons[1][0]
+    assert analysis_button.callback_data == "mgr:swing:083650"

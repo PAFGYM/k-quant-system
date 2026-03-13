@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+import kstock.core.health_monitor as health_monitor
 from kstock.core.health_monitor import (
     HealthCheck,
     run_health_checks,
@@ -228,6 +229,26 @@ class TestCheckManagerPipeline:
         result = check_manager_pipeline(db_file)
         assert result.status in {"warning", "error"}
         assert "매니저" in result.message
+
+    def test_missing_jobs_are_ok_during_weekend_premarket(self, tmp_path, monkeypatch):
+        db_file = tmp_path / "manager_weekend.db"
+        conn = self._make_job_runs_table(db_file)
+        conn.commit()
+        conn.close()
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                base = datetime(2026, 3, 14, 0, 26)
+                if tz is not None:
+                    return base.replace(tzinfo=tz)
+                return base
+
+        monkeypatch.setattr(health_monitor, "datetime", FrozenDateTime)
+
+        result = check_manager_pipeline(db_file)
+        assert result.status == "ok"
+        assert "대기" in result.message
 
 
 # =========================================================================
