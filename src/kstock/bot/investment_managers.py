@@ -1561,13 +1561,44 @@ def _evaluate_manager_candidate(manager_key: str, p: dict) -> tuple[bool, float,
         if p["inst_days"] >= 1:
             score += 8.0
             _append_reason(reasons, True, f"기관 순매수 {p['inst_days']}일")
-        if p["crowd_signal"] == "개미 과열 경계":
+        elif p["foreign_days"] >= 1:
+            score += 5.0
+            _append_reason(reasons, True, f"외인 순매수 {p['foreign_days']}일")
+        if p["composite"] >= 60:
+            score += min(10.0, (p["composite"] - 55) * 0.5)
+            _append_reason(reasons, True, f"종합점수 {p['composite']:.0f}")
+        if p["return_3m"] >= 5:
+            score += 6.0
+            _append_reason(reasons, True, f"3개월 RS {p['return_3m']:+.1f}%")
+        elif p["return_3m"] <= -18:
             score -= 8.0
-        action = "반등 확인 후 2~3회 분할 진입"
+            _append_reason(reasons, True, f"3개월 RS {p['return_3m']:+.1f}% 약세")
+        if price_above_ma20:
+            score += 6.0
+            _append_reason(reasons, True, "20일선 회복")
+        elif p["price"] > 0 and p["ma20"] > 0 and p["price"] <= p["ma20"] * 0.92:
+            score -= 8.0
+        if p["day_change"] >= 6:
+            score -= 10.0
+            _append_reason(reasons, True, f"당일 {p['day_change']:+.1f}% 급등 추격 주의")
+        if p["crowd_signal"] == "진성 수급 동행":
+            score += 4.0
+            _append_reason(reasons, True, "진성 수급 동행")
+        elif p["crowd_signal"] in {"개미 과열 경계", "리딩방 급행 주의"}:
+            score -= 10.0
+            _append_reason(reasons, True, p["crowd_signal"])
+        action = (
+            "20일선 회복과 수급 확인 후 2~3회 분할 진입"
+            if price_above_ma20 else
+            "반등 캔들·수급 확인 후 2~3회 분할 진입"
+        )
         match = (
-            score >= 54
+            score >= 58
             and 25 <= p["rsi"] <= 55
             and p["bb_pctb"] <= 0.55
+            and p["composite"] >= 58
+            and p["day_change"] < 6
+            and (p["inst_days"] >= 1 or p["foreign_days"] >= 1 or p["crowd_signal"] == "진성 수급 동행")
             and (p["macd_cross"] > 0 or p["recovery_score"] >= 35 or p["rsi_divergence"] > 0)
         )
 

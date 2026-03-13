@@ -10,7 +10,7 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from kstock.core.tz import KST
 
@@ -1043,3 +1043,218 @@ def compute_rolling_metrics(
         ))
 
     return metrics
+
+
+# ---------------------------------------------------------------------------
+# 10. Shadow portfolio validation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ShadowTradeResult:
+    """Single realized trade in a conservative shadow portfolio."""
+
+    ticker: str
+    name: str
+    manager_key: str
+    rec_date: str
+    exit_date: str
+    allocation_pct: float
+    gross_return_pct: float
+    net_return_pct: float
+    nav_after: float
+
+
+@dataclass
+class ShadowPortfolioSummary:
+    """Portfolio-like validation summary built from recommendation results."""
+
+    initial_nav: float = 100.0
+    ending_nav: float = 100.0
+    total_return_pct: float = 0.0
+    trades_considered: int = 0
+    trades_taken: int = 0
+    win_rate_pct: float = 0.0
+    avg_trade_return_pct: float = 0.0
+    max_drawdown_pct: float = 0.0
+    max_positions: int = 4
+    position_size_pct: float = 20.0
+    cash_buffer_pct: float = 20.0
+    round_trip_cost_pct: float = 0.35
+    strongest_manager: str = ""
+    weakest_manager: str = ""
+    trade_results: list[ShadowTradeResult] = field(default_factory=list)
+
+
+def simulate_shadow_portfolio(
+    recommendations: list[dict],
+    manager_weights: dict[str, float] | None = None,
+    *,
+    initial_nav: float = 100.0,
+    max_positions: int = 4,
+    position_size_pct: float = 20.0,
+    cash_buffer_pct: float = 20.0,
+    round_trip_cost_pct: float = 0.35,
+) -> ShadowPortfolioSummary:
+    """Simulate a conservative portfolio from evaluated recommendations.
+
+    Expected row fields:
+    - ticker, name
+    - rec_date or created_at
+    - manager_key
+    - rec_score
+    - day5_return (percent units)
+    """
+    summary = ShadowPortfolioSummary(
+        initial_nav=initial_nav,
+        ending_nav=initial_nav,
+        max_positions=max_positions,
+        position_size_pct=position_size_pct,
+        cash_buffer_pct=cash_buffer_pct,
+        round_trip_cost_pct=round_trip_cost_pct,
+    )
+    if not recommendations:
+        return summary
+
+    manager_weights = manager_weights or {}
+    deployable_pct = max(0.0, 100.0 - cash_buffer_pct)
+    slot_pct = min(position_size_pct, deployable_pct / max(max_positions, 1))
+
+    def _parse_dt(raw: str) -> datetime:
+        return datetime.strptime(str(raw or "")[:10], "%Y-%m-%d")
+
+    normalized: list[dict] = []
+    for row in recommendations:
+        try:
+            day5_return = row.get("day5_return")
+            if day5_return is None:
+                continue
+            rec_dt = _parse_dt(str(row.get("rec_date") or row.get("created_at") or ""))
+            normalized.append({
+                "ticker": str(row.get("ticker") or ""),
+                "name": str(row.get("name") or row.get("ticker") or ""),
+                "manager_key": str(row.get("manager_key") or ""),
+                "rec_date": rec_dt,
+                "rec_date_text": rec_dt.strftime("%Y-%m-%d"),
+                "exit_date": rec_dt + timedelta(days=5),
+                "rec_score": float(row.get("rec_score") or 0.0),
+                "day5_return": float(day5_return or 0.0),
+            })
+        except Exception:
+            logger.debug("shadow normalize failed", exc_info=True)
+
+    if not normalized:
+        return summary
+
+    normalized.sort(
+        key=lambda row: (
+            row["rec_date"],
+            -(row["rec_score"] * float(manager_weights.get(row["manager_key"], 1.0) or 1.0)),
+            row["ticker"],
+        ),
+    )
+    summary.trades_considered = len(normalized)
+
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in normalized:
+        grouped[row["rec_date_text"]].append(row)
+
+    nav = float(initial_nav)
+    nav_curve = [float(initial_nav)]
+    active_positions: list[dict] = []
+    manager_returns: dict[str, list[float]] = defaultdict(list)
+
+    def _realize_until(cutoff: datetime) -> None:
+        nonlocal nav
+        remaining: list[dict] = []
+        for pos in active_positions:
+            if pos["exit_date"] > cutoff:
+                remaining.append(pos)
+                continue
+            pnl = pos["stake"] * (pos["net_return_pct"] / 100.0)
+            nav += pnl
+            manager_returns[pos["manager_key"]].append(pos["net_return_pct"])
+            summary.trade_results.append(ShadowTradeResult(
+                ticker=pos["ticker"],
+                name=pos["name"],
+                manager_key=pos["manager_key"],
+                rec_date=pos["rec_date_text"],
+                exit_date=pos["exit_date"].strftime("%Y-%m-%d"),
+                allocation_pct=pos["allocation_pct"],
+                gross_return_pct=pos["gross_return_pct"],
+                net_return_pct=pos["net_return_pct"],
+                nav_after=round(nav, 4),
+            ))
+            nav_curve.append(round(nav, 6))
+        active_positions[:] = remaining
+
+    for rec_date_text in sorted(grouped):
+        rec_dt = _parse_dt(rec_date_text)
+        _realize_until(rec_dt)
+
+        used_tickers = {pos["ticker"] for pos in active_positions}
+        open_slots = max(0, max_positions - len(active_positions))
+        if open_slots <= 0:
+            continue
+
+        taken = 0
+        for row in grouped[rec_date_text]:
+            if taken >= open_slots:
+                break
+            ticker = row["ticker"]
+            if not ticker or ticker in used_tickers:
+                continue
+
+            stake = nav * (slot_pct / 100.0)
+            if stake <= 0:
+                continue
+
+            active_positions.append({
+                "ticker": ticker,
+                "name": row["name"],
+                "manager_key": row["manager_key"],
+                "rec_date_text": row["rec_date_text"],
+                "exit_date": row["exit_date"],
+                "allocation_pct": slot_pct,
+                "stake": stake,
+                "gross_return_pct": row["day5_return"],
+                "net_return_pct": row["day5_return"] - round_trip_cost_pct,
+            })
+            used_tickers.add(ticker)
+            taken += 1
+
+    if active_positions:
+        _realize_until(max(pos["exit_date"] for pos in active_positions))
+
+    trade_returns = [trade.net_return_pct for trade in summary.trade_results]
+    summary.ending_nav = round(nav, 4)
+    summary.total_return_pct = round((nav - initial_nav) / initial_nav * 100.0, 2) if initial_nav else 0.0
+    summary.trades_taken = len(summary.trade_results)
+    summary.avg_trade_return_pct = round(sum(trade_returns) / len(trade_returns), 2) if trade_returns else 0.0
+    summary.win_rate_pct = round(
+        sum(1 for ret in trade_returns if ret > 0) / len(trade_returns) * 100.0,
+        1,
+    ) if trade_returns else 0.0
+
+    peak = nav_curve[0] if nav_curve else initial_nav
+    max_dd = 0.0
+    for value in nav_curve:
+        if value > peak:
+            peak = value
+        if peak > 0:
+            drawdown = (value - peak) / peak * 100.0
+            if drawdown < max_dd:
+                max_dd = drawdown
+    summary.max_drawdown_pct = round(max_dd, 2)
+
+    if manager_returns:
+        ranked = sorted(
+            ((mgr, sum(vals) / len(vals)) for mgr, vals in manager_returns.items() if vals),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        if ranked:
+            summary.strongest_manager = ranked[0][0]
+            summary.weakest_manager = ranked[-1][0]
+
+    return summary

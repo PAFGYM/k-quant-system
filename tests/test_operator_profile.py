@@ -290,3 +290,46 @@ def test_calculate_manager_scorecard_falls_back_to_strategy_clusters_and_tenbagg
     text = format_manager_scorecard(scorecards)
     assert "5일 평균수익: +5.0%" in text
     assert "최고: 삼성전자 +5.0%" in text
+
+
+def test_shadow_portfolio_summary_uses_recommendation_results(tmp_path) -> None:
+    from kstock.bot.learning_engine import (
+        calculate_manager_scorecard,
+        calculate_shadow_portfolio_summary,
+        format_shadow_portfolio_summary,
+    )
+
+    db = _setup_db(str(tmp_path / "shadow.db"))
+    with db._connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO recommendations
+            (ticker, name, rec_date, rec_price, rec_score, strategy_type, created_at, updated_at, manager)
+            VALUES
+            ('111111', '스윙주', '2026-03-01', 10000, 78, 'F', '2026-03-01T08:00:00', '2026-03-01T08:00:00', ''),
+            ('222222', '장기주', '2026-03-02', 20000, 81, 'C', '2026-03-02T08:00:00', '2026-03-02T08:00:00', ''),
+            ('333333', '포지션주', '2026-03-03', 15000, 76, 'D', '2026-03-03T08:00:00', '2026-03-03T08:00:00', '')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO recommendation_results
+            (recommendation_id, ticker, rec_price, strategy_type, day5_return, day10_return, day20_return, correct)
+            VALUES
+            (3, '111111', 10000, 'F', -2.0, NULL, NULL, 0),
+            (4, '222222', 20000, 'C', 4.0, NULL, NULL, 1),
+            (5, '333333', 15000, 'D', 3.0, NULL, NULL, 1)
+            """
+        )
+
+    calculate_manager_scorecard(db, days=30)
+    summary = calculate_shadow_portfolio_summary(db, days=90)
+
+    assert summary["trades_considered"] >= 5
+    assert summary["trades_taken"] >= 3
+    assert summary["total_return_pct"] != 0
+    assert summary["strongest_manager"] in {"long_term", "position", "scalp", "swing"}
+
+    text = format_shadow_portfolio_summary(summary)
+    assert "그림자 포트폴리오" in text
+    assert "누적:" in text

@@ -3957,6 +3957,20 @@ class CommandsMixin:
             except Exception:
                 pass
 
+            # ── 0-c. 그림자 포트폴리오 검증 ──
+            try:
+                from kstock.bot.learning_engine import (
+                    calculate_shadow_portfolio_summary,
+                    format_shadow_portfolio_summary,
+                )
+
+                shadow_summary = calculate_shadow_portfolio_summary(self.db, days=90)
+                shadow_text = format_shadow_portfolio_summary(shadow_summary)
+                if shadow_text:
+                    sections.append(shadow_text)
+            except Exception:
+                pass
+
             # ── 1. ML 모델 현황 ──
             ml_perf = self.db.get_ml_performance(limit=3)
             ml_accuracy = self.db.get_prediction_accuracy(days=7) or {}

@@ -55,6 +55,14 @@ _MANAGER_STRATEGY_CLUSTERS: dict[str, tuple[str, ...]] = {
     "long_term": ("C", "E"),
 }
 
+_MANAGER_LABELS = {
+    "scalp": "⚡ 리버모어(단타)",
+    "swing": "🔥 오닐(스윙)",
+    "position": "📊 린치(포지션)",
+    "long_term": "💎 버핏(장기)",
+    "tenbagger": "🔟 텐베거",
+}
+
 
 def _safe_json_loads(raw: str) -> dict[str, Any]:
     try:
@@ -388,18 +396,11 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
 
 def format_manager_scorecard(scorecards: dict) -> str:
     """매니저 성적표를 텔레그램 메시지로 포맷."""
-    mgr_names = {
-        "scalp": "⚡ 리버모어(단타)",
-        "swing": "🔥 오닐(스윙)",
-        "position": "📊 린치(포지션)",
-        "long_term": "💎 버핏(장기)",
-        "tenbagger": "🔟 텐베거",
-    }
     lines = [
         "📋 매니저 성적표 (최근 30일)",
         "━" * 22,
     ]
-    for mgr, name in mgr_names.items():
+    for mgr, name in _MANAGER_LABELS.items():
         card = scorecards.get(mgr, {})
         total = card.get("total", 0)
         hits = card.get("hits", 0)
@@ -434,6 +435,129 @@ def format_manager_scorecard(scorecards: dict) -> str:
             lines.append(f"  최고: {card['best_trade']}")
         lines.append(f"  가중치: {weight:.2f}x")
 
+    return "\n".join(lines)
+
+
+def calculate_shadow_portfolio_summary(db, days: int = 90) -> dict[str, Any]:
+    """추천 결과를 실제 포트폴리오처럼 묶어 보수적으로 검증."""
+    cutoff = (datetime.now(KST) - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT r.ticker, r.name, r.rec_date, r.rec_score,
+                       r.strategy_type, r.manager, r.created_at,
+                       rr.day5_return
+                FROM recommendations r
+                JOIN recommendation_results rr
+                  ON rr.recommendation_id = r.id
+                WHERE r.created_at >= ?
+                  AND rr.day5_return IS NOT NULL
+                ORDER BY r.rec_date ASC, r.rec_score DESC, r.created_at ASC
+                """,
+                (cutoff,),
+            ).fetchall()
+            weight_rows = conn.execute(
+                """
+                SELECT manager_key, weight_adj
+                FROM manager_scorecard
+                WHERE calculated_at IN (
+                    SELECT MAX(calculated_at)
+                    FROM manager_scorecard
+                    GROUP BY manager_key
+                )
+                """,
+            ).fetchall()
+    except Exception as e:
+        logger.debug("calculate_shadow_portfolio_summary failed: %s", e)
+        return {}
+
+    manager_weights = {
+        str(row["manager_key"]): float(row["weight_adj"] or 1.0)
+        for row in weight_rows
+    }
+
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        manager_key = str(row["manager"] or "").strip()
+        if not manager_key:
+            strat = str(row["strategy_type"] or "")
+            for candidate_key, cluster in _MANAGER_STRATEGY_CLUSTERS.items():
+                if strat in cluster:
+                    manager_key = candidate_key
+                    break
+        normalized_rows.append({
+            "ticker": row["ticker"],
+            "name": row["name"],
+            "rec_date": row["rec_date"] or row["created_at"],
+            "created_at": row["created_at"],
+            "rec_score": float(row["rec_score"] or 0.0),
+            "manager_key": manager_key or "position",
+            "day5_return": float(row["day5_return"] or 0.0),
+        })
+
+    from kstock.core.performance_tracker import simulate_shadow_portfolio
+
+    summary = simulate_shadow_portfolio(
+        normalized_rows,
+        manager_weights=manager_weights,
+        max_positions=4,
+        position_size_pct=20.0,
+        cash_buffer_pct=20.0,
+        round_trip_cost_pct=0.35,
+    )
+    return {
+        "trades_considered": summary.trades_considered,
+        "trades_taken": summary.trades_taken,
+        "total_return_pct": summary.total_return_pct,
+        "avg_trade_return_pct": summary.avg_trade_return_pct,
+        "win_rate_pct": summary.win_rate_pct,
+        "max_drawdown_pct": summary.max_drawdown_pct,
+        "max_positions": summary.max_positions,
+        "position_size_pct": summary.position_size_pct,
+        "cash_buffer_pct": summary.cash_buffer_pct,
+        "strongest_manager": summary.strongest_manager,
+        "weakest_manager": summary.weakest_manager,
+    }
+
+
+def format_shadow_portfolio_summary(summary: dict[str, Any]) -> str:
+    """그림자 포트폴리오 요약을 텍스트로 포맷."""
+    if not summary or int(summary.get("trades_taken", 0) or 0) <= 0:
+        return "🎯 그림자 포트폴리오\n  아직 검증할 실전형 데이터가 부족합니다."
+
+    strong = _MANAGER_LABELS.get(
+        str(summary.get("strongest_manager") or ""),
+        str(summary.get("strongest_manager") or "").strip(),
+    )
+    weak = _MANAGER_LABELS.get(
+        str(summary.get("weakest_manager") or ""),
+        str(summary.get("weakest_manager") or "").strip(),
+    )
+
+    lines = ["🎯 그림자 포트폴리오 (최근 90일)"]
+    lines.append(
+        f"  가정: 최대 {int(summary.get('max_positions', 4))}종목 | "
+        f"종목당 {float(summary.get('position_size_pct', 20.0)):.0f}% | "
+        f"현금 {float(summary.get('cash_buffer_pct', 20.0)):.0f}%"
+    )
+    lines.append(
+        f"  채택: {int(summary.get('trades_taken', 0))}건 / "
+        f"검토 {int(summary.get('trades_considered', 0))}건"
+    )
+    lines.append(
+        f"  누적: {float(summary.get('total_return_pct', 0.0)):+.2f}% | "
+        f"평균 거래: {float(summary.get('avg_trade_return_pct', 0.0)):+.2f}%"
+    )
+    lines.append(
+        f"  승률: {float(summary.get('win_rate_pct', 0.0)):.1f}% | "
+        f"최대낙폭: {float(summary.get('max_drawdown_pct', 0.0)):+.2f}%"
+    )
+    if strong:
+        lines.append(f"  강한 레인: {strong}")
+    if weak and weak != strong:
+        lines.append(f"  약한 레인: {weak}")
     return "\n".join(lines)
 
 

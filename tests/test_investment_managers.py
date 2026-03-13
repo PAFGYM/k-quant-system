@@ -158,6 +158,30 @@ def test_enrich_watchlist_candidate_generates_actionable_fields():
     assert enriched["fit_reasons"]
 
 
+def test_swing_candidate_rejects_overheated_chase_setup():
+    overheated = _make_scan_result(
+        ticker="343434",
+        name="급등추격주",
+        composite=64,
+        rsi=43,
+        vol_ratio=3.1,
+        bb_pctb=0.28,
+        macd_cross=1,
+        current_price=10600,
+        ma20=9600,
+        return_3m=52,
+        roe=9,
+        debt_ratio=140,
+        per=38,
+        foreign_days=0,
+        inst_days=0,
+    )
+    overheated.day_change_pct = 7.4
+
+    picks = filter_discovery_candidates([overheated], "swing")
+    assert picks == []
+
+
 def test_tenbagger_prefers_domestic_small_cap_zone():
     candidate = _make_scan_result(
         ticker="555555",
