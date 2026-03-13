@@ -1,8 +1,11 @@
 """Naver Finance 클라이언트 테스트 (파싱 로직 중심)."""
+from unittest.mock import patch
+
 import pandas as pd
+import pytest
 
 from kstock.ingest.naver_finance import (
-    NaverFinanceClient, _parse_current_price, _parse_sise_json,
+    NaverFinanceClient, _naver_info_cache, _parse_current_price, _parse_sise_json,
     _parse_main_page, _to_float,
 )
 
@@ -57,6 +60,20 @@ def test_parse_main_page_empty():
     assert isinstance(result, dict)
 
 
+def test_parse_main_page_extracts_stock_name_from_title():
+    html = """
+    <html>
+      <head><title>오스코텍 : 네이버페이 증권</title></head>
+      <body>
+        <p class="no_today"><span class="blind">58,300</span></p>
+      </body>
+    </html>
+    """
+    result = _parse_main_page(html)
+    assert result["name"] == "오스코텍"
+    assert result["current_price"] == 58300.0
+
+
 def test_naver_client_init():
     client = NaverFinanceClient()
     assert isinstance(client._failed_tickers, set)
@@ -69,3 +86,43 @@ def test_data_router_naver_integration():
     naver = router._get_naver_client()
     assert naver is not None
     assert isinstance(naver, NaverFinanceClient)
+
+
+@pytest.mark.asyncio
+async def test_get_stock_info_keeps_parsed_name_when_name_arg_is_ticker():
+    html = """
+    <html>
+      <head><title>오스코텍 : 네이버페이 증권</title></head>
+      <body>
+        <p class="no_today"><span class="blind">58,300</span></p>
+      </body>
+    </html>
+    """
+
+    class DummyResponse:
+        text = html
+
+        def raise_for_status(self):
+            return None
+
+    class DummyAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return DummyResponse()
+
+    _naver_info_cache.clear()
+    client = NaverFinanceClient()
+
+    with patch("httpx.AsyncClient", DummyAsyncClient):
+        info = await client.get_stock_info("039200", "039200")
+
+    assert info["name"] == "오스코텍"
+    assert info["current_price"] == 58300.0

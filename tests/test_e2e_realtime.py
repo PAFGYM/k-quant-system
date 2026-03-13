@@ -254,3 +254,74 @@ class TestWsConnectWindow:
             await Mixin.job_ws_connect(obj, MagicMock())
 
         obj.ws.connect.assert_not_called()
+
+
+class TestRealtimeTickerNameResolution:
+    @pytest.mark.asyncio
+    async def test_resolve_ticker_name_async_uses_data_router_for_unknown_ticker(self):
+        Mixin = _get_mixin_class()
+
+        obj = Mixin.__new__(Mixin)
+        obj._ticker_name_cache = {}
+        obj._holdings_index = {}
+        obj.all_tickers = []
+        obj.db = MagicMock()
+        obj.db.get_holding_by_ticker.return_value = None
+        obj.db.get_watchlist.return_value = []
+        obj.data_router = MagicMock()
+        obj.data_router.get_stock_info = AsyncMock(
+            return_value={"ticker": "039200", "name": "오스코텍", "current_price": 58300},
+        )
+
+        name = await Mixin._resolve_ticker_name_async(obj, "039200", "039200")
+
+        assert name == "오스코텍"
+        assert obj._ticker_name_cache["039200"] == "오스코텍"
+
+    @pytest.mark.asyncio
+    async def test_resolve_ticker_name_async_falls_back_to_naver_when_router_returns_code(self):
+        Mixin = _get_mixin_class()
+
+        obj = Mixin.__new__(Mixin)
+        obj._ticker_name_cache = {}
+        obj._holdings_index = {}
+        obj.all_tickers = []
+        obj.db = MagicMock()
+        obj.db.get_holding_by_ticker.return_value = None
+        obj.db.get_watchlist.return_value = []
+        obj.data_router = MagicMock()
+        obj.data_router.get_stock_info = AsyncMock(
+            return_value={"ticker": "067160", "name": "067160", "current_price": 65000},
+        )
+
+        with patch(
+            "kstock.ingest.naver_finance.NaverFinanceClient.get_stock_info",
+            new=AsyncMock(return_value={"ticker": "067160", "name": "SOOP", "current_price": 65000}),
+        ):
+            name = await Mixin._resolve_ticker_name_async(obj, "067160", "067160")
+
+        assert name == "SOOP"
+        assert obj._ticker_name_cache["067160"] == "SOOP"
+
+    @pytest.mark.asyncio
+    async def test_send_surge_alert_uses_resolved_name_and_short_favorite_callback(self):
+        Mixin = _get_mixin_class()
+
+        obj = Mixin.__new__(Mixin)
+        obj.chat_id = 12345
+        obj.db = MagicMock()
+        obj.db.has_recent_alert.return_value = False
+        obj.db.insert_alert = MagicMock()
+        obj._allow_alert_emit = AsyncMock(return_value=True)
+        obj._resolve_ticker_name_async = AsyncMock(return_value="오스코텍")
+        obj._holdings_index = {}
+        obj._last_scan_results = []
+        obj._application = MagicMock()
+        obj._application.bot.send_message = AsyncMock()
+
+        await Mixin._send_surge_alert(obj, "039200", _make_data(change_pct=21.3, price=58300, pressure="강한 매도세"))
+
+        kwargs = obj._application.bot.send_message.call_args.kwargs
+        assert "오스코텍 (039200)" in kwargs["text"]
+        keyboard = kwargs["reply_markup"].inline_keyboard
+        assert keyboard[0][1].callback_data == "fav:add:039200:오스코텍"

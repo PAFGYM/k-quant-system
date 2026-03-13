@@ -125,6 +125,8 @@ class SchedulerMixin:
             self._holdings_cache = []
         if not hasattr(self, '_holdings_index'):
             self._holdings_index = {}  # ticker → holding dict (O(1) 조회)
+        if not hasattr(self, '_ticker_name_cache'):
+            self._ticker_name_cache = {}
         if not hasattr(self, '_alert_budget_notice_ts'):
             self._alert_budget_notice_ts = {}
         # 경계 모드 초기화 — DB에서 복원
@@ -6150,12 +6152,7 @@ class SchedulerMixin:
                 return
             if not await self._allow_alert_emit("surge_ws", priority="normal", units=1):
                 return
-            # 종목명 조회
-            name = ticker
-            for item in self.all_tickers:
-                if item.get("code") == ticker:
-                    name = item.get("name", ticker)
-                    break
+            name = await self._resolve_ticker_name_async(ticker, ticker)
 
             # 보유 여부
             is_held = ticker in self._holdings_index
@@ -6194,7 +6191,7 @@ class SchedulerMixin:
                     ),
                     InlineKeyboardButton(
                         "⭐ 즐겨찾기",
-                        callback_data=f"fav:add:{ticker}:{name}",
+                        callback_data=f"fav:add:{ticker}:{name[:10]}",
                     ),
                 ],
             ])
@@ -8412,6 +8409,89 @@ class SchedulerMixin:
             if item.get("code") == ticker:
                 return item.get("market", "KOSPI")
         return "KOSPI"
+
+    def _get_cached_ticker_name(self, ticker: str, fallback: str = "") -> str:
+        """빠른 종목명 해석: 캐시 → 보유 → 즐겨찾기 → universe."""
+        fallback_name = fallback or ticker
+        cache = getattr(self, "_ticker_name_cache", None)
+        if cache is None:
+            self._ticker_name_cache = {}
+            cache = self._ticker_name_cache
+        if cache and ticker in cache:
+            return cache[ticker]
+
+        holding = getattr(self, "_holdings_index", {}).get(ticker) or {}
+        name = str(holding.get("name", "")).strip()
+        if name and name != ticker:
+            if cache is not None:
+                cache[ticker] = name
+            return name
+
+        if hasattr(self, "_resolve_name"):
+            try:
+                resolved = str(self._resolve_name(ticker, "")).strip()
+            except Exception:
+                resolved = ""
+            if resolved and resolved != ticker:
+                if cache is not None:
+                    cache[ticker] = resolved
+                return resolved
+
+        try:
+            holding_row = self.db.get_holding_by_ticker(ticker)
+            if holding_row:
+                name = str(holding_row.get("name", "")).strip()
+                if name and name != ticker:
+                    if cache is not None:
+                        cache[ticker] = name
+                    return name
+        except Exception:
+            logger.debug("holding name lookup failed for %s", ticker, exc_info=True)
+
+        try:
+            for item in self.db.get_watchlist():
+                if item.get("ticker") != ticker:
+                    continue
+                name = str(item.get("name", "")).strip()
+                if name and name != ticker:
+                    if cache is not None:
+                        cache[ticker] = name
+                    return name
+                break
+        except Exception:
+            logger.debug("watchlist name lookup failed for %s", ticker, exc_info=True)
+
+        return fallback_name
+
+    async def _resolve_ticker_name_async(self, ticker: str, fallback: str = "") -> str:
+        """실시간 알림용 종목명 해석: 로컬 우선, 마지막에 외부 폴백."""
+        fallback_name = fallback or ticker
+        name = self._get_cached_ticker_name(ticker, fallback_name)
+        if name and name != ticker:
+            return name
+
+        try:
+            info = None
+            market = self._get_ticker_market(ticker)
+            if hasattr(self, "data_router"):
+                info = await self.data_router.get_stock_info(
+                    ticker, fallback_name, market=market,
+                )
+            fetched_name = str((info or {}).get("name", "")).strip()
+            if fetched_name and fetched_name != ticker:
+                self._ticker_name_cache[ticker] = fetched_name
+                return fetched_name
+
+            from kstock.ingest.naver_finance import NaverFinanceClient
+            naver_info = await NaverFinanceClient().get_stock_info(ticker, "")
+            naver_name = str((naver_info or {}).get("name", "")).strip()
+            if naver_name and naver_name != ticker:
+                self._ticker_name_cache[ticker] = naver_name
+                return naver_name
+        except Exception:
+            logger.debug("async ticker name lookup failed for %s", ticker, exc_info=True)
+
+        return fallback_name
 
     async def _calc_ml_prediction_actual_return(self, ticker: str, pred_date: str) -> float | None:
         """예측일 기준 5거래일 실제 수익률(%) 계산."""

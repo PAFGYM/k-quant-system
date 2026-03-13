@@ -165,7 +165,7 @@ class NaverFinanceClient:
                 parsed = _parse_main_page(resp.text)
                 result.update(parsed)
                 result["ticker"] = code
-                if name:
+                if name and name != code:
                     result["name"] = name
                 _naver_info_cache[code] = (now, result)
         except Exception as e:
@@ -264,6 +264,14 @@ def _parse_main_page(html: str) -> dict:
     try:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "html.parser")
+
+        title_tag = soup.find("title")
+        if title_tag:
+            raw_title = title_tag.get_text(" ", strip=True)
+            if raw_title:
+                name = raw_title.split(":", 1)[0].strip()
+                if name:
+                    result["name"] = name
 
         # 현재가
         no_today = soup.find("p", class_="no_today")
