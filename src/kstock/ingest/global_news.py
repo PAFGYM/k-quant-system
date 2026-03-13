@@ -401,6 +401,34 @@ IMPACT_KEYWORDS = {
     "Goldman Sachs": 5, "JP Morgan": 5, "Morgan Stanley": 5,
 }
 
+_MARKET_RELEVANCE_KEYWORDS = {
+    "증시", "주가", "코스피", "코스닥", "지수", "선물", "수급", "외인", "기관",
+    "환율", "원달러", "달러", "유가", "원유", "석유", "금리", "연준", "fomc",
+    "cpi", "pce", "고용", "실업률", "채권", "국채",
+    "실적", "영업이익", "매출", "가이던스", "목표가", "투자의견", "업황",
+    "수출", "수주", "계약", "투자협약", "생산라인", "공장", "증설", "착공",
+    "반도체", "배터리", "2차전지", "ai", "원전", "방산", "조선", "해운", "로봇", "바이오",
+    "관세", "무역전쟁", "제재", "호르무즈", "전쟁", "공습", "미사일",
+    "추경", "세수", "정책", "긴급 대출", "유상증자", "자사주", "배당", "ipo",
+}
+
+_MARKET_NOISE_KEYWORDS = {
+    "배드민턴", "동호인", "페스티벌", "팝업", "코인포차", "역주행", "음주운전",
+    "사망", "사고", "왕사남", "영화", "야구", "축구", "연예", "홀인원",
+    "합성", "논란", "사연", "업무·문화·상업시설", "심의 통과", "여객열차",
+    "감기 기운", "해외 나들이", "아동", "정기납부 서비스", "참가자 모집",
+}
+
+_SOURCE_RELEVANCE_BONUS = {
+    "Bloomberg": 2,
+    "Reuters": 2,
+    "CNBC": 2,
+    "FT": 2,
+    "연합인포맥스": 2,
+    "연합뉴스": 1,
+    "매일경제": 1,
+}
+
 
 @dataclass
 class NewsItem:
@@ -427,6 +455,47 @@ def _compute_impact(title: str) -> tuple[int, bool]:
             max_score = max(max_score, score)
     is_urgent = max_score >= 8
     return max_score, is_urgent
+
+
+def _market_relevance_score(item: NewsItem) -> int:
+    """시장/투자 관련성 점수."""
+    title = str(item.title or "")
+    source = str(item.source or "")
+    text = f"{title} {source} {item.category}".lower()
+
+    score = 0
+    if item.is_urgent:
+        score += 4
+    elif item.impact_score >= 5:
+        score += 2
+
+    for source_name, bonus in _SOURCE_RELEVANCE_BONUS.items():
+        if source_name.lower() in source.lower():
+            score += bonus
+            break
+
+    positive_hits = {kw for kw in _MARKET_RELEVANCE_KEYWORDS if kw.lower() in text}
+    negative_hits = {kw for kw in _MARKET_NOISE_KEYWORDS if kw.lower() in text}
+
+    score += min(len(positive_hits) * 2, 10)
+    score -= min(len(negative_hits) * 3, 12)
+
+    # 긴급 키워드가 있어도 사회면/가십성 기사면 배제
+    if negative_hits and not positive_hits and item.impact_score < 10:
+        score -= 4
+
+    return score
+
+
+def _is_actionable_market_news(item: NewsItem) -> bool:
+    """실제 투자 판단에 쓸 만한 뉴스만 남긴다."""
+    if item.video_id or "youtube" in str(item.category or ""):
+        return True
+
+    score = _market_relevance_score(item)
+    if item.is_urgent:
+        return score >= 2
+    return score >= 2
 
 
 def _hangul_ratio(text: str) -> float:
@@ -721,8 +790,19 @@ async def fetch_global_news(
                 filtered.append(item)
         all_items = filtered
 
-    # impact_score 내림차순 정렬
-    all_items.sort(key=lambda x: (-x.impact_score, x.published), reverse=False)
+    before_filter = len(all_items)
+    all_items = [item for item in all_items if _is_actionable_market_news(item)]
+    if before_filter != len(all_items):
+        logger.info(
+            "Global news relevance filter: kept %d/%d items",
+            len(all_items), before_filter,
+        )
+
+    # impact_score + 관련성 내림차순 정렬
+    all_items.sort(
+        key=lambda x: (-x.impact_score, -_market_relevance_score(x), x.published),
+        reverse=False,
+    )
     return all_items
 
 
