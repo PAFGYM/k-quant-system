@@ -1206,6 +1206,7 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
     try:
         from kstock.bot.learning_engine import (
             get_user_trade_profile,
+            get_user_operator_profile,
             get_active_event_adjustments,
         )
         # 매매 프로필
@@ -1214,6 +1215,14 @@ async def build_full_context_with_macro(db, macro_client=None, yf_client=None) -
             wr = profile.get("win_rate", 0)
             avg = profile.get("avg_pnl", 0) * 100
             learning_context += f"[주호님 매매 프로필] 승률 {wr:.0f}%, 평균수익 {avg:+.1f}%\n"
+        operator_profile = get_user_operator_profile(db)
+        if operator_profile:
+            focus = ", ".join(operator_profile.get("primary_focus", [])[:3])
+            brief = str(operator_profile.get("assistant_brief", "") or "").strip()
+            if focus:
+                learning_context += f"[주호님 관심사] {focus}\n"
+            if brief:
+                learning_context += f"[초개인화 가이드] {brief}\n"
 
         # 활성 이벤트 조정
         events = get_active_event_adjustments(db)

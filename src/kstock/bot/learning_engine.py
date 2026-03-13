@@ -14,12 +14,199 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
 from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
+
+
+_STYLE_LABELS = {
+    "scalper": "단타",
+    "swing": "스윙",
+    "position": "포지션",
+    "long_term": "장기",
+    "balanced": "균형",
+    "신규": "신규",
+}
+
+_CHAT_TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "market": ("시장", "시황", "환율", "유가", "vix", "금리", "뉴스", "전시", "레짐"),
+    "buy": ("매수", "사도", "살까", "종목", "추천", "들어가", "진입", "비중"),
+    "sell": ("매도", "익절", "손절", "정리", "청산", "팔아", "팔까"),
+    "holdings": ("보유", "잔고", "계좌", "포트", "내 종목", "내 보유"),
+    "tenbagger": ("텐베거", "텐배거", "미래", "산업", "정책", "이벤트", "촉매"),
+}
+
+_CHAT_TOPIC_LABELS = {
+    "market": "시장",
+    "buy": "매수",
+    "sell": "매도",
+    "holdings": "보유",
+    "tenbagger": "텐베거",
+}
+
+_MANAGER_STRATEGY_CLUSTERS: dict[str, tuple[str, ...]] = {
+    "scalp": ("A", "B", "G", "H"),
+    "swing": ("F", "J"),
+    "position": ("D", "I"),
+    "long_term": ("C", "E"),
+}
+
+
+def _safe_json_loads(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+        if isinstance(value, dict):
+            return value
+    except Exception:
+        pass
+    return {}
+
+
+def _infer_style_label(profile: dict[str, Any]) -> str:
+    style = str(profile.get("dominant_style") or profile.get("style") or "balanced")
+    return _STYLE_LABELS.get(style, style)
+
+
+def _load_user_chat_focus(db, limit: int = 300) -> dict[str, Any]:
+    """최근 사용자 질문에서 관심 주제를 추출."""
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT content
+                FROM chat_history
+                WHERE role='user'
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    except Exception as e:
+        logger.debug("load_user_chat_focus failed: %s", e)
+        return {
+            "message_count": 0,
+            "topic_counts": {},
+            "top_topics": [],
+            "top_keywords": [],
+        }
+
+    counts: Counter[str] = Counter()
+    keywords: Counter[str] = Counter()
+    messages = [str(r["content"] or "") for r in rows]
+    for msg in messages:
+        lowered = msg.lower()
+        for topic, topic_keywords in _CHAT_TOPIC_KEYWORDS.items():
+            matched = False
+            for keyword in topic_keywords:
+                key = keyword.lower()
+                if keyword in msg or key in lowered:
+                    keywords[keyword] += 1
+                    matched = True
+            if matched:
+                counts[topic] += 1
+
+    top_topics = [
+        _CHAT_TOPIC_LABELS.get(topic, topic)
+        for topic, _ in counts.most_common(3)
+    ]
+    return {
+        "message_count": len(messages),
+        "topic_counts": dict(counts),
+        "top_topics": top_topics,
+        "top_keywords": [word for word, _ in keywords.most_common(5)],
+    }
+
+
+def _build_operator_profile(profile: dict[str, Any], chat_focus: dict[str, Any]) -> dict[str, Any]:
+    """매매 이력 + 질문 패턴 기반 초개인화 프로필 생성."""
+    total_trades = int(profile.get("total_trades", 0) or 0)
+    win_rate = float(profile.get("win_rate", 0) or 0)
+    avg_hold = float(profile.get("avg_hold_days_win", 0) or 0)
+    avg_pnl = float(profile.get("avg_pnl", 0) or 0) * 100
+    avg_win = float(profile.get("avg_win", 0) or 0) * 100
+    avg_loss = float(profile.get("avg_loss", 0) or 0) * 100
+    holding_dist = profile.get("holding_type_distribution", {}) or {}
+
+    dominant_style = "balanced"
+    if holding_dist:
+        dominant_style = str(
+            max(holding_dist.items(), key=lambda item: item[1])[0]
+        ).strip() or dominant_style
+    if dominant_style in {"auto", "unknown"}:
+        if avg_hold <= 3:
+            dominant_style = "scalper"
+        elif avg_hold <= 14:
+            dominant_style = "swing"
+        elif avg_hold <= 60:
+            dominant_style = "position"
+        else:
+            dominant_style = "long_term"
+
+    strengths: list[str] = []
+    if win_rate >= 60:
+        strengths.append(f"승률 {win_rate:.0f}%")
+    if avg_win > abs(avg_loss) and avg_win > 0:
+        strengths.append("손익비 우위")
+    if avg_pnl > 5:
+        strengths.append("수익 종목을 크게 키움")
+
+    risks: list[str] = []
+    if avg_loss <= -7:
+        risks.append("손실 종목 방치 주의")
+    if total_trades >= 5 and win_rate < 45:
+        risks.append("진입 정확도 재점검 필요")
+    if float(profile.get("avg_hold_days_loss", 0) or 0) > float(profile.get("avg_hold_days_win", 0) or 0):
+        risks.append("손실 종목 보유가 길어지는 편")
+
+    focus_topics = list(chat_focus.get("top_topics") or [])
+    if not focus_topics:
+        focus_topics = ["시장", "매수", "보유"]
+
+    brief_parts = [
+        f"{', '.join(focus_topics[:3])} 중심으로 묻는 편",
+        f"주력 스타일은 {_infer_style_label({'dominant_style': dominant_style})}",
+    ]
+    if strengths:
+        brief_parts.append(f"강점은 {strengths[0]}")
+    if risks:
+        brief_parts.append(f"주의는 {risks[0]}")
+
+    return {
+        "message_count": int(chat_focus.get("message_count", 0) or 0),
+        "primary_focus": focus_topics,
+        "top_keywords": list(chat_focus.get("top_keywords") or []),
+        "dominant_style": dominant_style,
+        "dominant_style_label": _STYLE_LABELS.get(dominant_style, dominant_style),
+        "strengths": strengths,
+        "risks": risks,
+        "top_wins": profile.get("top_wins", [])[:3],
+        "top_losses": profile.get("top_losses", [])[:3],
+        "assistant_brief": " · ".join(part for part in brief_parts if part),
+    }
+
+
+def format_operator_profile(profile: dict[str, Any]) -> str:
+    """초개인화 운영자 프로필을 짧게 포맷."""
+    if not profile:
+        return "아직 개인화 프로필이 준비되지 않았습니다."
+
+    focus = ", ".join(profile.get("primary_focus", [])[:3]) or "시장, 매수, 보유"
+    lines = [
+        "👤 주호님 투자 DNA",
+        f"  주로 보는 것: {focus}",
+        f"  주력 스타일: {profile.get('dominant_style_label', '균형')}",
+    ]
+    strengths = profile.get("strengths", [])
+    risks = profile.get("risks", [])
+    if strengths:
+        lines.append(f"  강점: {strengths[0]}")
+    if risks:
+        lines.append(f"  주의: {risks[0]}")
+    return "\n".join(lines)
 
 
 # ── 매니저 성적표 계산 ─────────────────────────────────────────
@@ -38,26 +225,44 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
     now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
     scorecards = {}
-    managers = ["scalp", "swing", "position", "long_term"]
+    managers = ["scalp", "swing", "position", "long_term", "tenbagger"]
 
     for mgr in managers:
         try:
             with db._connect() as conn:
-                # 추천 + 결과 조인
-                rows = conn.execute(
-                    """
-                    SELECT r.ticker, r.name, r.rec_score, r.rec_price,
-                           rr.day5_return, rr.day10_return, rr.day20_return,
-                           rr.correct
-                    FROM recommendations r
-                    LEFT JOIN recommendation_results rr
-                        ON rr.recommendation_id = r.id
-                    WHERE r.manager = ?
-                      AND r.created_at >= ?
-                    ORDER BY r.created_at DESC
-                    """,
-                    (mgr, cutoff),
-                ).fetchall()
+                if mgr == "tenbagger":
+                    rows = conn.execute(
+                        """
+                        SELECT ticker, name, tenbagger_score, current_return
+                        FROM tenbagger_universe
+                        WHERE status='active'
+                        ORDER BY tenbagger_score DESC
+                        """,
+                    ).fetchall()
+                else:
+                    cluster = _MANAGER_STRATEGY_CLUSTERS.get(mgr, ())
+                    placeholders = ", ".join("?" for _ in cluster) or "''"
+                    rows = conn.execute(
+                        f"""
+                        SELECT r.ticker, r.name, r.rec_score, r.rec_price,
+                               r.strategy_type,
+                               rr.day5_return, rr.day10_return, rr.day20_return,
+                               rr.correct
+                        FROM recommendations r
+                        LEFT JOIN recommendation_results rr
+                            ON rr.recommendation_id = r.id
+                        WHERE r.created_at >= ?
+                          AND (
+                              r.manager = ?
+                              OR (
+                                  COALESCE(r.manager, '') = ''
+                                  AND r.strategy_type IN ({placeholders})
+                              )
+                          )
+                        ORDER BY r.created_at DESC
+                        """,
+                        (cutoff, mgr, *cluster),
+                    ).fetchall()
 
             if not rows:
                 scorecards[mgr] = {
@@ -65,6 +270,52 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
                     "hit_rate": 0.0, "avg_return_5d": 0.0,
                     "weight_adj": 1.0,
                 }
+                continue
+
+            if mgr == "tenbagger":
+                total = len(rows)
+                avg_score = sum(float(r["tenbagger_score"] or 0) for r in rows) / total if total else 0.0
+                best = max(rows, key=lambda r: r["tenbagger_score"] or -999)
+                best_text = f"{best['name']} {float(best['tenbagger_score'] or 0):.0f}점"
+                card = {
+                    "total": total,
+                    "evaluated": 0,
+                    "hits": 0,
+                    "hit_rate": 0.0,
+                    "avg_return_5d": 0.0,
+                    "avg_return_10d": 0.0,
+                    "avg_return_20d": 0.0,
+                    "best_trade": best_text,
+                    "worst_trade": "",
+                    "weight_adj": 1.0,
+                    "avg_score": avg_score,
+                    "source": "universe",
+                }
+                scorecards[mgr] = card
+                with db._connect() as conn:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO manager_scorecard
+                        (manager_key, period, total_recs, evaluated_recs, hits,
+                         hit_rate, avg_return_5d, avg_return_10d, avg_return_20d,
+                         best_trade, worst_trade, weight_adj, calculated_at)
+                        VALUES (?, 'monthly', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            mgr,
+                            total,
+                            0,
+                            0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                            best_text,
+                            "",
+                            1.0,
+                            now_str,
+                        ),
+                    )
                 continue
 
             total = len(rows)
@@ -142,6 +393,7 @@ def format_manager_scorecard(scorecards: dict) -> str:
         "swing": "🔥 오닐(스윙)",
         "position": "📊 린치(포지션)",
         "long_term": "💎 버핏(장기)",
+        "tenbagger": "🔟 텐베거",
     }
     lines = [
         "📋 매니저 성적표 (최근 30일)",
@@ -168,6 +420,13 @@ def format_manager_scorecard(scorecards: dict) -> str:
         lines.append(f"\n{name}")
         if total == 0:
             lines.append("  추천 이력 없음")
+            continue
+        if mgr == "tenbagger":
+            avg_score = float(card.get("avg_score", 0) or 0)
+            lines.append(f"  추적: {total}종목 | 평균 점수 {avg_score:.0f}/100")
+            if card.get("best_trade"):
+                lines.append(f"  최상단: {card['best_trade']}")
+            lines.append("  역할: 큰 촉매 전 씨앗 포지션 구축")
             continue
         lines.append(f"  추천: {total}건 | 적중: {hits}건 ({rate:.0f}%) [{grade}]")
         lines.append(f"  5일 평균수익: {avg5:+.1f}%")
@@ -197,17 +456,18 @@ def analyze_user_trade_patterns(db) -> dict[str, Any]:
     try:
         with db._connect() as conn:
             # 1. 모든 종료된 매매 조회
-            trades = conn.execute(
+            trade_rows = conn.execute(
                 """
                 SELECT h.ticker, h.name, h.buy_price, h.current_price,
                        h.pnl_pct, h.buy_date, h.updated_at,
-                       h.holding_type, h.quantity, h.eval_amount
+                       h.holding_type, h.quantity, h.eval_amount, h.status
                 FROM holdings h
-                WHERE h.status = 'closed' AND h.pnl_pct IS NOT NULL
+                WHERE h.status != 'active' AND h.pnl_pct IS NOT NULL
                 ORDER BY h.updated_at DESC
                 LIMIT 200
                 """,
             ).fetchall()
+        trades = [dict(row) for row in trade_rows]
 
         if not trades:
             logger.info("No closed trades found for pattern analysis")
@@ -261,9 +521,22 @@ def analyze_user_trade_patterns(db) -> dict[str, Any]:
         # 보유 유형 분석 (집중도)
         type_counts = {}
         for t in trades:
-            ht = t.get("holding_type", "unknown")
+            ht = str(t.get("holding_type", "unknown") or "unknown").strip()
+            if ht in {"auto", "unknown"}:
+                ht = "swing"
             type_counts[ht] = type_counts.get(ht, 0) + 1
         profile["holding_type_distribution"] = type_counts
+        if type_counts:
+            dominant_style = max(type_counts.items(), key=lambda item: item[1])[0]
+        elif profile["avg_hold_days_win"] <= 3:
+            dominant_style = "scalper"
+        elif profile["avg_hold_days_win"] <= 14:
+            dominant_style = "swing"
+        elif profile["avg_hold_days_win"] <= 60:
+            dominant_style = "position"
+        else:
+            dominant_style = "long_term"
+        profile["dominant_style"] = dominant_style
 
         # 수익 매매 상위 종목
         top_wins = sorted(profits, key=lambda t: t["pnl_pct"] or 0, reverse=True)[:5]
@@ -279,9 +552,44 @@ def analyze_user_trade_patterns(db) -> dict[str, Any]:
             for t in top_losses
         ]
 
+        chat_focus = _load_user_chat_focus(db)
+        operator_profile = _build_operator_profile(profile, chat_focus)
+        profile["chat_focus"] = chat_focus
+        profile["operator_profile"] = operator_profile
+
         # DB 저장
         _save_profile(db, "trade_stats", json.dumps(profile, ensure_ascii=False), now_str)
+        _save_profile(
+            db,
+            "operator_profile",
+            json.dumps(operator_profile, ensure_ascii=False),
+            now_str,
+        )
         _save_profile(db, "last_analysis", now_str, now_str)
+
+        try:
+            from kstock.core.investor_profile import analyze_investor_style
+
+            insight = analyze_investor_style(db)
+            db.upsert_investor_profile(
+                style=insight.style,
+                risk_tolerance=insight.risk_tolerance,
+                avg_hold_days=insight.avg_hold_days,
+                win_rate=insight.win_rate,
+                avg_profit_pct=insight.avg_profit_pct,
+                avg_loss_pct=insight.avg_loss_pct,
+                trade_count=insight.trade_count,
+                notes_json=json.dumps(
+                    {
+                        "strengths": insight.strengths,
+                        "weaknesses": insight.weaknesses,
+                        "suggestions": insight.suggestions,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        except Exception as e:
+            logger.debug("Investor profile upsert skipped: %s", e)
 
         logger.info(
             "Trade pattern analysis: %d trades, %.0f%% win rate, avg PnL %.1f%%",
@@ -477,4 +785,26 @@ def get_user_trade_profile(db) -> dict:
             return json.loads(row["profile_value"])
     except Exception:
         pass
+    return analyze_user_trade_patterns(db)
+
+
+def get_user_operator_profile(db) -> dict:
+    """저장된 초개인화 운영자 프로필 조회."""
+    try:
+        with db._connect() as conn:
+            row = conn.execute(
+                "SELECT profile_value FROM user_trade_profile "
+                "WHERE profile_key = 'operator_profile'",
+            ).fetchone()
+        if row:
+            profile = _safe_json_loads(row["profile_value"])
+            if profile:
+                return profile
+    except Exception:
+        pass
+
+    trade_profile = get_user_trade_profile(db)
+    operator_profile = trade_profile.get("operator_profile", {})
+    if isinstance(operator_profile, dict):
+        return operator_profile
     return {}

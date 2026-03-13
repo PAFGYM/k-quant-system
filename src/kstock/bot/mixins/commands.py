@@ -3935,8 +3935,31 @@ class CommandsMixin:
             except Exception:
                 pass
 
+            # ── 0-b. 초개인화 프로필 ──
+            try:
+                from kstock.bot.learning_engine import get_user_operator_profile
+
+                operator_profile = get_user_operator_profile(self.db)
+                if operator_profile:
+                    focus = ", ".join(operator_profile.get("primary_focus", [])[:3]) or "시장, 매수, 보유"
+                    personal_lines = ["👤 주호님 투자 DNA"]
+                    personal_lines.append(f"  주로 보는 것: {focus}")
+                    personal_lines.append(
+                        f"  주력 스타일: {operator_profile.get('dominant_style_label', '균형형')}"
+                    )
+                    strengths = list(operator_profile.get("strengths") or [])
+                    risks = list(operator_profile.get("risks") or [])
+                    if strengths:
+                        personal_lines.append(f"  강점: {strengths[0]}")
+                    if risks:
+                        personal_lines.append(f"  주의: {risks[0]}")
+                    sections.append("\n".join(personal_lines))
+            except Exception:
+                pass
+
             # ── 1. ML 모델 현황 ──
             ml_perf = self.db.get_ml_performance(limit=3)
+            ml_accuracy = self.db.get_prediction_accuracy(days=7) or {}
             train_hist_path = _Path("models/train_history.json")
             train_hist: list[dict] = []
             if train_hist_path.exists():
@@ -3967,6 +3990,12 @@ class CommandsMixin:
                 ml_lines.append(f"  최근: {p.get('date', '?')} | Val AUC {p.get('val_score', 0):.3f}")
             else:
                 ml_lines.append("  데이터 없음")
+            if ml_accuracy.get("total", 0):
+                ml_lines.append(
+                    f"  최근 7일 평가: {ml_accuracy.get('total', 0)}건 | 정확도 {ml_accuracy.get('accuracy_pct', 0):.1f}%"
+                )
+            else:
+                ml_lines.append("  최근 7일 평가는 아직 대기 중")
             ml_lines.append("  목적: 5일내 +3% 상승 확률 예측 (이진분류)")
             sections.append("\n".join(ml_lines))
 
@@ -4025,8 +4054,15 @@ class CommandsMixin:
                 grouped: dict[str, list[str]] = {}
                 for name, firm in TRACKED_ANALYSTS.items():
                     grouped.setdefault(firm, []).append(name)
-                for firm, names in sorted(grouped.items()):
-                    analyst_lines.append(f"  {firm}: {', '.join(names)}")
+                top_firms = sorted(
+                    grouped.items(),
+                    key=lambda item: (-len(item[1]), item[0]),
+                )[:5]
+                if top_firms:
+                    analyst_lines.append(
+                        "  상위 하우스: "
+                        + ", ".join(f"{firm}({len(names)})" for firm, names in top_firms)
+                    )
                 sections.append("\n".join(analyst_lines))
             except Exception:
                 pass

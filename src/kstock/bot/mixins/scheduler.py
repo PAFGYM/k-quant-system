@@ -2408,6 +2408,45 @@ class SchedulerMixin:
 
         return lines or ["- 시초 30분은 추격보다 강한 종목의 눌림과 수급만 확인하세요."]
 
+    def _build_personal_operator_lines(self, limit: int = 3) -> list[str]:
+        """사용자 질문/매매 패턴 기반 초개인화 요약."""
+        try:
+            from kstock.bot.learning_engine import get_user_operator_profile
+
+            profile = get_user_operator_profile(self.db)
+        except Exception:
+            logger.debug("build_personal_operator_lines failed", exc_info=True)
+            return []
+
+        if not profile:
+            return []
+
+        lines: list[str] = []
+        focus = ", ".join(list(profile.get("primary_focus") or [])[:3])
+        if focus:
+            lines.append(f"- 주로 보는 것: {focus}")
+
+        style_label = str(profile.get("dominant_style_label", "") or "").strip()
+        if style_label:
+            lines.append(f"- 주력 스타일: {style_label}")
+
+        strengths = list(profile.get("strengths") or [])
+        risks = list(profile.get("risks") or [])
+        if strengths:
+            lines.append(f"- 강점: {strengths[0]}")
+        if risks:
+            lines.append(f"- 주의: {risks[0]}")
+
+        brief = str(profile.get("assistant_brief", "") or "").strip()
+        if brief and len(lines) < limit:
+            lines.append(f"- 개인화 요약: {brief}")
+
+        deduped: list[str] = []
+        for line in lines:
+            if line not in deduped:
+                deduped.append(line)
+        return deduped[:limit]
+
     async def _build_morning_holdings_lines(self) -> list[str]:
         """보유 종목 진단을 아침 메인 브리핑에 맞게 짧게 압축한다."""
         try:
@@ -2505,6 +2544,7 @@ class SchedulerMixin:
         impact_lines = self._build_morning_market_impact_lines(macro, playbook)
         action_lines = self._build_morning_action_lines(macro, regime_mode, playbook)
         operator_lines: list[str] = []
+        personal_lines = self._build_personal_operator_lines(limit=4)
         try:
             from kstock.signal.krx_operator_memory import (
                 build_krx_operator_memory,
@@ -2546,6 +2586,13 @@ class SchedulerMixin:
             "🧭 아침 행동 코칭",
             *action_lines,
         ])
+
+        if personal_lines:
+            lines.extend([
+                "",
+                "👤 주호님 투자 DNA",
+                *personal_lines,
+            ])
 
         if operator_lines:
             lines.extend([
@@ -3093,6 +3140,13 @@ class SchedulerMixin:
                 lines.append(f"회피: {', '.join(memory.avoid_points[:2])}")
         except Exception:
             logger.debug("daily action coach memory build failed", exc_info=True)
+
+        for line in self._build_personal_operator_lines(limit=2):
+            clean = str(line or "").strip()
+            if clean.startswith("- "):
+                clean = clean[2:]
+            if clean:
+                lines.append(clean)
 
         top_urgent = next((a for a in actions if a.get("priority") in {"urgent", "caution"}), None)
         if top_urgent:
