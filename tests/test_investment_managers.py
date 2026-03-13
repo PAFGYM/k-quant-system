@@ -206,6 +206,7 @@ def test_format_manager_action_digest_includes_fast_signals():
                 "board_signal": "토론방 매집 감지",
                 "board_posts": 8,
                 "herd_pattern": "진성 세력",
+                "yt_outlook": "bullish",
                 "flow_signal": "외인+기관 순유입",
                 "short_pattern_labels": ["숏커버링 랠리", "숏스퀴즈"],
                 "crowd_signal": "커뮤니티+테마 공명",
@@ -227,6 +228,7 @@ def test_format_manager_action_digest_includes_fast_signals():
     assert "외인+기관 순유입" in text
     assert "군집 진성 세력" in text
     assert "토론방 매집 감지 8건" in text
+    assert "시황 bullish" in text
     assert "숏패턴 숏커버링 랠리/숏스퀴즈" in text
     assert "국내 스몰캡 레이더" in text
     assert "선점 구간" in text

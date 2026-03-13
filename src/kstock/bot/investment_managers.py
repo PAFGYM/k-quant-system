@@ -1820,6 +1820,9 @@ def format_manager_action_digest(
                     fast_parts.append(label)
             if pick.get("herd_pattern"):
                 fast_parts.append(f"군집 {pick['herd_pattern']}")
+            yt_outlook = str(pick.get("yt_outlook", "") or "").strip()
+            if yt_outlook:
+                fast_parts.append(f"시황 {yt_outlook}")
             if pick.get("operator_memory_hit"):
                 fast_parts.append(str(pick["operator_memory_hit"]))
             if pick.get("flow_signal"):

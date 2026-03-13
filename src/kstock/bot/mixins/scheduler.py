@@ -1044,6 +1044,8 @@ class SchedulerMixin:
             "board_by_name": {},
             "yt_by_ticker": {},
             "yt_by_name": {},
+            "yt_intel_by_ticker": {},
+            "yt_intel_by_name": {},
             "event_lines": [],
             "crowd_lines": [],
         }
@@ -1176,6 +1178,49 @@ class SchedulerMixin:
             logger.debug("Manager YouTube context build failed", exc_info=True)
 
         try:
+            yt_intels = self.db.get_recent_youtube_intelligence(hours=18, limit=10)
+            merged_event_lines = list(context.get("event_lines", []))
+            for item in yt_intels or []:
+                source = str(item.get("source", "") or "YouTube").replace("🎬", "").strip()
+                outlook = str(item.get("market_outlook", "") or "").strip().lower()
+                implications = str(item.get("investment_implications", "") or "").strip()
+                title = str(item.get("title", "") or "").strip()
+                tickers = item.get("mentioned_tickers") or []
+                if not isinstance(tickers, list):
+                    tickers = []
+
+                for mention in tickers:
+                    if not isinstance(mention, dict):
+                        continue
+                    ticker = str(mention.get("ticker", "") or "").strip()
+                    name = str(mention.get("name", "") or "").strip()
+                    entry = {
+                        "source": source,
+                        "outlook": outlook,
+                        "implications": implications,
+                        "title": title,
+                        "sentiment": str(mention.get("sentiment", "") or "").strip(),
+                    }
+                    if ticker:
+                        context["yt_intel_by_ticker"][ticker] = entry
+                    if name:
+                        context["yt_intel_by_name"][name] = entry
+
+                if implications:
+                    line_label = "유튜브 시황"
+                    if outlook in {"bullish", "mixed"}:
+                        line_label = "유튜브 매수 시황"
+                    elif outlook == "bearish":
+                        line_label = "유튜브 경계 시황"
+                    short_impl = implications if len(implications) <= 42 else implications[:39].rstrip() + "..."
+                    line = f"{line_label} | {source} | {short_impl}"
+                    if line not in merged_event_lines:
+                        merged_event_lines.append(line)
+            context["event_lines"] = merged_event_lines[:6]
+        except Exception:
+            logger.debug("Manager YouTube intelligence context build failed", exc_info=True)
+
+        try:
             from kstock.ingest.naver_discussion import fetch_discussion_buzz
 
             ranked_candidates: list[tuple[float, str, str]] = []
@@ -1228,6 +1273,17 @@ class SchedulerMixin:
         fast_context: dict,
     ) -> dict[str, list[dict]]:
         """후보 종목에 이벤트/유튜브/뉴스 신호를 합성."""
+        def _merge_action_hint(current: str, extra: str) -> str:
+            base = str(current or "").strip()
+            addon = str(extra or "").strip()
+            if not addon:
+                return base
+            if not base:
+                return addon
+            if addon in base:
+                return base
+            return f"{base} / {addon}"
+
         def _infer_tenbagger_entry_stage(candidate: dict) -> str:
             event_tags = candidate.get("event_tags") or []
             mentions = int(candidate.get("youtube_mentions", 0) or 0)
@@ -1255,12 +1311,15 @@ class SchedulerMixin:
         board_by_name = fast_context.get("board_by_name", {})
         yt_by_ticker = fast_context.get("yt_by_ticker", {})
         yt_by_name = fast_context.get("yt_by_name", {})
+        yt_intel_by_ticker = fast_context.get("yt_intel_by_ticker", {})
+        yt_intel_by_name = fast_context.get("yt_intel_by_name", {})
 
         for manager_key, candidates in candidates_by_manager.items():
             for candidate in candidates:
                 ticker = candidate.get("ticker", "")
                 name = candidate.get("name", "")
                 yt = yt_by_ticker.get(ticker) or yt_by_name.get(name) or {}
+                yt_intel = yt_intel_by_ticker.get(ticker) or yt_intel_by_name.get(name) or {}
                 mentions = int(yt.get("mentions", 0) or 0)
                 event_tags = list(dict.fromkeys(
                     list(event_hits_by_ticker.get(ticker, []))
@@ -1272,6 +1331,10 @@ class SchedulerMixin:
                 board_posts = int(board_buzz.get("posts", 0) or 0)
                 board_label = str(board_buzz.get("label", "") or "")
                 board_keywords = list(board_buzz.get("keywords") or [])
+                yt_outlook = str(yt_intel.get("outlook", "") or "").strip().lower()
+                yt_implications = str(yt_intel.get("implications", "") or "").strip()
+                yt_sentiment = str(yt_intel.get("sentiment", "") or "").strip()
+                yt_source = str(yt_intel.get("source", "") or "").strip()
                 crowd_signal = candidate.get("crowd_signal", "")
 
                 if not crowd_signal and board_label in {"토론방 과열", "리딩방 급락 경계"}:
@@ -1297,6 +1360,17 @@ class SchedulerMixin:
                     fast_bonus += 1 if board_posts >= 5 else 0
                 elif board_label in {"토론방 과열", "리딩방 급락 경계"}:
                     fast_bonus -= 4
+                if yt_outlook in {"bullish", "mixed"} and yt_sentiment in {"긍정", "positive"}:
+                    fast_bonus += 4 if manager_key in {"position", "tenbagger", "swing"} else 2
+                elif yt_outlook == "bearish" and yt_sentiment in {"부정", "negative"}:
+                    fast_bonus -= 5 if manager_key in {"scalp", "swing", "tenbagger"} else 3
+                elif yt_outlook == "bearish":
+                    fast_bonus -= 2
+                implication_lower = yt_implications.lower()
+                if any(keyword in implication_lower for keyword in ("씨앗", "선점", "분할", "눌림", "관심", "매수")):
+                    fast_bonus += 2 if manager_key in {"tenbagger", "swing", "position"} else 1
+                if any(keyword in implication_lower for keyword in ("관망", "회피", "정리", "매도", "주의")):
+                    fast_bonus -= 3
                 if crowd_signal in {"커뮤니티 과열", "개미 과열 경계"}:
                     fast_bonus -= 4
                 if crowd_signal == "리딩방 급행 주의":
@@ -1309,6 +1383,10 @@ class SchedulerMixin:
                 candidate["board_posts"] = board_posts
                 candidate["board_signal"] = board_label
                 candidate["board_keywords"] = board_keywords
+                candidate["yt_outlook"] = yt_outlook
+                candidate["yt_implication"] = yt_implications
+                candidate["yt_sentiment"] = yt_sentiment
+                candidate["yt_intel_source"] = yt_source
                 if crowd_signal:
                     candidate["crowd_signal"] = crowd_signal
                 try:
@@ -1322,6 +1400,12 @@ class SchedulerMixin:
                     reasons.append(f"이벤트 {event_tags[0]}")
                 if mentions >= 3:
                     reasons.append(f"유튜브 {mentions}회")
+                if yt_sentiment in {"긍정", "positive"}:
+                    reasons.append("유튜브 긍정")
+                elif yt_sentiment in {"부정", "negative"}:
+                    reasons.append("유튜브 경계")
+                if yt_source and yt_implications:
+                    reasons.append(f"{yt_source} 시사점")
                 if community_hits >= 1:
                     reasons.append(f"커뮤니티 {community_hits}건")
                 if board_label:
@@ -1359,6 +1443,21 @@ class SchedulerMixin:
                     candidate["action_hint"] = "토론방 과열보다 숏커버 지속 여부만 확인"
                 elif board_label in {"토론방 과열", "리딩방 급락 경계"}:
                     candidate["action_hint"] = "토론방 과열 진정과 종가 회복 전까지 관망"
+                if yt_implications:
+                    if any(keyword in yt_implications for keyword in ("관망", "회피", "정리", "매도", "주의")):
+                        candidate["action_hint"] = _merge_action_hint(
+                            candidate.get("action_hint", ""),
+                            "유튜브 경계 시그널 확인, 추격 대신 관망",
+                        )
+                    elif any(keyword in yt_implications for keyword in ("씨앗", "선점", "분할", "눌림", "매수")):
+                        candidate["action_hint"] = _merge_action_hint(
+                            candidate.get("action_hint", ""),
+                            (
+                                "유튜브 시황 기준 눌림 분할"
+                                if manager_key in {"swing", "position"}
+                                else "유튜브 시황 기준 씨앗 선점"
+                            ),
+                        )
 
             candidates.sort(key=lambda item: (
                 -float(item.get("fit_score", 0) or 0),

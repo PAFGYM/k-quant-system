@@ -180,6 +180,21 @@ def test_enrich_manager_candidates_with_fast_context_applies_board_buzz():
         "community_hits_by_name": {},
         "yt_by_ticker": {},
         "yt_by_name": {},
+        "yt_intel_by_ticker": {
+            "555555": {
+                "source": "장전시황TV",
+                "outlook": "bullish",
+                "implications": "씨앗 포지션 선점, 눌림 분할 매수",
+                "sentiment": "긍정",
+            },
+            "666666": {
+                "source": "마감시황TV",
+                "outlook": "bearish",
+                "implications": "관망, 추격 매수 금지",
+                "sentiment": "부정",
+            },
+        },
+        "yt_intel_by_name": {},
         "board_by_ticker": {
             "555555": {"posts": 8, "label": "토론방 매집 감지", "keywords": ["매집", "실적"]},
             "666666": {"posts": 11, "label": "토론방 과열", "keywords": ["상한가", "추천"]},
@@ -198,12 +213,17 @@ def test_enrich_manager_candidates_with_fast_context_applies_board_buzz():
 
     assert strong["fit_score"] > 70.0
     assert strong["board_signal"] == "토론방 매집 감지"
+    assert strong["yt_outlook"] == "bullish"
+    assert strong["yt_intel_source"] == "장전시황TV"
     assert "토론방 매집 감지" in strong["fit_reasons"]
+    assert "유튜브 긍정" in strong["fit_reasons"]
     assert "토론방 확산 전" in strong["action_hint"]
 
     assert weak["fit_score"] < 64.0
     assert weak["board_signal"] == "토론방 과열"
     assert weak["crowd_signal"] == "리딩방 급행 주의"
+    assert weak["yt_outlook"] == "bearish"
+    assert "유튜브 경계" in weak["fit_reasons"]
     assert "관망" in weak["action_hint"]
 
 
