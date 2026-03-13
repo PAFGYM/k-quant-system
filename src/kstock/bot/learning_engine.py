@@ -335,8 +335,8 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
             # 최고/최악 매매
             best = max(rows, key=lambda r: r["day5_return"] or -999)
             worst = min(rows, key=lambda r: r["day5_return"] or 999)
-            best_text = f"{best['name']} +{(best['day5_return'] or 0)*100:.1f}%"
-            worst_text = f"{worst['name']} {(worst['day5_return'] or 0)*100:.1f}%"
+            best_text = f"{best['name']} +{(best['day5_return'] or 0):.1f}%"
+            worst_text = f"{worst['name']} {(worst['day5_return'] or 0):.1f}%"
 
             # 가중치 조절 (hit_rate 기반)
             if hit_rate >= 70:
@@ -404,7 +404,7 @@ def format_manager_scorecard(scorecards: dict) -> str:
         total = card.get("total", 0)
         hits = card.get("hits", 0)
         rate = card.get("hit_rate", 0)
-        avg5 = card.get("avg_return_5d", 0) * 100
+        avg5 = card.get("avg_return_5d", 0)
         weight = card.get("weight_adj", 1.0)
 
         # 등급

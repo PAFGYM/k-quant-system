@@ -1092,7 +1092,7 @@ class SchedulerMixin:
                                 ).fetchone()
                             if _sc_row and _sc_row["hit_rate"] > 0:
                                 _hr = _sc_row["hit_rate"]
-                                _ar = _sc_row["avg_return_5d"] * 100
+                                _ar = _sc_row["avg_return_5d"]
                                 _badge_e = "🟢" if _hr >= 60 else ("🟡" if _hr >= 45 else "🔴")
                                 _badge = f"{_badge_e} 적중률 {_hr:.0f}% | 5일 평균 {_ar:+.1f}%"
                                 report = report.replace("\n", f"\n{_badge}\n", 1)

@@ -232,8 +232,8 @@ def _setup_db(path: str) -> _DummyDB:
             INSERT INTO recommendation_results
             (recommendation_id, ticker, rec_price, strategy_type, day5_return, day10_return, day20_return, correct)
             VALUES
-            (1, '005930', 79000, 'A', 0.05, 0.06, 0.08, 1),
-            (2, '086520', 150000, 'C', 0.02, 0.03, 0.05, 1)
+            (1, '005930', 79000, 'A', 5.0, 6.0, 8.0, 1),
+            (2, '086520', 150000, 'C', 2.0, 3.0, 5.0, 1)
             """
         )
         conn.execute(
@@ -276,7 +276,7 @@ def test_analyze_user_trade_patterns_reads_sold_history_and_saves_operator_profi
 
 
 def test_calculate_manager_scorecard_falls_back_to_strategy_clusters_and_tenbagger(tmp_path) -> None:
-    from kstock.bot.learning_engine import calculate_manager_scorecard
+    from kstock.bot.learning_engine import calculate_manager_scorecard, format_manager_scorecard
 
     db = _setup_db(str(tmp_path / "scorecard.db"))
     scorecards = calculate_manager_scorecard(db, days=30)
@@ -286,3 +286,7 @@ def test_calculate_manager_scorecard_falls_back_to_strategy_clusters_and_tenbagg
     assert scorecards["long_term"]["total"] == 1
     assert scorecards["tenbagger"]["total"] == 1
     assert round(scorecards["tenbagger"]["avg_score"], 1) == 88.5
+
+    text = format_manager_scorecard(scorecards)
+    assert "5일 평균수익: +5.0%" in text
+    assert "최고: 삼성전자 +5.0%" in text
