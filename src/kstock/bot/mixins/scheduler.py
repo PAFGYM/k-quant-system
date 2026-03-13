@@ -1040,6 +1040,8 @@ class SchedulerMixin:
             "event_hits_by_name": defaultdict(list),
             "news_hits_by_name": defaultdict(int),
             "community_hits_by_name": defaultdict(int),
+            "board_by_ticker": {},
+            "board_by_name": {},
             "yt_by_ticker": {},
             "yt_by_name": {},
             "event_lines": [],
@@ -1173,6 +1175,51 @@ class SchedulerMixin:
         except Exception:
             logger.debug("Manager YouTube context build failed", exc_info=True)
 
+        try:
+            from kstock.ingest.naver_discussion import fetch_discussion_buzz
+
+            ranked_candidates: list[tuple[float, str, str]] = []
+            for items in candidates_by_manager.values():
+                for item in items:
+                    ticker = str(item.get("ticker", "") or "")
+                    name = str(item.get("name", "") or "")
+                    if not ticker or not name:
+                        continue
+                    ranked_candidates.append((
+                        float(item.get("fit_score", 0) or 0),
+                        ticker,
+                        name,
+                    ))
+
+            seen_tickers: set[str] = set()
+            board_targets: list[tuple[str, str]] = []
+            for _, ticker, name in sorted(ranked_candidates, reverse=True):
+                if ticker in seen_tickers:
+                    continue
+                seen_tickers.add(ticker)
+                board_targets.append((ticker, name))
+                if len(board_targets) >= 6:
+                    break
+
+            merged_crowd = list(context.get("crowd_lines", []))
+            for ticker, name in board_targets:
+                buzz = fetch_discussion_buzz(ticker, name=name, pages=1)
+                if not buzz or int(buzz.get("posts", 0) or 0) <= 0:
+                    continue
+                context["board_by_ticker"][ticker] = buzz
+                context["board_by_name"][name] = buzz
+                label = str(buzz.get("label", "") or "")
+                posts = int(buzz.get("posts", 0) or 0)
+                if label:
+                    context["community_hits_by_name"][name] += max(1, min(3, posts // 4))
+                    keywords = "/".join(list(buzz.get("keywords") or [])[:2]) or "토론방"
+                    line = f"{name} | {label} | 글 {posts}건 | {keywords}"
+                    if line not in merged_crowd:
+                        merged_crowd.append(line)
+            context["crowd_lines"] = merged_crowd[:5]
+        except Exception:
+            logger.debug("Manager board buzz context build failed", exc_info=True)
+
         return context
 
     def _enrich_manager_candidates_with_fast_context(
@@ -1204,6 +1251,8 @@ class SchedulerMixin:
         event_hits_by_name = fast_context.get("event_hits_by_name", {})
         news_hits_by_name = fast_context.get("news_hits_by_name", {})
         community_hits_by_name = fast_context.get("community_hits_by_name", {})
+        board_by_ticker = fast_context.get("board_by_ticker", {})
+        board_by_name = fast_context.get("board_by_name", {})
         yt_by_ticker = fast_context.get("yt_by_ticker", {})
         yt_by_name = fast_context.get("yt_by_name", {})
 
@@ -1219,9 +1268,15 @@ class SchedulerMixin:
                 ))[:3]
                 news_hits = int(news_hits_by_name.get(name, 0))
                 community_hits = int(community_hits_by_name.get(name, 0))
+                board_buzz = board_by_ticker.get(ticker) or board_by_name.get(name) or {}
+                board_posts = int(board_buzz.get("posts", 0) or 0)
+                board_label = str(board_buzz.get("label", "") or "")
+                board_keywords = list(board_buzz.get("keywords") or [])
                 crowd_signal = candidate.get("crowd_signal", "")
 
-                if not crowd_signal and community_hits >= 2 and mentions >= 2 and not event_tags:
+                if not crowd_signal and board_label in {"토론방 과열", "리딩방 급락 경계"}:
+                    crowd_signal = "리딩방 급행 주의"
+                elif not crowd_signal and community_hits >= 2 and mentions >= 2 and not event_tags:
                     crowd_signal = "리딩방 급행 주의"
                 elif not crowd_signal and mentions >= 4 and not event_tags:
                     crowd_signal = "커뮤니티 과열"
@@ -1234,6 +1289,14 @@ class SchedulerMixin:
                 fast_bonus += min(4, mentions)
                 fast_bonus += min(3, news_hits)
                 fast_bonus += min(2, community_hits)
+                if board_label == "토론방 매집 감지":
+                    fast_bonus += 4 if manager_key in {"swing", "position", "tenbagger"} else 2
+                elif board_label == "토론방 숏커버 화제":
+                    fast_bonus += 4 if manager_key in {"scalp", "swing", "tenbagger"} else 2
+                elif board_label == "토론방 관심 집중":
+                    fast_bonus += 1 if board_posts >= 5 else 0
+                elif board_label in {"토론방 과열", "리딩방 급락 경계"}:
+                    fast_bonus -= 4
                 if crowd_signal in {"커뮤니티 과열", "개미 과열 경계"}:
                     fast_bonus -= 4
                 if crowd_signal == "리딩방 급행 주의":
@@ -1243,6 +1306,9 @@ class SchedulerMixin:
                 candidate["youtube_mentions"] = mentions
                 candidate["news_hits"] = news_hits
                 candidate["community_hits"] = community_hits
+                candidate["board_posts"] = board_posts
+                candidate["board_signal"] = board_label
+                candidate["board_keywords"] = board_keywords
                 if crowd_signal:
                     candidate["crowd_signal"] = crowd_signal
                 try:
@@ -1258,6 +1324,8 @@ class SchedulerMixin:
                     reasons.append(f"유튜브 {mentions}회")
                 if community_hits >= 1:
                     reasons.append(f"커뮤니티 {community_hits}건")
+                if board_label:
+                    reasons.append(board_label)
                 if crowd_signal and crowd_signal not in reasons:
                     reasons.append(crowd_signal)
                 seen_reason: set[str] = set()
@@ -1281,6 +1349,16 @@ class SchedulerMixin:
                         candidate["action_hint"] = "리딩방·커뮤니티 과열 진정 후만 접근"
                     elif entry_stage == "씨앗 구축":
                         candidate["action_hint"] = "뉴스보다 먼저 소액 씨앗만 선점"
+                if board_label == "토론방 매집 감지":
+                    candidate["action_hint"] = (
+                        "토론방 확산 전 씨앗 포지션 구축"
+                        if manager_key == "tenbagger"
+                        else "토론방 매집 흔적 확인 후 눌림 분할"
+                    )
+                elif board_label == "토론방 숏커버 화제":
+                    candidate["action_hint"] = "토론방 과열보다 숏커버 지속 여부만 확인"
+                elif board_label in {"토론방 과열", "리딩방 급락 경계"}:
+                    candidate["action_hint"] = "토론방 과열 진정과 종가 회복 전까지 관망"
 
             candidates.sort(key=lambda item: (
                 -float(item.get("fit_score", 0) or 0),
@@ -1474,6 +1552,99 @@ class SchedulerMixin:
             ))
 
         return candidates_by_manager
+
+    def _enrich_manager_candidates_with_operator_memory(
+        self,
+        candidates_by_manager: dict[str, list[dict]],
+        macro=None,
+        *,
+        playbook=None,
+    ) -> tuple[dict[str, list[dict]], object | None]:
+        """한국장 패턴 메모를 추천 순위에 직접 반영한다."""
+        try:
+            from kstock.signal.krx_operator_memory import build_krx_operator_memory
+        except Exception:
+            return candidates_by_manager, None
+
+        try:
+            memory = build_krx_operator_memory(
+                self.db,
+                macro,
+                playbook=playbook,
+            )
+        except Exception:
+            logger.debug("operator memory candidate enrichment failed", exc_info=True)
+            return candidates_by_manager, None
+
+        manager_key_by_label = {
+            "리버모어": "scalp",
+            "오닐": "swing",
+            "린치": "position",
+            "버핏": "long_term",
+            "텐베거": "tenbagger",
+        }
+        focused_managers: set[str] = set()
+        for line in list(getattr(memory, "manager_focus", []) or []):
+            for label, key in manager_key_by_label.items():
+                if label in str(line or ""):
+                    focused_managers.add(key)
+
+        attack_points = [str(item or "").strip() for item in list(getattr(memory, "attack_points", []) or [])]
+        avoid_points = [str(item or "").strip() for item in list(getattr(memory, "avoid_points", []) or [])]
+
+        for manager_key, candidates in candidates_by_manager.items():
+            manager_adj = 3.0 if manager_key in focused_managers else 0.0
+            for candidate in candidates:
+                reasons = list(candidate.get("fit_reasons") or [])
+                base_fit = float(candidate.get("fit_score", 0) or 0)
+                adj = manager_adj
+                text_pool = " ".join([
+                    str(candidate.get("name", "") or ""),
+                    str(candidate.get("crowd_signal", "") or ""),
+                    " ".join(str(tag) for tag in list(candidate.get("event_tags") or [])),
+                    " ".join(str(reason) for reason in reasons),
+                ])
+
+                memory_hit = ""
+                if any(point and point in str(candidate.get("name", "") or "") for point in attack_points):
+                    adj += 5.0
+                    memory_hit = "오늘 공략 축"
+                elif any(point and point in text_pool for point in attack_points):
+                    adj += 2.0
+                    memory_hit = "패턴 메모 공략"
+
+                if any(point and point in str(candidate.get("name", "") or "") for point in avoid_points):
+                    adj -= 6.0
+                    memory_hit = "패턴 메모 회피"
+                elif any(point and point in text_pool for point in avoid_points):
+                    adj -= 3.0
+                    memory_hit = "패턴 메모 회피"
+
+                if memory_hit:
+                    reasons.append(memory_hit)
+                    candidate["operator_memory_hit"] = memory_hit
+                elif manager_adj > 0:
+                    reasons.append("오늘 우선 매니저")
+                    candidate["operator_memory_hit"] = "오늘 우선 매니저"
+
+                seen: set[str] = set()
+                deduped: list[str] = []
+                for reason in reasons:
+                    text = str(reason or "").strip()
+                    if not text or text in seen:
+                        continue
+                    seen.add(text)
+                    deduped.append(text)
+                candidate["fit_reasons"] = deduped[:5]
+                candidate["fit_score"] = round(max(0.0, min(99.0, base_fit + adj)), 1)
+
+            candidates.sort(key=lambda item: (
+                -float(item.get("fit_score", 0) or 0),
+                -float(item.get("composite", 0) or 0),
+                -float(item.get("confidence_score", 0) or 0),
+            ))
+
+        return candidates_by_manager, memory
 
     def _get_ticker_tactical_context(self, ticker: str, name: str = "", macro=None) -> dict:
         """외인/기관·공매도·숏커버 문맥을 종목 단위로 요약."""
@@ -2256,6 +2427,10 @@ class SchedulerMixin:
             by_manager = self._enrich_manager_candidates_with_herd_context(
                 by_manager, herd_signal_map,
             )
+            by_manager, _ = self._enrich_manager_candidates_with_operator_memory(
+                by_manager,
+                macro,
+            )
 
             digest = format_manager_action_digest(
                 by_manager,
@@ -2530,6 +2705,11 @@ class SchedulerMixin:
         by_manager = self._enrich_manager_candidates_with_herd_context(
             by_manager, herd_signal_map,
         )
+        by_manager, operator_memory = self._enrich_manager_candidates_with_operator_memory(
+            by_manager,
+            macro,
+            playbook=playbook,
+        )
 
         strong_tickers = {
             getattr(item, "ticker", "")
@@ -2546,6 +2726,17 @@ class SchedulerMixin:
             "long_term": 1.01,
             "tenbagger": 1.08,
         }
+        memory_focus_lines = list(getattr(operator_memory, "manager_focus", []) or [])
+        if any("리버모어" in line for line in memory_focus_lines):
+            lane_bias["scalp"] *= 1.04
+        if any("오닐" in line for line in memory_focus_lines):
+            lane_bias["swing"] *= 1.05
+        if any("린치" in line for line in memory_focus_lines):
+            lane_bias["position"] *= 1.05
+        if any("버핏" in line for line in memory_focus_lines):
+            lane_bias["long_term"] *= 1.04
+        if any("텐베거" in line for line in memory_focus_lines):
+            lane_bias["tenbagger"] *= 1.06
 
         ranked: list[tuple[float, str, dict]] = []
         for mgr_key, picks in by_manager.items():
@@ -7862,6 +8053,10 @@ class SchedulerMixin:
             herd_signal_map, herd_lines = self._build_manager_herd_signals(results)
             candidates_by_manager = self._enrich_manager_candidates_with_herd_context(
                 candidates_by_manager, herd_signal_map,
+            )
+            candidates_by_manager, _ = self._enrich_manager_candidates_with_operator_memory(
+                candidates_by_manager,
+                macro,
             )
             digest = format_manager_action_digest(
                 candidates_by_manager,

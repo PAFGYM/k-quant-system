@@ -147,6 +147,110 @@ def test_enrich_manager_candidates_with_herd_context_updates_score_and_action():
     assert "종가 회복 확인" in weak["action_hint"]
 
 
+def test_enrich_manager_candidates_with_fast_context_applies_board_buzz():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    candidates = {
+        "tenbagger": [
+            {
+                "ticker": "555555",
+                "name": "버즈주",
+                "fit_score": 70.0,
+                "fit_reasons": ["국내 스몰캡 핵심 구간"],
+                "action_hint": "정책·산업 이벤트 전 씨앗 포지션 구축",
+                "listing_market": "KOSDAQ",
+                "market_cap": 1_1000_0000_0000,
+            }
+        ],
+        "swing": [
+            {
+                "ticker": "666666",
+                "name": "과열주",
+                "fit_score": 64.0,
+                "fit_reasons": ["BB 하단 0.35"],
+                "action_hint": "반등 확인 후 2~3회 분할 진입",
+            }
+        ],
+    }
+    fast_context = {
+        "event_hits_by_ticker": {},
+        "event_hits_by_name": {},
+        "news_hits_by_name": {},
+        "community_hits_by_name": {},
+        "yt_by_ticker": {},
+        "yt_by_name": {},
+        "board_by_ticker": {
+            "555555": {"posts": 8, "label": "토론방 매집 감지", "keywords": ["매집", "실적"]},
+            "666666": {"posts": 11, "label": "토론방 과열", "keywords": ["상한가", "추천"]},
+        },
+        "board_by_name": {},
+        "crowd_lines": [],
+        "event_lines": [],
+    }
+
+    enriched = SchedulerMixin._enrich_manager_candidates_with_fast_context(
+        mixin, candidates, fast_context,
+    )
+
+    strong = enriched["tenbagger"][0]
+    weak = enriched["swing"][0]
+
+    assert strong["fit_score"] > 70.0
+    assert strong["board_signal"] == "토론방 매집 감지"
+    assert "토론방 매집 감지" in strong["fit_reasons"]
+    assert "토론방 확산 전" in strong["action_hint"]
+
+    assert weak["fit_score"] < 64.0
+    assert weak["board_signal"] == "토론방 과열"
+    assert weak["crowd_signal"] == "리딩방 급행 주의"
+    assert "관망" in weak["action_hint"]
+
+
+def test_enrich_manager_candidates_with_operator_memory_boosts_focused_lane():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin.db = MagicMock()
+    candidates = {
+        "tenbagger": [
+            {
+                "ticker": "777777",
+                "name": "방산소형주",
+                "fit_score": 72.0,
+                "fit_reasons": ["국내 스몰캡 핵심 구간"],
+                "composite": 75.0,
+                "confidence_score": 0.8,
+            }
+        ],
+        "position": [
+            {
+                "ticker": "888888",
+                "name": "일반주",
+                "fit_score": 74.0,
+                "fit_reasons": ["종합점수 74"],
+                "composite": 74.0,
+                "confidence_score": 0.82,
+            }
+        ],
+    }
+
+    with patch("kstock.signal.krx_operator_memory.build_krx_operator_memory") as mock_builder:
+        mock_builder.return_value = MagicMock(
+            manager_focus=["텐베거: 이벤트 선점형 스몰캡 발굴 강화"],
+            attack_points=["방산", "전력/원전"],
+            avoid_points=["리딩방 과열주"],
+        )
+        enriched, memory = SchedulerMixin._enrich_manager_candidates_with_operator_memory(
+            mixin, candidates, macro=None,
+        )
+
+    assert memory is not None
+    assert enriched["tenbagger"][0]["fit_score"] > 72.0
+    assert enriched["tenbagger"][0]["operator_memory_hit"] in {"오늘 공략 축", "오늘 우선 매니저"}
+    assert "오늘" in " ".join(enriched["tenbagger"][0]["fit_reasons"])
+
+
 def test_backfill_profile_day_change_uses_cached_ohlcv_when_intraday_change_missing():
     from kstock.bot.mixins.scheduler import SchedulerMixin
 

@@ -1811,8 +1811,17 @@ def format_manager_action_digest(
                 fast_parts.append(f"유튜브 {pick['youtube_mentions']}회")
             if pick.get("community_hits", 0):
                 fast_parts.append(f"커뮤니티 {pick['community_hits']}건")
+            if pick.get("board_signal"):
+                board_posts = int(pick.get("board_posts", 0) or 0)
+                label = str(pick.get("board_signal", "") or "")
+                if board_posts > 0:
+                    fast_parts.append(f"{label} {board_posts}건")
+                else:
+                    fast_parts.append(label)
             if pick.get("herd_pattern"):
                 fast_parts.append(f"군집 {pick['herd_pattern']}")
+            if pick.get("operator_memory_hit"):
+                fast_parts.append(str(pick["operator_memory_hit"]))
             if pick.get("flow_signal"):
                 fast_parts.append(str(pick["flow_signal"]))
             if pick.get("short_pattern_labels"):
@@ -1824,7 +1833,7 @@ def format_manager_action_digest(
             if pick.get("crowd_signal"):
                 fast_parts.append(pick["crowd_signal"])
             if fast_parts:
-                lines.append(f"   빠른신호: {' · '.join(fast_parts[:6])}")
+                lines.append(f"   빠른신호: {' · '.join(fast_parts[:8])}")
             action = pick.get("action_hint") or guide.get("action", "")
             if action:
                 lines.append(f"   행동: {action}")

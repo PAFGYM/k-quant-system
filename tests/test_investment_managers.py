@@ -203,6 +203,8 @@ def test_format_manager_action_digest_includes_fast_signals():
                 "youtube_mentions": 4,
                 "news_hits": 2,
                 "community_hits": 2,
+                "board_signal": "토론방 매집 감지",
+                "board_posts": 8,
                 "herd_pattern": "진성 세력",
                 "flow_signal": "외인+기관 순유입",
                 "short_pattern_labels": ["숏커버링 랠리", "숏스퀴즈"],
@@ -224,6 +226,7 @@ def test_format_manager_action_digest_includes_fast_signals():
     assert "군집 레이더" in text
     assert "외인+기관 순유입" in text
     assert "군집 진성 세력" in text
+    assert "토론방 매집 감지 8건" in text
     assert "숏패턴 숏커버링 랠리/숏스퀴즈" in text
     assert "국내 스몰캡 레이더" in text
     assert "선점 구간" in text
