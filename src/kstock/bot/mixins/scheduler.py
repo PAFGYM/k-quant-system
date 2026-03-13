@@ -2964,6 +2964,10 @@ class SchedulerMixin:
                 alert_mode=alert_mode,
             ),
         )
+        actions = self._link_rotation_actions(
+            actions=actions,
+            allocation_context=allocation_context,
+        )
 
         # 정렬
         order = {"urgent": 0, "caution": 1, "opportunity": 2, "check": 3}
@@ -3699,6 +3703,85 @@ class SchedulerMixin:
 
         return base_actions
 
+    def _link_rotation_actions(
+        self,
+        *,
+        actions: list[dict],
+        allocation_context: dict,
+    ) -> list[dict]:
+        """현금이 빠듯할 때 약한 보유주와 강한 신규 후보를 교체 흐름으로 연결한다."""
+        if not actions:
+            return actions
+
+        current_cash_pct = float(allocation_context.get("current_cash_pct", 0) or 0)
+        cash_floor_pct = float(allocation_context.get("cash_floor_pct", 0) or 0)
+        if current_cash_pct > cash_floor_pct + 2.0:
+            return actions
+
+        weak_actions = [
+            action for action in actions
+            if str(action.get("action", "") or "") in {"교체매도 후보", "분할익절 우선"}
+            and str(action.get("ticker", "") or "").strip()
+        ]
+        candidate_actions = [
+            action for action in actions
+            if str(action.get("priority", "") or "") == "opportunity"
+            and str(action.get("ticker", "") or "").strip()
+            and str(action.get("allocation_summary", "") or "").strip()
+        ]
+        if not weak_actions or not candidate_actions:
+            return actions
+
+        weak_actions.sort(
+            key=lambda action: (
+                0 if str(action.get("action", "") or "") == "교체매도 후보" else 1,
+                float(action.get("manager_weight_adj", 1.0) or 1.0),
+            )
+        )
+        candidate_actions.sort(
+            key=lambda action: (
+                -float(action.get("weight_pct", 0) or 0),
+                -float(action.get("manager_weight_adj", 1.0) or 1.0),
+            )
+        )
+
+        used_sources: set[str] = set()
+        for candidate in candidate_actions:
+            candidate_ticker = str(candidate.get("ticker", "") or "").strip()
+            source = next(
+                (
+                    action for action in weak_actions
+                    if str(action.get("ticker", "") or "").strip() != candidate_ticker
+                    and str(action.get("ticker", "") or "").strip() not in used_sources
+                ),
+                None,
+            )
+            if source is None:
+                continue
+
+            source_name = str(source.get("name", "") or source.get("ticker", "") or "").strip()
+            candidate_name = str(candidate.get("name", "") or candidate_ticker).strip()
+            source_next = str(source.get("next_step", "") or "").strip()
+            source_hint = f"교체 1순위 {candidate_name}"
+            if source_hint not in source_next:
+                source["next_step"] = f"{source_next} · {source_hint}" if source_next else source_hint
+
+            candidate_next = str(candidate.get("next_step", "") or "").strip()
+            candidate_hint = f"교체매수 우선 · {source_name} 축소 재원 활용"
+            if candidate_hint not in candidate_next:
+                candidate["next_step"] = f"{candidate_next} · {candidate_hint}" if candidate_next else candidate_hint
+
+            allocation_summary = str(candidate.get("allocation_summary", "") or "").strip()
+            if "교체재원" not in allocation_summary:
+                candidate["allocation_summary"] = (
+                    f"{allocation_summary} · 교체재원 {source_name}"
+                    if allocation_summary else f"교체재원 {source_name}"
+                )
+            candidate["rotation_source"] = source_name
+            used_sources.add(str(source.get("ticker", "") or "").strip())
+
+        return actions
+
     def _build_daily_candidate_actions(
         self,
         *,
@@ -3979,6 +4062,14 @@ class SchedulerMixin:
             lines.append(
                 f"현금: {current_cash_pct:.1f}% | 목표 {cash_floor_pct:.0f}% ({cash_status})"
             )
+        rotation_pairs = []
+        for action in actions:
+            source = str(action.get("rotation_source", "") or "").strip()
+            name = str(action.get("name", "") or "").strip()
+            if source and name:
+                rotation_pairs.append(f"{source}->{name}")
+        if rotation_pairs:
+            lines.append(f"교체 우선: {rotation_pairs[0]}")
         _, bias_lines = self._build_personalized_lane_bias(holdings=holdings)
         for line in bias_lines[:1]:
             clean = str(line or "").strip()

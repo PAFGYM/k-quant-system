@@ -181,6 +181,71 @@ def test_generate_daily_actions_adds_personalized_holding_management():
     assert any(a["ticker"] == "017670" and a["action"] == "추매 후보" for a in actions)
 
 
+def test_generate_daily_actions_links_rotation_candidate_when_cash_tight():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin.db = MagicMock()
+    mixin.db.get_active_holdings.return_value = [
+        {
+            "ticker": "083650",
+            "name": "비에이치아이",
+            "buy_price": 100_000,
+            "current_price": 92_000,
+            "eval_amount": 45_000_000,
+            "quantity": 500,
+            "holding_type": "position",
+        },
+    ]
+    mixin.db.get_portfolio_snapshots.return_value = [
+        {"total_value": 100_000_000, "cash": 10_000_000},
+    ]
+    mixin._get_price = MagicMock(side_effect=lambda ticker, base_price=0: {"083650": 92_000}.get(ticker, base_price))
+    mixin._build_downside_playbook = MagicMock(return_value=None)
+    mixin._load_recent_manager_scorecards = MagicMock(
+        return_value={
+            "position": {"weight_adj": 0.82, "avg_return_5d": -1.1},
+            "long_term": {"weight_adj": 1.18, "avg_return_5d": 1.7},
+        }
+    )
+    mixin._build_daily_candidate_actions = MagicMock(
+        return_value=[
+            {
+                "priority": "opportunity",
+                "ticker": "017670",
+                "name": "SK텔레콤",
+                "action": "하루에 몰지 말고 2~3회 장기 분할",
+                "reason": "품질 가치 · 안정 현금흐름",
+                "manager_key": "long_term",
+                "manager_label": "🏦 장기 가치 매니저",
+                "callback_data": "fav:stock:017670",
+                "secondary_callback": "mgr_tab:long_term",
+                "button_label": "🏦 SK텔레콤 후보",
+                "next_step": "하루에 몰지 말고 2~3회 장기 분할",
+                "weight_pct": 3.0,
+                "requested_weight_pct": 3.0,
+                "budget_krw": 3_000_000,
+                "requested_budget_krw": 3_000_000,
+                "allocation_summary": "권장 비중 3.0% · 3,000,000원",
+                "allocation_split": "씨앗 1.2% → 눌림 1.0% → 확인 0.8%",
+                "split_weights": [1.2, 1.0, 0.8],
+                "manager_weight_adj": 1.18,
+                "candidate_sector": "통신/방어",
+                "allocation_note": "",
+            },
+        ]
+    )
+
+    with patch("kstock.bot.mixins.scheduler.detect_regime", return_value=MagicMock(mode="neutral", label="중립", emoji="⚪")):
+        actions = asyncio.run(mixin._generate_daily_actions(_make_macro()))
+
+    weak_action = next(a for a in actions if a["ticker"] == "083650" and a["action"] == "교체매도 후보")
+    candidate = next(a for a in actions if a["ticker"] == "017670")
+    assert "교체 1순위 SK텔레콤" in weak_action["next_step"]
+    assert "교체매수 우선" in candidate["next_step"]
+    assert "교체재원 비에이치아이" in candidate["allocation_summary"]
+
+
 def test_build_daily_candidate_actions_applies_personal_lane_bias():
     from kstock.bot.mixins.scheduler import SchedulerMixin
 
@@ -426,3 +491,36 @@ def test_build_daily_candidate_actions_rebalances_budget_toward_strong_manager()
     assert by_mgr["long_term"]["weight_pct"] > by_mgr["swing"]["weight_pct"]
     assert "레인 1.18x" in by_mgr["long_term"]["allocation_summary"]
     assert "약한 레인" in by_mgr["swing"]["next_step"]
+
+
+def test_build_daily_action_coach_lines_highlights_rotation_pair():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin.db = MagicMock()
+    mixin.db.get_portfolio_snapshots.return_value = [{"total_value": 100_000_000, "cash": 18_000_000}]
+    mixin.db.get_active_holdings.return_value = []
+    mixin._build_personalized_lane_bias = MagicMock(
+        return_value=(
+            {"scalp": 1.0, "swing": 1.0, "position": 1.0, "long_term": 1.0, "tenbagger": 1.0},
+            [],
+        )
+    )
+    mixin._build_downside_playbook = MagicMock(return_value=None)
+
+    actions = [
+        {
+            "priority": "opportunity",
+            "name": "SK텔레콤",
+            "action": "추매 후보",
+            "ticker": "017670",
+            "rotation_source": "비에이치아이",
+            "allocation_summary": "권장 비중 3.0% · 3,000,000원 · 교체재원 비에이치아이",
+            "weight_pct": 3.0,
+            "budget_krw": 3_000_000,
+        },
+    ]
+
+    lines = mixin._build_daily_action_coach_lines(actions, _make_macro())
+
+    assert any("교체 우선: 비에이치아이->SK텔레콤" in line for line in lines)
