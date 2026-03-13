@@ -2796,6 +2796,12 @@ class SchedulerMixin:
         holdings = self.db.get_active_holdings()
         alert_mode = getattr(self, '_alert_mode', 'normal')
         playbook = self._build_downside_playbook(macro) if macro else None
+        allocation_context = self._load_daily_allocation_context(
+            holdings=holdings,
+            macro=macro,
+            alert_mode=alert_mode,
+        )
+        scorecards = self._load_recent_manager_scorecards()
 
         for h in holdings:
             ticker = h.get("ticker", "")
@@ -2882,6 +2888,14 @@ class SchedulerMixin:
                     "secondary_callback": manager_tab,
                     "button_label": f"{manager.get('emoji', '📌')} {name} 점검",
                 })
+
+        actions = self._build_personalized_holding_actions(
+            holdings=holdings,
+            base_actions=actions,
+            allocation_context=allocation_context,
+            scorecards=scorecards,
+            alert_mode=alert_mode,
+        )
 
         # 기회: 시장 레짐
         try:
@@ -3528,6 +3542,162 @@ class SchedulerMixin:
                 action["next_step"] = f"{next_step} · {action['allocation_note']}" if next_step else action["allocation_note"]
 
         return actions
+
+    def _build_personalized_holding_actions(
+        self,
+        *,
+        holdings: list[dict],
+        base_actions: list[dict],
+        allocation_context: dict,
+        scorecards: dict[str, dict],
+        alert_mode: str,
+    ) -> list[dict]:
+        """보유 종목에 분할익절/추매/교체 제안을 덧붙인다."""
+        if not holdings:
+            return base_actions
+
+        existing_keys = {
+            (str(action.get("ticker", "") or ""), str(action.get("action", "") or ""))
+            for action in base_actions
+        }
+        total_value = float(allocation_context.get("total_value", 0) or 0)
+        current_cash_pct = float(allocation_context.get("current_cash_pct", 0) or 0)
+        cash_floor_pct = float(allocation_context.get("cash_floor_pct", 0) or 0)
+        sector_exposure_map = dict(allocation_context.get("sector_exposure_pct", {}) or {})
+        infer_sector = allocation_context.get("infer_sector")
+
+        lane_caps = {
+            "scalp": 4.0,
+            "swing": 6.5,
+            "position": 8.5,
+            "long_term": 10.0,
+            "tenbagger": 5.5,
+        }
+
+        from kstock.bot.investment_managers import MANAGERS, MANAGER_THRESHOLDS
+
+        for holding in holdings:
+            ticker = str(holding.get("ticker", "") or "").strip()
+            if not ticker:
+                continue
+            name = str(holding.get("name", "") or ticker).strip()[:8]
+            holding_type = self._normalize_morning_holding_type(
+                holding.get("holding_type", "") or holding.get("horizon", "")
+            )
+            buy_price = float(holding.get("buy_price", 0) or holding.get("avg_price", 0) or 0)
+            current_price = float(holding.get("current_price", 0) or 0)
+            if buy_price <= 0 or current_price <= 0:
+                continue
+
+            pnl = float(holding.get("pnl_pct", 0) or holding.get("profit_pct", 0) or 0)
+            if buy_price > 0 and current_price > 0 and abs(pnl) < 0.01:
+                pnl = (current_price - buy_price) / buy_price * 100.0
+            eval_amount = float(
+                holding.get("eval_amount", 0)
+                or current_price * float(holding.get("quantity", 0) or 0)
+                or 0
+            )
+            weight_pct = round((eval_amount / total_value) * 100.0, 1) if total_value > 0 else 0.0
+            lane_cap_pct = float(lane_caps.get(holding_type, 6.0))
+
+            manager_card = scorecards.get(holding_type, {})
+            manager_weight = float(manager_card.get("weight_adj", 1.0) or 1.0)
+            avg_return_5d = float(manager_card.get("avg_return_5d", 0.0) or 0.0)
+
+            sector = ""
+            if callable(infer_sector):
+                sector = str(
+                    infer_sector(
+                        ticker,
+                        str(holding.get("name", "") or ""),
+                        [str(holding.get("theme", "") or ""), str(holding.get("sector", "") or "")],
+                    )
+                ).strip()
+            sector_pct = float(sector_exposure_map.get(sector, 0.0) or 0.0)
+
+            thresholds = MANAGER_THRESHOLDS.get(holding_type, MANAGER_THRESHOLDS["swing"])
+            manager = MANAGERS.get(holding_type, {})
+            manager_label = f"{manager.get('emoji', '📌')} {manager.get('title', '자동')}"
+            manager_tab = f"mgr_tab:{holding_type}" if holding_type in MANAGERS else ""
+
+            if pnl >= thresholds["take_profit_1"] * 0.8 and (
+                weight_pct >= lane_cap_pct * 1.15 or sector_pct >= 38.0 or manager_weight <= 0.92
+            ):
+                key = (ticker, "분할익절 우선")
+                if key not in existing_keys:
+                    reasons = [f"+{pnl:.1f}% 수익 잠금 구간"]
+                    if sector and sector_pct >= 30.0:
+                        reasons.append(f"{sector} {sector_pct:.1f}% 편중")
+                    if manager_weight <= 0.92:
+                        reasons.append(f"레인 {manager_weight:.2f}x")
+                    base_actions.append({
+                        "priority": "caution",
+                        "ticker": ticker,
+                        "name": name,
+                        "action": "분할익절 우선",
+                        "reason": " · ".join(reasons),
+                        "manager_key": holding_type,
+                        "manager_label": manager_label,
+                        "callback_data": f"detail:{ticker}",
+                        "secondary_callback": manager_tab,
+                        "button_label": f"{manager.get('emoji', '📌')} {name} 익절",
+                        "next_step": "1/3 먼저 잠그고 나머지는 추세 유지력 확인",
+                    })
+                    existing_keys.add(key)
+
+            if (
+                current_cash_pct >= cash_floor_pct + 8.0
+                and manager_weight >= 1.05
+                and avg_return_5d >= 0.5
+                and -1.5 <= pnl <= max(4.0, thresholds["take_profit_1"] * 0.4)
+                and weight_pct <= lane_cap_pct * 0.85
+                and sector_pct < 32.0
+            ):
+                key = (ticker, "추매 후보")
+                if key not in existing_keys:
+                    add_weight = min(3.0, max(1.5, lane_cap_pct - weight_pct))
+                    add_budget = round(total_value * (add_weight / 100.0), -4) if total_value > 0 else 0.0
+                    summary = f"추매 여력 {add_weight:.1f}% · {add_budget:,.0f}원"
+                    if sector and sector != "기타":
+                        summary += f" · {sector}"
+                    base_actions.append({
+                        "priority": "opportunity",
+                        "ticker": ticker,
+                        "name": name,
+                        "action": "추매 후보",
+                        "reason": f"{pnl:+.1f}% · 강한 레인 {manager_weight:.2f}x · 종가 유지력 확인",
+                        "manager_key": holding_type,
+                        "manager_label": manager_label,
+                        "callback_data": f"detail:{ticker}",
+                        "secondary_callback": manager_tab,
+                        "button_label": f"{manager.get('emoji', '📌')} {name} 추매",
+                        "allocation_summary": summary,
+                        "next_step": "양봉 마감/수급 유지 시 1차만 추가",
+                    })
+                    existing_keys.add(key)
+
+            if pnl <= -3.0 and manager_weight <= 0.90 and (sector_pct >= 35.0 or weight_pct >= lane_cap_pct * 1.1):
+                key = (ticker, "교체매도 후보")
+                if key not in existing_keys:
+                    reasons = [f"{pnl:+.1f}% 약세 지속", f"레인 {manager_weight:.2f}x"]
+                    if sector and sector_pct >= 30.0:
+                        reasons.append(f"{sector} {sector_pct:.1f}% 집중")
+                    base_actions.append({
+                        "priority": "caution",
+                        "ticker": ticker,
+                        "name": name,
+                        "action": "교체매도 후보",
+                        "reason": " · ".join(reasons),
+                        "manager_key": holding_type,
+                        "manager_label": manager_label,
+                        "callback_data": f"detail:{ticker}",
+                        "secondary_callback": manager_tab,
+                        "button_label": f"{manager.get('emoji', '📌')} {name} 교체",
+                        "next_step": "약한 레인 축소 후 강한 신규 후보로 교체 검토",
+                    })
+                    existing_keys.add(key)
+
+        return base_actions
 
     def _build_daily_candidate_actions(
         self,

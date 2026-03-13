@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
 
@@ -133,6 +134,51 @@ def test_build_daily_action_coach_lines_summarizes_market_and_top_actions():
     assert any("회피:" in line for line in lines)
     assert any("현금:" in line for line in lines)
     assert any("개인화 우선 레인:" in line for line in lines)
+
+
+def test_generate_daily_actions_adds_personalized_holding_management():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin.db = MagicMock()
+    mixin.db.get_active_holdings.return_value = [
+        {
+            "ticker": "083650",
+            "name": "비에이치아이",
+            "buy_price": 100_000,
+            "current_price": 124_000,
+            "eval_amount": 60_000_000,
+            "quantity": 500,
+            "holding_type": "position",
+        },
+        {
+            "ticker": "017670",
+            "name": "SK텔레콤",
+            "buy_price": 60_000,
+            "current_price": 61_500,
+            "eval_amount": 6_000_000,
+            "quantity": 300,
+            "holding_type": "long_term",
+        },
+    ]
+    mixin.db.get_portfolio_snapshots.return_value = [
+        {"total_value": 100_000_000, "cash": 40_000_000},
+    ]
+    mixin._get_price = MagicMock(side_effect=lambda ticker, base_price=0: {"083650": 124_000, "017670": 61_500}.get(ticker, base_price))
+    mixin._build_downside_playbook = MagicMock(return_value=None)
+    mixin._load_recent_manager_scorecards = MagicMock(
+        return_value={
+            "position": {"weight_adj": 0.88, "avg_return_5d": -0.6},
+            "long_term": {"weight_adj": 1.16, "avg_return_5d": 1.2},
+        }
+    )
+    mixin._build_daily_candidate_actions = MagicMock(return_value=[])
+
+    with patch("kstock.bot.mixins.scheduler.detect_regime", return_value=MagicMock(mode="neutral", label="중립", emoji="⚪")):
+        actions = asyncio.run(mixin._generate_daily_actions(_make_macro()))
+
+    assert any(a["ticker"] == "083650" and a["action"] == "분할익절 우선" for a in actions)
+    assert any(a["ticker"] == "017670" and a["action"] == "추매 후보" for a in actions)
 
 
 def test_build_daily_candidate_actions_applies_personal_lane_bias():
