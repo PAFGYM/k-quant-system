@@ -3386,17 +3386,148 @@ class SchedulerMixin:
 
         return {
             "weight_pct": target_weight_pct,
+            "requested_weight_pct": target_weight_pct,
             "budget_krw": budget_krw,
+            "requested_budget_krw": budget_krw,
             "cash_floor_pct": cash_floor_pct,
             "current_cash_pct": current_cash_pct,
             "candidate_sector": candidate_sector,
             "sector_exposure_pct": sector_exposure_pct,
             "allocation_summary": summary,
             "allocation_split": split_label,
+            "split_weights": entry_weights,
+            "manager_weight_adj": round(float(manager_weight or 1.0), 2),
             "allocation_note": " · ".join(
                 part for part in [cash_note, sector_note] if str(part or "").strip()
             ),
         }
+
+    def _rebalance_action_allocations(
+        self,
+        *,
+        actions: list[dict],
+        allocation_context: dict,
+        scorecards: dict[str, dict],
+        alert_mode: str,
+    ) -> list[dict]:
+        """매니저 성적과 현금 여력 기준으로 전체 액션 비중을 다시 배분."""
+        if not actions:
+            return actions
+
+        total_value = float(allocation_context.get("total_value", 0) or 0)
+        if total_value <= 0:
+            return actions
+
+        base_pool_caps = {
+            "normal": 14.0,
+            "elevated": 9.0,
+            "wartime": 5.0,
+        }
+        max_pool_pct = float(base_pool_caps.get(alert_mode, 12.0))
+        current_cash_pct = float(allocation_context.get("current_cash_pct", 0) or 0)
+        cash_floor_pct = float(allocation_context.get("cash_floor_pct", 0) or 0)
+
+        if allocation_context.get("cash_known"):
+            deployable_pct = max(0.0, current_cash_pct - cash_floor_pct)
+            total_pool_pct = min(max_pool_pct, deployable_pct)
+        else:
+            total_pool_pct = max_pool_pct
+
+        investable = [
+            action for action in actions
+            if action.get("ticker")
+            and action.get("priority") in {"opportunity", "check"}
+            and float(action.get("requested_weight_pct", action.get("weight_pct", 0)) or 0) > 0
+        ]
+        if not investable or total_pool_pct <= 0:
+            return actions
+
+        strengths: dict[str, float] = {}
+        requested_map: dict[str, float] = {}
+        remaining_map: dict[str, float] = {}
+        manager_bias_map: dict[str, float] = {}
+        for action in investable:
+            ticker = str(action.get("ticker", "") or "")
+            mgr_key = str(action.get("manager_key", "") or "")
+            requested = float(action.get("requested_weight_pct", action.get("weight_pct", 0)) or 0)
+            manager_bias = float(scorecards.get(mgr_key, {}).get("weight_adj", action.get("manager_weight_adj", 1.0)) or 1.0)
+            avg_return_5d = float(scorecards.get(mgr_key, {}).get("avg_return_5d", 0.0) or 0.0)
+            performance_bias = 1.0
+            if avg_return_5d >= 2.0:
+                performance_bias = 1.07
+            elif avg_return_5d >= 0.5:
+                performance_bias = 1.03
+            elif avg_return_5d < -1.0:
+                performance_bias = 0.86
+            elif avg_return_5d < 0:
+                performance_bias = 0.93
+            strength = max(0.4, requested * max(0.65, min(1.35, manager_bias * performance_bias)))
+            strengths[ticker] = strength
+            requested_map[ticker] = requested
+            remaining_map[ticker] = requested
+            manager_bias_map[ticker] = manager_bias
+
+        allocated_map = {ticker: 0.0 for ticker in strengths}
+        remaining_pool = total_pool_pct
+        for _ in range(3):
+            active = [ticker for ticker, remaining in remaining_map.items() if remaining > 0.05]
+            if not active or remaining_pool <= 0.05:
+                break
+            strength_sum = sum(strengths[ticker] for ticker in active) or 0.0
+            if strength_sum <= 0:
+                break
+            for ticker in active:
+                share = remaining_pool * (strengths[ticker] / strength_sum)
+                take = min(remaining_map[ticker], share)
+                allocated_map[ticker] += take
+                remaining_map[ticker] -= take
+            remaining_pool = max(0.0, total_pool_pct - sum(allocated_map.values()))
+
+        for action in investable:
+            ticker = str(action.get("ticker", "") or "")
+            requested = requested_map.get(ticker, 0.0)
+            final_weight = round(max(1.0, allocated_map.get(ticker, requested)), 1)
+            final_weight = min(final_weight, requested)
+            action["weight_pct"] = final_weight
+            action["budget_krw"] = round(total_value * (final_weight / 100.0), -4)
+            manager_bias = float(manager_bias_map.get(ticker, 1.0) or 1.0)
+
+            split_weights = list(action.get("split_weights") or [])
+            split_label = ""
+            if split_weights and requested > 0:
+                scale = final_weight / requested
+                adjusted = [round(weight * scale, 1) for weight in split_weights[:3]]
+                if len(adjusted) >= 3:
+                    split_label = (
+                        f"씨앗 {adjusted[0]:.1f}% · 눌림 {adjusted[1]:.1f}% · "
+                        f"확인 {adjusted[2]:.1f}%"
+                    )
+                elif adjusted:
+                    split_label = " · ".join(f"{weight:.1f}%" for weight in adjusted)
+                action["allocation_split"] = split_label
+
+            summary = (
+                f"권장 비중 {final_weight:.1f}% · 기준 예산 {action['budget_krw']:,.0f}원"
+                f" · 현금 바닥 {cash_floor_pct:.0f}%"
+            )
+            candidate_sector = str(action.get("candidate_sector", "") or "").strip()
+            if candidate_sector and candidate_sector != "기타":
+                summary += f" · {candidate_sector}"
+            if abs(manager_bias - 1.0) >= 0.05:
+                summary += f" · 레인 {manager_bias:.2f}x"
+            action["allocation_summary"] = summary
+
+            notes = [str(action.get("allocation_note", "") or "").strip()]
+            if manager_bias <= 0.9:
+                notes.append("약한 레인: 비중 축소")
+            elif manager_bias >= 1.1:
+                notes.append("강한 레인: 우선 배분")
+            action["allocation_note"] = " · ".join(note for note in notes if note)
+            next_step = str(action.get("next_step", "") or "").strip()
+            if action["allocation_note"] and action["allocation_note"] not in next_step:
+                action["next_step"] = f"{next_step} · {action['allocation_note']}" if next_step else action["allocation_note"]
+
+        return actions
 
     def _build_daily_candidate_actions(
         self,
@@ -3577,11 +3708,26 @@ class SchedulerMixin:
                 "secondary_callback": f"mgr_tab:{mgr_key}",
                 "button_label": f"{manager.get('emoji', '📌')} {name} 후보",
                 "next_step": next_step,
+                "weight_pct": float(pick.get("weight_pct", 0) or 0),
+                "requested_weight_pct": float(pick.get("requested_weight_pct", 0) or 0),
+                "budget_krw": float(pick.get("budget_krw", 0) or 0),
+                "requested_budget_krw": float(pick.get("requested_budget_krw", 0) or 0),
                 "allocation_summary": allocation_summary,
                 "allocation_split": allocation_split,
+                "split_weights": list(pick.get("split_weights") or []),
+                "manager_weight_adj": float(pick.get("manager_weight_adj", 1.0) or 1.0),
+                "candidate_sector": str(pick.get("candidate_sector", "") or "").strip(),
+                "allocation_note": str(pick.get("allocation_note", "") or "").strip(),
             })
             if len(actions) >= 3:
                 break
+
+        actions = self._rebalance_action_allocations(
+            actions=actions,
+            allocation_context=allocation_context,
+            scorecards=scorecards,
+            alert_mode=alert_mode,
+        )
 
         return actions
 
@@ -3671,10 +3817,10 @@ class SchedulerMixin:
 
         actions_with_alloc = [a for a in actions if str(a.get("allocation_summary", "") or "").strip()]
         if actions_with_alloc:
-            top_alloc = actions_with_alloc[0]
-            alloc_line = str(top_alloc.get("allocation_summary", "") or "").strip()
-            if alloc_line:
-                lines.append(f"오늘 예산: {alloc_line}")
+            total_weight = sum(float(a.get("weight_pct", 0) or 0) for a in actions_with_alloc)
+            total_budget = sum(float(a.get("budget_krw", 0) or 0) for a in actions_with_alloc)
+            if total_weight > 0 and total_budget > 0:
+                lines.append(f"오늘 투입 상한: {total_weight:.1f}% · {total_budget:,.0f}원")
 
         if playbook and getattr(playbook, "strong_stocks", None):
             names = ", ".join(

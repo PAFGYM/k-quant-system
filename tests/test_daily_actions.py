@@ -304,3 +304,79 @@ def test_build_daily_candidate_actions_penalizes_sector_overlap():
     assert actions
     assert "원전/전력" in actions[0]["allocation_summary"]
     assert "편중" in actions[0]["next_step"] or "비중 높음" in actions[0]["next_step"]
+
+
+def test_build_daily_candidate_actions_rebalances_budget_toward_strong_manager():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin.db = MagicMock()
+    mixin.db.get_portfolio_snapshots.return_value = [
+        {
+            "total_value": 200_000_000,
+            "cash": 80_000_000,
+        },
+    ]
+    mixin._last_scan_results = [object()]
+    mixin._build_personalized_lane_bias = MagicMock(
+        return_value=(
+            {"scalp": 1.0, "swing": 1.0, "position": 1.0, "long_term": 1.0, "tenbagger": 1.0},
+            [],
+        )
+    )
+    mixin._load_recent_manager_scorecards = MagicMock(
+        return_value={
+            "swing": {"weight_adj": 0.78, "avg_return_5d": -0.8},
+            "long_term": {"weight_adj": 1.18, "avg_return_5d": 1.7},
+        }
+    )
+    mixin._enrich_manager_candidates_with_flow_short_context = MagicMock(side_effect=lambda data, macro: data)
+    mixin._build_manager_fast_context = MagicMock(return_value={})
+    mixin._enrich_manager_candidates_with_fast_context = MagicMock(side_effect=lambda data, fast_context: data)
+    mixin._build_manager_herd_signals = MagicMock(return_value=({}, []))
+    mixin._enrich_manager_candidates_with_herd_context = MagicMock(side_effect=lambda data, herd_map: data)
+    mixin._enrich_manager_candidates_with_operator_memory = MagicMock(
+        return_value=(
+            {
+                "swing": [{
+                    "ticker": "333333",
+                    "name": "스윙주",
+                    "price": 50_000,
+                    "fit_score": 82,
+                    "composite": 74,
+                    "confidence_score": 0.72,
+                    "fit_reasons": ["눌림목 반등", "기관 순매수"],
+                    "action_hint": "반등 확인 후 분할 진입",
+                    "day_change": 1.0,
+                }],
+                "long_term": [{
+                    "ticker": "017670",
+                    "name": "SK텔레콤",
+                    "price": 60_000,
+                    "fit_score": 80,
+                    "composite": 73,
+                    "confidence_score": 0.70,
+                    "fit_reasons": ["품질 가치", "안정 현금흐름"],
+                    "action_hint": "하루에 몰지 말고 2~3회 장기 분할",
+                    "day_change": 0.8,
+                }],
+            },
+            SimpleNamespace(manager_focus=[]),
+        )
+    )
+
+    with patch(
+        "kstock.bot.investment_managers.filter_discovery_candidates",
+        side_effect=lambda scan_results, manager_key, exclude: [{"ticker": manager_key}] if manager_key in {"swing", "long_term"} else [],
+    ):
+        actions = mixin._build_daily_candidate_actions(
+            holdings=[],
+            macro=_make_macro(),
+            playbook=None,
+            alert_mode="normal",
+        )
+
+    by_mgr = {action["manager_key"]: action for action in actions}
+    assert by_mgr["long_term"]["weight_pct"] > by_mgr["swing"]["weight_pct"]
+    assert "레인 1.18x" in by_mgr["long_term"]["allocation_summary"]
+    assert "약한 레인" in by_mgr["swing"]["next_step"]
