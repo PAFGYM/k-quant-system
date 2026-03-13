@@ -18,6 +18,7 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from kstock.core.tz import KST
 
@@ -414,6 +415,7 @@ class NewsItem:
     is_urgent: bool = False
     content_summary: str = ""  # v8.2: 영상 내용 요약 (자막 기반)
     video_id: str = ""  # v8.2: YouTube video ID
+    original_title: str = ""  # 번역/축약 전 원문 제목 보존
 
 
 def _compute_impact(title: str) -> tuple[int, bool]:
@@ -425,6 +427,137 @@ def _compute_impact(title: str) -> tuple[int, bool]:
             max_score = max(max_score, score)
     is_urgent = max_score >= 8
     return max_score, is_urgent
+
+
+def _hangul_ratio(text: str) -> float:
+    """문자열 내 한글 비율."""
+    if not text:
+        return 0.0
+    hangul = sum(1 for ch in text if "\uac00" <= ch <= "\ud7a3")
+    return hangul / max(len(text), 1)
+
+
+def _fallback_title_from_url(url: str) -> str:
+    """URL slug를 제목처럼 복구."""
+    if not url:
+        return ""
+    try:
+        path = urlparse(url).path.rstrip("/").split("/")[-1]
+        if not path:
+            return ""
+        path = re.sub(r"\.html?$", "", path, flags=re.IGNORECASE)
+        path = path.replace("-", " ")
+        path = re.sub(r"\s+", " ", path).strip()
+        if len(path) > 90:
+            path = path[:87].rstrip() + "..."
+        return path
+    except Exception:
+        return ""
+
+
+def _looks_like_broken_title(title: str, *, original: str = "") -> bool:
+    """깨진 번역/축약 제목인지 추정."""
+    text = str(title or "").strip()
+    ref = str(original or "").strip()
+    if not text:
+        return True
+    if len(text) <= 2:
+        return True
+    if ref and text == ref:
+        return False
+
+    # 긴 영문 제목이 1~2개 음절 한글로 줄면 깨진 번역으로 간주
+    if ref and _is_english(ref):
+        ref_words = len(ref.split())
+        if ref_words >= 5 and len(text.split()) == 1 and len(text) <= 4:
+            return True
+        if len(ref) >= 25 and len(text) <= 4:
+            return True
+        if _hangul_ratio(text) >= 0.6 and len(text) <= max(4, min(6, len(ref) // 10)):
+            return True
+
+    # URL slug나 제목 일부만 남은 경우
+    if re.fullmatch(r"[가-힣A-Za-z]{1,4}", text):
+        return True
+    return False
+
+
+def _preferred_title(item: NewsItem) -> str:
+    """알림/분석에 사용할 가장 안전한 제목."""
+    original = str(item.original_title or "").strip()
+    current = str(item.title or "").strip()
+    if current and not _looks_like_broken_title(current, original=original):
+        return current
+    if original and not _looks_like_broken_title(original):
+        return original
+    fallback = _fallback_title_from_url(item.url)
+    if fallback:
+        return fallback
+    return current or original or "제목 확인 중"
+
+
+def _needs_urgent_analysis_fallback(text: str) -> bool:
+    """AI 응답이 사용자에게 되묻는 불완전 답변인지 확인."""
+    lowered = str(text or "").lower()
+    bad_markers = [
+        "제공하신 정보가 불완전",
+        "필요한 정보",
+        "뉴스 전문",
+        "복사-붙여넣기",
+        "다시 제공",
+        "해주시겠어요",
+        "질문이 있으면",
+    ]
+    return any(marker.lower() in lowered for marker in bad_markers)
+
+
+def _heuristic_impact_line(title: str) -> tuple[int, str, str]:
+    """제목 기반 간단 영향/행동 해석."""
+    lower = str(title or "").lower()
+    severity = max(3, min(10, max(score for kw, score in IMPACT_KEYWORDS.items() if kw.lower() in lower) if any(kw.lower() in lower for kw in IMPACT_KEYWORDS) else 4))
+
+    if any(keyword in lower for keyword in ("iran", "호르무즈", "hormuz", "oil", "유가", "pipeline", "saudi", "uae")):
+        market = "유가·환율 변동성 확대 가능성. 정유·방산은 상대 강세, 항공·화학은 부담입니다."
+        action = "시초 추격매수보다 유가/원달러 안정 여부를 먼저 확인하고 방어 섹터만 선별 대응하세요."
+    elif any(keyword in lower for keyword in ("fed", "fomc", "금리", "rate", "cpi", "pce")):
+        market = "금리 민감 성장주의 변동성이 커질 수 있고 금융·현금흐름주가 상대 우위입니다."
+        action = "성장주 비중은 급히 늘리지 말고, 금리 반응 확인 후 분할 대응하세요."
+    elif any(keyword in lower for keyword in ("tariff", "관세", "trade war", "제재", "sanction")):
+        market = "수출·공급망 관련 종목 변동성이 커질 수 있습니다."
+        action = "직격 업종은 보수적으로 보고, 대체 공급망 수혜주를 우선 점검하세요."
+    else:
+        market = "한국 증시는 환율·외인 수급·장초반 변동성 반응을 먼저 확인할 필요가 있습니다."
+        action = "헤드라인 추격보다 수급과 가격 반응이 확인된 종목만 좁혀 보세요."
+
+    return severity, market, action
+
+
+def _build_urgent_analysis_fallback(groups: list[list[NewsItem]], db=None) -> str:
+    """AI 분석 실패/불량 응답 시 사용할 휴리스틱 요약."""
+    holdings_text = ""
+    if db:
+        try:
+            holdings = db.get_active_holdings() or []
+            names = [str(h.get("name", "") or "").strip() for h in holdings[:12] if h.get("name")]
+            if names:
+                holdings_text = ", ".join(names)
+        except Exception:
+            logger.debug("urgent analysis fallback holdings load failed", exc_info=True)
+
+    lines: list[str] = []
+    for idx, group in enumerate(groups[:3], 1):
+        rep = max(group, key=lambda item: item.impact_score)
+        title = _preferred_title(rep)
+        severity, market, action = _heuristic_impact_line(title)
+        lines.append(f"{idx}. {title}")
+        lines.append(f"실제 심각도: {severity}/10")
+        lines.append(f"시장 영향: {market}")
+        if holdings_text and any(name and name in market for name in holdings_text.split(", ")):
+            lines.append(f"보유종목: {holdings_text}")
+        lines.append(f"행동: {action}")
+        if idx < min(len(groups), 3):
+            lines.append("")
+    return "\n".join(lines)
 
 
 def _parse_rss(xml_text: str, feed: dict) -> list[NewsItem]:
@@ -766,7 +899,7 @@ def format_urgent_alert(items: list[NewsItem]) -> str:
     ]
     for item in items[:3]:
         impact_bar = "🔴" * min(item.impact_score // 2, 5)
-        lines.append(f"\n{impact_bar} {item.title}")
+        lines.append(f"\n{impact_bar} {_preferred_title(item)}")
         lines.append(f"  출처: {item.source}")
         lines.append(f"  영향도: {item.impact_score}/10")
 
@@ -923,13 +1056,18 @@ async def analyze_urgent_news(groups: list[list[NewsItem]], db=None) -> str:
     # 뉴스 그룹 텍스트 구성
     news_text = ""
     for i, group in enumerate(groups[:3]):
-        titles = [it.title for it in group]
+        titles = [_preferred_title(it) for it in group]
         sources = list({it.source for it in group})
         max_impact = max(it.impact_score for it in group)
         news_text += f"\n이벤트 {i+1} (키워드 영향도: {max_impact}/10):\n"
         for t in titles[:3]:
             news_text += f"  - {t}\n"
         news_text += f"  출처: {', '.join(sources)}\n"
+        summaries = [str(it.content_summary or "").strip() for it in group if str(it.content_summary or "").strip()]
+        if summaries:
+            news_text += f"  요약: {summaries[0][:180]}\n"
+        elif group and group[0].url:
+            news_text += f"  URL 힌트: {_fallback_title_from_url(group[0].url)}\n"
 
     prompt = (
         f"다음 긴급 글로벌 뉴스를 분석해줘.\n"
@@ -951,6 +1089,8 @@ async def analyze_urgent_news(groups: list[list[NewsItem]], db=None) -> str:
         "- 한국어, 간결하게\n"
         "- 과장 금지. 추모식/의전 행사는 심각도 2-3\n"
         "- 실제 군사 충돌/경제 위기만 심각도 8+\n"
+        "- 정보가 다소 부족해도 헤드라인/URL 단서로 보수적으로 해석하고 사용자에게 추가 자료를 요구하지 마라\n"
+        "- '뉴스 전문을 보내달라', '다시 제공해달라' 같은 되묻기 금지\n"
         "- ** 볼드 금지"
     )
 
@@ -964,6 +1104,9 @@ async def analyze_urgent_news(groups: list[list[NewsItem]], db=None) -> str:
             messages=[{"role": "user", "content": prompt}],
         )
         analysis = response.content[0].text.replace("**", "")
+        if _needs_urgent_analysis_fallback(analysis):
+            logger.info("Urgent news analysis fell back due to unhelpful AI response")
+            analysis = _build_urgent_analysis_fallback(groups, db=db)
 
         # 토큰 사용량 기록
         try:
@@ -991,7 +1134,10 @@ async def analyze_urgent_news(groups: list[list[NewsItem]], db=None) -> str:
 
     except Exception as e:
         logger.warning("Urgent news AI analysis failed: %s", e)
-        return _format_urgent_alert_basic(groups)
+        return _format_urgent_alert_rich(
+            groups,
+            _build_urgent_analysis_fallback(groups, db=db),
+        )
 
 
 async def _extract_and_save_event_adjustments(
@@ -1073,7 +1219,7 @@ def _format_urgent_alert_rich(
     for group in groups[:3]:
         rep = group[0]
         impact_bar = "🔴" * min(rep.impact_score // 2, 5)
-        lines.append(f"\n{impact_bar} {rep.title}")
+        lines.append(f"\n{impact_bar} {_preferred_title(rep)}")
         if len(group) > 1:
             lines.append(f"  (관련 뉴스 {len(group)}건 통합)")
         sources = list({it.source for it in group})
@@ -1101,7 +1247,7 @@ def _format_urgent_alert_basic(groups: list[list[NewsItem]]) -> str:
     for group in groups[:3]:
         rep = group[0]
         impact_bar = "🔴" * min(rep.impact_score // 2, 5)
-        lines.append(f"\n{impact_bar} {rep.title}")
+        lines.append(f"\n{impact_bar} {_preferred_title(rep)}")
         if len(group) > 1:
             lines.append(f"  (관련 뉴스 {len(group)}건)")
         lines.append(f"  출처: {', '.join(list({it.source for it in group})[:2])}")
@@ -1158,6 +1304,9 @@ async def translate_titles_to_korean(items: list[NewsItem]) -> list[NewsItem]:
         return items  # 번역할 영문 제목 없음
 
     # 번역할 제목 모음
+    for item in en_items:
+        if not item.original_title:
+            item.original_title = item.title
     titles = [item.title for item in en_items]
     numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
 
@@ -1211,7 +1360,15 @@ async def translate_titles_to_korean(items: list[NewsItem]) -> list[NewsItem]:
         # 번역 적용
         for i, item in enumerate(en_items):
             if i in translated and translated[i]:
-                item.title = translated[i]
+                candidate = translated[i].strip()
+                if _looks_like_broken_title(candidate, original=item.original_title):
+                    logger.info(
+                        "Rejected broken title translation: '%s' -> '%s'",
+                        item.original_title[:60],
+                        candidate[:30],
+                    )
+                    continue
+                item.title = candidate
 
         logger.info(
             "Translated %d/%d English titles to Korean",
