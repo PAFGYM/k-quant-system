@@ -88,6 +88,8 @@ def test_build_daily_action_coach_lines_summarizes_market_and_top_actions():
 
     mixin = SchedulerMixin.__new__(SchedulerMixin)
     mixin.db = MagicMock()
+    mixin.db.get_portfolio_snapshots.return_value = [{"total_value": 100_000_000, "cash": 18_000_000}]
+    mixin.db.get_active_holdings.return_value = []
     mixin._build_personalized_lane_bias = MagicMock(
         return_value=(
             {"scalp": 1.0, "swing": 1.0, "position": 1.0, "long_term": 1.0, "tenbagger": 1.0},
@@ -129,6 +131,7 @@ def test_build_daily_action_coach_lines_summarizes_market_and_top_actions():
     assert any("1순위: 씨에스윈드" in line for line in lines)
     assert any("신규 후보: 텐배거주" in line for line in lines)
     assert any("회피:" in line for line in lines)
+    assert any("현금:" in line for line in lines)
     assert any("개인화 우선 레인:" in line for line in lines)
 
 

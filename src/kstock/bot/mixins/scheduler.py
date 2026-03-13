@@ -3088,7 +3088,8 @@ class SchedulerMixin:
         cash_known = False
 
         try:
-            snapshots = (getattr(self, "db", None) and self.db.get_portfolio_snapshots(limit=1)) or []
+            raw_snapshots = (getattr(self, "db", None) and self.db.get_portfolio_snapshots(limit=1)) or []
+            snapshots = raw_snapshots if isinstance(raw_snapshots, list) else []
         except Exception:
             logger.debug("daily allocation context snapshot load failed", exc_info=True)
             snapshots = []
@@ -3102,7 +3103,8 @@ class SchedulerMixin:
 
         if getattr(self, "db", None) is not None and (total_value <= 0 or not cash_known):
             try:
-                screenshot = self.db.get_latest_screenshot() or {}
+                raw_screenshot = self.db.get_latest_screenshot() or {}
+                screenshot = raw_screenshot if isinstance(raw_screenshot, dict) else {}
             except Exception:
                 logger.debug("daily allocation context screenshot load failed", exc_info=True)
                 screenshot = {}
@@ -3549,6 +3551,22 @@ class SchedulerMixin:
             holdings = self.db.get_active_holdings() or []
         except Exception:
             holdings = []
+        allocation_context = self._load_daily_allocation_context(
+            holdings=holdings,
+            macro=macro,
+            alert_mode=getattr(self, "_alert_mode", "normal"),
+        )
+        if allocation_context.get("cash_known"):
+            current_cash_pct = float(allocation_context.get("current_cash_pct", 0) or 0)
+            cash_floor_pct = float(allocation_context.get("cash_floor_pct", 0) or 0)
+            cash_status = "신규매수 가능"
+            if current_cash_pct <= cash_floor_pct + 1.0:
+                cash_status = "교체매수 우선"
+            elif current_cash_pct <= cash_floor_pct + 5.0:
+                cash_status = "씨앗 매수만"
+            lines.append(
+                f"현금: {current_cash_pct:.1f}% | 목표 {cash_floor_pct:.0f}% ({cash_status})"
+            )
         _, bias_lines = self._build_personalized_lane_bias(holdings=holdings)
         for line in bias_lines[:1]:
             clean = str(line or "").strip()
@@ -3571,7 +3589,7 @@ class SchedulerMixin:
             if names:
                 lines.append(f"강세 축: {names}")
 
-        return list(dict.fromkeys(line for line in lines if line))[:6]
+        return list(dict.fromkeys(line for line in lines if line))[:7]
 
     async def _send_daily_actions(self, context, macro) -> None:
         """오늘의 할 일 메시지 전송."""
