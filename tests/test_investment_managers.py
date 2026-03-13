@@ -341,6 +341,7 @@ def test_format_daily_actions_renders_coach_lines_and_next_step():
                 "name": "성장주",
                 "action": "씨앗 포지션 검토",
                 "reason": "정책 이벤트 · 초기 수급 유입",
+                "execution_window": "오전: 10시 이후 체결 강도 유지 시 1차만",
                 "next_step": "시초 추격 대신 2회 분할 접근",
             },
         ],
@@ -353,6 +354,7 @@ def test_format_daily_actions_renders_coach_lines_and_next_step():
     assert "🧭 자동 코치" in text
     assert "기본 태세: 변동성 소화 후 강한 종목 선별" in text
     assert "회피: 지수 레버리지 추격" in text
+    assert "타이밍: 오전: 10시 이후 체결 강도 유지 시 1차만" in text
     assert "다음 행동: 시초 추격 대신 2회 분할 접근" in text
 
 

@@ -1717,6 +1717,9 @@ def format_daily_actions(
             allocation_split = str(item.get("allocation_split", "") or "").strip()
             if allocation_split:
                 lines.append(f"    \u2514 분할: {allocation_split}")
+            execution_window = str(item.get("execution_window", "") or "").strip()
+            if execution_window:
+                lines.append(f"    \u2514 타이밍: {execution_window}")
             next_step = str(item.get("next_step", "") or "").strip()
             if next_step:
                 lines.append(f"    \u2514 다음 행동: {next_step}")

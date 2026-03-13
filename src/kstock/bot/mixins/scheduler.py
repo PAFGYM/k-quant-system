@@ -2974,6 +2974,7 @@ class SchedulerMixin:
             allocation_context=allocation_context,
             scorecards=scorecards,
         )
+        actions = self._apply_intraday_execution_timing(actions)
 
         # 정렬
         order = {"urgent": 0, "caution": 1, "opportunity": 2, "check": 3}
@@ -3878,6 +3879,85 @@ class SchedulerMixin:
             "callback_data": "fav:tab:holding:0",
             "next_step": next_step,
         })
+        return actions
+
+    def _current_intraday_phase(self, now=None) -> tuple[str, str]:
+        """현재 KST 장중 단계를 반환."""
+        now = now or datetime.now(KST)
+        minutes = now.hour * 60 + now.minute
+        if minutes < 9 * 60:
+            return "preopen", "장전"
+        if minutes < 9 * 60 + 20:
+            return "opening", "시초"
+        if minutes < 11 * 60:
+            return "morning", "오전"
+        if minutes < 14 * 60 + 20:
+            return "midday", "장중"
+        if minutes < 15 * 60 + 10:
+            return "afternoon", "오후"
+        if minutes <= 15 * 60 + 30:
+            return "closing", "종가"
+        return "offhours", "장마감 후"
+
+    def _apply_intraday_execution_timing(self, actions: list[dict], now=None) -> list[dict]:
+        """액션별 실행 타이밍 가이드를 붙인다."""
+        if not actions:
+            return actions
+
+        phase_key, phase_label = self._current_intraday_phase(now=now)
+        opportunity_map = {
+            "preopen": "장전 계획만 세우고 09:05 이후 첫 분할",
+            "opening": "시초 20분은 추격 말고 강도 확인 후 1차",
+            "morning": "10시 이후 체결 강도 유지 시 1차만",
+            "midday": "눌림과 수급 유지 시 1차 접근",
+            "afternoon": "오후 강도 유지면 1차, 아니면 종가 확인",
+            "closing": "종가 회복 확인 시만 소량 진입",
+            "offhours": "다음 장 시작 전 계획만 확정",
+        }
+        reduce_map = {
+            "preopen": "장전에는 계획만, 시초 반등 실패 시 1차 집행",
+            "opening": "시초 반등 실패면 1/3 먼저 정리",
+            "morning": "고점 재시도 실패 시 1/3~1/2 축소",
+            "midday": "점심 이후 약세 지속 시 비중 축소",
+            "afternoon": "오후에도 회복 없으면 축소/교체 우선",
+            "closing": "종가 약세 전환이면 오늘 바로 실행",
+            "offhours": "다음 장 우선순위만 확정",
+        }
+        risk_map = {
+            "preopen": "장전에는 손절 계획만, 시초 약세 확인 즉시 대응",
+            "opening": "시초 10분 약세 지속이면 바로 대응",
+            "morning": "10시 전 저점 재이탈 시 우선 대응",
+            "midday": "반등 실패와 수급 이탈 동시 확인 시 정리",
+            "afternoon": "오후에도 저점 회복 없으면 교체 우선",
+            "closing": "종가 회복 없으면 오늘 정리 확정",
+            "offhours": "다음 장 손절/교체 우선순위만 확정",
+        }
+        ranking_map = {
+            "preopen": "장전엔 순서만 정하고 시초 20분 후 상단부터 실행",
+            "opening": "시초엔 교체/축소 상단만 먼저 확인",
+            "morning": "오전엔 교체/축소 먼저, 추가는 10시 이후",
+            "midday": "장중엔 상단 1~2개만 집행하고 나머지는 종가 판단",
+            "afternoon": "오후엔 랭킹 상단부터 정리 후 추가 판단",
+            "closing": "종가엔 회복 못한 상단 종목 우선 정리",
+            "offhours": "다음 장 시작 전 랭킹 상단부터 계획",
+        }
+
+        for action in actions:
+            action_name = str(action.get("action", "") or "").strip()
+            priority = str(action.get("priority", "") or "").strip()
+            timing = ""
+            if action_name in {"추매 후보"} or priority == "opportunity":
+                timing = opportunity_map.get(phase_key, "")
+            if action_name in {"분할익절 우선", "1차 익절 검토", "큰 수익 관리"}:
+                timing = reduce_map.get(phase_key, "")
+            elif action_name in {"교체매도 후보", "손절 필요", "단타 청산 검토", "큰 손실 점검"}:
+                timing = risk_map.get(phase_key, "")
+            elif action_name == "유지/추가/축소 순서":
+                timing = ranking_map.get(phase_key, "")
+
+            if timing:
+                action["execution_window"] = f"{phase_label}: {timing}"
+
         return actions
 
     def _build_daily_candidate_actions(

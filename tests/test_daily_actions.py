@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
 
@@ -533,3 +534,27 @@ def test_build_daily_action_coach_lines_highlights_rotation_pair():
 
     assert any("교체 우선: 비에이치아이->SK텔레콤" in line for line in lines)
     assert any("보유 랭킹: 교체 비에이치아이 > 추가 SK텔레콤 > 유지 우진" in line for line in lines)
+
+
+def test_apply_intraday_execution_timing_adds_phase_guidance():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+    from kstock.core.tz import KST
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    actions = [
+        {"priority": "opportunity", "name": "SK텔레콤", "action": "추매 후보"},
+        {"priority": "caution", "name": "비에이치아이", "action": "분할익절 우선"},
+        {"priority": "caution", "name": "씨에스윈드", "action": "교체매도 후보"},
+        {"priority": "check", "name": "보유 랭킹", "action": "유지/추가/축소 순서"},
+    ]
+
+    timed = mixin._apply_intraday_execution_timing(
+        actions,
+        now=datetime(2026, 3, 13, 14, 45, tzinfo=KST),
+    )
+
+    by_action = {item["action"]: item for item in timed}
+    assert by_action["추매 후보"]["execution_window"].startswith("오후:")
+    assert "오후 강도 유지" in by_action["추매 후보"]["execution_window"]
+    assert "교체 우선" in by_action["교체매도 후보"]["execution_window"]
+    assert "랭킹 상단부터" in by_action["유지/추가/축소 순서"]["execution_window"]
