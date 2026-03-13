@@ -801,6 +801,18 @@ def evaluate_strategy_j(
     if ticker in LEVERAGE_ETFS or ticker in INVERSE_ETFS:
         return None
 
+    # Mean reversion breakout is fragile in weak tape.
+    # Require at least neutral-to-positive market backdrop.
+    if regime in {"risk_off", "panic"}:
+        return None
+
+    # Avoid catch-the-falling-knife setups:
+    # need some medium-term strength and multi-timeframe support.
+    if tech.return_3m_pct <= 0:
+        return None
+    if not (tech.mtf_aligned or tech.weekly_trend == "up"):
+        return None
+
     reasons = []
     conditions_met = 0
 
@@ -809,8 +821,8 @@ def evaluate_strategy_j(
         conditions_met += 1
         reasons.append("BB 스퀴즈 감지 (밴드 압축)")
 
-    # Condition 2: Volume ratio > 1.3
-    if tech.volume_ratio > 1.3:
+    # Condition 2: Volume ratio > 1.5
+    if tech.volume_ratio > 1.5:
         conditions_met += 1
         reasons.append(f"거래량 증가 (평균 {tech.volume_ratio:.1f}배)")
 
@@ -829,20 +841,14 @@ def evaluate_strategy_j(
         close_price = getattr(tech, 'close', 0) or tech.ema_50
         if close_price > 0:
             distance_pct = abs(close_price - tech.ma20) / tech.ma20 * 100
-            if distance_pct <= 3.0:
+            if distance_pct <= 2.5:
                 conditions_met += 1
                 reasons.append(f"MA20 근접 (괴리율 {distance_pct:.1f}%)")
 
     sig_score = min(conditions_met * 25, 100)
 
-    # Regime filtering:
-    # Best in neutral/risk_on, still works in risk_off with score >= 75
-    if regime == "risk_off" and sig_score < 75:
-        return None
-    if regime == "panic":
-        return None
-
-    if sig_score < 50:
+    # Require at least 4/5 technical confirmations after the higher-level guards.
+    if sig_score < 75 or conditions_met < 4:
         return None
 
     reasons.append(f"충족 조건: {conditions_met}/5")

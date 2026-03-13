@@ -63,6 +63,19 @@ _MANAGER_LABELS = {
     "tenbagger": "🔟 텐베거",
 }
 
+_STRATEGY_SHORT_LABELS = {
+    "A": "반등",
+    "B": "ETF",
+    "C": "장기",
+    "D": "섹터",
+    "E": "글로벌",
+    "F": "모멘텀",
+    "G": "돌파",
+    "H": "공격",
+    "I": "실적",
+    "J": "평균회귀",
+}
+
 
 def _safe_json_loads(raw: str) -> dict[str, Any]:
     try:
@@ -340,6 +353,20 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
             avg_d20 = sum(d20_vals) / len(d20_vals) if d20_vals else 0.0
             hit_rate = (hits / evaluated * 100) if evaluated > 0 else 0.0
 
+            strategy_breakdown: dict[str, dict[str, float]] = {}
+            for strategy_type in sorted({str(r["strategy_type"] or "") for r in rows if r["strategy_type"]}):
+                strat_rows = [r for r in rows if str(r["strategy_type"] or "") == strategy_type]
+                strat_eval = [r for r in strat_rows if r["day5_return"] is not None]
+                if not strat_eval:
+                    continue
+                strat_vals = [float(r["day5_return"] or 0.0) for r in strat_eval]
+                strat_hits = sum(1 for r in strat_eval if r["correct"])
+                strategy_breakdown[strategy_type] = {
+                    "evaluated": float(len(strat_eval)),
+                    "avg_return_5d": sum(strat_vals) / len(strat_vals),
+                    "hit_rate": (strat_hits / len(strat_eval) * 100.0) if strat_eval else 0.0,
+                }
+
             # 최고/최악 매매
             best = max(rows, key=lambda r: r["day5_return"] or -999)
             worst = min(rows, key=lambda r: r["day5_return"] or 999)
@@ -358,6 +385,18 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
             else:
                 weight = 0.8
 
+            if mgr == "swing":
+                momentum_stats = strategy_breakdown.get("F", {})
+                reversion_stats = strategy_breakdown.get("J", {})
+                if momentum_stats.get("evaluated", 0) >= 3 and momentum_stats.get("avg_return_5d", 0.0) >= 1.0:
+                    weight *= 1.03
+                if reversion_stats.get("evaluated", 0) >= 3:
+                    if reversion_stats.get("avg_return_5d", 0.0) < 0:
+                        weight *= 0.88
+                    if reversion_stats.get("hit_rate", 0.0) < 35:
+                        weight *= 0.92
+                weight = max(0.75, min(1.25, weight))
+
             card = {
                 "total": total,
                 "evaluated": evaluated,
@@ -369,6 +408,7 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
                 "best_trade": best_text,
                 "worst_trade": worst_text,
                 "weight_adj": weight,
+                "strategy_breakdown": strategy_breakdown,
             }
             scorecards[mgr] = card
 
@@ -390,6 +430,42 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
         except Exception as e:
             logger.error("Manager scorecard calc failed for %s: %s", mgr, e)
             scorecards[mgr] = {"total": 0, "hit_rate": 0.0, "weight_adj": 1.0}
+
+    try:
+        shadow_summary = calculate_shadow_portfolio_summary_with_options(
+            db,
+            days=max(days, 90),
+            use_manager_weights=False,
+        )
+        shadow_manager_returns = shadow_summary.get("manager_avg_returns", {})
+        if shadow_manager_returns:
+            with db._connect() as conn:
+                for mgr, avg_return in shadow_manager_returns.items():
+                    card = scorecards.get(mgr)
+                    if not card or int(card.get("evaluated", 0) or 0) < 3:
+                        continue
+                    multiplier = 1.0
+                    if avg_return >= 2.0:
+                        multiplier = 1.08
+                    elif avg_return >= 0.5:
+                        multiplier = 1.03
+                    elif avg_return < -1.0:
+                        multiplier = 0.84
+                    elif avg_return < 0:
+                        multiplier = 0.92
+                    new_weight = round(max(0.75, min(1.25, float(card.get("weight_adj", 1.0)) * multiplier)), 2)
+                    card["weight_adj"] = new_weight
+                    card["shadow_avg_return_5d"] = round(float(avg_return), 2)
+                    conn.execute(
+                        """
+                        UPDATE manager_scorecard
+                        SET weight_adj=?
+                        WHERE manager_key=? AND calculated_at=?
+                        """,
+                        (new_weight, mgr, now_str),
+                    )
+    except Exception as e:
+        logger.debug("shadow portfolio feedback apply failed: %s", e)
 
     return scorecards
 
@@ -431,6 +507,18 @@ def format_manager_scorecard(scorecards: dict) -> str:
             continue
         lines.append(f"  추천: {total}건 | 적중: {hits}건 ({rate:.0f}%) [{grade}]")
         lines.append(f"  5일 평균수익: {avg5:+.1f}%")
+        if mgr == "swing":
+            sub_parts: list[str] = []
+            for strategy_type, strat_card in sorted((card.get("strategy_breakdown") or {}).items()):
+                sub_parts.append(
+                    f"{_STRATEGY_SHORT_LABELS.get(strategy_type, strategy_type)} "
+                    f"{float(strat_card.get('avg_return_5d', 0.0)):+.1f}%"
+                    f"({float(strat_card.get('hit_rate', 0.0)):.0f}%)"
+                )
+            if sub_parts:
+                lines.append(f"  세부: {' / '.join(sub_parts)}")
+        if card.get("shadow_avg_return_5d") is not None:
+            lines.append(f"  그림자 검증: {float(card.get('shadow_avg_return_5d', 0.0)):+.1f}%")
         if card.get("best_trade"):
             lines.append(f"  최고: {card['best_trade']}")
         lines.append(f"  가중치: {weight:.2f}x")
@@ -439,6 +527,16 @@ def format_manager_scorecard(scorecards: dict) -> str:
 
 
 def calculate_shadow_portfolio_summary(db, days: int = 90) -> dict[str, Any]:
+    """추천 결과를 실제 포트폴리오처럼 묶어 보수적으로 검증."""
+    return calculate_shadow_portfolio_summary_with_options(db, days=days, use_manager_weights=True)
+
+
+def calculate_shadow_portfolio_summary_with_options(
+    db,
+    days: int = 90,
+    *,
+    use_manager_weights: bool = True,
+) -> dict[str, Any]:
     """추천 결과를 실제 포트폴리오처럼 묶어 보수적으로 검증."""
     cutoff = (datetime.now(KST) - timedelta(days=days)).strftime("%Y-%m-%d")
 
@@ -473,10 +571,13 @@ def calculate_shadow_portfolio_summary(db, days: int = 90) -> dict[str, Any]:
         logger.debug("calculate_shadow_portfolio_summary failed: %s", e)
         return {}
 
-    manager_weights = {
-        str(row["manager_key"]): float(row["weight_adj"] or 1.0)
-        for row in weight_rows
-    }
+    manager_weights = (
+        {
+            str(row["manager_key"]): float(row["weight_adj"] or 1.0)
+            for row in weight_rows
+        }
+        if use_manager_weights else {}
+    )
 
     normalized_rows: list[dict[str, Any]] = []
     for row in rows:
@@ -519,6 +620,14 @@ def calculate_shadow_portfolio_summary(db, days: int = 90) -> dict[str, Any]:
         "cash_buffer_pct": summary.cash_buffer_pct,
         "strongest_manager": summary.strongest_manager,
         "weakest_manager": summary.weakest_manager,
+        "manager_avg_returns": {
+            mgr: round(
+                sum(trade.net_return_pct for trade in trades) / len(trades),
+                2,
+            )
+            for mgr in {trade.manager_key for trade in summary.trade_results}
+            if (trades := [trade for trade in summary.trade_results if trade.manager_key == mgr])
+        },
     }
 
 

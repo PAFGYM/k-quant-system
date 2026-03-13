@@ -17,6 +17,7 @@ from kstock.signal.strategies import (
     evaluate_strategy_e,
     evaluate_strategy_f,
     evaluate_strategy_g,
+    evaluate_strategy_j,
     compute_confidence_score,
     get_regime_mode,
 )
@@ -27,7 +28,7 @@ def _make_tech(
     ema_50=0, ema_200=0, golden_cross=False, dead_cross=False,
     weekly_trend="neutral", mtf_aligned=False,
     high_52w=0, high_20d=0, volume_ratio=1.0,
-    bb_squeeze=False, return_3m_pct=0,
+    bb_squeeze=False, return_3m_pct=0, ma20=0,
 ):
     return TechnicalIndicators(
         rsi=rsi, bb_pctb=bb_pctb, bb_bandwidth=0.1,
@@ -39,6 +40,7 @@ def _make_tech(
         high_52w=high_52w, high_20d=high_20d,
         volume_ratio=volume_ratio, bb_squeeze=bb_squeeze,
         return_3m_pct=return_3m_pct,
+        ma20=ma20,
     )
 
 
@@ -223,6 +225,41 @@ class TestStrategyG:
     def test_no_breakout_no_signal(self):
         tech = _make_tech(ema_50=50000, high_52w=60000, high_20d=55000, volume_ratio=0.8)
         result = evaluate_strategy_g("005930", "삼성전자", tech)
+        assert result is None
+
+
+class TestStrategyJ:
+    def test_mean_reversion_breakout_requires_supported_setup(self):
+        tech = _make_tech(
+            rsi=51,
+            macd_cross=1,
+            ema_50=103000,
+            ema_200=98000,
+            weekly_trend="up",
+            mtf_aligned=True,
+            volume_ratio=1.9,
+            bb_squeeze=True,
+            return_3m_pct=9.5,
+            ma20=101500,
+        )
+        result = evaluate_strategy_j("005930", "삼성전자", tech, _make_macro(regime="neutral"))
+        assert result is not None
+        assert result.strategy == "J"
+
+    def test_mean_reversion_breakout_rejects_weak_trend_setup(self):
+        tech = _make_tech(
+            rsi=48,
+            macd_cross=1,
+            ema_50=95000,
+            ema_200=98000,
+            weekly_trend="down",
+            mtf_aligned=False,
+            volume_ratio=1.8,
+            bb_squeeze=True,
+            return_3m_pct=-4.0,
+            ma20=96000,
+        )
+        result = evaluate_strategy_j("005930", "삼성전자", tech, _make_macro(regime="neutral"))
         assert result is None
 
 
