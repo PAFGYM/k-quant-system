@@ -35,6 +35,7 @@ async def generate_daily_self_report(db, macro_client=None, ws=None) -> str:
         "\u2500" * 25,
         "",
     ]
+    macro_snapshot = None
 
     # 1. 오늘 봇 성과 요약
     lines.append("\U0001f4ca 1. 오늘의 성과")
@@ -120,10 +121,10 @@ async def generate_daily_self_report(db, macro_client=None, ws=None) -> str:
     # 매크로 데이터 상태
     if macro_client:
         try:
-            snap = await macro_client.get_snapshot()
-            if snap and snap.is_cached:
+            macro_snapshot = await macro_client.get_snapshot()
+            if macro_snapshot and macro_snapshot.is_cached:
                 suggestions.append("  \u2192 매크로 데이터: 캐시 사용 중 (정상)")
-            elif snap:
+            elif macro_snapshot:
                 suggestions.append("  \u2192 매크로 데이터: 실시간 갱신 중 (정상)")
         except Exception:
             suggestions.append("  \u2192 매크로 데이터 갱신 실패 \u2192 점검 필요")
@@ -178,6 +179,22 @@ async def generate_daily_self_report(db, macro_client=None, ws=None) -> str:
         lines.append("  \u2192 Gemini API 키 미설정 → Multi-AI 불완전")
     if openai_ok and gemini_ok and anthropic_configured:
         lines.append("  \u2192 3엔진 Multi-AI 정상 가동 중")
+
+    lines.append("")
+
+    # 6. 한국장 오퍼레이터 메모
+    lines.append("\U0001f9e0 6. 한국장 오퍼레이터 메모")
+    try:
+        from kstock.signal.krx_operator_memory import (
+            build_krx_operator_memory,
+            format_operator_memory_report_lines,
+        )
+
+        operator_memory = build_krx_operator_memory(db, macro_snapshot)
+        lines.extend(format_operator_memory_report_lines(operator_memory))
+    except Exception:
+        logger.debug("daily self report operator memory failed", exc_info=True)
+        lines.append("  \u2192 패턴 메모 생성 실패 \u2192 아침 브리핑 기준 재확인 필요")
 
     lines.extend([
         "",

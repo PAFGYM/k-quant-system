@@ -394,6 +394,15 @@ def _merge_unique_texts(*groups: list[str] | None) -> list[str]:
     return merged
 
 
+def _config_text_contains(universe_item: dict[str, Any], *keywords: str) -> bool:
+    """설정 메모/캐릭터/카탈리스트 안에 특정 키워드가 있는지 확인한다."""
+    haystacks = [
+        str(universe_item.get("character", "") or "").lower(),
+        " ".join(str(x or "") for x in universe_item.get("catalysts", []) or []).lower(),
+    ]
+    return any(keyword.lower() in haystack for haystack in haystacks for keyword in keywords)
+
+
 def _normalize_market(market: str) -> str:
     """시장 표기를 KRX / US 두 종류로 정규화한다."""
     text = str(market or "").upper()
@@ -539,6 +548,117 @@ def _estimate_future_value_path(
     return future
 
 
+def _config_seed_moat_score(universe_item: dict[str, Any]) -> float:
+    """정성 메모를 바탕으로 기술 해자 기본 점수를 보정한다."""
+    score = {
+        "direct": 58.0,
+        "enabler": 50.0,
+        "indirect_to_medium": 42.0,
+        "indirect": 34.0,
+    }.get(str(universe_item.get("directness", "")).lower(), 32.0)
+
+    score += {"core": 8.0, "structural": 4.0, "option": 0.0}.get(
+        str(universe_item.get("tier", "")).lower(), 0.0,
+    )
+    score += {"A": 8.0, "B": 4.0, "C": 0.0}.get(
+        str(universe_item.get("grade", "")).upper(), 0.0,
+    )
+
+    if _config_text_contains(universe_item, "독점", "유일", "1위"):
+        score += 12.0
+    if _config_text_contains(universe_item, "반복", "백로그", "플랫폼"):
+        score += 6.0
+
+    return min(95.0, score)
+
+
+def _config_seed_revenue_score(universe_item: dict[str, Any]) -> float:
+    """실적 가시성 메모를 바탕으로 매출/이익 궤적 점수를 보정한다."""
+    score = {
+        "proven": 78.0,
+        "expected": 62.0,
+        "emerging": 50.0,
+        "speculative": 30.0,
+        "low_to_medium": 42.0,
+    }.get(str(universe_item.get("earnings_linkage", "")).lower(), 40.0)
+    score += {"strong": 8.0, "moderate": 4.0, "medium": 4.0, "weak": 0.0}.get(
+        str(universe_item.get("catalyst_strength", "")).lower(), 0.0,
+    )
+    score += {"A": 8.0, "B": 3.0, "C": 0.0}.get(
+        str(universe_item.get("grade", "")).upper(), 0.0,
+    )
+    return min(95.0, score)
+
+
+def _config_seed_discovery_score(universe_item: dict[str, Any]) -> float:
+    """AI 합의와 랭킹을 기반으로 초기 기관 발견 점수를 보정한다."""
+    ai_consensus = float(universe_item.get("ai_consensus", 50) or 50)
+    rank = int(universe_item.get("rank", 0) or 0)
+    score = 32.0
+    if ai_consensus >= 90:
+        score += 28.0
+    elif ai_consensus >= 80:
+        score += 22.0
+    elif ai_consensus >= 70:
+        score += 16.0
+    elif ai_consensus >= 60:
+        score += 10.0
+
+    if 1 <= rank <= 3:
+        score += 16.0
+    elif 4 <= rank <= 6:
+        score += 10.0
+    elif 7 <= rank <= 10:
+        score += 6.0
+
+    score += {"core": 8.0, "structural": 4.0, "option": 0.0}.get(
+        str(universe_item.get("tier", "")).lower(), 0.0,
+    )
+    return min(92.0, score)
+
+
+def _config_seed_momentum_score(universe_item: dict[str, Any], sector_tailwind: float) -> float:
+    """섹터 순풍과 카탈리스트 강도를 바탕으로 모멘텀 점수를 보정한다."""
+    score = 20.0 + min(44.0, sector_tailwind * 0.45)
+    score += {"strong": 10.0, "moderate": 5.0, "medium": 5.0, "weak": 0.0}.get(
+        str(universe_item.get("catalyst_strength", "")).lower(), 0.0,
+    )
+    if _config_text_contains(universe_item, "이벤트", "발표", "계약", "수주"):
+        score += 4.0
+    if _config_text_contains(universe_item, "반복", "확대", "증가"):
+        score += 4.0
+    return min(90.0, score)
+
+
+def _config_alignment_bonus(
+    universe_item: dict[str, Any],
+    catalysts: list[str],
+    risks: list[str],
+    market_cap: float = 0,
+) -> float:
+    """실전 메모에 적힌 확신도를 종합 점수에 소폭 반영한다."""
+    if not universe_item:
+        return 0.0
+
+    bonus = {"A": 8.0, "B": 4.0, "C": 1.5}.get(
+        str(universe_item.get("grade", "")).upper(), 0.0,
+    )
+    bonus += {"core": 4.0, "structural": 2.0, "option": 0.0}.get(
+        str(universe_item.get("tier", "")).lower(), 0.0,
+    )
+    bonus += {"strong": 4.0, "moderate": 2.0, "medium": 2.0, "weak": 0.0}.get(
+        str(universe_item.get("catalyst_strength", "")).lower(), 0.0,
+    )
+    bonus += min(5.0, len(catalysts) * 1.2)
+    bonus -= min(4.0, len(risks) * 0.8)
+
+    listing_market = str(universe_item.get("market", "")).upper()
+    if listing_market == "KOSDAQ" and 0 < market_cap < 5_0000_0000_000:
+        bonus += 3.0
+
+    return bonus
+
+
 # ── 종합 스코어링 ───────────────────────────────────────────
 
 def compute_tenbagger_score(
@@ -604,17 +724,25 @@ def compute_tenbagger_score(
         has_patents, patent_count, first_mover,
         exclusive_contracts, market_share_pct, domestic_monopoly,
     )
+    if moat <= 0 and universe_item:
+        moat = _config_seed_moat_score(universe_item)
     revenue = _score_revenue_trajectory(
         revenue_growth_yoy, revenue_growth_qoq,
         operating_profit_growth, is_profitable, turning_profitable,
     )
+    if revenue <= 0 and universe_item:
+        revenue = _config_seed_revenue_score(universe_item)
     discovery = _score_institutional_discovery(
         foreign_buy_days_in_20, institution_buy_days_in_20,
         foreign_ratio_change,
     )
+    if discovery <= 0 and universe_item:
+        discovery = _config_seed_discovery_score(universe_item)
     momentum = _score_sector_momentum(
         sector_return_1m, sector_return_3m, leader_return_1m,
     )
+    if momentum <= 0 and universe_item:
+        momentum = _config_seed_momentum_score(universe_item, sector_tailwind)
     merged_consensus = dict(consensus_data or {})
     if not merged_consensus and universe_item.get("ai_consensus") is not None:
         merged_consensus = {"ai_avg": universe_item.get("ai_consensus", 50)}
@@ -636,6 +764,15 @@ def compute_tenbagger_score(
         catalysts,
     )
     merged_risks = _merge_unique_texts(risks)
+    composite = min(
+        100.0,
+        composite + _config_alignment_bonus(
+            universe_item,
+            merged_catalysts,
+            merged_risks,
+            market_cap=market_cap,
+        ),
+    )
     future = _estimate_future_value_path(
         current_price=current_price,
         composite_score=composite,

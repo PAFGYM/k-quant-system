@@ -1,6 +1,8 @@
 """적응형 모니터링 — VIX 레짐 분류 테스트."""
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from kstock.bot.mixins.scheduler import (
     ADAPTIVE_INTERVALS,
@@ -64,3 +66,24 @@ class TestAdaptiveIntervals:
     def test_fear_intervals(self):
         assert ADAPTIVE_INTERVALS["fear"]["intraday_monitor"] == 30
         assert ADAPTIVE_INTERVALS["fear"]["market_pulse"] == 30
+
+
+@pytest.mark.asyncio
+async def test_allow_alert_emit_blocks_normal_alerts_when_daily_limit_exceeded():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin.db = MagicMock()
+    mixin.db.get_recent_alerts.return_value = [
+        {"created_at": "2999-01-01T00:00:00"} for _ in range(80)
+    ]
+    mixin.chat_id = None
+    mixin._application = MagicMock()
+    mixin._application.bot.send_message = AsyncMock()
+    mixin._alert_mode = "normal"
+
+    allowed = await SchedulerMixin._allow_alert_emit(
+        mixin, "surge_batch", priority="normal", units=1,
+    )
+
+    assert allowed is False

@@ -10,6 +10,7 @@ import socket
 import sys
 from contextlib import suppress
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 try:
@@ -19,21 +20,49 @@ except ImportError:  # pragma: no cover - production is macOS/Linux
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger(__name__)
-
 ROOT_DIR = Path(__file__).resolve().parents[2]
 PID_FILE = ROOT_DIR / "bot.pid"
 RUNTIME_DIR = ROOT_DIR / "data" / "runtime"
+LOG_DIR = ROOT_DIR / "data" / "logs"
+APP_LOG_FILE = LOG_DIR / "kquant.log"
+ERROR_LOG_FILE = LOG_DIR / "kquant_error.log"
 LOCK_FILE = RUNTIME_DIR / "bot.lock"
 STATE_FILE = RUNTIME_DIR / "instance.json"
 HOSTNAME = socket.gethostname().split(".")[0]
 
 _lock_fd: int | None = None
+
+
+def _configure_logging() -> None:
+    """콘솔 + 파일 회전 로그를 함께 설정한다."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    handlers = [
+        logging.StreamHandler(),
+        RotatingFileHandler(
+            APP_LOG_FILE,
+            maxBytes=8 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        ),
+        RotatingFileHandler(
+            ERROR_LOG_FILE,
+            maxBytes=4 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        ),
+    ]
+    handlers[-1].setLevel(logging.WARNING)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
+load_dotenv(override=True)
+_configure_logging()
+logger = logging.getLogger(__name__)
 
 
 def _write_runtime_state(status: str, **extra: object) -> None:

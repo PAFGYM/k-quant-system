@@ -22,6 +22,7 @@ import os
 import re
 from datetime import datetime
 
+from kstock.core.budget_manager import get_global_budget_limits
 from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
@@ -175,10 +176,19 @@ def _apply_chat_budget_guard(
 
     adjusted = route
     mode = ""
+    global_limits = get_global_budget_limits()
 
     if route == "deep" and usage_count >= deep_limit:
         adjusted = "balanced"
         mode = "deep_limit"
+
+    if (
+        daily_cost >= global_limits["daily_hard"]
+        or monthly_cost >= global_limits["monthly_hard"]
+    ):
+        adjusted = "light"
+        mode = "global_hard"
+        return adjusted, mode
 
     if daily_cost >= daily_hard or monthly_cost >= monthly_hard:
         if adjusted != "light":
@@ -370,7 +380,7 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
     }.get(chat_route, 8)
     if budget_mode == "soft":
         history_limit = max(4, history_limit - 2)
-    elif budget_mode == "hard":
+    elif budget_mode in {"hard", "global_hard"}:
         history_limit = min(history_limit, 4)
     history = chat_memory.get_recent(limit=history_limit)
     messages: list[dict[str, str]] = []
@@ -386,7 +396,7 @@ async def handle_ai_question(question: str, context: dict, db, chat_memory, veri
     }.get(chat_route, 850)
     if budget_mode == "soft":
         max_tokens = int(max_tokens * 0.8)
-    elif budget_mode == "hard":
+    elif budget_mode in {"hard", "global_hard"}:
         max_tokens = min(max_tokens, 420)
     temperature = {
         "light": 0.15,

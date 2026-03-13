@@ -1861,6 +1861,35 @@ def format_manager_action_digest(
     return "\n".join(lines) if has_pick else ""
 
 
+def build_manager_stance_snapshots(
+    picks_by_manager: dict[str, list[dict]],
+    *,
+    market_context: str = "",
+) -> dict[str, str]:
+    """매니저별 현재 관점 한 줄 요약을 만든다."""
+    snapshots: dict[str, str] = {}
+    market_prefix = f"{market_context} | " if market_context else ""
+
+    for manager_key, manager in MANAGERS.items():
+        picks = picks_by_manager.get(manager_key) or []
+        if not picks:
+            continue
+        top_pick = picks[0]
+        reason = " · ".join(top_pick.get("fit_reasons") or [])[:80]
+        action = str(top_pick.get("action_hint", "") or "").strip()
+        parts = [
+            f"{market_prefix}{top_pick.get('name', '')}({top_pick.get('ticker', '')})",
+            f"적합도 {float(top_pick.get('fit_score', 0) or 0):.0f}",
+        ]
+        if reason:
+            parts.append(reason)
+        if action:
+            parts.append(action)
+        snapshots[manager_key] = " | ".join(part for part in parts if part).strip()[:180]
+
+    return snapshots
+
+
 def build_manager_shortcuts(
     picks_by_manager: dict[str, list[dict]],
     *,

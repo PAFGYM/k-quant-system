@@ -129,6 +129,22 @@ def track_usage(
             cache_read_tokens, cache_write_tokens,
         )
 
+        # usage 메타데이터가 비어 있는 성공 호출은 기록하지 않는다.
+        if (
+            status == "success"
+            and total_cost <= 0
+            and input_tokens <= 0
+            and output_tokens <= 0
+            and cache_read_tokens <= 0
+            and cache_write_tokens <= 0
+            and not error_message
+        ):
+            logger.debug(
+                "Skip zero-usage api log: provider=%s model=%s function=%s",
+                provider, model, function_name,
+            )
+            return
+
         db.log_api_usage(
             provider=provider,
             model=model,

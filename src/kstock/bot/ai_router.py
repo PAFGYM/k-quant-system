@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 
+from kstock.core.budget_manager import get_global_budget_limits
 from kstock.core.token_tracker import get_db, track_usage_global
 
 logger = logging.getLogger(__name__)
@@ -246,8 +247,14 @@ class AIRouter:
         self._daily_soft_budget_usd = self._load_budget_limit(
             "AI_DAILY_SOFT_BUDGET_USD", 1.5,
         )
+        self._daily_hard_budget_usd = self._load_budget_limit(
+            "AI_DAILY_HARD_BUDGET_USD", 3.0,
+        )
         self._monthly_soft_budget_usd = self._load_budget_limit(
             "AI_MONTHLY_SOFT_BUDGET_USD", 35.0,
+        )
+        self._monthly_hard_budget_usd = self._load_budget_limit(
+            "AI_MONTHLY_HARD_BUDGET_USD", 70.0,
         )
         self._init_providers()
 
@@ -408,6 +415,7 @@ class AIRouter:
             if provider_name == "claude":
                 result, usage = await self._call_claude(
                     provider.api_key, model, prompt,
+                    task=task,
                     system=system, max_tokens=max_tokens, temperature=temperature,
                 )
             elif provider_name == "gpt":
@@ -439,6 +447,20 @@ class AIRouter:
             self.stats[provider_name].total_latency_ms += elapsed
             raise
 
+    def _get_budget_snapshot(self) -> tuple[float, float]:
+        db = get_db()
+        if db is None:
+            return 0.0, 0.0
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            year_month = datetime.now().strftime("%Y-%m")
+            daily_cost = float((db.get_daily_api_usage(today) or {}).get("total_cost", 0) or 0)
+            monthly_cost = float((db.get_monthly_api_usage(year_month) or {}).get("total_cost", 0) or 0)
+            return daily_cost, monthly_cost
+        except Exception:
+            logger.debug("AI budget snapshot failed", exc_info=True)
+            return 0.0, 0.0
+
     def _apply_cost_guard(
         self,
         task: str,
@@ -447,20 +469,16 @@ class AIRouter:
         max_tokens: int,
     ) -> tuple[str, int]:
         """비용이 높아질 때 저비용 모델/토큰 상한으로 부드럽게 강등한다."""
-        db = get_db()
-        if db is None:
-            return model_tier, max_tokens
-
-        try:
-            today = datetime.now().strftime("%Y-%m-%d")
-            year_month = datetime.now().strftime("%Y-%m")
-            daily_cost = float((db.get_daily_api_usage(today) or {}).get("total_cost", 0) or 0)
-            monthly_cost = float((db.get_monthly_api_usage(year_month) or {}).get("total_cost", 0) or 0)
-        except Exception:
-            logger.debug("AI budget guard skipped", exc_info=True)
-            return model_tier, max_tokens
+        daily_cost, monthly_cost = self._get_budget_snapshot()
+        global_limits = get_global_budget_limits()
 
         interactive_tasks = {"chat", "deep_analysis", "strategy_synthesis", "vision_ocr"}
+        noncritical_tasks = {
+            "morning_briefing", "live_market", "news_summary", "column_summary",
+            "daily_synthesis", "youtube_screening", "daily_synthesis_quality",
+            "macro_shock_step1", "macro_shock_step2", "preopen_action",
+            "opening_reality_check",
+        }
         capped_tokens = max_tokens
         capped_tier = model_tier
 
@@ -471,6 +489,12 @@ class AIRouter:
         over_limit = (
             daily_cost >= self._daily_soft_budget_usd
             or monthly_cost >= self._monthly_soft_budget_usd
+        )
+        hard_over_limit = (
+            daily_cost >= self._daily_hard_budget_usd
+            or monthly_cost >= self._monthly_hard_budget_usd
+            or daily_cost >= global_limits["daily_hard"]
+            or monthly_cost >= global_limits["monthly_hard"]
         )
 
         if nearing_limit:
@@ -485,18 +509,42 @@ class AIRouter:
                 capped_tokens,
                 700 if task in interactive_tasks else 450,
             )
+        if hard_over_limit:
+            capped_tier = "fast"
+            capped_tokens = min(
+                capped_tokens,
+                500 if task in interactive_tasks else 320,
+            )
+            if task in noncritical_tasks:
+                capped_tokens = min(capped_tokens, 260)
 
         if (capped_tier, capped_tokens) != (model_tier, max_tokens):
             logger.info(
-                "AI budget guard applied: task=%s provider=%s tier %s->%s tokens %d->%d",
+                "AI budget guard applied: task=%s provider=%s tier %s->%s tokens %d->%d daily=%.4f monthly=%.4f",
                 task,
                 provider_name,
                 model_tier,
                 capped_tier,
                 max_tokens,
                 capped_tokens,
+                daily_cost,
+                monthly_cost,
             )
         return capped_tier, capped_tokens
+
+    @staticmethod
+    def _should_use_claude_prompt_cache(task: str, system: str, prompt: str) -> bool:
+        stable_tasks = {
+            "deep_analysis", "strategy_synthesis", "pdf_report", "eod_report",
+            "vision_ocr", "shock_attribution",
+        }
+        if task not in stable_tasks:
+            return False
+        if len(system or "") < 200:
+            return False
+        if len(prompt or "") > 12000:
+            return False
+        return True
 
     def _track_usage(
         self,
@@ -525,6 +573,7 @@ class AIRouter:
 
     async def _call_claude(
         self, api_key: str, model: str, prompt: str, *,
+        task: str,
         system: str = "", max_tokens: int = 1000, temperature: float = 0.3,
     ) -> tuple[str, dict[str, int]]:
         """Anthropic Claude API 호출 (Prompt Caching 적용)."""
@@ -539,8 +588,9 @@ class AIRouter:
             payload["system"] = [{
                 "type": "text",
                 "text": system,
-                "cache_control": {"type": "ephemeral"},
             }]
+            if self._should_use_claude_prompt_cache(task, system, prompt):
+                payload["system"][0]["cache_control"] = {"type": "ephemeral"}
 
         client = _get_router_client()
         resp = await client.post(

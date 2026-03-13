@@ -11,6 +11,34 @@ from kstock.signal.tenbagger_screener import (
 class TestComputeTenbaggerScore:
     """텐배거 스코어 계산기 회귀 테스트."""
 
+    def test_config_only_scores_do_not_cluster_at_mid_30s(self):
+        a_score = compute_tenbagger_score(
+            ticker="105840",
+            name="우진",
+            market="KRX",
+            sector="nuclear_smr",
+            current_price=10_000,
+        )
+        b_score = compute_tenbagger_score(
+            ticker="010170",
+            name="대한광통신",
+            market="KRX",
+            sector="optical_ai_infra",
+            current_price=10_000,
+        )
+        c_score = compute_tenbagger_score(
+            ticker="069540",
+            name="빛과전자",
+            market="KRX",
+            sector="optical_ai_infra",
+            current_price=10_000,
+        )
+
+        assert a_score.tenbagger_score >= 70
+        assert b_score.tenbagger_score >= 55
+        assert c_score.tenbagger_score >= 40
+        assert a_score.tenbagger_score > b_score.tenbagger_score > c_score.tenbagger_score
+
     def test_config_context_and_future_value_are_populated(self):
         score = compute_tenbagger_score(
             ticker="105840",

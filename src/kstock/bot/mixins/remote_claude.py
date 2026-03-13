@@ -249,7 +249,7 @@ class RemoteClaudeMixin:
         },
         "logs": {
             "label": "📊 에러로그",
-            "bash": "grep -iE '(error|exception|traceback|critical)' /tmp/kquant_bot.log | tail -20",
+            "bash": "cd /Users/botddol/k-quant-system && tail -n 120 data/logs/kquant_error.log data/bot_error.log 2>/dev/null | grep -iE '(error|exception|traceback|critical|warning)' | tail -20",
         },
         "restart": {"label": "🔄 봇재시작", "special": "restart"},
         "system": {"label": "📦 시스템상태", "special": "stats"},

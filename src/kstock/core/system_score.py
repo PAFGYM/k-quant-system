@@ -21,6 +21,17 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _count_sql(db: Any, sql: str, params: tuple = ()) -> int:
+    """간단한 COUNT 쿼리를 안전하게 실행."""
+    try:
+        with db._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        return int(row[0] if row else 0)
+    except Exception:
+        logger.debug("count query failed", exc_info=True)
+        return 0
+
+
 def compute_system_score(db: Any) -> dict:
     """시스템 자가 점수 계산 (100점 만점).
 
@@ -101,6 +112,13 @@ def _score_signals(db: Any) -> tuple[float, dict]:
         total_evaluated = sum(s.get("evaluated", 0) or 0 for s in stats)
         total_hits = sum(s.get("hits", 0) or 0 for s in stats)
         total_signals = sum(s.get("total", s.get("total_signals", 0)) or 0 for s in stats)
+        if total_evaluated == 0 and total_signals > 0:
+            return 10.0, {
+                "hit_rate": None,
+                "total_signals": total_signals,
+                "hits": 0,
+                "msg": "평가 대기 중인 신호만 존재",
+            }
         hit_rate = (total_hits / total_evaluated * 100) if total_evaluated > 0 else 0
 
         # 적중률 → 점수 변환 (80%=25점, 60%=18점, 40%=10점, 20%=5점)
@@ -227,6 +245,35 @@ def _score_learning(db: Any) -> tuple[float, dict]:
         except Exception:
             details["rag_active"] = False
 
+        # 5) 매니저 stance 누적? (+2)
+        try:
+            stances = db.get_recent_manager_stances(hours=48)
+            stance_count = len(stances or {})
+            details["manager_stances"] = stance_count
+            if stance_count >= 3:
+                score += 2.0
+        except Exception:
+            details["manager_stances"] = 0
+
+        # 6) ML 예측 검증 준비도 (성숙한 예측만 반영) (+3)
+        mature_total = _count_sql(
+            db,
+            "SELECT COUNT(*) FROM ml_predictions WHERE pred_date <= date('now','-5 day')",
+        )
+        mature_done = _count_sql(
+            db,
+            "SELECT COUNT(*) FROM ml_predictions "
+            "WHERE pred_date <= date('now','-5 day') AND actual_return IS NOT NULL",
+        )
+        details["ml_mature_total"] = mature_total
+        details["ml_mature_done"] = mature_done
+        if mature_total > 0:
+            eval_ratio = mature_done / mature_total
+            score += min(3.0, round(eval_ratio * 3.0, 2))
+            details["ml_eval_ratio"] = round(eval_ratio * 100, 1)
+        else:
+            details["ml_eval_ratio"] = None
+
         return min(15.0, score), details
     except Exception as e:
         logger.debug("학습 점수 계산 실패: %s", e)
@@ -286,7 +333,30 @@ def _score_uptime(db: Any) -> tuple[float, dict]:
         # 최근 이벤트 로그에서 에러 비율 확인
         events = db.get_events(limit=100)
         if not events:
-            return 8.0, {"msg": "이벤트 로그 없음 (기본점)"}
+            try:
+                job_runs = db.get_job_runs(datetime.utcnow().strftime("%Y-%m-%d")) or []
+            except Exception:
+                job_runs = []
+            if not job_runs:
+                return 8.0, {"msg": "이벤트 로그 없음 (기본점)"}
+
+            total_jobs = len(job_runs)
+            error_jobs = sum(1 for j in job_runs if j.get("status") == "error")
+            success_jobs = sum(1 for j in job_runs if j.get("status") == "success")
+            success_rate = (success_jobs / total_jobs * 100) if total_jobs > 0 else 0
+            if success_rate >= 95:
+                score = 9.0
+            elif success_rate >= 85:
+                score = 8.0
+            elif success_rate >= 70:
+                score = 7.0
+            else:
+                score = 5.0
+            return score, {
+                "job_success_rate": round(success_rate, 1),
+                "job_errors": error_jobs,
+                "recent_jobs": total_jobs,
+            }
 
         errors = sum(1 for e in events if e.get("severity") in ("error", "critical"))
         total = len(events)
@@ -372,7 +442,10 @@ def format_score_report(score: dict) -> str:
 
     signal_d = details.get("signal", {})
     if "hit_rate" in signal_d:
-        lines.append(f"\n📈 신호 적중률: {signal_d['hit_rate']}%")
+        if signal_d["hit_rate"] is None:
+            lines.append("\n📈 신호 적중률: 평가 대기")
+        else:
+            lines.append(f"\n📈 신호 적중률: {signal_d['hit_rate']}%")
 
     trade_d = details.get("trade", {})
     if "win_rate" in trade_d:
@@ -400,6 +473,13 @@ def format_score_report(score: dict) -> str:
             active.append(f"선호도 {learn_d['preferences']}개")
         if learn_d.get("rag_active"):
             active.append("RAG 활성")
+        if learn_d.get("manager_stances", 0) > 0:
+            active.append(f"매니저 stance {learn_d['manager_stances']}개")
+        if learn_d.get("ml_mature_total", 0) > 0:
+            active.append(
+                f"ML 검증 {learn_d.get('ml_mature_done', 0)}/"
+                f"{learn_d.get('ml_mature_total', 0)}"
+            )
         if active:
             lines.append(f"🧠 학습: {', '.join(active)}")
 

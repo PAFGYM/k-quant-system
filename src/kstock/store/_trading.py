@@ -598,6 +598,44 @@ class TradingMixin:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_unevaluated_predictions(
+        self,
+        min_age_days: int = 5,
+        limit: int = 500,
+    ) -> list[dict]:
+        """actual_return이 비어 있는 오래된 ML 예측 조회."""
+        cutoff = (datetime.utcnow() - timedelta(days=min_age_days)).strftime("%Y-%m-%d")
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM ml_predictions
+                WHERE pred_date <= ?
+                  AND actual_return IS NULL
+                ORDER BY pred_date ASC, id ASC
+                LIMIT ?
+                """,
+                (cutoff, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_prediction_result(
+        self,
+        prediction_id: int,
+        actual_return: float,
+        correct: int,
+    ) -> None:
+        """ML 예측의 실제 수익률/정답 여부를 기록."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE ml_predictions
+                   SET actual_return=?,
+                       correct=?
+                 WHERE id=?
+                """,
+                (actual_return, correct, prediction_id),
+            )
+
     # -- ml_performance ---------------------------------------------------------
 
     def add_ml_performance(
