@@ -2296,10 +2296,213 @@ class SchedulerMixin:
                 "callback_data": "fav:tab:holding:0",
             })
 
+        actions.extend(
+            self._build_daily_candidate_actions(
+                holdings=holdings,
+                macro=macro,
+                playbook=playbook,
+                alert_mode=alert_mode,
+            ),
+        )
+
         # 정렬
         order = {"urgent": 0, "caution": 1, "opportunity": 2, "check": 3}
         actions.sort(key=lambda a: order.get(a.get("priority", ""), 4))
         return actions
+
+    def _build_daily_candidate_actions(
+        self,
+        *,
+        holdings: list[dict],
+        macro,
+        playbook,
+        alert_mode: str,
+    ) -> list[dict]:
+        """캐시된 스캔 결과에서 지금 볼 신규 후보를 행동 항목으로 만든다."""
+        try:
+            from kstock.bot.investment_managers import (
+                MANAGERS,
+                filter_discovery_candidates,
+            )
+        except Exception:
+            logger.debug("daily candidate actions import failed", exc_info=True)
+            return []
+
+        results = list(getattr(self, "_last_scan_results", None) or [])
+        if not results:
+            return []
+
+        exclude = {str(h.get("ticker", "") or "") for h in holdings if h.get("ticker")}
+        by_manager: dict[str, list[dict]] = {}
+        for mgr_key in MANAGERS:
+            candidates = filter_discovery_candidates(results, mgr_key, exclude)
+            if candidates:
+                by_manager[mgr_key] = candidates
+        if not by_manager:
+            return []
+
+        by_manager = self._enrich_manager_candidates_with_flow_short_context(
+            by_manager, macro,
+        )
+        fast_context = self._build_manager_fast_context(by_manager)
+        by_manager = self._enrich_manager_candidates_with_fast_context(
+            by_manager, fast_context,
+        )
+
+        strong_tickers = {
+            getattr(item, "ticker", "")
+            for item in list(getattr(playbook, "strong_stocks", []) or [])
+        }
+        squeeze_tickers = {
+            getattr(item, "ticker", "")
+            for item in list(getattr(playbook, "short_squeeze_watch", []) or [])
+        }
+        lane_bias = {
+            "scalp": 0.92 if alert_mode == "wartime" else 1.00,
+            "swing": 0.96 if alert_mode == "wartime" else 1.02,
+            "position": 1.05,
+            "long_term": 1.01,
+            "tenbagger": 1.08,
+        }
+
+        ranked: list[tuple[float, str, dict]] = []
+        for mgr_key, picks in by_manager.items():
+            if not picks:
+                continue
+            top_pick = dict(picks[0])
+            composite = float(top_pick.get("composite", 0) or 0)
+            fit_score = float(top_pick.get("fit_score", 0) or 0)
+            confidence = float(top_pick.get("confidence_score", 0) or 0)
+            ticker = str(top_pick.get("ticker", "") or "")
+            rank_score = (fit_score * 1.8) + (composite * 0.4) + (confidence * 12.0)
+            rank_score *= lane_bias.get(mgr_key, 1.0)
+            if ticker in strong_tickers:
+                rank_score += 6.0
+            if ticker in squeeze_tickers:
+                rank_score += 4.0
+            ranked.append((rank_score, mgr_key, top_pick))
+
+        ranked.sort(key=lambda row: row[0], reverse=True)
+        actions: list[dict] = []
+        seen_tickers: set[str] = set()
+
+        for _, mgr_key, pick in ranked:
+            ticker = str(pick.get("ticker", "") or "")
+            if not ticker or ticker in seen_tickers:
+                continue
+            seen_tickers.add(ticker)
+
+            manager = MANAGERS.get(mgr_key, {})
+            manager_label = f"{manager.get('emoji', '📌')} {manager.get('title', mgr_key)}"
+            name = str(pick.get("name", "") or ticker)[:8]
+
+            reason_bits = list(pick.get("fit_reasons") or [])[:2]
+            flow_signal = str(pick.get("flow_signal", "") or "").strip()
+            if flow_signal:
+                reason_bits.append(flow_signal)
+            event_tags = list(pick.get("event_tags") or [])
+            if event_tags:
+                reason_bits.append(f"이벤트 {'/'.join(event_tags[:2])}")
+            if not reason_bits:
+                reason_bits.append(f"적합도 {float(pick.get('fit_score', 0) or 0):.0f}")
+            reason = " · ".join(dict.fromkeys(reason_bits))[:90]
+
+            action_hint = str(pick.get("action_hint", "") or "").strip()
+            next_step = ""
+            priority = "opportunity"
+            action = action_hint or "분할 진입 후보"
+            if alert_mode == "wartime" and mgr_key in {"scalp", "swing"}:
+                priority = "check"
+                action = "추격 금지, 강도 확인"
+                next_step = "시초 추격 대신 10시 이후 눌림과 체결 강도 확인"
+            elif mgr_key == "tenbagger":
+                next_step = "이벤트 전 씨앗 포지션 1차만 고려"
+            elif mgr_key == "position":
+                next_step = "실적·수급 유지 시 2회 분할 진입"
+            elif mgr_key == "long_term":
+                next_step = "하루에 몰지 말고 2~3회 장기 분할"
+            else:
+                next_step = "시초 변동성 소화 후 분할 접근"
+
+            actions.append({
+                "priority": priority,
+                "ticker": ticker,
+                "name": name,
+                "action": action,
+                "reason": reason,
+                "manager_key": mgr_key,
+                "manager_label": manager_label,
+                "callback_data": f"fav:stock:{ticker}",
+                "secondary_callback": f"mgr_tab:{mgr_key}",
+                "button_label": f"{manager.get('emoji', '📌')} {name} 후보",
+                "next_step": next_step,
+            })
+            if len(actions) >= 3:
+                break
+
+        return actions
+
+    def _build_daily_action_coach_lines(self, actions: list[dict], macro) -> list[str]:
+        """액션콘솔 상단에 노출할 자동 코치 한눈 요약."""
+        playbook = self._build_downside_playbook(macro) if macro else None
+        regime_mode = {}
+        if macro:
+            try:
+                regime = detect_regime(macro)
+                regime_mode = {
+                    "mode": getattr(regime, "mode", ""),
+                    "label": getattr(regime, "label", ""),
+                }
+            except Exception:
+                logger.debug("daily action coach regime detection failed", exc_info=True)
+
+        lines: list[str] = []
+        try:
+            from kstock.signal.krx_operator_memory import build_krx_operator_memory
+
+            memory = build_krx_operator_memory(
+                self.db,
+                macro,
+                playbook=playbook,
+                regime_mode=regime_mode,
+            )
+            if memory.headline:
+                lines.append(f"기본 태세: {memory.headline}")
+            if memory.attack_points:
+                lines.append(f"오늘 공략: {', '.join(memory.attack_points[:2])}")
+            if memory.avoid_points:
+                lines.append(f"회피: {', '.join(memory.avoid_points[:2])}")
+        except Exception:
+            logger.debug("daily action coach memory build failed", exc_info=True)
+
+        top_urgent = next((a for a in actions if a.get("priority") in {"urgent", "caution"}), None)
+        if top_urgent:
+            lines.append(f"1순위: {top_urgent.get('name', '')} → {top_urgent.get('action', '')}")
+
+        top_opportunity = next(
+            (
+                a for a in actions
+                if a.get("priority") == "opportunity" and str(a.get("ticker", "") or "").strip()
+            ),
+            None,
+        )
+        if top_opportunity:
+            manager_label = str(top_opportunity.get("manager_label", "") or "").strip()
+            buy_line = f"신규 후보: {top_opportunity.get('name', '')} → {top_opportunity.get('action', '')}"
+            if manager_label:
+                buy_line += f" ({manager_label})"
+            lines.append(buy_line)
+
+        if playbook and getattr(playbook, "strong_stocks", None):
+            names = ", ".join(
+                getattr(item, "name", "")
+                for item in list(playbook.strong_stocks)[:2]
+                if getattr(item, "name", "")
+            )
+            if names:
+                lines.append(f"강세 축: {names}")
+
+        return list(dict.fromkeys(line for line in lines if line))[:5]
 
     async def _send_daily_actions(self, context, macro) -> None:
         """오늘의 할 일 메시지 전송."""
@@ -2308,7 +2511,10 @@ class SchedulerMixin:
 
             actions = await self._generate_daily_actions(macro)
             alert_mode = getattr(self, '_alert_mode', 'normal')
-            text = format_daily_actions(actions, alert_mode=alert_mode)
+            coach_lines = self._build_daily_action_coach_lines(actions, macro)
+            text = format_daily_actions(
+                actions, alert_mode=alert_mode, coach_lines=coach_lines,
+            )
 
             buttons = make_shortcut_rows(build_daily_action_shortcuts(actions))
             manager_shortcuts = []

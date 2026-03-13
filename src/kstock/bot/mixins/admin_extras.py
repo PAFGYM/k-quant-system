@@ -3129,9 +3129,11 @@ class AdminExtrasMixin:
             except Exception:
                 pass
             actions = await self._generate_daily_actions(macro)
+            coach_lines = self._build_daily_action_coach_lines(actions, macro)
             text = format_daily_actions(
                 actions,
                 alert_mode=getattr(self, "_alert_mode", "normal"),
+                coach_lines=coach_lines,
             )
             buttons = make_shortcut_rows(build_daily_action_shortcuts(actions, max_buttons=5))
             manager_shortcuts = []

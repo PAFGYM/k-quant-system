@@ -300,3 +300,26 @@ def test_format_daily_actions_includes_manager_label():
 
     assert "🔥 스윙 매니저" in text
     assert "미래주: 손절 필요" in text
+
+
+def test_format_daily_actions_renders_coach_lines_and_next_step():
+    text = format_daily_actions(
+        [
+            {
+                "priority": "opportunity",
+                "name": "성장주",
+                "action": "씨앗 포지션 검토",
+                "reason": "정책 이벤트 · 초기 수급 유입",
+                "next_step": "시초 추격 대신 2회 분할 접근",
+            },
+        ],
+        coach_lines=[
+            "기본 태세: 변동성 소화 후 강한 종목 선별",
+            "회피: 지수 레버리지 추격",
+        ],
+    )
+
+    assert "🧭 자동 코치" in text
+    assert "기본 태세: 변동성 소화 후 강한 종목 선별" in text
+    assert "회피: 지수 레버리지 추격" in text
+    assert "다음 행동: 시초 추격 대신 2회 분할 접근" in text

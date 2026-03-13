@@ -1652,7 +1652,11 @@ def format_onboarding_complete() -> str:
     )
 
 
-def format_daily_actions(actions: list[dict], alert_mode: str = "normal") -> str:
+def format_daily_actions(
+    actions: list[dict],
+    alert_mode: str = "normal",
+    coach_lines: list[str] | None = None,
+) -> str:
     """오늘의 할 일 포맷."""
     mode_label = {
         "normal": "\U0001f7e2 일상",
@@ -1683,6 +1687,17 @@ def format_daily_actions(actions: list[dict], alert_mode: str = "normal") -> str
         "",
     ]
 
+    if coach_lines:
+        lines.append("🧭 자동 코치")
+        for raw in coach_lines[:5]:
+            line = str(raw or "").strip()
+            if not line:
+                continue
+            if not line.startswith("-"):
+                line = f"- {line}"
+            lines.append(f"  {line[2:]}" if line.startswith("- ") else line)
+        lines.append("")
+
     for p in ("urgent", "caution", "opportunity", "check"):
         items = [a for a in actions if a.get("priority") == p]
         if not items:
@@ -1696,6 +1711,9 @@ def format_daily_actions(actions: list[dict], alert_mode: str = "normal") -> str
                 lines.append(f"    \u2514 {manager_label} | {reason}")
             else:
                 lines.append(f"    \u2514 {reason}")
+            next_step = str(item.get("next_step", "") or "").strip()
+            if next_step:
+                lines.append(f"    \u2514 다음 행동: {next_step}")
         lines.append("")
 
     cnt = {p: sum(1 for a in actions if a.get("priority") == p)
