@@ -7540,6 +7540,146 @@ class SchedulerMixin:
 
     # -- v10.4: YouTube 심화 학습 파이프라인 ------------------------------------
 
+    def _youtube_live_watch_window(
+        self, now: datetime | None = None,
+    ) -> tuple[str, int, int] | None:
+        """라이브 시황 감시를 돌릴 시간대와 수집 범위를 결정."""
+        now = now or datetime.now(KST)
+        if now.weekday() >= 5:
+            return None
+
+        current = now.time()
+        if dt_time(hour=7, minute=20) <= current <= dt_time(hour=8, minute=55):
+            return ("장전", 3, 3)
+        if dt_time(hour=9, minute=0) <= current <= dt_time(hour=15, minute=35):
+            return ("장중", 2, 2)
+        if dt_time(hour=20, minute=30) <= current <= dt_time(hour=23, minute=30):
+            return ("미국장 전후", 3, 2)
+        return None
+
+    def _format_youtube_live_watch_alert(
+        self,
+        result: dict,
+        *,
+        window_label: str,
+        extra_count: int = 0,
+    ) -> str:
+        """짧고 행동형인 라이브 시황 브리프."""
+        source = str(result.get("source", "") or "시황 채널").strip()
+        title = str(result.get("title", "") or "제목 확인 중").strip()
+        outlook = str(result.get("market_outlook", "") or "").strip()
+        implications = str(result.get("investment_implications", "") or "").strip()
+        summary = str(result.get("full_summary", "") or result.get("raw_summary", "") or "").strip()
+        sectors = result.get("mentioned_sectors", []) or []
+        tickers = result.get("mentioned_tickers", []) or []
+
+        lines = [
+            f"📺 라이브 시황 감시 ({window_label})",
+            "━" * 24,
+            f"[{source}] {title[:120]}",
+        ]
+
+        if outlook:
+            outlook_emoji = (
+                "📈" if any(token in outlook for token in ("상승", "긍정", "bull"))
+                else "📉" if any(token in outlook for token in ("하락", "부정", "bear"))
+                else "➡️"
+            )
+            lines.append(f"{outlook_emoji} 전망: {outlook[:120]}")
+
+        if sectors:
+            lines.append(f"섹터: {', '.join(str(s) for s in sectors[:4])}")
+
+        if tickers:
+            ticker_parts = []
+            for ticker in tickers[:4]:
+                if not isinstance(ticker, dict):
+                    continue
+                name = str(ticker.get("name", "") or "").strip()
+                if not name:
+                    continue
+                sentiment = str(ticker.get("sentiment", "") or "").strip()
+                emoji = {"긍정": "🟢", "부정": "🔴", "중립": "⚪"}.get(sentiment, "⚪")
+                ticker_parts.append(f"{name}{emoji}")
+            if ticker_parts:
+                lines.append(f"종목: {' '.join(ticker_parts)}")
+
+        coach = implications or summary
+        if coach:
+            lines.append(f"행동: {coach[:180]}")
+
+        if extra_count > 0:
+            lines.append(f"외 {extra_count}건 추가 감지")
+
+        return "\n".join(lines)
+
+    async def job_youtube_live_watch(
+        self, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """장전/장중 시황 라이브 영상을 짧은 주기로 감시한다."""
+        if not self.chat_id:
+            return
+
+        today_str = datetime.now(KST).strftime("%Y-%m-%d")
+        window = self._youtube_live_watch_window()
+        if not window:
+            return
+
+        window_label, hours_lookback, max_videos = window
+        try:
+            from kstock.ingest.global_news import batch_youtube_live_watch
+
+            results = await batch_youtube_live_watch(
+                db=self.db,
+                max_videos=max_videos,
+                hours_lookback=hours_lookback,
+            )
+
+            fresh_results: list[dict] = []
+            for result in results:
+                video_id = str(result.get("video_id", "") or "").strip()
+                if not video_id:
+                    continue
+                alert_hash = f"yt_live_watch:{video_id}"
+                if self.db.is_alert_sent(alert_hash, hours=18):
+                    continue
+                fresh_results.append(result)
+
+            sent_count = 0
+            if fresh_results:
+                top = fresh_results[0]
+                text = self._format_youtube_live_watch_alert(
+                    top,
+                    window_label=window_label,
+                    extra_count=max(0, len(fresh_results) - 1),
+                )
+                if await self._allow_alert_emit("youtube_live_watch", priority="normal"):
+                    await context.bot.send_message(chat_id=self.chat_id, text=text[:4000])
+                    self.db.insert_alert("YOUTUBE", "live_watch", text[:200])
+                    self.db.save_sent_alert(
+                        f"yt_live_watch:{top.get('video_id', '')}",
+                        f"{top.get('source', '')} {top.get('title', '')}",
+                    )
+                    sent_count = 1
+
+            self.db.upsert_job_run(
+                "youtube_live_watch",
+                today_str,
+                status="success",
+                message=(
+                    f"window={window_label} analyzed={len(results)} "
+                    f"fresh={len(fresh_results)} sent={sent_count}"
+                ),
+            )
+        except Exception as e:
+            logger.error("job_youtube_live_watch failed: %s", e, exc_info=True)
+            self.db.upsert_job_run(
+                "youtube_live_watch",
+                today_str,
+                status="error",
+                message=str(e)[:120],
+            )
+
     async def job_youtube_deep_learning(
         self, context: ContextTypes.DEFAULT_TYPE,
     ) -> None:

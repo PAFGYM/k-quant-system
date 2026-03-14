@@ -387,6 +387,30 @@ _YOUTUBE_PRIORITY_KEYWORDS = {
     "ai": 3,
 }
 
+_YOUTUBE_LIVE_WATCH_KEYWORDS = {
+    "라이브",
+    "live",
+    "생방송",
+    "시황",
+    "오늘장",
+    "내일장",
+    "장전",
+    "장중",
+    "장마감",
+    "마감시황",
+    "브리핑",
+    "오프닝벨",
+    "개장",
+    "수급",
+    "외인",
+    "기관",
+    "선물",
+    "코스피",
+    "코스닥",
+    "나스닥",
+    "반도체",
+}
+
 
 def _youtube_priority_score(item: NewsItem) -> int:
     """시황/라이브/테마성 영상을 우선 학습하기 위한 점수."""
@@ -410,6 +434,35 @@ def _youtube_priority_score(item: NewsItem) -> int:
     if any(channel.lower() in source for channel in ("삼프로", "증권", "각도기", "biz", "경제tv")):
         score += 1
     return score
+
+
+def _is_youtube_live_watch_candidate(item: NewsItem) -> bool:
+    """라이브/장전/장중 시황 감시에 적합한 영상인지 판별."""
+    if not getattr(item, "video_id", ""):
+        return False
+
+    category = str(getattr(item, "category", "") or "")
+    title = str(getattr(item, "title", "") or "").lower()
+    source = str(getattr(item, "source", "") or "").replace("🎬", "").strip().lower()
+
+    if "youtube" not in category:
+        return False
+
+    keyword_hits = sum(
+        1 for keyword in _YOUTUBE_LIVE_WATCH_KEYWORDS if keyword.lower() in title
+    )
+    if keyword_hits >= 1:
+        return True
+
+    # 증권사/미국장 채널은 장중/장전 브리핑 비중이 높아 우선 감시
+    if "youtube_broker" in category or "youtube_us_market" in category:
+        return True
+
+    # 채널명 자체가 라이브/시황 특화면 후보로 본다.
+    return any(
+        marker in source
+        for marker in ("증권", "경제tv", "biz", "시황", "라이브")
+    )
 
 # ── 긴급 이벤트 키워드 ────────────────────────────────────
 
@@ -2116,6 +2169,77 @@ async def batch_deep_youtube_analysis(
     logger.info(
         "batch_deep_youtube: analyzed %d videos, skipped %d (of %d total)",
         processed, skipped, len(yt_items),
+    )
+    return results
+
+
+async def batch_youtube_live_watch(
+    db=None,
+    *,
+    max_videos: int = 3,
+    hours_lookback: int = 3,
+) -> list[dict]:
+    """라이브/장전/장중 시황 영상을 짧은 주기로 우선 학습한다.
+
+    완전한 실시간 스트림 청취는 아니지만, RSS에 잡힌 직후 영상을
+    빠르게 구조화해 장전/장중 브리프에 반영하기 위한 경량 감시 루프.
+    """
+    items = await fetch_global_news(
+        max_per_feed=4,
+        hours_lookback=hours_lookback,
+    )
+    candidates = [
+        item for item in items
+        if _is_youtube_live_watch_candidate(item)
+    ]
+    candidates.sort(key=_youtube_priority_score, reverse=True)
+
+    if not candidates:
+        logger.info("batch_youtube_live_watch: no live-watch candidates found")
+        return []
+
+    results: list[dict] = []
+    for item in candidates:
+        if len(results) >= max_videos:
+            break
+
+        if db:
+            try:
+                if db.check_youtube_processed(item.video_id):
+                    should_upgrade = True
+                    if hasattr(db, "should_upgrade_youtube_intelligence"):
+                        should_upgrade = db.should_upgrade_youtube_intelligence(item.video_id)
+                    if not should_upgrade:
+                        continue
+            except Exception:
+                logger.debug(
+                    "batch_youtube_live_watch duplicate check failed for %s",
+                    item.video_id,
+                    exc_info=True,
+                )
+
+        structured = await deep_analyze_youtube(
+            video_id=item.video_id,
+            title=item.title,
+            source=item.source.replace("🎬", "").strip(),
+            db=db,
+        )
+        if not (structured.get("full_summary") or structured.get("raw_summary")):
+            continue
+
+        structured["title"] = item.title
+        structured["source"] = item.source.replace("🎬", "").strip()
+        structured["published"] = item.published
+        structured["priority_score"] = _youtube_priority_score(item)
+        structured["live_watch"] = True
+        results.append(structured)
+
+        # 너무 잦은 반복 호출에서도 외부 API 부담을 낮춘다.
+        await asyncio.sleep(1)
+
+    logger.info(
+        "batch_youtube_live_watch: analyzed %d live-watch videos",
+        len(results),
     )
     return results
 

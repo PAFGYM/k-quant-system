@@ -10,6 +10,7 @@ import pytest
 from kstock.ingest.global_news import (
     _build_whisper_download_attempts,
     _download_audio_for_whisper,
+    batch_youtube_live_watch,
     batch_deep_youtube_analysis,
     summarize_transcript_structured,
 )
@@ -120,6 +121,89 @@ class TestBatchDeepYoutubeAnalysis:
         ):
             results = await batch_deep_youtube_analysis(
                 db=db, max_videos=3, hours_lookback=12,
+            )
+
+        assert results == []
+        db.should_upgrade_youtube_intelligence.assert_called_once_with(item.video_id)
+        mock_deep.assert_not_called()
+
+
+class TestBatchYoutubeLiveWatch:
+    @pytest.mark.asyncio
+    async def test_live_watch_prioritizes_market_live_titles(self):
+        live_item = SimpleNamespace(
+            video_id="live123def45",
+            title="장전 라이브 시황 | 오늘장 반도체 수급 점검",
+            source="🎬 테스트증권",
+            category="youtube_broker",
+            published="2026-03-14T08:10:00+0900",
+        )
+        normal_item = SimpleNamespace(
+            video_id="norm123def45",
+            title="주말 브이로그",
+            source="🎬 기타채널",
+            category="youtube_finance",
+            published="2026-03-14T08:05:00+0900",
+        )
+        db = MagicMock()
+        db.check_youtube_processed.return_value = False
+        db.should_upgrade_youtube_intelligence.return_value = True
+
+        structured = {
+            "video_id": live_item.video_id,
+            "full_summary": "장전 핵심 요약",
+            "raw_summary": "장전 핵심 요약",
+            "mentioned_tickers": [{"ticker": "000660", "name": "SK하이닉스", "sentiment": "긍정"}],
+            "mentioned_sectors": ["반도체"],
+            "market_outlook": "반도체 수급 확인 후 긍정",
+            "investment_implications": "시초 추격보다 눌림 분할",
+        }
+
+        with patch(
+            "kstock.ingest.global_news.fetch_global_news",
+            AsyncMock(return_value=[normal_item, live_item]),
+        ), patch(
+            "kstock.ingest.global_news.deep_analyze_youtube",
+            AsyncMock(return_value=structured),
+        ) as mock_deep, patch(
+            "kstock.ingest.global_news.asyncio.sleep",
+            AsyncMock(),
+        ):
+            results = await batch_youtube_live_watch(
+                db=db, max_videos=2, hours_lookback=3,
+            )
+
+        assert len(results) == 1
+        assert results[0]["video_id"] == live_item.video_id
+        assert results[0]["live_watch"] is True
+        assert results[0]["priority_score"] > 0
+        mock_deep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_live_watch_skips_processed_high_quality_video(self):
+        item = SimpleNamespace(
+            video_id="done123def45",
+            title="장중 라이브 브리핑",
+            source="🎬 테스트증권",
+            category="youtube_broker",
+            published="2026-03-14T10:00:00+0900",
+        )
+        db = MagicMock()
+        db.check_youtube_processed.return_value = True
+        db.should_upgrade_youtube_intelligence.return_value = False
+
+        with patch(
+            "kstock.ingest.global_news.fetch_global_news",
+            AsyncMock(return_value=[item]),
+        ), patch(
+            "kstock.ingest.global_news.deep_analyze_youtube",
+            AsyncMock(),
+        ) as mock_deep, patch(
+            "kstock.ingest.global_news.asyncio.sleep",
+            AsyncMock(),
+        ):
+            results = await batch_youtube_live_watch(
+                db=db, max_videos=2, hours_lookback=3,
             )
 
         assert results == []

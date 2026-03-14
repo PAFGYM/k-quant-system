@@ -425,6 +425,13 @@ class CoreHandlersMixin:
             time=dt_time(hour=9, minute=5, tzinfo=KST),
             name="active_etf_tracking",
         )
+        # v13.0: 장전/장중 라이브 시황 감시 (15분 간격)
+        jq.run_repeating(
+            self.job_youtube_live_watch,
+            interval=900,
+            first=180,
+            name="youtube_live_watch",
+        )
         # v11.0: 5x/일 YouTube 배치 학습 (Gemini Flash)
         for batch_name, hour, minute in [
             ("youtube_batch_1", 6, 30),
