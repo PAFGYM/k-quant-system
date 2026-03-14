@@ -1359,6 +1359,29 @@ class CoreHandlersMixin:
                     context.user_data.pop("awaiting_stock_add", None)
                     # 종목 못 찾으면 일반 처리로 진행
 
+            # 0-0. 분석 허브에서 종목 입력 대기 상태
+            if context.user_data.get("awaiting_analysis_query"):
+                detected = self._detect_stock_query(text)
+                if detected:
+                    context.user_data.pop("awaiting_analysis_query", None)
+                    await self._show_stock_actions(update, context, detected)
+                    return
+
+                suggestions = self._find_stock_candidates(text)
+                if suggestions:
+                    await self._show_stock_candidate_suggestions(
+                        update, context, text, suggestions
+                    )
+                    return
+
+                await update.message.reply_text(
+                    "⚠️ 종목을 찾지 못했습니다.\n\n"
+                    "종목명 또는 6자리 종목코드를 다시 보내주세요.\n"
+                    "예: GC지놈 / 340450 / 삼성전자 / 005930",
+                    reply_markup=get_reply_markup(context),
+                )
+                return
+
             # 0-0.5. 관리자 모드: 오류 신고 / 업데이트 요청 / 운영 지침 수정
             admin_mode = context.user_data.get("admin_mode")
             if admin_mode:
@@ -1539,6 +1562,7 @@ class CoreHandlersMixin:
 
         clean = text.strip()
         clean_lower = clean.lower()
+        normalized_clean = self._normalize_stock_lookup_text(clean)
 
         # 0. 영문 티커 매칭 (GRT, HLB 등)
         for eng_key, (code, name, market) in self._ENGLISH_TICKER_MAP.items():
@@ -1580,6 +1604,19 @@ class CoreHandlersMixin:
             if cand_name and cand_name in clean:
                 return cand_data
 
+        # 2-1. 발음/로마자 혼용 대응 ("지씨지놈" → "GC지놈")
+        if normalized_clean:
+            for cand_name, cand_data in candidates:
+                norm_name = self._normalize_stock_lookup_text(cand_name)
+                if not norm_name:
+                    continue
+                if normalized_clean == norm_name:
+                    return cand_data
+                if len(normalized_clean) >= 3 and (
+                    normalized_clean in norm_name or norm_name in normalized_clean
+                ):
+                    return cand_data
+
         # 3. 부분 매칭: 사용자 입력 키워드가 종목명에 포함 ("하이닉스" → "SK하이닉스")
         # 한글 3글자 이상 키워드만 매칭 (오탐 방지)
         words = re.findall(r"[가-힣]{3,}", clean)
@@ -1601,6 +1638,122 @@ class CoreHandlersMixin:
                     return cand_data
 
         return None
+
+    def _normalize_stock_lookup_text(self, text: str) -> str:
+        """종목 탐지용 문자열을 정규화한다.
+
+        영문 약어의 한글 발음과 구분 문자를 정리해서
+        "지씨지놈" ↔ "GC지놈" 같은 입력을 최대한 같은 형태로 맞춘다.
+        """
+        import re
+
+        normalized = str(text or "").strip().lower()
+        replacements = {
+            "에스케이": "sk",
+            "엘지": "lg",
+            "케이티": "kt",
+            "케이비": "kb",
+            "씨제이": "cj",
+            "에이치엘비": "hlb",
+            "에이치엠엠": "hmm",
+            "에스오일": "soil",
+            "에이아이": "ai",
+            "지씨": "gc",
+            "주식": "",
+            "종목": "",
+            "분석": "",
+        }
+        for src, dst in replacements.items():
+            normalized = normalized.replace(src, dst)
+        normalized = re.sub(r"[^0-9a-z가-힣]+", "", normalized)
+        return normalized
+
+    def _find_stock_candidates(self, text: str, limit: int = 4) -> list[dict]:
+        """입력 텍스트와 유사한 종목 후보를 반환한다."""
+        import difflib
+
+        normalized_clean = self._normalize_stock_lookup_text(text)
+        if not normalized_clean:
+            return []
+
+        raw_candidates: list[dict] = []
+        seen: set[str] = set()
+        for item in self.all_tickers:
+            code = str(item.get("code", "")).strip()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            raw_candidates.append(item)
+        try:
+            for h in self.db.get_active_holdings():
+                code = str(h.get("ticker", "")).strip()
+                if not code or code in seen:
+                    continue
+                seen.add(code)
+                raw_candidates.append({
+                    "code": code,
+                    "name": h.get("name", code),
+                    "market": "KOSPI",
+                })
+        except Exception:
+            logger.debug("_find_stock_candidates holdings failed", exc_info=True)
+
+        scored: list[tuple[float, dict]] = []
+        for item in raw_candidates:
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            norm_name = self._normalize_stock_lookup_text(name)
+            if not norm_name:
+                continue
+
+            score = 0.0
+            if normalized_clean == norm_name:
+                score = 1.0
+            elif normalized_clean in norm_name or norm_name in normalized_clean:
+                score = 0.9
+                if norm_name.startswith(normalized_clean):
+                    score += 0.05
+            else:
+                score = max(
+                    difflib.SequenceMatcher(None, normalized_clean, norm_name).ratio(),
+                    difflib.SequenceMatcher(None, text.lower(), name.lower()).ratio(),
+                )
+
+            if score >= 0.45:
+                scored.append((score, item))
+
+        scored.sort(key=lambda x: (x[0], len(str(x[1].get("name", "")))), reverse=True)
+        return [item for _, item in scored[:limit]]
+
+    async def _show_stock_candidate_suggestions(
+        self, update: Update, context, text: str, suggestions: list[dict],
+    ) -> None:
+        """정확히 못 찾은 경우 비슷한 후보와 분석 버튼을 보여준다."""
+        buttons = []
+        for stock in suggestions[:4]:
+            code = stock.get("code", "")
+            name = stock.get("name", code)
+            if not code:
+                continue
+            buttons.append([
+                InlineKeyboardButton(
+                    f"📊 {name} 분석",
+                    callback_data=f"detail:{code}",
+                )
+            ])
+        buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
+
+        lines = [
+            f"⚠️ '{text}' 종목을 정확히 찾지 못했습니다.",
+            "",
+            "아래 후보 중에서 바로 분석해보세요.",
+            "다시 입력하셔도 됩니다.",
+        ]
+        await update.message.reply_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
     def _detect_trade_input(self, text: str) -> dict | None:
         """자연어에서 매수/매도 등록 패턴을 감지합니다.
