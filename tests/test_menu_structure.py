@@ -9,7 +9,7 @@ from kstock.bot.mixins.core_handlers import _normalize_menu_label
 
 
 # ---------------------------------------------------------------------------
-# MAIN_MENU structure (v13.0 compact layout)
+# MAIN_MENU structure (v13.1 action-oriented layout)
 # ---------------------------------------------------------------------------
 
 class TestMainMenuStructure:
@@ -21,7 +21,7 @@ class TestMainMenuStructure:
 
     def test_menu_has_rows(self):
         rows = MAIN_MENU.keyboard
-        assert len(rows) == 5  # v13.0: 5행 (클로드/AI비서 포함)
+        assert len(rows) == 5  # v13.1: 5행 행동형 메뉴
 
     def test_each_row_has_max_two_columns(self):
         rows = MAIN_MENU.keyboard
@@ -30,7 +30,7 @@ class TestMainMenuStructure:
 
     def test_main_menu_buttons(self):
         flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        for expected in ["분석", "시황", "잔고", "즐겨찾기", "클로드", "에이전트", "리포트", "AI비서", "더보기"]:
+        for expected in ["오늘 행동", "종목 검색", "내 보유", "시장 브리핑", "AI 토론", "즐겨찾기", "클로드", "에이전트", "더보기"]:
             assert any(expected in b for b in flat), f"Missing: {expected}"
 
 
@@ -89,6 +89,8 @@ class TestMenuAliases:
         assert _normalize_menu_label("📊 분석") == "분석"
         assert _normalize_menu_label("💰 잔고") == "잔고"
         assert _normalize_menu_label("클로드") == "클로드"
+        assert _normalize_menu_label("🔎 종목 검색") == "종목검색"
+        assert _normalize_menu_label("📋 오늘 행동") == "오늘행동"
 
 
 # ---------------------------------------------------------------------------

@@ -205,10 +205,10 @@ CLAUDE_PREFIX = "클코"
 # Claude 대화 모드 키보드 — MAIN_MENU와 동일 구조 + is_persistent
 CLAUDE_MODE_MENU = ReplyKeyboardMarkup(
     [
-        ["📊 분석", "📈 시황"],
-        ["💰 잔고", "⭐ 즐겨찾기"],
+        ["📋 오늘 행동", "🔎 종목 검색"],
+        ["💰 내 보유", "📈 시장 브리핑"],
+        ["🧠 AI 토론", "⭐ 즐겨찾기"],
         ["💻 클로드", "🤖 에이전트"],
-        ["💬 AI비서", "📋 리포트"],
         ["⚙️ 더보기"],
     ],
     resize_keyboard=True,

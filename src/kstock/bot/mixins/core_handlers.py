@@ -1206,8 +1206,11 @@ class CoreHandlersMixin:
         handlers = {
             # ── v3.6.2 메인 메뉴 (4행) ──
             "📊 분석": self._menu_analysis_hub,
+            "🔎 종목 검색": self._menu_analysis_hub,
             "📈 시황": self._menu_market_status,
+            "📈 시장 브리핑": self._menu_market_status,
             "💰 잔고": self._menu_balance,
+            "💰 내 보유": self._menu_balance,
             "📊 통계": self.cmd_stats,
             "📈 성과": self.cmd_performance,
             "⭐ 즐겨찾기": self._menu_favorites,
@@ -1215,6 +1218,7 @@ class CoreHandlersMixin:
             "🤖 에이전트": self._menu_agent_chat,
             "📋 리포트": self._menu_reports,
             "💬 AI비서": self._menu_ai_chat,
+            "🧠 AI 토론": self._menu_ai_chat,
             "⚙️ 더보기": self._menu_more,
             "🔙 메인으로": self._menu_back_to_main,
             # ── 더보기 서브메뉴 ──
@@ -1240,6 +1244,7 @@ class CoreHandlersMixin:
             "📖 온보딩": self._menu_onboarding,
             "📖 사용설명서": self._menu_guide,
             "📋 오늘의 할 일": self._menu_daily_actions,
+            "📋 오늘 행동": self._menu_daily_actions,
             # v9.6.2: 이전 하위호환 메뉴 삭제 (v9.0 이후 Reply Keyboard만 사용)
         }
         resolved_text = text
@@ -1247,8 +1252,14 @@ class CoreHandlersMixin:
         if not handler:
             alias_map = {
                 "분석": "📊 분석",
+                "종목검색": "🔎 종목 검색",
+                "검색": "🔎 종목 검색",
                 "시황": "📈 시황",
+                "시장브리핑": "📈 시장 브리핑",
+                "브리핑": "📈 시장 브리핑",
                 "잔고": "💰 잔고",
+                "내보유": "💰 내 보유",
+                "보유": "💰 내 보유",
                 "통계": "📊 통계",
                 "성적표": "📊 통계",
                 "추천성적표": "📊 통계",
@@ -1262,9 +1273,13 @@ class CoreHandlersMixin:
                 "리포트": "📋 리포트",
                 "ai비서": "💬 AI비서",
                 "aI비서": "💬 AI비서",
+                "ai토론": "🧠 AI 토론",
+                "토론": "🧠 AI 토론",
                 "더보기": "⚙️ 더보기",
                 "온보딩": "📖 온보딩",
                 "오늘의할일": "📋 오늘의 할 일",
+                "오늘행동": "📋 오늘 행동",
+                "행동": "📋 오늘 행동",
             }
             normalized = _normalize_menu_label(text)
             resolved_text = alias_map.get(normalized, text)
@@ -1277,9 +1292,13 @@ class CoreHandlersMixin:
             # Claude 대화 모드: CLAUDE_MODE_MENU에 포함된 버튼은 모드 유지
             _claude_safe_buttons = {
                 "💻 클로드", "🔙 대화 종료", "🤖 에이전트", "🖥 원격접속",
-                "📊 분석", "📈 시황", "💰 잔고", "⭐ 즐겨찾기",
-                "💬 AI비서", "📋 리포트", "⚙️ 더보기",
-                "📖 온보딩", "📋 오늘의 할 일",
+                "📊 분석", "🔎 종목 검색",
+                "📈 시황", "📈 시장 브리핑",
+                "💰 잔고", "💰 내 보유",
+                "⭐ 즐겨찾기",
+                "💬 AI비서", "🧠 AI 토론",
+                "📋 리포트", "⚙️ 더보기",
+                "📖 온보딩", "📋 오늘의 할 일", "📋 오늘 행동",
             }
             if text not in _claude_safe_buttons and resolved_text not in _claude_safe_buttons:
                 context.user_data.pop("claude_mode", None)
@@ -1288,9 +1307,12 @@ class CoreHandlersMixin:
                 context.user_data.pop("claude_chat_history", None)
             # v8.5: 메뉴 컨텍스트 팁 (세션당 1회)
             _tip_map = {
-                "📊 분석": "analysis", "📈 시황": "market",
-                "💰 잔고": "balance", "⭐ 즐겨찾기": "favorites",
-                "💬 AI비서": "ai_chat", "📋 리포트": "reports",
+                "📊 분석": "analysis", "🔎 종목 검색": "analysis",
+                "📈 시황": "market", "📈 시장 브리핑": "market",
+                "💰 잔고": "balance", "💰 내 보유": "balance",
+                "⭐ 즐겨찾기": "favorites",
+                "💬 AI비서": "ai_chat", "🧠 AI 토론": "ai_chat",
+                "📋 리포트": "reports",
                 "⚙️ 더보기": "more",
             }
             tip_key = _tip_map.get(resolved_text)
