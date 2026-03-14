@@ -195,3 +195,37 @@ def test_format_balance_lines_is_scannable_block_layout(tmp_path):
     assert "매수 56,700원 / 현재 55,400원" in text
     assert "🔥 스윙 매니저" in text
     assert "전시 손절 53,865원" in text
+
+
+def test_format_balance_lines_includes_timing_coach(tmp_path):
+    from kstock.bot.mixins.trading import TradingMixin
+
+    mixin = TradingMixin.__new__(TradingMixin)
+    mixin.db = _FakeDB(tmp_path)
+    mixin._alert_mode = "normal"
+
+    lines = mixin._format_balance_lines(
+        [
+            {
+                "ticker": "083650",
+                "name": "비에이치아이",
+                "quantity": 812,
+                "buy_price": 104_886,
+                "current_price": 103_600,
+                "pnl_pct": -1.2,
+                "eval_amount": 83_554_800,
+                "purchase_type": "현금",
+                "holding_type": "auto",
+                "_timing_lines": [
+                    "⏱ 타이밍 15일 중심 변곡 끝자락",
+                    "15일 중심 변곡 끝자락 확인. 지금은 씨앗 또는 1차 분할이 맞고, MA5 유지 여부를 같이 확인하세요.",
+                ],
+            }
+        ],
+        total_eval=83_554_800,
+        total_invested=85_000_000,
+    )
+
+    text = "\n".join(lines)
+    assert "⏱ 타이밍 15일 중심 변곡 끝자락" in text
+    assert "씨앗 또는 1차 분할" in text

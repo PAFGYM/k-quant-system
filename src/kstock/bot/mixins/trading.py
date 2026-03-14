@@ -381,10 +381,13 @@ class TradingMixin:
                 tech_data = ""
                 price_data = ""
                 fund_data = ""
+                timing_data = ""
                 cur_price = 0.0
                 try:
                     ohlcv = await self.yf_client.get_ohlcv(code, market)
                     if ohlcv is not None and not ohlcv.empty:
+                        from kstock.signal.timing_windows import analyze_timing_windows
+
                         tech = compute_indicators(ohlcv)
                         close = ohlcv["close"].astype(float)
                         volume = ohlcv["volume"].astype(float)
@@ -404,6 +407,11 @@ class TradingMixin:
                             f"이동평균선: 5일 {tech.ma5:,.0f}원, 20일 {tech.ma20:,.0f}원, "
                             f"60일 {tech.ma60:,.0f}원, 120일 {tech.ma120:,.0f}원"
                         )
+                        timing = analyze_timing_windows(close)
+                        if timing is not None:
+                            timing_data = "\n".join(
+                                self._format_timing_lines(timing, detailed=True)
+                            )
                 except Exception:
                     logger.debug("_action_stock_action tech data fetch failed for %s", code, exc_info=True)
                     tech_data = "기술적 데이터 조회 실패"
@@ -435,11 +443,13 @@ class TradingMixin:
                     f"{name}({code}) 종목 분석 요청.\n\n"
                     f"[실시간 가격]\n{price_data}\n\n"
                     f"[기술적 지표]\n{tech_data}\n\n"
+                    f"[타이밍 체크]\n{timing_data or '타이밍 데이터 없음'}\n\n"
                     f"[펀더멘털]\n{fund_data}\n\n"
                     f"{trade_levels}\n"
                     f"[절대 규칙] 위 [실시간 가격]과 [매매 참고 레벨]의 숫자만 사용하라. "
                     f"너의 학습 데이터에 있는 과거 주가를 절대 사용 금지. "
-                    f"매수/매도 포인트 가격은 반드시 위 [매매 참고 레벨]에서 선택하라."
+                    f"매수/매도 포인트 가격은 반드시 위 [매매 참고 레벨]에서 선택하라. "
+                    f"[타이밍 체크]에 나온 7/15/30일축 변곡 해석을 먼저 반영하라."
                 )
                 from kstock.bot.chat_handler import handle_ai_question
                 from kstock.bot.context_builder import build_full_context_with_macro
@@ -452,6 +462,8 @@ class TradingMixin:
                 answer = await handle_ai_question(
                     enriched_question, ctx, self.db, chat_mem,
                 )
+                if timing_data:
+                    answer = f"{timing_data}\n\n{answer}"
                 try:
                     await query.message.reply_text(answer, reply_markup=get_reply_markup(context))
                 except Exception:
@@ -1263,6 +1275,33 @@ class TradingMixin:
 
         return label_map.get(lane, "📌 종합 매니저"), message
 
+    def _market_for_ticker(self, ticker: str, default: str = "KOSPI") -> str:
+        for item in getattr(self, "all_tickers", []) or []:
+            if item.get("code") == ticker:
+                return item.get("market", default)
+        return default
+
+    @staticmethod
+    def _format_timing_lines(assessment, *, detailed: bool = False) -> list[str]:
+        if assessment is None:
+            return []
+
+        phase_label = {
+            "early": "변곡 시작 전",
+            "mid": "반등 확인 중",
+            "end": "변곡 끝자락",
+            "late": "추격 구간",
+        }.get(getattr(assessment, "overall_phase", ""), "타이밍 점검")
+
+        lines = [
+            f"⏱ 타이밍 {getattr(assessment, 'preferred_window', 0)}일 중심 {phase_label}",
+            getattr(assessment, "coach_line", ""),
+        ]
+        if detailed:
+            detail_lines = getattr(assessment, "detail_lines", []) or []
+            lines.extend(f"- {line}" for line in detail_lines)
+        return [line for line in lines if line]
+
     async def _load_holdings_with_fallback(self) -> list[dict]:
         """보유종목 로드 (DB 우선, 없으면 스크린샷 fallback → DB 동기화).
 
@@ -1434,6 +1473,8 @@ class TradingMixin:
 
         [v3.5.5] ticker 없어도 eval_amount/quantity로 총합 계산.
         """
+        from kstock.signal.timing_windows import analyze_timing_windows
+
         total_eval = 0.0
         total_invested = 0.0
         for h in holdings:
@@ -1459,6 +1500,18 @@ class TradingMixin:
                     logger.debug("_update_holdings_prices get_price_detail failed for %s", ticker, exc_info=True)
                     if cur <= 0:
                         cur = bp
+
+            if ticker and hasattr(self, "yf_client"):
+                try:
+                    market = self._market_for_ticker(ticker, h.get("market", "KOSPI") or "KOSPI")
+                    ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
+                    if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
+                        assessment = analyze_timing_windows(ohlcv["close"].astype(float))
+                        if assessment is not None:
+                            h["_timing_assessment"] = assessment
+                            h["_timing_lines"] = self._format_timing_lines(assessment)
+                except Exception:
+                    logger.debug("_update_holdings_prices timing assessment failed for %s", ticker, exc_info=True)
 
             # 2. 총합 계산 — ticker 유무 상관없이 항상 수행
             if qty > 0 and cur > 0:
@@ -1601,6 +1654,14 @@ class TradingMixin:
                 f"   {manager_label}",
                 f"   {manager_tip}",
             ])
+            timing_lines = h.get("_timing_lines") or []
+            if timing_lines:
+                block.extend([
+                    "",
+                    f"   {timing_lines[0]}",
+                ])
+                if len(timing_lines) > 1:
+                    block.append(f"   {timing_lines[1]}")
 
             # 상황별 종목 액션 가이드
             if alert_mode == "wartime":
