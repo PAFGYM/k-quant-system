@@ -16,13 +16,70 @@ import logging
 import os
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from kstock.core.tz import KST
 
 logger = logging.getLogger(__name__)
+
+_DEAD_FEED_BACKOFF: dict[str, dict[str, object]] = {}
+
+
+def _feed_backoff_key(feed: dict) -> str:
+    return str(feed.get("url") or feed.get("name") or "")
+
+
+def _feed_is_in_backoff(feed: dict, now: datetime | None = None) -> bool:
+    now = now or datetime.now(KST)
+    state = _DEAD_FEED_BACKOFF.get(_feed_backoff_key(feed))
+    if not state:
+        return False
+    skip_until = state.get("skip_until")
+    if isinstance(skip_until, datetime) and skip_until > now:
+        return True
+    if isinstance(skip_until, datetime) and skip_until <= now:
+        _DEAD_FEED_BACKOFF.pop(_feed_backoff_key(feed), None)
+    return False
+
+
+def _mark_feed_success(feed: dict) -> None:
+    _DEAD_FEED_BACKOFF.pop(_feed_backoff_key(feed), None)
+
+
+def _mark_feed_failure(
+    feed: dict,
+    *,
+    status_code: int | None = None,
+    now: datetime | None = None,
+) -> None:
+    now = now or datetime.now(KST)
+    key = _feed_backoff_key(feed)
+    state = dict(_DEAD_FEED_BACKOFF.get(key) or {})
+    consecutive = int(state.get("consecutive", 0))
+    last_status = state.get("status_code")
+
+    if last_status != status_code:
+        consecutive = 0
+    consecutive += 1
+
+    skip_until: datetime | None = None
+    if status_code in {404, 410}:
+        skip_until = now + timedelta(hours=6)
+    elif status_code in {301, 302, 307, 308} and consecutive >= 2:
+        skip_until = now + timedelta(hours=3)
+    elif consecutive >= 3:
+        skip_until = now + timedelta(hours=1)
+
+    next_state: dict[str, object] = {
+        "status_code": status_code,
+        "consecutive": consecutive,
+        "failed_at": now,
+    }
+    if skip_until:
+        next_state["skip_until"] = skip_until
+    _DEAD_FEED_BACKOFF[key] = next_state
 
 # ── RSS 피드 소스 정의 ──────────────────────────────────────
 
@@ -748,14 +805,20 @@ async def fetch_global_news(
 
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         async def _fetch_one(feed: dict) -> list[NewsItem]:
+            if _feed_is_in_backoff(feed):
+                logger.debug("RSS backoff skip %s (%s)", feed["name"], feed["url"])
+                return []
             try:
                 resp = await client.get(
                     feed["url"],
                     headers={"User-Agent": "K-Quant/6.0 NewsBot"},
                 )
                 if resp.status_code == 200:
+                    _mark_feed_success(feed)
                     return _parse_rss(resp.text, feed)[:max_per_feed]
+                _mark_feed_failure(feed, status_code=resp.status_code)
             except Exception as e:
+                _mark_feed_failure(feed, status_code=None)
                 logger.debug("RSS fetch error %s: %s", feed["name"], e)
             return []
 

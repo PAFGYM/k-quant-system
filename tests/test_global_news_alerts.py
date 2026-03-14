@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -8,11 +9,15 @@ import pytest
 
 from kstock.ingest.global_news import (
     NewsItem,
+    _DEAD_FEED_BACKOFF,
+    _feed_is_in_backoff,
     _format_urgent_alert_basic,
     _is_actionable_market_news,
     analyze_urgent_news,
+    fetch_global_news,
     translate_titles_to_korean,
 )
+from kstock.core.tz import KST
 
 
 class _FakeResponse:
@@ -37,6 +42,25 @@ class _FakeAsyncClient:
 
     async def post(self, *args, **kwargs):
         return self._response
+
+
+class _FakeFeedClient:
+    def __init__(self, responses: dict[str, list[_FakeResponse]]):
+        self.responses = responses
+        self.calls: dict[str, int] = {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def get(self, url, *args, **kwargs):
+        self.calls[url] = self.calls.get(url, 0) + 1
+        queue = self.responses.get(url, [])
+        if queue:
+            return queue.pop(0)
+        return _FakeResponse(404, "")
 
 
 class _FakeAnthropicMessages:
@@ -137,3 +161,61 @@ def test_market_relevance_filter_drops_noise_articles():
     assert _is_actionable_market_news(noisy) is False
     assert _is_actionable_market_news(useful) is True
     assert _is_actionable_market_news(corporate) is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_global_news_backs_off_dead_feed(monkeypatch):
+    dead_url = "https://example.com/dead.xml"
+    feed = {"name": "Dead feed", "url": dead_url, "lang": "ko", "category": "market"}
+    client = _FakeFeedClient({dead_url: [_FakeResponse(404, ""), _FakeResponse(404, "")]})
+
+    _DEAD_FEED_BACKOFF.clear()
+
+    with patch("httpx.AsyncClient", return_value=client):
+        first = await fetch_global_news(feeds=[feed], include_youtube=False)
+        second = await fetch_global_news(feeds=[feed], include_youtube=False)
+
+    assert first == []
+    assert second == []
+    assert client.calls[dead_url] == 1
+    assert _feed_is_in_backoff(feed) is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_global_news_clears_backoff_on_success(monkeypatch):
+    url = "https://example.com/recovered.xml"
+    feed = {"name": "Recovered feed", "url": url, "lang": "ko", "category": "market"}
+    client = _FakeFeedClient(
+        {
+            url: [
+                _FakeResponse(404, ""),
+                _FakeResponse(
+                    200,
+                    """
+                    <rss><channel>
+                      <item>
+                        <title>유가 하락에 코스피 반등</title>
+                        <link>https://example.com/news1</link>
+                      </item>
+                    </channel></rss>
+                    """,
+                ),
+            ]
+        }
+    )
+
+    _DEAD_FEED_BACKOFF.clear()
+
+    with patch("httpx.AsyncClient", return_value=client):
+        await fetch_global_news(feeds=[feed], include_youtube=False)
+        _DEAD_FEED_BACKOFF[url] = {
+            "status_code": 404,
+            "consecutive": 1,
+            "skip_until": datetime.now(KST) - timedelta(minutes=1),
+        }
+        items = await fetch_global_news(feeds=[feed], include_youtube=False)
+
+    assert client.calls[url] == 2
+    assert len(items) == 1
+    assert items[0].title == "유가 하락에 코스피 반등"
+    assert url not in _DEAD_FEED_BACKOFF
