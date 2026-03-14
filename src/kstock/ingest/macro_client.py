@@ -156,6 +156,14 @@ class MacroClient:
         """DB 연결 설정 (봇 초기화 후 호출)."""
         self._db = db
 
+    def _clone_cached_snapshot(self) -> MacroSnapshot | None:
+        if self._cached_snapshot is None:
+            return None
+        return MacroSnapshot(**{
+            f.name: getattr(self._cached_snapshot, f.name)
+            for f in fields(self._cached_snapshot)
+        })
+
     async def get_snapshot(self) -> MacroSnapshot:
         """매크로 스냅샷 반환. 3-tier cache로 즉시 응답.
 
@@ -222,6 +230,13 @@ class MacroClient:
             logger.info("Macro data refreshed at %s", now.strftime("%H:%M:%S"))
             return snapshot
         except Exception as e:
+            if "out-of-bounds" in str(e):
+                cached = self._clone_cached_snapshot()
+                if cached is not None:
+                    logger.debug("Background macro refresh sparse payload; using cached snapshot")
+                    cached.fetched_at = self._cached_at or datetime.now(KST)
+                    cached.is_cached = True
+                    return cached
             logger.warning("Background macro refresh failed: %s", e)
             return None
 
@@ -249,6 +264,9 @@ class MacroClient:
                 await self._save_to_sqlite(snapshot)
                 logger.debug("Background macro refresh completed")
             except Exception as e:
+                if "out-of-bounds" in str(e):
+                    logger.debug("Background refresh sparse payload; keeping cached snapshot")
+                    return
                 logger.warning("Background refresh failed: %s", e)
 
     async def _save_to_sqlite(self, snapshot: MacroSnapshot) -> None:

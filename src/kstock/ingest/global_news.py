@@ -32,6 +32,10 @@ def _feed_backoff_key(feed: dict) -> str:
     return str(feed.get("url") or feed.get("name") or "")
 
 
+def _feed_is_disabled(feed: dict) -> bool:
+    return bool(feed.get("disabled"))
+
+
 def _feed_is_in_backoff(feed: dict, now: datetime | None = None) -> bool:
     now = now or datetime.now(KST)
     state = _DEAD_FEED_BACKOFF.get(_feed_backoff_key(feed))
@@ -116,9 +120,9 @@ def _mark_youtube_video_failure(
 
     skip_hours = 0
     if reason in {"metadata_only", "empty_summary"}:
-        skip_hours = 6 if consecutive >= 2 else 2
+        skip_hours = 24 if consecutive >= 4 else 12 if consecutive >= 2 else 4
     elif reason in {"transcript_failed", "download_failed"}:
-        skip_hours = 3 if consecutive >= 2 else 1
+        skip_hours = 24 if consecutive >= 5 else 12 if consecutive >= 3 else 4 if consecutive >= 2 else 2
     else:
         skip_hours = 1 if consecutive >= 2 else 0
 
@@ -140,6 +144,7 @@ RSS_FEEDS: list[dict] = [
         "url": "https://www.hankyung.com/feed/globalmarket",
         "lang": "ko",
         "category": "market",
+        "disabled": True,
     },
     {
         "name": "연합뉴스 경제",
@@ -178,6 +183,7 @@ RSS_FEEDS: list[dict] = [
         "url": "https://www.reutersagency.com/feed/?taxonomy=best-sectors&post_type=best",
         "lang": "en",
         "category": "market",
+        "disabled": True,
     },
     # v12.2: 해외 증권사/투자은행/매크로 뉴스 강화
     {
@@ -397,6 +403,7 @@ YOUTUBE_FEEDS: list[dict] = [
         "url": "https://www.youtube.com/feeds/videos.xml?channel_id=UC_xNTnsFIpKUhM8sWCQN6Zw",
         "lang": "ko",
         "category": "youtube_news",
+        "disabled": True,
     },
     {
         "name": "오선의 미국 증시 라이브",
@@ -952,6 +959,9 @@ async def fetch_global_news(
 
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         async def _fetch_one(feed: dict) -> list[NewsItem]:
+            if _feed_is_disabled(feed):
+                logger.debug("RSS disabled skip %s (%s)", feed["name"], feed["url"])
+                return []
             if _feed_is_in_backoff(feed):
                 logger.debug("RSS backoff skip %s (%s)", feed["name"], feed["url"])
                 return []
@@ -1946,6 +1956,9 @@ def fetch_transcript_whisper(video_id: str, max_chars: int = 8000) -> str:
     if not openai_key:
         logger.debug("Whisper: OPENAI_API_KEY not set")
         return ""
+    if _youtube_video_is_in_backoff(video_id):
+        logger.debug("Whisper: transcript backoff skip for %s", video_id)
+        return ""
 
     tmp_dir = tempfile.mkdtemp(prefix="kq_whisper_")
 
@@ -1967,11 +1980,13 @@ def fetch_transcript_whisper(video_id: str, max_chars: int = 8000) -> str:
             has_ffmpeg=has_ffmpeg,
         )
         if not actual_path:
+            _mark_youtube_video_failure(video_id, reason="download_failed")
             return ""
 
         file_size = os.path.getsize(actual_path)
         if file_size > 25 * 1024 * 1024:
             logger.info("Whisper: audio too large (%d MB) for %s", file_size // (1024*1024), video_id)
+            _mark_youtube_video_failure(video_id, reason="download_failed")
             return ""
 
         logger.info("Whisper: transcribing %s (%.1f MB)", video_id, file_size / (1024*1024))
@@ -1990,13 +2005,17 @@ def fetch_transcript_whisper(video_id: str, max_chars: int = 8000) -> str:
 
         transcript = str(resp).strip()
         logger.info("Whisper: %s → %d chars", video_id, len(transcript))
+        if transcript:
+            _mark_youtube_video_success(video_id)
         return transcript[:max_chars] if transcript else ""
 
     except subprocess.TimeoutExpired:
         logger.info("Whisper: yt-dlp timeout for %s", video_id)
+        _mark_youtube_video_failure(video_id, reason="download_failed")
         return ""
     except Exception as e:
         logger.info("Whisper transcription failed for %s: %s", video_id, e)
+        _mark_youtube_video_failure(video_id, reason="transcript_failed")
         return ""
     finally:
         # 임시 파일 정리

@@ -2010,6 +2010,7 @@ class CoreHandlersMixin:
         # 현재가 자동 조회
         price = 0.0
         price_str = "현재가: 조회 중"
+        timing_line = ""
         try:
             price = await self._get_price(code)
             if price > 0:
@@ -2017,6 +2018,19 @@ class CoreHandlersMixin:
         except Exception:
             logger.debug("_detect_stock_query get_price failed for %s", code, exc_info=True)
             price_str = "현재가: 조회 실패"
+        try:
+            if hasattr(self, "yf_client"):
+                ohlcv = await self.yf_client.get_ohlcv(code, market)
+                if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
+                    from kstock.signal.timing_windows import analyze_timing_windows
+
+                    close = ohlcv["close"].astype(float)
+                    timing = analyze_timing_windows(close)
+                    timing_lines = self._format_timing_lines(timing)
+                    if timing_lines:
+                        timing_line = timing_lines[0]
+        except Exception:
+            logger.debug("_show_stock_actions timing fetch failed for %s", code, exc_info=True)
 
         # user_data에 저장 (콜백에서 사용)
         context.user_data["pending_stock_action"] = {
@@ -2026,8 +2040,12 @@ class CoreHandlersMixin:
         # 이미 보유 중인지 확인
         existing = self.db.get_holding_by_ticker(code)
 
+        lines = [f"📌 {name} ({code})", price_str]
+        if timing_line:
+            lines.append(timing_line)
+        lines.extend(["", "원하는 기능을 누르면 바로 이어집니다."])
         await update.message.reply_text(
-            f"📌 {name} ({code})\n{price_str}\n\n다음 중 바로 이어서 하세요.",
+            "\n".join(lines),
             reply_markup=self._build_stock_action_keyboard(code, existing=bool(existing)),
         )
 

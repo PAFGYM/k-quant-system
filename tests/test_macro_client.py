@@ -45,6 +45,24 @@ def test_macro_client_survives_partial_yfinance_payload(monkeypatch) -> None:
     assert snap.ewy_change_pct == 0.0
 
 
+def test_macro_client_refresh_now_uses_cached_snapshot_on_sparse_index_error(monkeypatch) -> None:
+    client = MacroClient(db=None)
+    client._cached_snapshot = client._generate_mock_snapshot()
+    client._cached_at = client._cached_snapshot.fetched_at
+
+    monkeypatch.setattr(
+        client,
+        "_fetch_live_snapshot",
+        lambda: (_ for _ in ()).throw(IndexError("single positional indexer is out-of-bounds")),
+    )
+
+    snap = asyncio.run(client.refresh_now())
+
+    assert snap is not None
+    assert snap.is_cached is True
+    assert snap.vix == client._cached_snapshot.vix
+
+
 class _MemoryDB:
     def __init__(self) -> None:
         self.conn = sqlite3.connect(":memory:")

@@ -10,11 +10,13 @@ import pytest
 from kstock.ingest.global_news import (
     _build_whisper_download_attempts,
     _download_audio_for_whisper,
+    _feed_is_disabled,
     _is_high_signal_youtube_item,
     _mark_feed_failure,
     _mark_youtube_video_failure,
     _youtube_video_is_in_backoff,
     batch_youtube_live_watch,
+    fetch_transcript_whisper,
     batch_deep_youtube_analysis,
     summarize_transcript_structured,
 )
@@ -254,6 +256,22 @@ def test_youtube_feed_404_backoff_is_longer():
     assert "skip_until" in state
 
 
+def test_known_dead_feed_is_disabled():
+    feed = {
+        "name": "한경 글로벌",
+        "url": "https://www.hankyung.com/feed/globalmarket",
+        "category": "market",
+        "disabled": True,
+    }
+    assert _feed_is_disabled(feed) is True
+
+
+def test_repeated_transcript_failure_backoff_gets_longer():
+    _mark_youtube_video_failure("video1234567", reason="download_failed")
+    _mark_youtube_video_failure("video1234567", reason="download_failed")
+    assert _youtube_video_is_in_backoff("video1234567") is True
+
+
 class _FakeResponse:
     def __init__(self, status_code: int, text: str = "", json_data: dict | None = None):
         self.status_code = status_code
@@ -348,3 +366,15 @@ class TestWhisperDownloadFallbacks:
 
         assert path == "/tmp/abc123.m4a"
         assert mock_run.call_count == 2
+
+    def test_fetch_transcript_whisper_skips_when_video_is_in_backoff(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
+        _mark_youtube_video_failure("blocked12345", reason="download_failed")
+
+        with patch(
+            "kstock.ingest.global_news._download_audio_for_whisper",
+            side_effect=AssertionError("should not be called"),
+        ):
+            transcript = fetch_transcript_whisper("blocked12345")
+
+        assert transcript == ""
