@@ -72,6 +72,8 @@ class CoreHandlersMixin:
         self.sell_planner = SellPlanner()
         # v3.6: Multi-AI Router
         self.ai = AIRouter()
+        # 레거시 잡/믹스인이 아직 ai_router를 참조하는 경로와 호환
+        self.ai_router = self.ai
         # v3.6: KIS WebSocket (실시간 호가)
         self.ws = KISWebSocket()
         self._recent_callbacks: dict[tuple[int, int, str], float] = {}

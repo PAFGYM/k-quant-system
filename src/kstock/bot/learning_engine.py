@@ -913,6 +913,10 @@ async def apply_event_to_strategy(
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
     try:
+        adjustment_value = int(adjustment)
+        confidence_value = float(confidence)
+        sectors_json = json.dumps(list(affected_sectors or []), ensure_ascii=False)
+        tickers_json = json.dumps(list(affected_tickers or []), ensure_ascii=False)
         with db._connect() as conn:
             conn.execute(
                 """
@@ -923,14 +927,14 @@ async def apply_event_to_strategy(
                 """,
                 (
                     "global_news", event_summary[:200],
-                    json.dumps(affected_sectors, ensure_ascii=False),
-                    json.dumps(affected_tickers, ensure_ascii=False),
-                    adjustment, confidence, expires, now_str,
+                    sectors_json,
+                    tickers_json,
+                    adjustment_value, confidence_value, expires, now_str,
                 ),
             )
         logger.info(
             "Event score adjustment saved: %s → %+d for %s",
-            event_summary[:50], adjustment, affected_sectors,
+            event_summary[:50], adjustment_value, affected_sectors,
         )
         return True
     except Exception as e:

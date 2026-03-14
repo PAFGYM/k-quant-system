@@ -7887,7 +7887,7 @@ class SchedulerMixin:
 
             result = await youtube_weekly_synthesis(
                 db=self.db,
-                ai_router=getattr(self, "ai_router", None),
+                ai_router=getattr(self, "ai_router", None) or getattr(self, "ai", None),
             )
 
             synthesis = result.get("synthesis", "")
@@ -9362,7 +9362,8 @@ class SchedulerMixin:
             ai_review = ""
             if prompt:
                 try:
-                    ai_review = await self.ai_router.analyze(
+                    ai_router = getattr(self, "ai_router", None) or getattr(self, "ai", None)
+                    ai_review = await ai_router.analyze(
                         task="deep_analysis",
                         prompt=prompt,
                         system="당신은 숙련된 주식 투자 코치입니다. 한국어로 친근하게 답변하세요.",
@@ -11004,7 +11005,7 @@ class SchedulerMixin:
 
             result = await daily_learning_synthesis(
                 db=self.db,
-                ai_router=getattr(self, "ai_router", None),
+                ai_router=getattr(self, "ai_router", None) or getattr(self, "ai", None),
             )
 
             synthesis = result.get("synthesis", "")

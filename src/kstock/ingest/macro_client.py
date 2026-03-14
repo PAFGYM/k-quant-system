@@ -327,6 +327,22 @@ class MacroClient:
 
     def _fetch_live_snapshot(self) -> MacroSnapshot:
         """Fetch live macro data from yfinance (runs in thread pool)."""
+        fallback = self._cached_snapshot or self._generate_mock_snapshot()
+
+        def _safe_float(value: object, default: float) -> float:
+            try:
+                numeric = float(value)
+                if np.isnan(numeric) or np.isinf(numeric):
+                    return float(default)
+                return numeric
+            except Exception:
+                return float(default)
+
+        def _pct_change(current: float, previous: float) -> float:
+            if abs(previous) < 1e-9:
+                return 0.0
+            return (current - previous) / previous * 100
+
         # Batch download all tickers at once - much faster than individual calls
         symbols = [
             "^VIX", "^GSPC", "^IXIC", "KRW=X", "^TNX", "DX-Y.NYB",
@@ -339,78 +355,115 @@ class MacroClient:
             "^N225", "^HSI",  # v10.2: 아시아 지수
             "^IRX",  # v10.2: 미국 2년물 프록시
         ]
-        data = yf.download(symbols, period="5d", group_by="ticker", progress=False)
+        data = yf.download(
+            symbols,
+            period="5d",
+            group_by="ticker",
+            progress=False,
+            threads=False,
+            auto_adjust=False,
+        )
 
-        vix_hist = data["^VIX"]["Close"].dropna()
-        spx_hist = data["^GSPC"]["Close"].dropna()
-        ndx_hist = data["^IXIC"]["Close"].dropna()
-        krw_hist = data["KRW=X"]["Close"].dropna()
-        tny_hist = data["^TNX"]["Close"].dropna()
-        dxy_hist = data["DX-Y.NYB"]["Close"].dropna()
-        btc_hist = data["BTC-USD"]["Close"].dropna()
-        gold_hist = data["GC=F"]["Close"].dropna()
+        ticker_keys: set[str] = set()
+        try:
+            if getattr(data, "columns", None) is not None and getattr(data.columns, "nlevels", 1) >= 2:
+                ticker_keys = set(data.columns.get_level_values(0))
+        except Exception:
+            ticker_keys = set()
 
-        # 한국 시장 지수
-        kospi_hist = data["^KS11"]["Close"].dropna() if "^KS11" in data.columns.get_level_values(0) else None
-        kosdaq_hist = data["^KQ11"]["Close"].dropna() if "^KQ11" in data.columns.get_level_values(0) else None
+        def _close_hist(ticker_key: str):
+            try:
+                if data is None or getattr(data, "empty", True):
+                    return None
+                if getattr(data.columns, "nlevels", 1) >= 2:
+                    if ticker_key not in ticker_keys:
+                        return None
+                    hist = data[ticker_key]["Close"]
+                else:
+                    hist = data["Close"] if "Close" in data else None
+                if hist is None:
+                    return None
+                hist = hist.dropna()
+                return hist if len(hist) > 0 else None
+            except Exception:
+                return None
 
-        vix = float(vix_hist.iloc[-1])
-        vix_prev = float(vix_hist.iloc[-2])
-        vix_change = (vix - vix_prev) / vix_prev * 100
+        def _pair(ticker_key: str, current_default: float, prev_default: float | None = None) -> tuple[float, float]:
+            hist = _close_hist(ticker_key)
+            if hist is None or len(hist) == 0:
+                prev = current_default if prev_default is None else prev_default
+                return float(current_default), float(prev)
+            current = _safe_float(hist.iloc[-1], current_default)
+            prev = _safe_float(
+                hist.iloc[-2] if len(hist) >= 2 else current,
+                current if prev_default is None else prev_default,
+            )
+            return current, prev
 
-        spx = float(spx_hist.iloc[-1])
-        spx_prev = float(spx_hist.iloc[-2])
-        spx_change = (spx - spx_prev) / spx_prev * 100
+        vix, vix_prev = _pair("^VIX", fallback.vix or 18.0, fallback.vix_prev or fallback.vix or 18.0)
+        vix_change = _pct_change(vix, vix_prev)
 
-        ndx = float(ndx_hist.iloc[-1])
-        ndx_prev = float(ndx_hist.iloc[-2])
-        ndx_change = (ndx - ndx_prev) / ndx_prev * 100
+        fallback_spx_prev = _safe_float(fallback.spx_prev_close or 5000.0, 5000.0)
+        fallback_spx = _safe_float(
+            fallback_spx_prev * (1 + fallback.spx_change_pct / 100),
+            fallback_spx_prev,
+        )
+        spx = fallback_spx
+        spx_prev = fallback_spx_prev
+        spx, spx_prev = _pair("^GSPC", spx, spx_prev)
+        spx_change = _pct_change(spx, spx_prev)
 
-        usdkrw = float(krw_hist.iloc[-1])
-        usdkrw_prev = float(krw_hist.iloc[-2])
-        usdkrw_change = (usdkrw - usdkrw_prev) / usdkrw_prev * 100
+        ndx_default = _safe_float(spx * 1.15, 16000.0)
+        ndx_prev_default = _safe_float(ndx_default / max(0.01, (1 + fallback.nasdaq_change_pct / 100)), ndx_default)
+        ndx, ndx_prev = _pair("^IXIC", ndx_default, ndx_prev_default)
+        ndx_change = _pct_change(ndx, ndx_prev)
 
-        us10y = float(tny_hist.iloc[-1])
-        us10y_prev = float(tny_hist.iloc[-2]) if len(tny_hist) >= 2 else us10y
-        us10y_change = (us10y - us10y_prev) / us10y_prev * 100 if us10y_prev > 0 else 0
+        usdkrw, usdkrw_prev = _pair("KRW=X", fallback.usdkrw or 1350.0, fallback.usdkrw_prev or fallback.usdkrw or 1350.0)
+        usdkrw_change = _pct_change(usdkrw, usdkrw_prev)
 
-        dxy = float(dxy_hist.iloc[-1])
-        dxy_prev = float(dxy_hist.iloc[-2]) if len(dxy_hist) >= 2 else dxy
-        dxy_change = (dxy - dxy_prev) / dxy_prev * 100 if dxy_prev > 0 else 0
+        us10y, us10y_prev = _pair("^TNX", fallback.us10y or 4.2, fallback.us10y)
+        us10y_change = _pct_change(us10y, us10y_prev)
 
-        btc = float(btc_hist.iloc[-1])
-        btc_prev = float(btc_hist.iloc[-2])
-        btc_change = (btc - btc_prev) / btc_prev * 100
+        dxy, dxy_prev = _pair("DX-Y.NYB", fallback.dxy or 104.0, fallback.dxy or 104.0)
+        dxy_change = _pct_change(dxy, dxy_prev)
 
-        gold = float(gold_hist.iloc[-1]) if not gold_hist.empty else 0
-        gold_prev = float(gold_hist.iloc[-2]) if len(gold_hist) >= 2 else gold
-        gold_change = (gold - gold_prev) / gold_prev * 100 if gold_prev > 0 else 0
+        btc, btc_prev = _pair("BTC-USD", fallback.btc_price or 80000.0, fallback.btc_prev or fallback.btc_price or 80000.0)
+        btc_change = _pct_change(btc, btc_prev)
+
+        gold, gold_prev = _pair("GC=F", fallback.gold_price or 2300.0, fallback.gold_prev or fallback.gold_price or 2300.0)
+        gold_change = _pct_change(gold, gold_prev)
 
         # KOSPI
         kospi_val = kospi_change = 0.0
-        if kospi_hist is not None and len(kospi_hist) >= 2:
-            kospi_val = float(kospi_hist.iloc[-1])
-            kospi_prev = float(kospi_hist.iloc[-2])
-            kospi_change = (kospi_val - kospi_prev) / kospi_prev * 100 if kospi_prev > 0 else 0
+        kospi_hist = _close_hist("^KS11")
+        if kospi_hist is not None and len(kospi_hist) >= 1:
+            kospi_val = _safe_float(kospi_hist.iloc[-1], fallback.kospi)
+            kospi_prev = _safe_float(kospi_hist.iloc[-2] if len(kospi_hist) >= 2 else kospi_val, fallback.kospi)
+            kospi_change = _pct_change(kospi_val, kospi_prev)
+        elif fallback.kospi > 0:
+            kospi_val = fallback.kospi
+            kospi_change = fallback.kospi_change_pct
 
         # KOSDAQ
         kosdaq_val = kosdaq_change = 0.0
-        if kosdaq_hist is not None and len(kosdaq_hist) >= 2:
-            kosdaq_val = float(kosdaq_hist.iloc[-1])
-            kosdaq_prev = float(kosdaq_hist.iloc[-2])
-            kosdaq_change = (kosdaq_val - kosdaq_prev) / kosdaq_prev * 100 if kosdaq_prev > 0 else 0
+        kosdaq_hist = _close_hist("^KQ11")
+        if kosdaq_hist is not None and len(kosdaq_hist) >= 1:
+            kosdaq_val = _safe_float(kosdaq_hist.iloc[-1], fallback.kosdaq)
+            kosdaq_prev = _safe_float(kosdaq_hist.iloc[-2] if len(kosdaq_hist) >= 2 else kosdaq_val, fallback.kosdaq)
+            kosdaq_change = _pct_change(kosdaq_val, kosdaq_prev)
+        elif fallback.kosdaq > 0:
+            kosdaq_val = fallback.kosdaq
+            kosdaq_change = fallback.kosdaq_change_pct
 
         # v6.6: 미국 레버리지 ETF
         def _etf_data(ticker_key: str):
             try:
-                if ticker_key not in data.columns.get_level_values(0):
+                hist = _close_hist(ticker_key)
+                if hist is None or len(hist) < 1:
                     return 0.0, 0.0
-                hist = data[ticker_key]["Close"].dropna()
-                if len(hist) < 2:
-                    return 0.0, 0.0
-                price = float(hist.iloc[-1])
-                prev = float(hist.iloc[-2])
-                chg = (price - prev) / prev * 100 if prev > 0 else 0
+                price = _safe_float(hist.iloc[-1], 0.0)
+                prev = _safe_float(hist.iloc[-2] if len(hist) >= 2 else price, price)
+                chg = _pct_change(price, prev)
                 return price, chg
             except Exception:
                 return 0.0, 0.0
@@ -439,11 +492,11 @@ class MacroClient:
         us2y_val = 0.0
         us2y_chg = 0.0
         try:
-            irx_hist = data["^IRX"]["Close"].dropna() if "^IRX" in data.columns.get_level_values(0) else None
-            if irx_hist is not None and len(irx_hist) >= 2:
-                us2y_val = float(irx_hist.iloc[-1])
-                irx_prev = float(irx_hist.iloc[-2])
-                us2y_chg = (us2y_val - irx_prev) / irx_prev * 100 if irx_prev > 0 else 0
+            irx_hist = _close_hist("^IRX")
+            if irx_hist is not None and len(irx_hist) >= 1:
+                us2y_val = _safe_float(irx_hist.iloc[-1], fallback.us2y)
+                irx_prev = _safe_float(irx_hist.iloc[-2] if len(irx_hist) >= 2 else us2y_val, fallback.us2y or us2y_val)
+                us2y_chg = _pct_change(us2y_val, irx_prev)
         except Exception:
             pass
 
