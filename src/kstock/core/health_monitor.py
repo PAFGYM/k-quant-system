@@ -147,6 +147,97 @@ def _get_memory_usage_darwin() -> float:
         return -1.0
 
 
+def _get_memory_stats_darwin() -> dict[str, float]:
+    """macOS 메모리 통계를 반환한다.
+
+    반환값 예시:
+    {
+        "used_pct": 77.6,
+        "available_gb": 3.4,
+        "compressed_gb": 6.1,
+        "pressure_free_pct": 42.0,
+    }
+    """
+    stats: dict[str, float] = {
+        "used_pct": -1.0,
+        "available_gb": -1.0,
+        "compressed_gb": -1.0,
+        "pressure_free_pct": -1.0,
+    }
+    try:
+        result = subprocess.run(
+            ["vm_stat"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return stats
+
+        lines = result.stdout.strip().split("\n")
+        page_size = 16384  # default for Apple Silicon
+        first_line = lines[0] if lines else ""
+        if "page size of" in first_line:
+            try:
+                page_size = int(first_line.split("page size of")[1].strip().rstrip(".").strip())
+            except (ValueError, IndexError):
+                page_size = 16384
+
+        vm_stats: dict[str, int] = {}
+        for line in lines[1:]:
+            if ":" not in line:
+                continue
+            key, _, val = line.partition(":")
+            key = key.strip().lower()
+            val = val.strip().rstrip(".")
+            try:
+                vm_stats[key] = int(val)
+            except ValueError:
+                continue
+
+        free_pages = vm_stats.get("pages free", 0)
+        inactive_pages = vm_stats.get("pages inactive", 0)
+        speculative_pages = vm_stats.get("pages speculative", 0)
+        active_pages = vm_stats.get("pages active", 0)
+        wired_pages = vm_stats.get("pages wired down", 0)
+        compressed_pages = vm_stats.get("pages occupied by compressor", 0)
+
+        total_pages = (
+            free_pages + inactive_pages + speculative_pages
+            + active_pages + wired_pages + compressed_pages
+        )
+        if total_pages <= 0:
+            return stats
+
+        used_pages = active_pages + wired_pages + compressed_pages
+        available_pages = free_pages + inactive_pages + speculative_pages
+        stats["used_pct"] = (used_pages / total_pages) * 100.0
+        stats["available_gb"] = (available_pages * page_size) / (1024 ** 3)
+        stats["compressed_gb"] = (compressed_pages * page_size) / (1024 ** 3)
+
+        pressure = subprocess.run(
+            ["memory_pressure", "-Q"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if pressure.returncode == 0:
+            for line in pressure.stdout.splitlines():
+                marker = "System-wide memory free percentage:"
+                if marker in line:
+                    try:
+                        pct = line.split(marker, 1)[1].strip().rstrip("%")
+                        stats["pressure_free_pct"] = float(pct)
+                    except ValueError:
+                        pass
+                    break
+
+        return stats
+    except Exception:
+        logger.debug("_get_memory_stats_darwin failed", exc_info=True)
+        return stats
+
+
 def _get_memory_usage_linux() -> float:
     """Linux에서 /proc/meminfo 파싱하여 메모리 사용률(%) 반환."""
     try:
@@ -188,9 +279,14 @@ def check_memory_usage(threshold_pct: float = 80.0) -> HealthCheck:
     try:
         system = platform.system()
         if system == "Darwin":
-            used_pct = _get_memory_usage_darwin()
+            stats = _get_memory_stats_darwin()
+            used_pct = stats["used_pct"]
+            available_gb = stats["available_gb"]
+            pressure_free_pct = stats["pressure_free_pct"]
         elif system == "Linux":
             used_pct = _get_memory_usage_linux()
+            available_gb = -1.0
+            pressure_free_pct = -1.0
         else:
             # 기타 OS: resource 모듈로 현재 프로세스 RSS만 확인
             ru = resource.getrusage(resource.RUSAGE_SELF)
@@ -205,23 +301,48 @@ def check_memory_usage(threshold_pct: float = 80.0) -> HealthCheck:
             logger.warning("메모리 사용량 측정 실패")
             return check
 
-        if used_pct >= threshold_pct + 10:
+        memory_is_tight = False
+        if system == "Darwin":
+            # macOS는 파일 캐시/압축 메모리 영향으로 사용률만 보면 거짓 경고가 잦다.
+            memory_is_tight = (
+                (available_gb >= 0 and available_gb < 2.0)
+                or (pressure_free_pct >= 0 and pressure_free_pct < 15.0)
+            )
+        elif used_pct >= threshold_pct:
+            memory_is_tight = True
+
+        if used_pct >= threshold_pct + 10 and memory_is_tight:
             check.status = "error"
             check.message = (
                 f"{USER_NAME}, 메모리 사용량이 {used_pct:.1f}%로 심각합니다. "
                 f"불필요한 프로세스 종료를 권장합니다."
             )
             logger.error("메모리 사용량 심각: %.1f%%", used_pct)
-        elif used_pct >= threshold_pct:
+        elif used_pct >= threshold_pct and memory_is_tight:
             check.status = "warning"
+            detail = ""
+            if system == "Darwin":
+                detail = (
+                    f" (여유 {available_gb:.1f}GB"
+                    f"{'' if pressure_free_pct < 0 else f', 여유비율 {pressure_free_pct:.0f}%'}"
+                    ")"
+                )
             check.message = (
-                f"{USER_NAME}, 메모리 사용량이 {used_pct:.1f}%입니다. "
-                f"여유 메모리가 부족해지고 있습니다."
+                f"{USER_NAME}, 메모리 사용량이 {used_pct:.1f}%입니다."
+                f"{detail} 여유 메모리가 부족해지고 있습니다."
             )
             logger.warning("메모리 사용량 경고: %.1f%%", used_pct)
         else:
             check.status = "ok"
-            check.message = f"메모리 사용량 {used_pct:.1f}%"
+            if system == "Darwin" and available_gb >= 0:
+                suffix = (
+                    f" (여유 {available_gb:.1f}GB"
+                    f"{'' if pressure_free_pct < 0 else f', 여유비율 {pressure_free_pct:.0f}%'}"
+                    ")"
+                )
+            else:
+                suffix = ""
+            check.message = f"메모리 사용량 {used_pct:.1f}%{suffix}"
     except Exception as exc:
         check.status = "error"
         check.message = f"메모리 사용량 확인 실패: {exc}"
@@ -447,12 +568,17 @@ def check_manager_pipeline(db_path: str | Path) -> HealthCheck:
         conn = sqlite3.connect(str(db_path), timeout=5)
         conn.row_factory = sqlite3.Row
         try:
+            jobs_expected_now = _manager_jobs_expected_now()
+            if not jobs_expected_now:
+                check.status = "ok"
+                check.message = "매니저 파이프라인 대기: 휴장/비장시간"
+                return check
+
             missing: list[str] = []
             stale: list[str] = []
             failed: list[str] = []
             healthy: list[str] = []
             now = datetime.now()
-            jobs_expected_now = _manager_jobs_expected_now()
 
             for job_name, spec in _MANAGER_PIPELINE_SPECS.items():
                 label = str(spec["label"])

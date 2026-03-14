@@ -12,6 +12,7 @@ from kstock.core.health_monitor import (
     HealthCheck,
     run_health_checks,
     check_disk_usage,
+    check_memory_usage,
     check_db_accessible,
     check_db_size,
     check_manager_pipeline,
@@ -210,7 +211,10 @@ class TestCheckManagerPipeline:
         conn.commit()
         conn.close()
 
-        result = check_manager_pipeline(db_file)
+        result = None
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(health_monitor, "_manager_jobs_expected_now", lambda: True)
+            result = check_manager_pipeline(db_file)
         assert result.status == "ok"
         assert "정상" in result.message
 
@@ -226,7 +230,10 @@ class TestCheckManagerPipeline:
         conn.commit()
         conn.close()
 
-        result = check_manager_pipeline(db_file)
+        result = None
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(health_monitor, "_manager_jobs_expected_now", lambda: True)
+            result = check_manager_pipeline(db_file)
         assert result.status in {"warning", "error"}
         assert "매니저" in result.message
 
@@ -249,6 +256,74 @@ class TestCheckManagerPipeline:
         result = check_manager_pipeline(db_file)
         assert result.status == "ok"
         assert "대기" in result.message
+
+    def test_stale_jobs_are_ok_during_weekend(self, tmp_path, monkeypatch):
+        db_file = tmp_path / "manager_weekend_stale.db"
+        conn = self._make_job_runs_table(db_file)
+        ended_at = (datetime.now() - timedelta(hours=60)).isoformat()
+        conn.execute(
+            "INSERT INTO job_runs (job_name, run_date, status, started_at, ended_at, message) "
+            "VALUES (?, ?, 'success', ?, ?, '')",
+            ("manager_discovery", "2026-03-12", ended_at, ended_at),
+        )
+        conn.commit()
+        conn.close()
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                base = datetime(2026, 3, 14, 15, 34)
+                if tz is not None:
+                    return base.replace(tzinfo=tz)
+                return base
+
+        monkeypatch.setattr(health_monitor, "datetime", FrozenDateTime)
+
+        result = check_manager_pipeline(db_file)
+        assert result.status == "ok"
+        assert "대기" in result.message
+
+
+# =========================================================================
+# TestCheckMemoryUsage
+# =========================================================================
+
+class TestCheckMemoryUsage:
+    """check_memory_usage 함수 테스트."""
+
+    def test_darwin_high_usage_but_plenty_available_is_ok(self, monkeypatch):
+        monkeypatch.setattr(health_monitor.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            health_monitor,
+            "_get_memory_stats_darwin",
+            lambda: {
+                "used_pct": 82.9,
+                "available_gb": 3.4,
+                "compressed_gb": 6.0,
+                "pressure_free_pct": 42.0,
+            },
+        )
+
+        result = check_memory_usage()
+        assert result.status == "ok"
+        assert "3.4GB" in result.message
+
+    def test_darwin_high_usage_and_low_available_warns(self, monkeypatch):
+        monkeypatch.setattr(health_monitor.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            health_monitor,
+            "_get_memory_stats_darwin",
+            lambda: {
+                "used_pct": 86.2,
+                "available_gb": 1.1,
+                "compressed_gb": 7.2,
+                "pressure_free_pct": 9.0,
+            },
+        )
+
+        result = check_memory_usage()
+        assert result.status == "warning"
+        assert "여유 1.1GB" in result.message
 
 
 # =========================================================================
