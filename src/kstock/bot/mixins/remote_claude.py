@@ -900,10 +900,32 @@ class RemoteClaudeMixin:
                 try:
                     code = stock.get("code", "")
                     name = stock.get("name", code)
+                    market = stock.get("market", "KOSPI")
                     price = await self._get_price(code)
                     data_parts = [f"{name}({code})"]
                     if price and price > 0:
                         data_parts.append(f"현재가: {price:,.0f}원")
+                    if hasattr(self, "yf_client"):
+                        ohlcv = await self.yf_client.get_ohlcv(code, market)
+                        if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
+                            close = ohlcv["close"].astype(float)
+                            if len(close) >= 20:
+                                data_parts.append(f"20일선: {float(close.tail(20).mean()):,.0f}원")
+                            if len(close) >= 60:
+                                data_parts.append(f"60일선: {float(close.tail(60).mean()):,.0f}원")
+                            try:
+                                from kstock.signal.timing_windows import analyze_timing_windows
+
+                                timing = analyze_timing_windows(close)
+                                timing_lines = (
+                                    self._format_timing_lines(timing)
+                                    if timing is not None and hasattr(self, "_format_timing_lines")
+                                    else []
+                                )
+                                if timing_lines:
+                                    data_parts.append(timing_lines[0])
+                            except Exception:
+                                logger.debug("claude direct chat timing injection failed for %s", code, exc_info=True)
                     enriched = f"{text}\n\n[실시간 데이터] {' / '.join(data_parts)}"
                 except Exception:
                     pass

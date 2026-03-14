@@ -11,6 +11,9 @@ from kstock.ingest.global_news import (
     _build_whisper_download_attempts,
     _download_audio_for_whisper,
     _is_high_signal_youtube_item,
+    _mark_feed_failure,
+    _mark_youtube_video_failure,
+    _youtube_video_is_in_backoff,
     batch_youtube_live_watch,
     batch_deep_youtube_analysis,
     summarize_transcript_structured,
@@ -230,6 +233,25 @@ def test_high_signal_youtube_item_filters_noise_titles():
 
     assert _is_high_signal_youtube_item(noisy_item) is False
     assert _is_high_signal_youtube_item(strong_item) is True
+
+
+def test_youtube_video_failure_enters_backoff():
+    _mark_youtube_video_failure("abc123def45", reason="metadata_only")
+    _mark_youtube_video_failure("abc123def45", reason="metadata_only")
+    assert _youtube_video_is_in_backoff("abc123def45") is True
+
+
+def test_youtube_feed_404_backoff_is_longer():
+    feed = {
+        "name": "토마토증권통",
+        "url": "https://www.youtube.com/feeds/videos.xml?channel_id=test",
+        "category": "youtube_finance",
+    }
+    _mark_feed_failure(feed, status_code=404)
+    from kstock.ingest.global_news import _DEAD_FEED_BACKOFF, _feed_backoff_key
+
+    state = _DEAD_FEED_BACKOFF[_feed_backoff_key(feed)]
+    assert "skip_until" in state
 
 
 class _FakeResponse:

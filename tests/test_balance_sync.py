@@ -229,3 +229,22 @@ def test_format_balance_lines_includes_timing_coach(tmp_path):
     text = "\n".join(lines)
     assert "⏱ 타이밍 15일 중심 변곡 끝자락" in text
     assert "씨앗 또는 1차 분할" in text
+
+
+def test_manager_coaching_text_is_action_first(tmp_path):
+    from kstock.bot.mixins.trading import TradingMixin
+
+    mixin = TradingMixin.__new__(TradingMixin)
+    mixin.db = _FakeDB(tmp_path)
+
+    label, tip = mixin._manager_coaching_text(
+        {
+            "holding_type": "swing",
+            "pnl_pct": -1.8,
+            "current_price": 55_400,
+            "stop_price": 53_865,
+        }
+    )
+
+    assert label == "🔥 스윙 매니저"
+    assert "추매 금지" in tip or "교체" in tip or "축소" in tip

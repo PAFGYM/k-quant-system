@@ -1174,9 +1174,9 @@ class AdminExtrasMixin:
         ]
         await update.message.reply_text(
             "🔎 종목 검색\n\n"
-            "💬 어떤 종목을 찾고 계신가요?\n"
+            "어떤 종목을 찾고 계신가요?\n"
             "종목명 또는 6자리 종목코드를 보내주세요.\n"
-            "입력하면 바로 `분석 / 포트폴리오 추가 / 관심종목` 버튼이 뜹니다.\n\n"
+            "입력하면 바로 `분석 · AI 토론 · 매수 시나리오` 버튼이 뜹니다.\n\n"
             "예: GC지놈 / 340450 / 삼성전자 / 005930\n\n"
             "⬇️ 또는 지금 바로 보기:",
             reply_markup=InlineKeyboardMarkup(buttons),

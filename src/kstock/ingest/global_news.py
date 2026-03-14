@@ -25,6 +25,7 @@ from kstock.core.tz import KST
 logger = logging.getLogger(__name__)
 
 _DEAD_FEED_BACKOFF: dict[str, dict[str, object]] = {}
+_YOUTUBE_VIDEO_BACKOFF: dict[str, dict[str, object]] = {}
 
 
 def _feed_backoff_key(feed: dict) -> str:
@@ -59,6 +60,7 @@ def _mark_feed_failure(
     state = dict(_DEAD_FEED_BACKOFF.get(key) or {})
     consecutive = int(state.get("consecutive", 0))
     last_status = state.get("status_code")
+    is_youtube_feed = "youtube" in str(feed.get("category", "") or "").lower()
 
     if last_status != status_code:
         consecutive = 0
@@ -66,11 +68,11 @@ def _mark_feed_failure(
 
     skip_until: datetime | None = None
     if status_code in {404, 410}:
-        skip_until = now + timedelta(hours=6)
+        skip_until = now + timedelta(hours=12 if is_youtube_feed else 6)
     elif status_code in {301, 302, 307, 308} and consecutive >= 2:
-        skip_until = now + timedelta(hours=3)
-    elif consecutive >= 3:
-        skip_until = now + timedelta(hours=1)
+        skip_until = now + timedelta(hours=6 if is_youtube_feed else 3)
+    elif consecutive >= (2 if is_youtube_feed else 3):
+        skip_until = now + timedelta(hours=2 if is_youtube_feed else 1)
 
     next_state: dict[str, object] = {
         "status_code": status_code,
@@ -80,6 +82,54 @@ def _mark_feed_failure(
     if skip_until:
         next_state["skip_until"] = skip_until
     _DEAD_FEED_BACKOFF[key] = next_state
+
+
+def _youtube_video_is_in_backoff(video_id: str, now: datetime | None = None) -> bool:
+    now = now or datetime.now(KST)
+    state = _YOUTUBE_VIDEO_BACKOFF.get(str(video_id or "").strip())
+    if not state:
+        return False
+    skip_until = state.get("skip_until")
+    if isinstance(skip_until, datetime) and skip_until > now:
+        return True
+    if isinstance(skip_until, datetime) and skip_until <= now:
+        _YOUTUBE_VIDEO_BACKOFF.pop(str(video_id or "").strip(), None)
+    return False
+
+
+def _mark_youtube_video_success(video_id: str) -> None:
+    _YOUTUBE_VIDEO_BACKOFF.pop(str(video_id or "").strip(), None)
+
+
+def _mark_youtube_video_failure(
+    video_id: str,
+    *,
+    reason: str = "unknown",
+    now: datetime | None = None,
+) -> None:
+    now = now or datetime.now(KST)
+    key = str(video_id or "").strip()
+    if not key:
+        return
+    state = dict(_YOUTUBE_VIDEO_BACKOFF.get(key) or {})
+    consecutive = int(state.get("consecutive", 0)) + 1
+
+    skip_hours = 0
+    if reason in {"metadata_only", "empty_summary"}:
+        skip_hours = 6 if consecutive >= 2 else 2
+    elif reason in {"transcript_failed", "download_failed"}:
+        skip_hours = 3 if consecutive >= 2 else 1
+    else:
+        skip_hours = 1 if consecutive >= 2 else 0
+
+    next_state: dict[str, object] = {
+        "reason": reason,
+        "consecutive": consecutive,
+        "failed_at": now,
+    }
+    if skip_hours > 0:
+        next_state["skip_until"] = now + timedelta(hours=skip_hours)
+    _YOUTUBE_VIDEO_BACKOFF[key] = next_state
 
 # ── RSS 피드 소스 정의 ──────────────────────────────────────
 
@@ -2183,6 +2233,9 @@ async def batch_deep_youtube_analysis(
     for item in yt_items:
         if processed >= max_videos:
             break
+        if _youtube_video_is_in_backoff(item.video_id):
+            skipped += 1
+            continue
 
         # 중복 스킵
         if db:
@@ -2212,9 +2265,11 @@ async def batch_deep_youtube_analysis(
             or structured.get("mentioned_tickers")
             or structured.get("mentioned_sectors")
         ):
+            _mark_youtube_video_success(item.video_id)
             results.append(structured)
             processed += 1
         else:
+            _mark_youtube_video_failure(item.video_id, reason="empty_summary")
             skipped += 1
 
         # API 레이트 리밋 방지
@@ -2256,6 +2311,8 @@ async def batch_youtube_live_watch(
     for item in candidates:
         if len(results) >= max_videos:
             break
+        if _youtube_video_is_in_backoff(item.video_id):
+            continue
 
         if db:
             try:
@@ -2284,8 +2341,10 @@ async def batch_youtube_live_watch(
             or structured.get("mentioned_tickers")
             or structured.get("mentioned_sectors")
         ):
+            _mark_youtube_video_failure(item.video_id, reason="empty_summary")
             continue
 
+        _mark_youtube_video_success(item.video_id)
         structured["title"] = item.title
         structured["source"] = item.source.replace("🎬", "").strip()
         structured["published"] = item.published
@@ -2849,6 +2908,9 @@ async def enrich_youtube_summaries(
     for item in yt_items:
         if count >= max_summaries:
             break
+        if _youtube_video_is_in_backoff(item.video_id):
+            skipped += 1
+            continue
 
         # v10.0: DB 중복 스킵 — 이미 처리한 영상은 건너뛰기
         if db:
@@ -2894,10 +2956,15 @@ async def enrich_youtube_summaries(
 
             if len(fallback_text) > 30:
                 logger.info("YouTube using metadata fallback: %s", item.title[:30])
+                if _is_low_signal_metadata_payload(fallback_text):
+                    _mark_youtube_video_failure(item.video_id, reason="metadata_only")
+                    skipped += 1
+                    continue
                 structured = await summarize_transcript_structured(
                     fallback_text, item.title, item.source.replace("\U0001f3ac", "").strip(),
                 )
             else:
+                _mark_youtube_video_failure(item.video_id, reason="transcript_failed")
                 continue
         else:
             # v9.5: 구조화 추출
@@ -2907,6 +2974,18 @@ async def enrich_youtube_summaries(
 
         raw_summary = structured.get("raw_summary", "")
         full_summary = structured.get("full_summary", "")
+        if not (
+            structured.get("market_outlook")
+            or structured.get("investment_implications")
+            or structured.get("mentioned_tickers")
+            or structured.get("mentioned_sectors")
+            or len(str(full_summary or "")) > 100
+            or len(str(raw_summary or "")) > 100
+        ):
+            _mark_youtube_video_failure(item.video_id, reason="empty_summary")
+            skipped += 1
+            continue
+        _mark_youtube_video_success(item.video_id)
 
         if raw_summary or full_summary:
             item.content_summary = raw_summary or full_summary[:200]

@@ -367,12 +367,35 @@ class TradingMixin:
     async def _action_stock_action(
         self, query, context, payload: str,
     ) -> None:
-        """종목 액션 버튼 처리: stock_act:analyze/add/watch/noop:ticker."""
+        """종목 액션 버튼 처리: stock_act:show/analyze/debate/plan/add/watch/noop:ticker."""
         action, _, code = payload.partition(":")
         stock_data = context.user_data.get("pending_stock_action", {})
+        if stock_data.get("code") != code:
+            for item in getattr(self, "all_tickers", []) or []:
+                if str(item.get("code", "")).strip() == code:
+                    stock_data = {
+                        "code": code,
+                        "name": item.get("name", code),
+                        "market": item.get("market", "KOSPI"),
+                        "price": 0,
+                    }
+                    context.user_data["pending_stock_action"] = stock_data
+                    break
         name = stock_data.get("name", code)
-        price = stock_data.get("price", 0)
+        price = float(stock_data.get("price", 0) or 0)
         market = stock_data.get("market", "KOSPI")
+
+        if action == "show":
+            await self._show_stock_actions(
+                query if hasattr(query, "message") else query,
+                context,
+                {
+                    "code": code,
+                    "name": name,
+                    "market": market,
+                },
+            )
+            return
 
         if action == "analyze":
             await safe_edit_or_reply(query,f"🔍 {name}({code}) 분석 중...")
@@ -464,8 +487,16 @@ class TradingMixin:
                 )
                 if timing_data:
                     answer = f"{timing_data}\n\n{answer}"
+                followup_markup = None
                 try:
-                    await query.message.reply_text(answer, reply_markup=get_reply_markup(context))
+                    followup_markup = self._build_stock_action_keyboard(
+                        code,
+                        existing=bool(self.db.get_holding_by_ticker(code)),
+                    )
+                except Exception:
+                    logger.debug("_action_stock_action followup keyboard failed for %s", code, exc_info=True)
+                try:
+                    await query.message.reply_text(answer, reply_markup=followup_markup or get_reply_markup(context))
                 except Exception:
                     logger.debug("_action_stock_action reply_text with markup failed", exc_info=True)
                     await query.message.reply_text(answer)
@@ -475,6 +506,85 @@ class TradingMixin:
                     f"⚠️ {name} 분석 중 오류가 발생했습니다.",
                     reply_markup=get_reply_markup(context),
                 )
+
+        elif action == "debate":
+            await self._action_manager_debate(query, context, code)
+
+        elif action == "plan":
+            await safe_edit_or_reply(query, f"🧾 {name} 매수 시나리오 계산 중...")
+            try:
+                from kstock.signal.timing_windows import analyze_timing_windows
+
+                cur = price
+                ma20 = 0.0
+                ma60 = 0.0
+                timing_lines: list[str] = []
+                if hasattr(self, "yf_client"):
+                    ohlcv = await self.yf_client.get_ohlcv(code, market)
+                    if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
+                        close = ohlcv["close"].astype(float)
+                        cur = float(close.iloc[-1])
+                        if len(close) >= 20:
+                            ma20 = float(close.tail(20).mean())
+                        if len(close) >= 60:
+                            ma60 = float(close.tail(60).mean())
+                        timing = analyze_timing_windows(close)
+                        timing_lines = self._format_timing_lines(timing)
+                if cur <= 0:
+                    cur = await self._get_price(code)
+
+                first_seed = cur * 0.98 if cur > 0 else 0
+                second_pullback = cur * 0.95 if cur > 0 else 0
+                confirm_price = max(cur * 1.02, ma20) if cur > 0 and ma20 > 0 else cur * 1.02 if cur > 0 else 0
+                stop_price = min(cur * 0.93, ma60 * 0.98) if cur > 0 and ma60 > 0 else cur * 0.93 if cur > 0 else 0
+
+                coach = "지금은 데이터 부족으로 씨앗만 접근하세요."
+                if timing_lines:
+                    if "변곡 시작 전" in timing_lines[0]:
+                        coach = "변곡 시작 전입니다. 급히 추격하지 말고 눌림 첫 확인만 보세요."
+                    elif "반등 확인 중" in timing_lines[0]:
+                        coach = "반등 확인 구간입니다. 씨앗→눌림 추가 순서가 맞습니다."
+                    elif "변곡 끝자락" in timing_lines[0]:
+                        coach = "끝자락 구간입니다. 씨앗 또는 1차 분할까지만 허용하고 추격은 금지입니다."
+                    elif "추격 구간" in timing_lines[0]:
+                        coach = "이미 추격 구간에 가깝습니다. 눌림 없이 바로 사기보다 재대기 쪽이 낫습니다."
+
+                lines = [
+                    f"🧾 {name}({code}) 매수 시나리오",
+                    "",
+                    f"현재가 {cur:,.0f}원" if cur > 0 else "현재가 조회 실패",
+                ]
+                if timing_lines:
+                    lines.append(timing_lines[0])
+                    if len(timing_lines) > 1:
+                        lines.append(timing_lines[1])
+                if cur > 0:
+                    lines.extend([
+                        "",
+                        f"1차 씨앗  {first_seed:,.0f}원",
+                        f"2차 눌림  {second_pullback:,.0f}원",
+                        f"확인 매수 {confirm_price:,.0f}원",
+                        f"손절 기준 {stop_price:,.0f}원",
+                    ])
+                if ma20 > 0 or ma60 > 0:
+                    lines.append("")
+                    if ma20 > 0:
+                        lines.append(f"20일선 {ma20:,.0f}원")
+                    if ma60 > 0:
+                        lines.append(f"60일선 {ma60:,.0f}원")
+                lines.extend(["", f"지금 행동: {coach}"])
+
+                await safe_edit_or_reply(
+                    query,
+                    "\n".join(lines),
+                    reply_markup=self._build_stock_action_keyboard(
+                        code,
+                        existing=bool(self.db.get_holding_by_ticker(code)),
+                    ),
+                )
+            except Exception as e:
+                logger.error("Stock action plan error: %s", e, exc_info=True)
+                await safe_edit_or_reply(query, f"⚠️ {name} 매수 시나리오 계산 중 오류가 발생했습니다.")
 
         elif action == "add":
             # 현재가 자동 조회
@@ -508,7 +618,9 @@ class TradingMixin:
 
         elif action == "noop":
             await safe_edit_or_reply(query,
-                f"ℹ️ {name}은(는) 이미 포트폴리오에 있습니다."
+                f"ℹ️ {name}은(는) 이미 포트폴리오에 있습니다.\n"
+                "아래에서 분석이나 토론을 이어가세요.",
+                reply_markup=self._build_stock_action_keyboard(code, existing=True),
             )
 
     async def _ask_horizon(self, query, ticker: str, name: str) -> None:
@@ -1255,23 +1367,23 @@ class TradingMixin:
         stop_price = float(holding.get("stop_price", 0) or 0)
 
         if stop_price > 0 and current_price > 0 and current_price <= stop_price:
-            message = f"손절선 근접, 축소·교체 우선 (손절 {stop_price:,.0f}원)"
+            message = f"손절선 근접 · 축소/교체 우선 ({stop_price:,.0f}원)"
         elif target_2 > 0 and current_price >= target_2:
-            message = f"2차 목표권, 추세 유지면 분할익절 검토 (목표 {target_2:,.0f}원)"
+            message = f"2차 목표권 · 분할익절 우선 ({target_2:,.0f}원)"
         elif target_1 > 0 and current_price >= target_1:
-            message = f"1차 목표권, 일부 익절 또는 본전컷 상향 (목표 {target_1:,.0f}원)"
+            message = f"1차 목표권 · 일부 익절 또는 본전컷 상향 ({target_1:,.0f}원)"
         elif lane == "long_term":
-            message = "스토리 훼손 전까지 핵심 보유, 급락만 경계"
+            message = "스토리 유지면 보유 · 급락만 경계"
         elif lane == "tenbagger":
-            message = "촉매·정책·이벤트 유지 여부를 계속 추적"
+            message = "촉매 유지 확인 · 조급한 추격 금지"
         elif lane == "position":
-            message = "중기 추세 유지 여부 점검, 눌림 시만 추가"
+            message = "중기 추세 점검 · 눌림만 추가"
         elif lane == "scalp":
-            message = "장중 추세 약해지면 빠르게 비중 축소"
+            message = "장중 약세면 빠르게 축소"
         elif pnl < 0:
-            message = "반등 확인 전 추매 금지, 교체 후보와 비교"
+            message = "반등 확인 전 추매 금지 · 교체 후보 비교"
         else:
-            message = "추세 유지 확인 후 보유, 눌림 구간만 분할 대응"
+            message = "추세 유지 확인 후 보유 · 눌림만 대응"
 
         return label_map.get(lane, "📌 종합 매니저"), message
 

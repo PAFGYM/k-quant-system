@@ -30,3 +30,16 @@ def test_find_stock_candidates_returns_similar_matches():
     assert candidates
     assert candidates[0]["code"] == "340450"
 
+
+def test_build_stock_action_keyboard_exposes_full_flow():
+    mixin = _make_mixin()
+    markup = mixin._build_stock_action_keyboard("340450", existing=False)
+    callbacks = [
+        btn.callback_data
+        for row in markup.inline_keyboard
+        for btn in row
+    ]
+    assert "stock_act:analyze:340450" in callbacks
+    assert "stock_act:debate:340450" in callbacks
+    assert "stock_act:plan:340450" in callbacks
+    assert "stock_act:add:340450" in callbacks

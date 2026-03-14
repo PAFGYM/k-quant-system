@@ -1769,8 +1769,8 @@ class CoreHandlersMixin:
                 continue
             buttons.append([
                 InlineKeyboardButton(
-                    f"📊 {name} 분석",
-                    callback_data=f"detail:{code}",
+                    f"🔎 {name}",
+                    callback_data=f"stock_act:show:{code}",
                 )
             ])
         buttons.append([InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")])
@@ -1778,13 +1778,38 @@ class CoreHandlersMixin:
         lines = [
             f"⚠️ '{text}' 종목을 정확히 찾지 못했습니다.",
             "",
-            "아래 후보 중에서 바로 분석해보세요.",
+            "아래 후보를 누르면 분석 · AI 토론 · 매수 시나리오로 바로 이어집니다.",
             "다시 입력하셔도 됩니다.",
         ]
         await update.message.reply_text(
             "\n".join(lines),
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+
+    def _build_stock_action_keyboard(self, code: str, *, existing: bool = False) -> InlineKeyboardMarkup:
+        if existing:
+            portfolio_btn = InlineKeyboardButton(
+                "✅ 보유 중", callback_data=f"stock_act:noop:{code}",
+            )
+        else:
+            portfolio_btn = InlineKeyboardButton(
+                "➕ 포트폴리오 추가",
+                callback_data=f"stock_act:add:{code}",
+            )
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📊 분석", callback_data=f"stock_act:analyze:{code}"),
+                InlineKeyboardButton("🎙️ AI 토론", callback_data=f"stock_act:debate:{code}"),
+            ],
+            [
+                InlineKeyboardButton("🧾 매수 시나리오", callback_data=f"stock_act:plan:{code}"),
+                portfolio_btn,
+            ],
+            [
+                InlineKeyboardButton("👀 관심종목", callback_data=f"stock_act:watch:{code}"),
+                InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+            ],
+        ])
 
     def _detect_trade_input(self, text: str) -> dict | None:
         """자연어에서 매수/매도 등록 패턴을 감지합니다.
@@ -1976,7 +2001,7 @@ class CoreHandlersMixin:
     ) -> None:
         """종목명만 입력했을 때 액션 버튼 제공.
 
-        "삼성전자" → [📊 분석] [➕ 추가] [👀 관심]
+        "삼성전자" → 분석 → 토론 → 매수 시나리오 → 관심/추가 흐름 제공
         """
         code = stock.get("code", "")
         name = stock.get("name", code)
@@ -2001,36 +2026,9 @@ class CoreHandlersMixin:
         # 이미 보유 중인지 확인
         existing = self.db.get_holding_by_ticker(code)
 
-        if existing:
-            add_btn = InlineKeyboardButton(
-                "✅ 보유 중", callback_data=f"stock_act:noop:{code}",
-            )
-        else:
-            add_btn = InlineKeyboardButton(
-                "➕ 포트폴리오 추가",
-                callback_data=f"stock_act:add:{code}",
-            )
-
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    "📊 분석", callback_data=f"stock_act:analyze:{code}",
-                ),
-                add_btn,
-            ],
-            [
-                InlineKeyboardButton(
-                    "👀 관심종목", callback_data=f"stock_act:watch:{code}",
-                ),
-                InlineKeyboardButton(
-                    "❌ 닫기", callback_data="dismiss:0",
-                ),
-            ],
-        ]
-
         await update.message.reply_text(
-            f"📌 {name} ({code})\n{price_str}\n\n어떻게 하시겠어요?",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            f"📌 {name} ({code})\n{price_str}\n\n다음 중 바로 이어서 하세요.",
+            reply_markup=self._build_stock_action_keyboard(code, existing=bool(existing)),
         )
 
     async def _handle_stock_analysis(
