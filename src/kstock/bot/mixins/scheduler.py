@@ -4241,6 +4241,23 @@ class SchedulerMixin:
                 buy_line += f" ({manager_label})"
             lines.append(buy_line)
 
+        trim_count = 0
+        add_count = 0
+        rotation_count = 0
+        for action in actions:
+            action_name = str(action.get("action", "") or "").strip()
+            priority = str(action.get("priority", "") or "").strip()
+            if priority in {"urgent", "caution"} or any(
+                keyword in action_name for keyword in ("교체", "축소", "익절", "손절", "청산", "점검")
+            ):
+                trim_count += 1
+            if any(keyword in action_name for keyword in ("추매", "씨앗", "분할", "추가", "매수")):
+                add_count += 1
+            if str(action.get("rotation_source", "") or "").strip():
+                rotation_count += 1
+        if trim_count or add_count or rotation_count:
+            lines.append(f"오늘 관리: 축소 {trim_count} · 추가 {add_count} · 교체 {rotation_count}")
+
         for line in self._build_personal_operator_lines(limit=1):
             clean = str(line or "").strip()
             if clean.startswith("- "):
@@ -4319,7 +4336,7 @@ class SchedulerMixin:
             if names:
                 lines.append(f"강세 축: {names}")
 
-        return list(dict.fromkeys(line for line in lines if line))[:7]
+        return list(dict.fromkeys(line for line in lines if line))[:8]
 
     async def _send_daily_actions(self, context, macro) -> None:
         """오늘의 할 일 메시지 전송."""

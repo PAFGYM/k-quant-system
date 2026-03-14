@@ -132,6 +132,7 @@ def test_build_daily_action_coach_lines_summarizes_market_and_top_actions():
     assert any("기본 태세:" in line for line in lines)
     assert any("1순위: 씨에스윈드" in line for line in lines)
     assert any("신규 후보: 텐배거주" in line for line in lines)
+    assert any("오늘 관리: 축소 1 · 추가 1 · 교체 0" in line for line in lines)
     assert any("회피:" in line for line in lines)
     assert any("현금:" in line for line in lines)
     assert any("개인화 우선 레인:" in line for line in lines)

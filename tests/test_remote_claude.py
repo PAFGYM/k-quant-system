@@ -17,8 +17,10 @@ class _FakeResponse:
 class _FakeClient:
     def __init__(self, responses):
         self._responses = list(responses)
+        self.calls = []
 
     async def post(self, *args, **kwargs):
+        self.calls.append({"args": args, "kwargs": kwargs})
         if not self._responses:
             raise AssertionError("No fake responses left")
         return self._responses.pop(0)
@@ -247,6 +249,54 @@ class TestRemoteClaudeFallbacks(unittest.IsolatedAsyncioTestCase):
         assert "API 오류" not in final_text
         assert "보조 엔진으로 우회" in final_text
         assert "씨에스윈드" in final_text
+
+    async def test_direct_chat_injects_live_stock_context(self):
+        from kstock.bot.mixins import remote_claude
+        import pandas as pd
+
+        mixin = self._make_mixin()
+        mixin._detect_stock_query = MagicMock(return_value={"code": "005930", "name": "삼성전자", "market": "KOSPI"})
+        mixin._get_price = AsyncMock(return_value=183500)
+        mixin.db.get_supply_demand.return_value = [
+            {"foreign_net": 120000, "institution_net": -50000},
+            {"foreign_net": 80000, "institution_net": 20000},
+        ]
+        mixin.db.get_macro_snapshot.return_value = {"regime": "risk_off"}
+        mixin.yf_client = MagicMock()
+        mixin.yf_client.get_ohlcv = AsyncMock(
+            return_value=pd.DataFrame({"close": [150000 + i * 500 for i in range(65)]})
+        )
+
+        update = self._make_update()
+        context = self._make_context()
+        fake_client = _FakeClient([
+            _FakeResponse(
+                200,
+                json_data={
+                    "content": [{"text": "삼성전자는 눌림 확인이 우선입니다."}],
+                    "usage": {"input_tokens": 111, "output_tokens": 22},
+                },
+            ),
+        ])
+
+        with patch.object(remote_claude, "_get_api_client", return_value=fake_client):
+            with patch.object(remote_claude, "get_reply_markup", return_value=None):
+                await mixin._claude_direct_chat(
+                    update,
+                    context,
+                    "삼성전자 지금 사도 돼?",
+                    tier=mixin._CLAUDE_TIERS["bujang"],
+                )
+
+        sent_messages = fake_client.calls[0]["kwargs"]["json"]["messages"]
+        enriched = sent_messages[-1]["content"]
+        assert "[실시간 데이터]" in enriched
+        assert "현재가: 183,500원" in enriched
+        assert "시장레짐: risk_off" in enriched
+        assert "최근수급: 외인 +200,000주 / 기관 -30,000주" in enriched
+        assert "20일선:" in enriched
+        assert "60일선:" in enriched
+        assert "52주 위치:" in enriched
 
     async def test_image_analysis_falls_back_to_openai_when_anthropic_returns_400(self):
         from kstock.bot.mixins import remote_claude

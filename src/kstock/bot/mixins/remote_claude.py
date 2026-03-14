@@ -901,31 +901,11 @@ class RemoteClaudeMixin:
                     code = stock.get("code", "")
                     name = stock.get("name", code)
                     market = stock.get("market", "KOSPI")
-                    price = await self._get_price(code)
-                    data_parts = [f"{name}({code})"]
-                    if price and price > 0:
-                        data_parts.append(f"현재가: {price:,.0f}원")
-                    if hasattr(self, "yf_client"):
-                        ohlcv = await self.yf_client.get_ohlcv(code, market)
-                        if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
-                            close = ohlcv["close"].astype(float)
-                            if len(close) >= 20:
-                                data_parts.append(f"20일선: {float(close.tail(20).mean()):,.0f}원")
-                            if len(close) >= 60:
-                                data_parts.append(f"60일선: {float(close.tail(60).mean()):,.0f}원")
-                            try:
-                                from kstock.signal.timing_windows import analyze_timing_windows
-
-                                timing = analyze_timing_windows(close)
-                                timing_lines = (
-                                    self._format_timing_lines(timing)
-                                    if timing is not None and hasattr(self, "_format_timing_lines")
-                                    else []
-                                )
-                                if timing_lines:
-                                    data_parts.append(timing_lines[0])
-                            except Exception:
-                                logger.debug("claude direct chat timing injection failed for %s", code, exc_info=True)
+                    data_parts = await self._build_stock_chat_context(
+                        code=code,
+                        name=name,
+                        market=market,
+                    )
                     enriched = f"{text}\n\n[실시간 데이터] {' / '.join(data_parts)}"
                 except Exception:
                     pass
@@ -1052,6 +1032,76 @@ class RemoteClaudeMixin:
                     "⚠️ 응답 중 오류가 발생했어요. 다시 시도해주세요.",
                     reply_markup=get_reply_markup(context),
                 )
+
+    async def _build_stock_chat_context(
+        self, *, code: str, name: str, market: str = "KOSPI",
+    ) -> list[str]:
+        """주식 질문에 주입할 현재가/추세/수급 컨텍스트."""
+        data_parts = [f"{name}({code})"]
+
+        try:
+            price = await self._get_price(code)
+            if price and price > 0:
+                data_parts.append(f"현재가: {price:,.0f}원")
+        except Exception:
+            logger.debug("stock chat price injection failed for %s", code, exc_info=True)
+
+        try:
+            macro_snapshot = self.db.get_macro_snapshot() if hasattr(self, "db") else {}
+            if isinstance(macro_snapshot, dict):
+                regime = str(macro_snapshot.get("regime", "") or "").strip()
+                if regime:
+                    data_parts.append(f"시장레짐: {regime}")
+        except Exception:
+            logger.debug("stock chat macro injection failed for %s", code, exc_info=True)
+
+        try:
+            if hasattr(self, "db"):
+                supply = self.db.get_supply_demand(code, days=5) or []
+                if supply:
+                    foreign_net = sum(float(row.get("foreign_net", 0) or 0) for row in supply)
+                    institution_net = sum(float(row.get("institution_net", 0) or 0) for row in supply)
+                    data_parts.append(
+                        f"최근수급: 외인 {foreign_net:+,.0f}주 / 기관 {institution_net:+,.0f}주"
+                    )
+        except Exception:
+            logger.debug("stock chat flow injection failed for %s", code, exc_info=True)
+
+        try:
+            if hasattr(self, "yf_client"):
+                ohlcv = await self.yf_client.get_ohlcv(code, market)
+                if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
+                    close = ohlcv["close"].astype(float)
+                    last_close = float(close.iloc[-1])
+                    if len(close) >= 5 and float(close.iloc[-5]) > 0:
+                        chg_5d = (last_close / float(close.iloc[-5]) - 1) * 100
+                        data_parts.append(f"5일 변화: {chg_5d:+.1f}%")
+                    if len(close) >= 20:
+                        data_parts.append(f"20일선: {float(close.tail(20).mean()):,.0f}원")
+                    if len(close) >= 60:
+                        data_parts.append(f"60일선: {float(close.tail(60).mean()):,.0f}원")
+                        hi = float(close.max())
+                        lo = float(close.min())
+                        if hi > lo:
+                            pos_52w = (last_close - lo) / (hi - lo)
+                            data_parts.append(f"52주 위치: {pos_52w:.0%}")
+                    try:
+                        from kstock.signal.timing_windows import analyze_timing_windows
+
+                        timing = analyze_timing_windows(close)
+                        timing_lines = (
+                            self._format_timing_lines(timing)
+                            if timing is not None and hasattr(self, "_format_timing_lines")
+                            else []
+                        )
+                        if timing_lines:
+                            data_parts.append(timing_lines[0])
+                    except Exception:
+                        logger.debug("claude direct chat timing injection failed for %s", code, exc_info=True)
+        except Exception:
+            logger.debug("stock chat chart injection failed for %s", code, exc_info=True)
+
+        return data_parts
 
     async def _call_openai_chat_fallback(
         self,
