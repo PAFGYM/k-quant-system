@@ -10,6 +10,7 @@ import pytest
 from kstock.ingest.global_news import (
     _build_whisper_download_attempts,
     _download_audio_for_whisper,
+    _is_high_signal_youtube_item,
     batch_youtube_live_watch,
     batch_deep_youtube_analysis,
     summarize_transcript_structured,
@@ -64,8 +65,9 @@ class TestBatchDeepYoutubeAnalysis:
     async def test_reprocesses_existing_low_quality_video(self):
         item = SimpleNamespace(
             video_id="abc123def45",
-            title="매크로 점검 영상",
+            title="장전 시황 매크로 점검 영상",
             source="🎬 테스트채널",
+            category="youtube_finance",
         )
         db = MagicMock()
         db.check_youtube_processed.return_value = True
@@ -102,8 +104,9 @@ class TestBatchDeepYoutubeAnalysis:
     async def test_skips_existing_high_quality_video(self):
         item = SimpleNamespace(
             video_id="xyz987uvw65",
-            title="이미 잘 학습된 영상",
+            title="장중 시황 이미 잘 학습된 영상",
             source="🎬 테스트채널",
+            category="youtube_finance",
         )
         db = MagicMock()
         db.check_youtube_processed.return_value = True
@@ -209,6 +212,24 @@ class TestBatchYoutubeLiveWatch:
         assert results == []
         db.should_upgrade_youtube_intelligence.assert_called_once_with(item.video_id)
         mock_deep.assert_not_called()
+
+
+def test_high_signal_youtube_item_filters_noise_titles():
+    noisy_item = SimpleNamespace(
+        video_id="noise123def4",
+        title="[사주팔자 보러와] 오늘 뭐 살지 모르겠다면 추천주 상담",
+        source="🎬 매일경제TV",
+        category="youtube_finance",
+    )
+    strong_item = SimpleNamespace(
+        video_id="live123def4",
+        title="장전 시황 라이브 | 외인 수급과 반도체 체크",
+        source="🎬 테스트증권",
+        category="youtube_broker",
+    )
+
+    assert _is_high_signal_youtube_item(noisy_item) is False
+    assert _is_high_signal_youtube_item(strong_item) is True
 
 
 class _FakeResponse:

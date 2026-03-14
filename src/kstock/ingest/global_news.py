@@ -411,6 +411,21 @@ _YOUTUBE_LIVE_WATCH_KEYWORDS = {
     "반도체",
 }
 
+_YOUTUBE_NOISE_KEYWORDS = {
+    "사주팔자",
+    "민원처리반",
+    "사연",
+    "상담",
+    "종목상담",
+    "종목 상담",
+    "무엇을 살까",
+    "뭐 살지",
+    "추천주",
+    "급등주 추천",
+    "운세",
+    "타로",
+}
+
 
 def _youtube_priority_score(item: NewsItem) -> int:
     """시황/라이브/테마성 영상을 우선 학습하기 위한 점수."""
@@ -433,7 +448,36 @@ def _youtube_priority_score(item: NewsItem) -> int:
         score += 2
     if any(channel.lower() in source for channel in ("삼프로", "증권", "각도기", "biz", "경제tv")):
         score += 1
+    noise_hits = sum(
+        1 for keyword in _YOUTUBE_NOISE_KEYWORDS if keyword.lower() in title
+    )
+    if noise_hits:
+        score -= noise_hits * 8
     return score
+
+
+def _is_noisy_youtube_title(title: str) -> bool:
+    text = str(title or "").lower()
+    return any(keyword.lower() in text for keyword in _YOUTUBE_NOISE_KEYWORDS)
+
+
+def _is_high_signal_youtube_item(item: NewsItem) -> bool:
+    """매매에 직접 연결될 가능성이 높은 영상만 남긴다."""
+    if not getattr(item, "video_id", ""):
+        return False
+
+    title = str(getattr(item, "title", "") or "")
+    category = str(getattr(item, "category", "") or "")
+
+    if _is_noisy_youtube_title(title):
+        return False
+
+    score = _youtube_priority_score(item)
+    if not category:
+        return score >= 1
+    if "youtube_broker" in category or "youtube_us_market" in category:
+        return score >= 2
+    return score >= 4
 
 
 def _is_youtube_live_watch_candidate(item: NewsItem) -> bool:
@@ -2122,7 +2166,10 @@ async def batch_deep_youtube_analysis(
 
     # YouTube 영상만 수집
     items = await fetch_global_news(max_per_feed=10, hours_lookback=hours_lookback)
-    yt_items = [it for it in items if it.video_id]
+    yt_items = [
+        it for it in items
+        if _is_high_signal_youtube_item(it)
+    ]
     yt_items.sort(key=_youtube_priority_score, reverse=True)
 
     if not yt_items:
@@ -2159,9 +2206,16 @@ async def batch_deep_youtube_analysis(
             db=db,
         )
 
-        if structured.get("full_summary") or structured.get("raw_summary"):
+        if (
+            structured.get("market_outlook")
+            or structured.get("investment_implications")
+            or structured.get("mentioned_tickers")
+            or structured.get("mentioned_sectors")
+        ):
             results.append(structured)
             processed += 1
+        else:
+            skipped += 1
 
         # API 레이트 리밋 방지
         await asyncio.sleep(2)
@@ -2190,7 +2244,7 @@ async def batch_youtube_live_watch(
     )
     candidates = [
         item for item in items
-        if _is_youtube_live_watch_candidate(item)
+        if _is_youtube_live_watch_candidate(item) and _is_high_signal_youtube_item(item)
     ]
     candidates.sort(key=_youtube_priority_score, reverse=True)
 
@@ -2224,7 +2278,12 @@ async def batch_youtube_live_watch(
             source=item.source.replace("🎬", "").strip(),
             db=db,
         )
-        if not (structured.get("full_summary") or structured.get("raw_summary")):
+        if not (
+            structured.get("market_outlook")
+            or structured.get("investment_implications")
+            or structured.get("mentioned_tickers")
+            or structured.get("mentioned_sectors")
+        ):
             continue
 
         structured["title"] = item.title
@@ -2780,7 +2839,7 @@ async def enrich_youtube_summaries(
         max_summaries: 요약할 최대 영상 수 (비용 제어)
         db: SQLiteStore instance (있으면 youtube_intelligence 저장)
     """
-    yt_items = [it for it in items if it.video_id]
+    yt_items = [it for it in items if _is_high_signal_youtube_item(it)]
     yt_items.sort(key=_youtube_priority_score, reverse=True)
     if not yt_items:
         return items
