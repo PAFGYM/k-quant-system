@@ -3118,6 +3118,8 @@ class SchedulerMixin:
         alert_mode: str,
     ) -> dict:
         """액션콘솔용 개인화 비중/현금 운용 컨텍스트."""
+        from kstock.signal.risk_windows import assess_krx_risk_window
+
         sector_keyword_map = {
             "원전/전력": ["원전", "SMR", "전력", "터빈", "원자로", "계측"],
             "방산/우주": ["방산", "미사일", "우주", "위성", "항공", "드론"],
@@ -3245,6 +3247,9 @@ class SchedulerMixin:
             cash_floor_pct = max(cash_floor_pct, 25.0)
         elif alert_mode == "elevated":
             cash_floor_pct = max(cash_floor_pct, 20.0)
+        risk_window = assess_krx_risk_window(datetime.now(KST))
+        if risk_window.active:
+            cash_floor_pct += float(risk_window.cash_floor_add or 0.0)
 
         lane_exposure_pct = {
             key: round((value / total_value) * 100.0, 1)
@@ -3267,6 +3272,7 @@ class SchedulerMixin:
             "lane_exposure_pct": lane_exposure_pct,
             "sector_exposure_pct": sector_exposure_pct,
             "infer_sector": _infer_sector,
+            "risk_window": risk_window,
         }
 
     def _build_candidate_allocation_hint(
@@ -4033,11 +4039,17 @@ class SchedulerMixin:
             macro=macro,
             alert_mode=alert_mode,
         )
+        risk_window = allocation_context.get("risk_window")
         lane_bias["scalp"] *= 0.92 if alert_mode == "wartime" else 1.00
         lane_bias["swing"] *= 0.96 if alert_mode == "wartime" else 1.02
         lane_bias["position"] *= 1.05
         lane_bias["long_term"] *= 1.01
         lane_bias["tenbagger"] *= 1.08
+        if getattr(risk_window, "active", False):
+            lane_bias["scalp"] *= float(getattr(risk_window, "scalp_multiplier", 1.0) or 1.0)
+            lane_bias["swing"] *= float(getattr(risk_window, "swing_multiplier", 1.0) or 1.0)
+            lane_bias["position"] *= 0.98
+            lane_bias["long_term"] *= 1.02
         memory_focus_lines = list(getattr(operator_memory, "manager_focus", []) or [])
         if any("리버모어" in line for line in memory_focus_lines):
             lane_bias["scalp"] *= 1.04
@@ -4122,6 +4134,12 @@ class SchedulerMixin:
                 priority = "check"
                 action = "추격 금지, 강도 확인"
                 next_step = "시초 추격 대신 10시 이후 눌림과 체결 강도 확인"
+            elif getattr(risk_window, "active", False) and mgr_key in {"scalp", "swing"}:
+                if mgr_key == "scalp":
+                    priority = "check"
+                    action = "추격보다 눌림 확인"
+                risk_note = str(getattr(risk_window, "action_line", "") or "").strip()
+                next_step = f"{next_step} · {risk_note}" if next_step and risk_note else (risk_note or next_step)
             elif mgr_key == "tenbagger":
                 next_step = "이벤트 전 씨앗 포지션 1차만 고려"
             elif mgr_key == "position":
@@ -4239,6 +4257,17 @@ class SchedulerMixin:
             macro=macro,
             alert_mode=getattr(self, "_alert_mode", "normal"),
         )
+        risk_window = allocation_context.get("risk_window")
+        if getattr(risk_window, "active", False):
+            label = str(getattr(risk_window, "label", "") or "").strip()
+            coach = str(getattr(risk_window, "coach_line", "") or "").strip()
+            action_line = str(getattr(risk_window, "action_line", "") or "").strip()
+            if label:
+                lines.append(f"달력 리스크: {label}")
+            if coach:
+                lines.append(coach)
+            if action_line:
+                lines.append(f"운용 원칙: {action_line}")
         if allocation_context.get("cash_known"):
             current_cash_pct = float(allocation_context.get("current_cash_pct", 0) or 0)
             cash_floor_pct = float(allocation_context.get("cash_floor_pct", 0) or 0)

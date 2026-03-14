@@ -137,6 +137,44 @@ def test_build_daily_action_coach_lines_summarizes_market_and_top_actions():
     assert any("개인화 우선 레인:" in line for line in lines)
 
 
+def test_build_daily_action_coach_lines_includes_risk_window_guidance():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+    from kstock.signal.risk_windows import RiskWindowAssessment
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin.db = MagicMock()
+    mixin.db.get_portfolio_snapshots.return_value = [{"total_value": 100_000_000, "cash": 18_000_000}]
+    mixin.db.get_active_holdings.return_value = []
+    mixin._build_personalized_lane_bias = MagicMock(return_value=({}, []))
+    mixin._build_downside_playbook = MagicMock(return_value=None)
+    risk_window = RiskWindowAssessment(
+        active=True,
+        key="earnings_apr_may",
+        label="4월말 실적·5월 선반영 윈도우",
+        severity=3,
+        coach_line="1분기 실적 재평가와 5월 리스크 선반영이 겹치는 구간입니다.",
+        action_line="실적 확인 전 추격매수보다 눌림·외인수급 확인이 우선",
+        scalp_multiplier=0.82,
+        swing_multiplier=0.88,
+        cash_floor_add=5.0,
+    )
+    mixin._load_daily_allocation_context = MagicMock(
+        return_value={
+            "cash_known": True,
+            "current_cash_pct": 18.0,
+            "cash_floor_pct": 20.0,
+            "risk_window": risk_window,
+        }
+    )
+
+    with patch("kstock.bot.mixins.scheduler.detect_regime", return_value=MagicMock(mode="defense", label="방어")), \
+         patch("kstock.signal.krx_operator_memory.build_krx_operator_memory", return_value=MagicMock(headline="", attack_points=[], avoid_points=[])):
+        lines = mixin._build_daily_action_coach_lines([], _make_macro())
+
+    assert any("달력 리스크: 4월말 실적·5월 선반영 윈도우" in line for line in lines)
+    assert any("실적 재평가" in line for line in lines)
+
+
 def test_generate_daily_actions_adds_personalized_holding_management():
     from kstock.bot.mixins.scheduler import SchedulerMixin
 
