@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from kstock import APP_NAME, DISPLAY_VERSION, SYSTEM_NAME
 from kstock.bot.bot_imports import *  # noqa: F403
+from kstock.core.log_paths import APP_LOG_FILE, ERROR_LOG_FILE, STDOUT_LOG_FILE
 
 
 def _holding_type_to_horizon(ht: str) -> str:
@@ -325,10 +326,12 @@ class AdminExtrasMixin:
 
                 # 로그 크기
                 try:
-                    log_path = "/tmp/kstock_bot.log"
-                    if os.path.exists(log_path):
-                        log_size = os.path.getsize(log_path) / (1024 * 1024)
-                        lines.append(f"📝 로그: {log_size:.1f}MB")
+                    log_sizes = []
+                    for path in (APP_LOG_FILE, ERROR_LOG_FILE, STDOUT_LOG_FILE):
+                        if os.path.exists(path):
+                            log_sizes.append(os.path.getsize(path))
+                    if log_sizes:
+                        lines.append(f"📝 로그: {sum(log_sizes) / (1024 * 1024):.1f}MB")
                 except Exception:
                     pass
 
@@ -345,7 +348,11 @@ class AdminExtrasMixin:
                 import subprocess as _sp
                 try:
                     result = _sp.run(
-                        ["grep", "-E", "ERROR|CRITICAL|Exception", "/tmp/kstock_bot.log"],
+                        [
+                            "bash", "-lc",
+                            f"grep -E 'ERROR|CRITICAL|Exception' "
+                            f"'{APP_LOG_FILE}' '{ERROR_LOG_FILE}' '{STDOUT_LOG_FILE}' 2>/dev/null",
+                        ],
                         capture_output=True, text=True, timeout=5,
                     )
                     error_lines = result.stdout.strip().split("\n")
@@ -610,7 +617,7 @@ class AdminExtrasMixin:
             try:
                 import subprocess
                 result = subprocess.run(
-                    ["tail", "-50", "bot.log"],
+                    ["tail", "-50", str(APP_LOG_FILE)],
                     capture_output=True, text=True, timeout=5,
                 )
                 errors = [
@@ -754,7 +761,7 @@ class AdminExtrasMixin:
             try:
                 import subprocess
                 result = subprocess.run(
-                    ["tail", "-20", "bot.log"],
+                    ["tail", "-20", str(APP_LOG_FILE)],
                     capture_output=True, text=True, timeout=5,
                 )
                 for line in result.stdout.splitlines():
@@ -814,7 +821,7 @@ class AdminExtrasMixin:
             try:
                 import subprocess
                 result = subprocess.run(
-                    ["tail", "-50", "bot.log"],
+                    ["tail", "-50", str(APP_LOG_FILE)],
                     capture_output=True, text=True, timeout=5,
                 )
                 error_lines = [

@@ -267,7 +267,7 @@ class CoreHandlersMixin:
         )
         jq.run_repeating(
             self.job_intraday_monitor,
-            interval=60,
+            interval=90,
             first=30,
             name="intraday_monitor",
         )
@@ -322,7 +322,7 @@ class CoreHandlersMixin:
         # Phase 8: market pulse (1분마다, 실시간 시장 모니터링)
         jq.run_repeating(
             self.job_market_pulse,
-            interval=60,
+            interval=120,
             first=60,
             name="market_pulse",
         )
@@ -703,10 +703,10 @@ class CoreHandlersMixin:
 
         logger.info(
             "Scheduled: buy_planner(weekday 07:50), us_premarket(07:00), "
-            "morning(07:30), intraday(1min), "
+            "morning(07:30), intraday(90s base/dynamic), "
             "weekly_learn(Sat 09:00), screenshot(Mon/Fri 08:00), "
             "sentiment(08:00), weekly_report(Sun 19:00), "
-            "macro_refresh(1min), market_pulse(1min), "
+            "macro_refresh(1min), market_pulse(120s base/dynamic), "
             "daily_report_pdf(16:00), self_report(21:00), "
             "report_crawl(weekday 08:20), "
             "ws_connect(weekday 08:50), ws_disconnect(weekday 15:35), "

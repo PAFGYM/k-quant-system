@@ -9,27 +9,37 @@ from kstock.core.market_calendar import is_kr_market_open, market_status_text, n
 
 # ── 적응형 모니터링: VIX 레짐별 체크 주기 (초) ─────────────────────
 # v12.3: risk_thresholds.yaml에서 로드 (없으면 기본값 fallback)
+_DEFAULT_ADAPTIVE_INTERVALS = {
+    "calm":   {"intraday_monitor": 180, "market_pulse": 240},
+    "normal": {"intraday_monitor": 90,  "market_pulse": 120},
+    "fear":   {"intraday_monitor": 60,  "market_pulse": 60},
+    "panic":  {"intraday_monitor": 30,  "market_pulse": 30},
+}
+
+
+def _normalize_adaptive_intervals(raw: dict | None) -> dict:
+    """설정이 너무 공격적이어도 운영 기본선을 지키도록 보정한다."""
+    normalized: dict[str, dict[str, int]] = {}
+    for regime, defaults in _DEFAULT_ADAPTIVE_INTERVALS.items():
+        source = raw.get(regime, {}) if isinstance(raw, dict) else {}
+        normalized[regime] = {
+            key: max(int(source.get(key, defaults[key])), defaults[key])
+            for key in defaults
+        }
+    return normalized
+
+
 try:
     from kstock.core.risk_config import get_risk_thresholds as _get_rt
     _rt = _get_rt()
-    ADAPTIVE_INTERVALS = _rt.adaptive_intervals or {
-        "calm":   {"intraday_monitor": 120, "market_pulse": 180},
-        "normal": {"intraday_monitor": 60,  "market_pulse": 60},
-        "fear":   {"intraday_monitor": 30,  "market_pulse": 30},
-        "panic":  {"intraday_monitor": 15,  "market_pulse": 15},
-    }
+    ADAPTIVE_INTERVALS = _normalize_adaptive_intervals(_rt.adaptive_intervals)
 except Exception:
-    ADAPTIVE_INTERVALS = {
-        "calm":   {"intraday_monitor": 120, "market_pulse": 180},
-        "normal": {"intraday_monitor": 60,  "market_pulse": 60},
-        "fear":   {"intraday_monitor": 30,  "market_pulse": 30},
-        "panic":  {"intraday_monitor": 15,  "market_pulse": 15},
-    }
+    ADAPTIVE_INTERVALS = _normalize_adaptive_intervals(None)
 
 # 레짐 변경 쿨다운 (초)
 _RESCHEDULE_COOLDOWN = 300  # 5분
-_INTRADAY_SCAN_CACHE_TTL = 120
-_INTRADAY_SCAN_MAX_TICKERS = 24
+_INTRADAY_SCAN_CACHE_TTL = 180
+_INTRADAY_SCAN_MAX_TICKERS = 18
 
 
 def _get_vix_regime(vix: float) -> str:
@@ -71,7 +81,7 @@ class SchedulerMixin:
     _ALERT_MODES = {
         "normal": {
             "label": "🟢 일상",
-            "risk_interval": 120,       # 리스크 모니터 (초)
+            "risk_interval": 180,       # 리스크 모니터 (초)
             "news_interval": 900,       # 뉴스 모니터 (초)
             "global_news_interval": 1800,  # 글로벌 뉴스 수집 (초)
             "surge_threshold": 3.0,     # 급등 감지 %
@@ -79,19 +89,19 @@ class SchedulerMixin:
         },
         "elevated": {
             "label": "🟡 긴장",
-            "risk_interval": 60,
-            "news_interval": 600,
-            "global_news_interval": 900,
+            "risk_interval": 90,
+            "news_interval": 900,
+            "global_news_interval": 1200,
             "surge_threshold": 2.0,
-            "us_futures_interval": 1800,
+            "us_futures_interval": 2400,
         },
         "wartime": {
             "label": "🔴 전시",
-            "risk_interval": 30,
-            "news_interval": 300,
-            "global_news_interval": 300,
+            "risk_interval": 45,
+            "news_interval": 420,
+            "global_news_interval": 420,
             "surge_threshold": 1.5,
-            "us_futures_interval": 900,
+            "us_futures_interval": 1200,
         },
     }
     # 자동 강등 시간 (설정 후 N시간 무사 경과 시 한 단계 완화)
@@ -4821,6 +4831,21 @@ class SchedulerMixin:
                 h.get("ticker", ""): h for h in self._holdings_cache if h.get("ticker")
             }
         try:
+            macro = await self.macro_client.get_snapshot()
+            regime = _get_vix_regime(getattr(macro, "vix", 20.0) or 20.0)
+            scan_ttl = {
+                "calm": 240,
+                "normal": _INTRADAY_SCAN_CACHE_TTL,
+                "fear": 150,
+                "panic": 120,
+            }.get(regime, _INTRADAY_SCAN_CACHE_TTL)
+            scan_max_tickers = {
+                "calm": 12,
+                "normal": _INTRADAY_SCAN_MAX_TICKERS,
+                "fear": 20,
+                "panic": 24,
+            }.get(regime, _INTRADAY_SCAN_MAX_TICKERS)
+
             backoff_until = getattr(self, "_scan_backoff_until", None)
             if backoff_until and now < backoff_until:
                 results = list(getattr(self, "_last_scan_results", []) or [])
@@ -4833,13 +4858,12 @@ class SchedulerMixin:
                     return
             else:
                 results = await self._scan_all_stocks(
-                    max_tickers=_INTRADAY_SCAN_MAX_TICKERS,
-                    cache_ttl=_INTRADAY_SCAN_CACHE_TTL,
+                    max_tickers=scan_max_tickers,
+                    cache_ttl=scan_ttl,
                     busy_ok=True,
                 )
             self._last_scan_results = results
             self._scan_cache_time = now
-            macro = await self.macro_client.get_snapshot()
 
             # v7.0: Alert fatigue 방지 — 우선순위 기반 Top-N 알림
             # 점수순 정렬 후 상위 5개만 알림 발송 (나머지는 로그만)

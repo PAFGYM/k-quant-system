@@ -33,6 +33,7 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_DIR, "src"))
 
 from dotenv import load_dotenv
+from kstock.core.log_paths import LOG_DIR, STDOUT_LOG_FILE
 
 load_dotenv(os.path.join(PROJECT_DIR, ".env"), override=True)
 
@@ -131,6 +132,7 @@ def get_holdings() -> str:
 def restart_bot() -> str:
     """봇 재시작."""
     try:
+        os.makedirs(LOG_DIR, exist_ok=True)
         # 기존 프로세스 종료
         subprocess.run(["pkill", "-9", "-f", "kstock.app"], timeout=5)
         time.sleep(5)
@@ -139,7 +141,7 @@ def restart_bot() -> str:
             [sys.executable, "-c", "from kstock.app import main; main()"],
             cwd=PROJECT_DIR,
             env={**os.environ, "PYTHONPATH": "src"},
-            stdout=open("/tmp/kstock_bot.log", "w"),
+            stdout=open(STDOUT_LOG_FILE, "a"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )

@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from kstock import DISPLAY_VERSION
+from kstock.core.log_paths import APP_LOG_FILE, ERROR_LOG_FILE, STDOUT_LOG_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -208,12 +209,14 @@ class ControlServer:
             return f"Send failed: {e}"
 
     async def _cmd_get_logs(self, lines: int = 30, filter: str = "", **_kw) -> str:
-        log_path = "/tmp/kstock_bot.log"
-        if not os.path.exists(log_path):
-            return "Log file not found"
         try:
-            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                all_lines = f.readlines()
+            all_lines: list[str] = []
+            for path in (APP_LOG_FILE, ERROR_LOG_FILE, STDOUT_LOG_FILE):
+                if path.exists():
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        all_lines.extend(f.readlines())
+            if not all_lines:
+                return "Log file not found"
             if filter:
                 all_lines = [l for l in all_lines if filter.upper() in l.upper()]
             tail = all_lines[-lines:]

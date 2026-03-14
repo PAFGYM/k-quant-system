@@ -19,6 +19,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+from kstock.core.log_paths import ERROR_LOG_FILE, STDOUT_LOG_FILE
+
 logger = logging.getLogger(__name__)
 USER_NAME = "주호님"
 
@@ -847,10 +849,10 @@ def generate_launchd_plist(
     <integer>60</integer>
 
     <key>StandardOutPath</key>
-    <string>{log_dir}/kquant_bot_stdout.log</string>
+    <string>{STDOUT_LOG_FILE}</string>
 
     <key>StandardErrorPath</key>
-    <string>{log_dir}/kquant_bot_stderr.log</string>
+    <string>{ERROR_LOG_FILE}</string>
 
     <key>EnvironmentVariables</key>
     <dict>

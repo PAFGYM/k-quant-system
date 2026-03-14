@@ -9,6 +9,7 @@ import os
 import socket
 import sys
 from contextlib import suppress
+from collections import deque
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -20,17 +21,53 @@ except ImportError:  # pragma: no cover - production is macOS/Linux
 
 from dotenv import load_dotenv
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+from kstock.core.log_paths import (
+    APP_LOG_FILE,
+    ERROR_LOG_FILE,
+    LEGACY_LOG_DIR,
+    LEGACY_LOG_FILES,
+    LOG_DIR,
+    ROOT_DIR,
+)
+
 PID_FILE = ROOT_DIR / "bot.pid"
 RUNTIME_DIR = ROOT_DIR / "data" / "runtime"
-LOG_DIR = ROOT_DIR / "data" / "logs"
-APP_LOG_FILE = LOG_DIR / "kquant.log"
-ERROR_LOG_FILE = LOG_DIR / "kquant_error.log"
 LOCK_FILE = RUNTIME_DIR / "bot.lock"
 STATE_FILE = RUNTIME_DIR / "instance.json"
 HOSTNAME = socket.gethostname().split(".")[0]
 
 _lock_fd: int | None = None
+
+
+def _trim_legacy_logs(max_mb: int = 16, keep_lines: int = 2500) -> None:
+    """오래된 대형 로그를 보관용으로 줄여 런타임 부담과 디스크 점유를 낮춘다."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    LEGACY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    for path in LEGACY_LOG_FILES:
+        try:
+            if not path.exists() or not path.is_file():
+                continue
+            size_mb = path.stat().st_size / (1024 * 1024)
+            if size_mb < max_mb:
+                continue
+
+            with path.open("r", encoding="utf-8", errors="replace") as f:
+                tail = deque(f, maxlen=keep_lines)
+
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            archive_path = LEGACY_LOG_DIR / f"{path.stem}_{stamp}{path.suffix}"
+            archive_path.write_text("".join(tail), encoding="utf-8")
+            path.write_text("", encoding="utf-8")
+
+            logging.getLogger(__name__).info(
+                "Trimmed legacy log %s (%.1fMB -> %d lines archived to %s)",
+                path,
+                size_mb,
+                len(tail),
+                archive_path,
+            )
+        except Exception:
+            logging.getLogger(__name__).debug("Legacy log trim failed for %s", path, exc_info=True)
 
 
 def _configure_logging() -> None:
@@ -62,6 +99,7 @@ def _configure_logging() -> None:
 
 load_dotenv(override=True)
 _configure_logging()
+_trim_legacy_logs()
 logger = logging.getLogger(__name__)
 
 

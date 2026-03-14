@@ -8,6 +8,7 @@ import sys
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from kstock.bot.bot_imports import safe_edit_or_reply
+from kstock.core.log_paths import APP_LOG_FILE, ERROR_LOG_FILE, STDOUT_LOG_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -300,12 +301,14 @@ class ControlMixin:
         )
 
     def _read_log_tail(self, lines: int = 30, filter_str: str = "") -> str:
-        log_path = "/tmp/kstock_bot.log"
-        if not os.path.exists(log_path):
-            return "로그 파일 없음"
         try:
-            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                all_lines = f.readlines()
+            all_lines: list[str] = []
+            for path in (APP_LOG_FILE, ERROR_LOG_FILE, STDOUT_LOG_FILE):
+                if path.exists():
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        all_lines.extend(f.readlines())
+            if not all_lines:
+                return "로그 파일 없음"
             if filter_str:
                 all_lines = [l for l in all_lines if filter_str.upper() in l.upper()]
             tail = all_lines[-lines:]
@@ -340,3 +343,4 @@ class ControlMixin:
         except Exception:
             pass
         os.execv(sys.executable, [sys.executable, "-m", "kstock.app"])
+from kstock.core.log_paths import APP_LOG_FILE, ERROR_LOG_FILE, STDOUT_LOG_FILE

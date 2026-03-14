@@ -5,8 +5,11 @@
 
 cd /Users/botddol/k-quant-system
 
-LOG_FILE="bot.log"
+LOG_DIR="data/logs"
+LOG_FILE="${LOG_DIR}/kquant_stdout.log"
 WATCHDOG_LOG="data/watchdog.log"
+
+mkdir -p "$LOG_DIR"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$WATCHDOG_LOG"
@@ -17,7 +20,7 @@ log() {
 BOT_PID=$(pgrep -f "kstock.app")
 if [ -z "$BOT_PID" ]; then
     log "ALERT: Bot not running! Restarting..."
-    PYTHONPATH=src nohup python3 -m kstock.app > bot.log 2>&1 &
+    PYTHONPATH=src nohup python3 -m kstock.app >> "$LOG_FILE" 2>&1 &
     sleep 10
     NEW_PID=$(pgrep -f "kstock.app")
     if [ -n "$NEW_PID" ]; then
@@ -37,7 +40,7 @@ if [ "$PROC_COUNT" -gt 1 ]; then
     TOKEN=$(grep TELEGRAM_BOT_TOKEN .env | cut -d'=' -f2 | tr -d '"' | tr -d "'")
     curl -s "https://api.telegram.org/bot${TOKEN}/deleteWebhook?drop_pending_updates=true" > /dev/null 2>&1
     sleep 3
-    PYTHONPATH=src nohup python3 -m kstock.app > bot.log 2>&1 &
+    PYTHONPATH=src nohup python3 -m kstock.app >> "$LOG_FILE" 2>&1 &
     sleep 10
     log "OK: Bot restarted after duplicate cleanup (PID: $(pgrep -f 'kstock.app'))"
     exit 0

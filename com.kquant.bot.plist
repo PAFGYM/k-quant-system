@@ -17,8 +17,8 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>StandardOutPath</key>
-    <string>/Users/botddol/k-quant-system/data/bot.log</string>
+    <string>/Users/botddol/k-quant-system/data/logs/kquant_stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/botddol/k-quant-system/data/bot_error.log</string>
+    <string>/Users/botddol/k-quant-system/data/logs/kquant_error.log</string>
 </dict>
 </plist>
