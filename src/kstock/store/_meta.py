@@ -66,6 +66,26 @@ class MetaMixin:
             ).fetchone()
         return dict(row)["cnt"] > 0
 
+    def has_recent_alert_any(
+        self, ticker: str, alert_types: list[str] | tuple[str, ...], hours: int = 4,
+    ) -> bool:
+        """Check if any similar alert type was sent recently.
+
+        Useful when batch alerts and realtime alerts share the same user meaning.
+        """
+        if not alert_types:
+            return False
+        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        placeholders = ",".join("?" for _ in alert_types)
+        params = [ticker, *alert_types, cutoff]
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) as cnt FROM alerts "
+                f"WHERE ticker=? AND alert_type IN ({placeholders}) AND created_at>?",
+                params,
+            ).fetchone()
+        return dict(row)["cnt"] > 0
+
     # -- chat_history (v3.5) ---------------------------------------------------
 
     def add_chat_message(self, role: str, content: str) -> int:

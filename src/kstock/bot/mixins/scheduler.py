@@ -5016,9 +5016,17 @@ class SchedulerMixin:
             info = r.info
             change_pct = getattr(info, "change_pct", 0)
             score = r.score
+            pressure = str(getattr(info, "pressure", "") or "")
+            is_held = bool(getattr(self, "_holdings_index", {}).get(r.ticker))
 
             # 급등 감지: 경계 모드별 임계값 적용
             if change_pct >= self._SURGE_THRESHOLD_PCT:
+                if self._has_recent_alert_any(r.ticker, ("surge", "surge_ws"), hours=12):
+                    continue
+                if not is_held and "매도" in pressure and change_pct < 7.0:
+                    continue
+                if getattr(score, "composite", 0) < 55:
+                    continue
                 if not self.db.has_recent_alert(r.ticker, "surge", hours=8):
                     surge_stocks.append(r)
 
@@ -5060,12 +5068,23 @@ class SchedulerMixin:
                 if s.score.composite >= 110:
                     reasons.append(f"스캔 점수 {s.score.composite:.0f}점 — 펀더멘탈 양호")
                 reason_text = " | ".join(reasons[:2]) if reasons else "장중 모멘텀"
+                pressure = str(getattr(s.info, "pressure", "") or "")
+                is_held = bool(getattr(self, "_holdings_index", {}).get(s.ticker))
+                if is_held:
+                    action_hint = "보유주면 분할익절·비중 점검"
+                elif "매도" in pressure:
+                    action_hint = "미보유 추격 금지 · 눌림만 대기"
+                elif chg >= 10:
+                    action_hint = "과열 구간 · 눌림 확인 후만 검토"
+                else:
+                    action_hint = "관심종목 승격 · 눌림만 검토"
 
                 lines.append(
                     f"\U0001f4c8 {s.name} ({s.ticker})\n"
                     f"  {price:,.0f}원 | +{chg:.1f}%\n"
                     f"  점수 {s.score.composite:.0f}점 | {s.score.signal}\n"
-                    f"  💡 {reason_text}"
+                    f"  💡 {reason_text}\n"
+                    f"  🎯 {action_hint}"
                 )
                 self.db.insert_alert(s.ticker, "surge", f"급등 +{chg:.1f}%")
             buttons = []
@@ -5076,8 +5095,8 @@ class SchedulerMixin:
                         callback_data=f"fav:add:{s.ticker}:{s.name}",
                     ),
                     InlineKeyboardButton(
-                        f"\U0001f50d 상세",
-                        callback_data=f"detail:{s.ticker}",
+                        "📊 분석/토론",
+                        callback_data=f"stock_act:show:{s.ticker}",
                     ),
                 ])
             if await self._allow_alert_emit("surge_batch", priority="normal", units=min(len(surge_stocks), 3)):
@@ -8320,12 +8339,23 @@ class SchedulerMixin:
         # 2. 보유종목 목표가/손절가 체크
         self._check_sell_targets(ticker, data, now, loop)
 
+    def _has_recent_alert_any(
+        self, ticker: str, alert_types: tuple[str, ...] | list[str], hours: int = 4,
+    ) -> bool:
+        checker = getattr(self.db, "has_recent_alert_any", None)
+        if callable(checker):
+            try:
+                return bool(checker(ticker, list(alert_types), hours=hours))
+            except Exception:
+                logger.debug("has_recent_alert_any failed for %s", ticker, exc_info=True)
+        return any(self.db.has_recent_alert(ticker, alert_type, hours=hours) for alert_type in alert_types)
+
     async def _send_surge_alert(self, ticker: str, data) -> None:
         """급등 감지 알림 발송."""
         if not self.chat_id or not hasattr(self, '_application'):
             return
         try:
-            if self.db.has_recent_alert(ticker, "surge_ws", hours=12):
+            if self._has_recent_alert_any(ticker, ("surge_ws", "surge"), hours=12):
                 return
             if not await self._allow_alert_emit("surge_ws", priority="normal", units=1):
                 return
@@ -8352,19 +8382,31 @@ class SchedulerMixin:
             pressure = getattr(data, 'pressure', '중립')
             change_pct = getattr(data, 'change_pct', 0)
             price = getattr(data, 'price', 0)
+            if not is_held and "매도" in str(pressure) and change_pct < 7.0:
+                logger.debug("Surge skipped (sell pressure noise): %s", ticker)
+                return
+            if is_held:
+                action_hint = "분할익절·비중 점검 우선"
+            elif "매도" in str(pressure):
+                action_hint = "미보유 추격 금지 · 눌림만 확인"
+            elif change_pct >= 10:
+                action_hint = "과열 가능성 · 눌림 확인 전 대기"
+            else:
+                action_hint = "관심종목 승격 · 눌림만 검토"
 
             text = (
                 f"🚀 급등 감지: {name} ({ticker})\n\n"
                 f"현재가: {price:,.0f}원 ({change_pct:+.1f}%)\n"
                 f"매수세: {pressure}\n"
                 f"{score_info}\n"
-                f"{held_tag}"
+                f"{held_tag}\n"
+                f"🎯 {action_hint}"
             )
 
             keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
-                        "🔍 상세분석", callback_data=f"detail:{ticker}",
+                        "📊 분석/토론", callback_data=f"stock_act:show:{ticker}",
                     ),
                     InlineKeyboardButton(
                         "⭐ 즐겨찾기",

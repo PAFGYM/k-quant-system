@@ -237,7 +237,7 @@ class TestStrategyJ:
             ema_200=98000,
             weekly_trend="up",
             mtf_aligned=True,
-            volume_ratio=1.9,
+            volume_ratio=2.1,
             bb_squeeze=True,
             return_3m_pct=9.5,
             ma20=101500,

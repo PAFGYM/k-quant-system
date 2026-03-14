@@ -311,6 +311,7 @@ class TestRealtimeTickerNameResolution:
         obj.chat_id = 12345
         obj.db = MagicMock()
         obj.db.has_recent_alert.return_value = False
+        obj.db.has_recent_alert_any.return_value = False
         obj.db.insert_alert = MagicMock()
         obj._allow_alert_emit = AsyncMock(return_value=True)
         obj._resolve_ticker_name_async = AsyncMock(return_value="오스코텍")
@@ -323,5 +324,32 @@ class TestRealtimeTickerNameResolution:
 
         kwargs = obj._application.bot.send_message.call_args.kwargs
         assert "오스코텍 (039200)" in kwargs["text"]
+        assert "미보유 추격 금지" in kwargs["text"]
         keyboard = kwargs["reply_markup"].inline_keyboard
         assert keyboard[0][1].callback_data == "fav:add:039200:오스코텍"
+        assert keyboard[0][0].callback_data == "stock_act:show:039200"
+
+    @pytest.mark.asyncio
+    async def test_send_surge_alert_skips_duplicate_or_sell_pressure_noise(self):
+        Mixin = _get_mixin_class()
+
+        obj = Mixin.__new__(Mixin)
+        obj.chat_id = 12345
+        obj.db = MagicMock()
+        obj.db.has_recent_alert.return_value = False
+        obj.db.has_recent_alert_any.return_value = True
+        obj.db.insert_alert = MagicMock()
+        obj._allow_alert_emit = AsyncMock(return_value=True)
+        obj._resolve_ticker_name_async = AsyncMock(return_value="테스트")
+        obj._holdings_index = {}
+        obj._last_scan_results = []
+        obj._application = MagicMock()
+        obj._application.bot.send_message = AsyncMock()
+
+        await Mixin._send_surge_alert(obj, "111111", _make_data(change_pct=5.2, price=12000, pressure="강한 매도세"))
+
+        obj._application.bot.send_message.assert_not_called()
+
+        obj.db.has_recent_alert_any.return_value = False
+        await Mixin._send_surge_alert(obj, "111111", _make_data(change_pct=5.2, price=12000, pressure="강한 매도세"))
+        obj._application.bot.send_message.assert_not_called()

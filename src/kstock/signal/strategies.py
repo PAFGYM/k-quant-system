@@ -808,7 +808,7 @@ def evaluate_strategy_j(
 
     # Avoid catch-the-falling-knife setups:
     # need some medium-term strength and multi-timeframe support.
-    if tech.return_3m_pct < 5:
+    if tech.return_3m_pct < 8:
         return None
     if not (tech.mtf_aligned or tech.weekly_trend == "up"):
         return None
@@ -821,13 +821,13 @@ def evaluate_strategy_j(
         conditions_met += 1
         reasons.append("BB 스퀴즈 감지 (밴드 압축)")
 
-    # Condition 2: Volume ratio > 1.5
-    if tech.volume_ratio >= 1.8:
+    # Condition 2: Volume ratio > 2.0
+    if tech.volume_ratio >= 2.0:
         conditions_met += 1
         reasons.append(f"거래량 증가 (평균 {tech.volume_ratio:.1f}배)")
 
-    # Condition 3: RSI between 40-60 (neutral zone)
-    if 40 <= tech.rsi <= 60:
+    # Condition 3: RSI between 45-58 (narrower setup zone)
+    if 45 <= tech.rsi <= 58:
         conditions_met += 1
         reasons.append(f"RSI {tech.rsi:.1f} (중립 구간, 방향 대기)")
 
@@ -841,7 +841,12 @@ def evaluate_strategy_j(
         close_price = getattr(tech, 'close', 0) or tech.ema_50
         if close_price > 0:
             distance_pct = abs(close_price - tech.ma20) / tech.ma20 * 100
-            if distance_pct <= 2.0 and close_price >= tech.ma20 and close_price >= tech.ema_50:
+            if (
+                distance_pct <= 2.0
+                and close_price >= tech.ma20
+                and close_price >= tech.ema_50
+                and tech.ma20 >= tech.ema_50 * 0.97
+            ):
                 conditions_met += 1
                 reasons.append(f"MA20 근접 (괴리율 {distance_pct:.1f}%)")
 

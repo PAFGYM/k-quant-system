@@ -1373,17 +1373,17 @@ class TradingMixin:
         elif target_1 > 0 and current_price >= target_1:
             message = f"1차 목표권 · 일부 익절 또는 본전컷 상향 ({target_1:,.0f}원)"
         elif lane == "long_term":
-            message = "스토리 유지면 보유 · 급락만 경계"
+            message = "보유 우선 · 급락만 경계"
         elif lane == "tenbagger":
-            message = "촉매 유지 확인 · 조급한 추격 금지"
+            message = "촉매 확인 · 추격 금지"
         elif lane == "position":
-            message = "중기 추세 점검 · 눌림만 추가"
+            message = "보유 우선 · 눌림만 추가"
         elif lane == "scalp":
-            message = "장중 약세면 빠르게 축소"
+            message = "약세면 빠른 축소"
         elif pnl < 0:
-            message = "반등 확인 전 추매 금지 · 교체 후보 비교"
+            message = "추매 금지 · 교체 후보 먼저 비교"
         else:
-            message = "추세 유지 확인 후 보유 · 눌림만 대응"
+            message = "보유 우선 · 눌림만 대응"
 
         return label_map.get(lane, "📌 종합 매니저"), message
 
