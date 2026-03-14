@@ -10612,6 +10612,11 @@ class SchedulerMixin:
         5일 전 토론의 예측을 실제 가격과 비교.
         """
         try:
+            from kstock.bot.historical_learning import (
+                backfill_historical_recommendations,
+                backfill_learning_memory,
+            )
+
             unevaluated = self.db.get_unevaluated_debates(min_age_days=5)
             if not unevaluated:
                 unevaluated = []
@@ -10658,17 +10663,26 @@ class SchedulerMixin:
                 except Exception as e:
                     logger.debug("track_predictions: error for %s: %s", ticker, e)
 
+            rec_backfill = await backfill_historical_recommendations(self.db, limit=200)
+            learning_backfill = backfill_learning_memory(self.db, days=180)
             ml_updated = await self._backfill_ml_prediction_results(limit=800)
 
-            if evaluated > 0 or ml_updated > 0:
+            rec_updated = int(rec_backfill.get("updated", 0) or 0)
+            learning_events = int(learning_backfill.get("saved_events", 0) or 0)
+
+            if evaluated > 0 or ml_updated > 0 or rec_updated > 0 or learning_events > 0:
                 self.db.upsert_job_run(
                     "track_predictions", _today(),
                     status="success",
-                    message=f"debates={evaluated}, ml={ml_updated}",
+                    message=(
+                        f"debates={evaluated}, recs={rec_updated}, "
+                        f"ml={ml_updated}, learn={learning_events}"
+                    ),
                 )
                 logger.info(
-                    "job_track_predictions: evaluated debates=%d ml_predictions=%d",
-                    evaluated, ml_updated,
+                    "job_track_predictions: evaluated debates=%d recommendations=%d "
+                    "ml_predictions=%d learning_events=%d",
+                    evaluated, rec_updated, ml_updated, learning_events,
                 )
 
         except Exception as e:
