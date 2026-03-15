@@ -21,7 +21,7 @@ class TestMainMenuStructure:
 
     def test_menu_has_rows(self):
         rows = MAIN_MENU.keyboard
-        assert len(rows) == 5  # v13.1: 5행 행동형 메뉴
+        assert len(rows) == 6  # v13.1+: 리포트 메인 노출
 
     def test_each_row_has_max_two_columns(self):
         rows = MAIN_MENU.keyboard
@@ -30,7 +30,7 @@ class TestMainMenuStructure:
 
     def test_main_menu_buttons(self):
         flat = [btn.text if hasattr(btn, "text") else str(btn) for row in MAIN_MENU.keyboard for btn in row]
-        for expected in ["오늘 행동", "종목 검색", "내 보유", "시장 브리핑", "AI 토론", "즐겨찾기", "클로드", "에이전트", "더보기"]:
+        for expected in ["오늘 행동", "종목 검색", "내 보유", "시장 브리핑", "AI 토론", "즐겨찾기", "리포트", "클로드", "에이전트", "더보기"]:
             assert any(expected in b for b in flat), f"Missing: {expected}"
 
 
