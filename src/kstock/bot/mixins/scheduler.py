@@ -3647,12 +3647,19 @@ class SchedulerMixin:
             manager_label = f"{manager.get('emoji', '📌')} {manager.get('title', '자동')}"
             manager_tab = f"mgr_tab:{holding_type}" if holding_type in MANAGERS else ""
 
-            if pnl >= thresholds["take_profit_1"] * 0.8 and (
-                weight_pct >= lane_cap_pct * 1.15 or sector_pct >= 38.0 or manager_weight <= 0.92
+            cash_tight = current_cash_pct <= cash_floor_pct + 4.0
+
+            if pnl >= thresholds["take_profit_1"] * (0.6 if cash_tight else 0.8) and (
+                cash_tight
+                or weight_pct >= lane_cap_pct * 1.15
+                or sector_pct >= 38.0
+                or manager_weight <= 0.92
             ):
                 key = (ticker, "분할익절 우선")
                 if key not in existing_keys:
                     reasons = [f"+{pnl:.1f}% 수익 잠금 구간"]
+                    if cash_tight:
+                        reasons.append(f"현금 {current_cash_pct:.1f}%")
                     if sector and sector_pct >= 30.0:
                         reasons.append(f"{sector} {sector_pct:.1f}% 편중")
                     if manager_weight <= 0.92:
@@ -3668,7 +3675,7 @@ class SchedulerMixin:
                         "callback_data": f"detail:{ticker}",
                         "secondary_callback": manager_tab,
                         "button_label": f"{manager.get('emoji', '📌')} {name} 익절",
-                        "next_step": "1/3 먼저 잠그고 나머지는 추세 유지력 확인",
+                        "next_step": "1/3 먼저 잠그고 현금 바닥을 회복한 뒤 나머지 추세 유지력 확인",
                     })
                     existing_keys.add(key)
 
@@ -3703,10 +3710,14 @@ class SchedulerMixin:
                     })
                     existing_keys.add(key)
 
-            if pnl <= -3.0 and manager_weight <= 0.90 and (sector_pct >= 35.0 or weight_pct >= lane_cap_pct * 1.1):
+            if pnl <= (-1.8 if cash_tight else -3.0) and manager_weight <= (0.94 if cash_tight else 0.90) and (
+                cash_tight or sector_pct >= 35.0 or weight_pct >= lane_cap_pct * 1.1
+            ):
                 key = (ticker, "교체매도 후보")
                 if key not in existing_keys:
                     reasons = [f"{pnl:+.1f}% 약세 지속", f"레인 {manager_weight:.2f}x"]
+                    if cash_tight:
+                        reasons.append(f"현금 {current_cash_pct:.1f}%")
                     if sector and sector_pct >= 30.0:
                         reasons.append(f"{sector} {sector_pct:.1f}% 집중")
                     base_actions.append({
@@ -3720,7 +3731,7 @@ class SchedulerMixin:
                         "callback_data": f"detail:{ticker}",
                         "secondary_callback": manager_tab,
                         "button_label": f"{manager.get('emoji', '📌')} {name} 교체",
-                        "next_step": "약한 레인 축소 후 강한 신규 후보로 교체 검토",
+                        "next_step": "현금 바닥 회복 우선 · 약한 레인 축소 후 강한 신규 후보로 교체 검토",
                     })
                     existing_keys.add(key)
 
@@ -3738,7 +3749,7 @@ class SchedulerMixin:
 
         current_cash_pct = float(allocation_context.get("current_cash_pct", 0) or 0)
         cash_floor_pct = float(allocation_context.get("cash_floor_pct", 0) or 0)
-        if current_cash_pct > cash_floor_pct + 2.0:
+        if current_cash_pct > cash_floor_pct + 4.0:
             return actions
 
         weak_actions = [
@@ -4226,6 +4237,16 @@ class SchedulerMixin:
         top_urgent = next((a for a in actions if a.get("priority") in {"urgent", "caution"}), None)
         if top_urgent:
             lines.append(f"1순위: {top_urgent.get('name', '')} → {top_urgent.get('action', '')}")
+        top_management = next(
+            (
+                a for a in actions
+                if str(a.get("priority", "") or "") in {"urgent", "caution"}
+                or str(a.get("action", "") or "") in {"교체매도 후보", "분할익절 우선", "손절 필요"}
+            ),
+            None,
+        )
+        if top_management:
+            lines.append(f"최우선 관리: {top_management.get('name', '')} → {top_management.get('action', '')}")
 
         top_opportunity = next(
             (
@@ -4336,7 +4357,7 @@ class SchedulerMixin:
             if names:
                 lines.append(f"강세 축: {names}")
 
-        return list(dict.fromkeys(line for line in lines if line))[:8]
+        return list(dict.fromkeys(line for line in lines if line))[:9]
 
     async def _send_daily_actions(self, context, macro) -> None:
         """오늘의 할 일 메시지 전송."""

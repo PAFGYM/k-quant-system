@@ -131,6 +131,7 @@ def test_build_daily_action_coach_lines_summarizes_market_and_top_actions():
 
     assert any("기본 태세:" in line for line in lines)
     assert any("1순위: 씨에스윈드" in line for line in lines)
+    assert any("최우선 관리: 씨에스윈드" in line for line in lines)
     assert any("신규 후보: 텐배거주" in line for line in lines)
     assert any("오늘 관리: 축소 1 · 추가 1 · 교체 0" in line for line in lines)
     assert any("회피:" in line for line in lines)
@@ -286,6 +287,41 @@ def test_generate_daily_actions_links_rotation_candidate_when_cash_tight():
     assert "교체매수 우선" in candidate["next_step"]
     assert "교체재원 비에이치아이" in candidate["allocation_summary"]
     assert "교체 비에이치아이" in ranking["reason"]
+
+
+def test_generate_daily_actions_trims_profit_earlier_when_cash_is_tight():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin.db = MagicMock()
+    mixin.db.get_active_holdings.return_value = [
+        {
+            "ticker": "083650",
+            "name": "비에이치아이",
+            "buy_price": 100_000,
+            "current_price": 113_000,
+            "eval_amount": 40_000_000,
+            "quantity": 400,
+            "holding_type": "position",
+        },
+    ]
+    mixin.db.get_portfolio_snapshots.return_value = [
+        {"total_value": 100_000_000, "cash": 16_000_000},
+    ]
+    mixin._get_price = MagicMock(side_effect=lambda ticker, base_price=0: {"083650": 113_000}.get(ticker, base_price))
+    mixin._build_downside_playbook = MagicMock(return_value=None)
+    mixin._load_recent_manager_scorecards = MagicMock(
+        return_value={
+            "position": {"weight_adj": 0.96, "avg_return_5d": 0.4},
+        }
+    )
+    mixin._build_daily_candidate_actions = MagicMock(return_value=[])
+
+    with patch("kstock.bot.mixins.scheduler.detect_regime", return_value=MagicMock(mode="neutral", label="중립", emoji="⚪")):
+        actions = asyncio.run(mixin._generate_daily_actions(_make_macro()))
+
+    trim_action = next(a for a in actions if a["ticker"] == "083650" and a["action"] == "분할익절 우선")
+    assert "현금 16.0%" in trim_action["reason"]
 
 
 def test_build_daily_candidate_actions_applies_personal_lane_bias():
