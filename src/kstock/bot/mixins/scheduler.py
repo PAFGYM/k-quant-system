@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time as _time
+from datetime import datetime as _dt
 
 from kstock.bot.bot_imports import *  # noqa: F403
 from kstock.core.market_calendar import is_kr_market_open, market_status_text, next_market_day
@@ -40,6 +42,85 @@ except Exception:
 _RESCHEDULE_COOLDOWN = 300  # 5분
 _INTRADAY_SCAN_CACHE_TTL = 180
 _INTRADAY_SCAN_MAX_TICKERS = 18
+
+
+def _normalize_stock_news_title(title: str) -> str:
+    """보유/관심 뉴스 중복 제거용 제목 정규화."""
+    text = str(title or "").strip().lower()
+    if not text:
+        return ""
+    text = text.replace("&quot;", "\"")
+    text = re.sub(r"\[[^\]]+\]", " ", text)
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = re.sub(r"[\"'“”‘’…·•,./!?~`]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _stock_news_title_fingerprint(ticker: str, title: str) -> str:
+    normalized = _normalize_stock_news_title(title)
+    if not normalized:
+        return ""
+    tokens = normalized.split()
+    core = " ".join(tokens[:10])
+    return f"title:{ticker}:{core}"
+
+
+def _stock_news_is_fresh(date_text: str, *, now: _dt | None = None, max_age_hours: int = 48) -> bool:
+    """네이버 종목뉴스 날짜 문자열이 너무 오래됐는지 판별."""
+    raw = str(date_text or "").strip()
+    if not raw:
+        return True
+    current = now or datetime.now(KST)
+    for fmt in ("%Y.%m.%d %H:%M", "%Y.%m.%d", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(raw, fmt)
+            if fmt.endswith("%H:%M"):
+                parsed = parsed.replace(tzinfo=KST)
+            else:
+                parsed = parsed.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=KST)
+            return (current - parsed).total_seconds() <= max_age_hours * 3600
+        except Exception:
+            continue
+    return True
+
+
+def _choose_ml_ohlcv_period(pred_date: str, *, now: _dt | None = None) -> str:
+    """예측일 기준으로 실제 수익률 계산에 필요한 OHLCV 기간 선택."""
+    current = now or datetime.now(KST)
+    try:
+        pred_dt = datetime.strptime(str(pred_date), "%Y-%m-%d").replace(tzinfo=KST)
+    except Exception:
+        return "3mo"
+    age_days = max(0, (current.date() - pred_dt.date()).days)
+    if age_days <= 60:
+        return "3mo"
+    if age_days <= 150:
+        return "6mo"
+    if age_days <= 330:
+        return "1y"
+    return "2y"
+
+
+def _is_strategy_relevant_title(title: str) -> bool:
+    raw = str(title or "").strip().lower()
+    text = _normalize_stock_news_title(title)
+    if not text:
+        return False
+    positive_keywords = (
+        "전쟁", "유가", "금리", "환율", "반도체", "hbm", "ai", "gpt", "원전",
+        "수주", "정책", "관세", "외인", "기관", "공매도", "수출", "운임", "조선",
+        "방산", "실적", "가이던스", "msci", "ewy", "리밸런싱", "g tc", "gtc",
+        "ces", "mwc", "computex", "호르무즈", "중동", "핵융합", "전력", "로봇",
+        "바이오", "액체생검", "매크로", "리스크", "급등", "급락",
+    )
+    negative_keywords = (
+        "면세점", "브랜드", "모십니다", "공모전", "과정 개설", "상담", "민원처리반",
+        "사주팔자", "배당률", "입문과정", "참가자 모집", "팝업", "광고", "매매 포인트",
+    )
+    return any(keyword in text for keyword in positive_keywords) and not any(
+        keyword in text or keyword in raw for keyword in negative_keywords
+    )
 
 
 def _get_vix_regime(vix: float) -> str:
@@ -4818,6 +4899,14 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("Morning briefing learning context failed", exc_info=True)
 
+            strategy_watch_ctx = ""
+            try:
+                brief = self._build_strategy_watch_brief()
+                if brief:
+                    strategy_watch_ctx = f"\n{brief}\n"
+            except Exception:
+                logger.debug("Morning briefing strategy watch failed", exc_info=True)
+
             prompt = (
                 f"주호님의 오늘 아침 투자 브리핑을 작성해주세요.\n\n"
                 f"[시장 데이터]\n"
@@ -4837,6 +4926,7 @@ class SchedulerMixin:
                 f"{oil_ctx}"
                 f"{cross_market_ctx}"
                 f"{learning_ctx}\n"
+                f"{strategy_watch_ctx}"
                 f"{news_ctx}"
                 f"{yt_intel_ctx}"
                 f"{special_ctx}"
@@ -6302,6 +6392,7 @@ class SchedulerMixin:
                     pnl = (cur - buy) / buy * 100
                 ht = h.get("holding_type", "swing")
                 h_lines.append(f"  {name}: {pnl:+.1f}% ({ht})")
+            strategy_watch = self._build_strategy_watch_brief(holdings_limit=4, tenbagger_limit=4)
 
             prompt = PREOPEN_ACTION_TEMPLATE.format(
                 date=datetime.now(KST).strftime("%Y-%m-%d"),
@@ -6315,7 +6406,10 @@ class SchedulerMixin:
                 kospi_futures=f"{macro.kospi:.0f}",
                 usdkrw=f"{macro.usdkrw:,.0f}",
                 usdkrw_change=f"{macro.usdkrw_change_pct:+.2f}",
-                holdings_text="\n".join(h_lines) if h_lines else "보유종목 없음",
+                holdings_text=(
+                    ("\n".join(h_lines) if h_lines else "보유종목 없음")
+                    + (f"\n{strategy_watch}" if strategy_watch else "")
+                ),
             )
 
             raw = await self.ai.analyze(
@@ -10038,13 +10132,17 @@ class SchedulerMixin:
             for ticker, name in list(ticker_names.items())[:15]:
                 try:
                     news_list = await get_stock_news(ticker, limit=5)
+                    best_alert: tuple[int, str, list[str]] | None = None
                     for news in news_list:
                         url = news.get("url", "")
                         title = news.get("title", "")
                         if not url:
                             continue
+                        if not _stock_news_is_fresh(news.get("date", "")):
+                            continue
                         dedup_key = _news_dedup_key(url)
-                        if dedup_key in sent_news:
+                        title_key = _stock_news_title_fingerprint(ticker, title)
+                        if dedup_key in sent_news or (title_key and title_key in sent_news):
                             continue
                         # 종목명이 제목에 포함된 뉴스만 (잘못된 매칭 방지)
                         name_clean = name.replace("우", "").replace("홀딩스", "")
@@ -10054,25 +10152,33 @@ class SchedulerMixin:
                             continue  # 종목명이 없는 뉴스는 무시
                         signal = assess_stock_news_headline(title)
                         is_important = any(kw in title for kw in important_kw)
-                        if signal.score == 0 and not is_important:
+                        if abs(signal.score) < 4 and not is_important:
                             continue
+                        alert_keys = [dedup_key]
+                        if title_key:
+                            alert_keys.append(title_key)
                         alert_text = (
                             f"{signal.emoji} {name} | {signal.label}\n"
                             f"{title}\n"
                             f"행동: {signal.action}\n"
                             f"🔗 {url}"
                         )
-                        alerts.append((abs(signal.score), alert_text))
-                        sent_news.add(dedup_key)
-                        # DB에도 저장 (재시작 후 중복 방지)
-                        try:
-                            self.db.conn.execute(
-                                "INSERT OR IGNORE INTO sent_news_urls (url) VALUES (?)",
-                                (dedup_key,),
-                            )
-                            self.db.conn.commit()
-                        except Exception:
-                            logger.debug("Failed to persist sent news URL to DB", exc_info=True)
+                        score = abs(signal.score) + (2 if is_important else 0)
+                        if best_alert is None or score > best_alert[0]:
+                            best_alert = (score, alert_text, alert_keys)
+                    if best_alert is not None:
+                        score, alert_text, alert_keys = best_alert
+                        alerts.append((score, alert_text))
+                        for key in alert_keys:
+                            sent_news.add(key)
+                            try:
+                                self.db.conn.execute(
+                                    "INSERT OR IGNORE INTO sent_news_urls (url) VALUES (?)",
+                                    (key,),
+                                )
+                                self.db.conn.commit()
+                            except Exception:
+                                logger.debug("Failed to persist sent news fingerprint", exc_info=True)
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.debug("News monitor for %s: %s", ticker, e)
@@ -10786,10 +10892,11 @@ class SchedulerMixin:
             import pandas as _pd
 
             market = self._get_ticker_market(ticker)
+            period = _choose_ml_ohlcv_period(pred_date)
             if hasattr(self, "data_router"):
-                ohlcv = await self.data_router.get_ohlcv(ticker, market=market, period="3mo")
+                ohlcv = await self.data_router.get_ohlcv(ticker, market=market, period=period)
             else:
-                ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
+                ohlcv = await self.yf_client.get_ohlcv(ticker, market, period=period)
             if ohlcv is None or getattr(ohlcv, "empty", True) or len(ohlcv) < 6:
                 return None
 
@@ -10823,6 +10930,128 @@ class SchedulerMixin:
         except Exception:
             logger.debug("calc_ml_prediction_actual_return failed for %s", ticker, exc_info=True)
             return None
+
+    def _build_strategy_watch_brief(
+        self,
+        *,
+        holdings_limit: int = 4,
+        tenbagger_limit: int = 4,
+        global_limit: int = 3,
+        youtube_limit: int = 3,
+    ) -> str:
+        """세계/미국/국내 동향을 보유주·텐베거와 연결한 전략 브리프."""
+        lines: list[str] = []
+
+        try:
+            with self.db._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT title, source, category, impact_score, created_at
+                    FROM global_news
+                    WHERE datetime(created_at) >= datetime('now','-36 hours')
+                      AND (
+                        is_urgent = 1
+                        OR impact_score >= 8
+                        OR category IN ('geopolitics', 'market', 'economy')
+                      )
+                    ORDER BY is_urgent DESC, impact_score DESC, datetime(created_at) DESC
+                    LIMIT 30
+                    """
+                ).fetchall()
+        except Exception:
+            rows = []
+
+        if rows:
+            lines.append("[전략 감시]")
+            seen_titles: set[str] = set()
+            added = 0
+            for row in rows:
+                title = str(row["title"] or "").strip()
+                if not _is_strategy_relevant_title(title):
+                    continue
+                norm = _normalize_stock_news_title(title)
+                if not norm or norm in seen_titles:
+                    continue
+                seen_titles.add(norm)
+                category = str(row["category"] or "market")
+                prefix = {
+                    "geopolitics": "🌍 글로벌",
+                    "economy": "🇺🇸 미국/거시",
+                    "market": "🇰🇷 국내시장",
+                }.get(category, "📰 이슈")
+                lines.append(f"{prefix}: {title}")
+                added += 1
+                if added >= global_limit:
+                    break
+
+        try:
+            yt_rows = self.db.get_recent_youtube_intelligence(hours=24, limit=20) or []
+        except Exception:
+            yt_rows = []
+        if yt_rows:
+            added = 0
+            for row in yt_rows:
+                title = str(row.get("title", "") or "").strip()
+                outlook = str(row.get("market_outlook", "") or "").strip()
+                implications = str(row.get("investment_implications", "") or "").strip()
+                if not title or len(implications) < 20 or not _is_strategy_relevant_title(title):
+                    continue
+                tag = {
+                    "bullish": "🟢 시황",
+                    "bearish": "🔴 시황",
+                    "mixed": "🟡 시황",
+                    "neutral": "⚪ 시황",
+                }.get(outlook, "📺 시황")
+                lines.append(f"{tag}: {title[:42]}")
+                lines.append(f"  → {implications[:90]}")
+                added += 1
+                if added >= youtube_limit:
+                    break
+
+        holdings = list(self.db.get_active_holdings() or [])[:holdings_limit]
+        if holdings:
+            lines.append("[보유주 연결]")
+            for h in holdings:
+                name = str(h.get("name", h.get("ticker", "")) or "").strip()
+                ticker = str(h.get("ticker", "") or "")
+                tactical = self._get_ticker_tactical_context(ticker, name)
+                flow = str(tactical.get("flow_signal", "") or "").strip()
+                action = str(tactical.get("short_timing_action", "") or "").strip()
+                holding_type = str(h.get("holding_type", "auto") or "auto")
+                context_parts = [part for part in (flow, action) if part]
+                if not context_parts:
+                    context_parts = [f"{holding_type} 기준 관찰"]
+                lines.append(f"• {name}: {' | '.join(context_parts[:2])}")
+
+        try:
+            tb_rows = self.db.get_tenbagger_universe(status="active") or []
+        except Exception:
+            tb_rows = []
+        if tb_rows:
+            lines.append("[텐베거 감시]")
+            for row in tb_rows[:tenbagger_limit]:
+                ticker = str(row.get("ticker", "") or "")
+                name = str(row.get("name", ticker) or ticker)
+                score = float(row.get("tenbagger_score", 0) or 0)
+                try:
+                    catalysts = self.db.get_tenbagger_catalysts(ticker=ticker, status="pending") or []
+                except Exception:
+                    catalysts = []
+                catalyst_text = ""
+                if catalysts:
+                    top = catalysts[0]
+                    catalyst_text = str(
+                        top.get("title")
+                        or top.get("description")
+                        or top.get("catalyst_type")
+                        or ""
+                    ).strip()
+                line = f"• {name}: {score:.0f}점"
+                if catalyst_text:
+                    line += f" | 촉매 {catalyst_text[:36]}"
+                lines.append(line)
+
+        return "\n".join(lines).strip()
 
     async def _backfill_ml_prediction_results(self, limit: int = 500) -> int:
         """actual_return이 비어 있는 ML 예측 결과를 채운다."""

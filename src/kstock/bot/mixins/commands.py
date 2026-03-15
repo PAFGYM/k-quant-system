@@ -4005,12 +4005,38 @@ class CommandsMixin:
                 ml_lines.append(f"  최근: {p.get('date', '?')} | Val AUC {p.get('val_score', 0):.3f}")
             else:
                 ml_lines.append("  데이터 없음")
+            try:
+                with self.db._connect() as conn:
+                    total_preds = int(conn.execute("SELECT COUNT(*) FROM ml_predictions").fetchone()[0] or 0)
+                    evaluated_preds = int(
+                        conn.execute(
+                            "SELECT COUNT(*) FROM ml_predictions WHERE actual_return IS NOT NULL"
+                        ).fetchone()[0] or 0
+                    )
+                    first_pred = conn.execute(
+                        "SELECT MIN(pred_date) FROM ml_predictions"
+                    ).fetchone()[0]
+                    last_pred = conn.execute(
+                        "SELECT MAX(pred_date) FROM ml_predictions"
+                    ).fetchone()[0]
+            except Exception:
+                total_preds = 0
+                evaluated_preds = 0
+                first_pred = None
+                last_pred = None
+
             if ml_accuracy.get("total", 0):
                 ml_lines.append(
                     f"  최근 7일 평가: {ml_accuracy.get('total', 0)}건 | 정확도 {ml_accuracy.get('accuracy_pct', 0):.1f}%"
                 )
             else:
                 ml_lines.append("  최근 7일 평가는 아직 대기 중")
+            if total_preds:
+                ml_lines.append(f"  누적 예측: {total_preds:,}건 | 평가 완료 {evaluated_preds:,}건")
+                if evaluated_preds == 0 and first_pred and last_pred:
+                    ml_lines.append(
+                        f"  상태: 첫 예측 구간({first_pred}~{last_pred})은 5거래일 평가 대기 중"
+                    )
             ml_lines.append("  목적: 5일내 +3% 상승 확률 예측 (이진분류)")
             sections.append("\n".join(ml_lines))
 
@@ -4061,6 +4087,20 @@ class CommandsMixin:
                     sections.append("\n".join(syn_lines))
             except Exception:
                 pass
+
+            # ── 4-b. 전략 감시 브리프 ──
+            try:
+                if hasattr(self, "_build_strategy_watch_brief"):
+                    strategy_watch = self._build_strategy_watch_brief(
+                        holdings_limit=3,
+                        tenbagger_limit=3,
+                        global_limit=2,
+                        youtube_limit=2,
+                    )
+                    if strategy_watch:
+                        sections.append(strategy_watch)
+            except Exception:
+                logger.debug("cmd_learning strategy_watch failed", exc_info=True)
 
             # ── 5. 추적 애널리스트 ──
             try:
