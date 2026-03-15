@@ -2813,6 +2813,175 @@ class SchedulerMixin:
             except Exception:
                 logger.debug("generate_strategy_report learning impact failed", exc_info=True)
 
+        def _trim_prefix(line: str) -> str:
+            line = str(line or "").strip()
+            if line.startswith("- "):
+                return line[2:].strip()
+            if line.startswith("• "):
+                return line[2:].strip()
+            return line
+
+        def _clip(text: str, limit: int = 72) -> str:
+            text = re.sub(r"\s+", " ", str(text or "").strip())
+            if len(text) <= limit:
+                return text
+            return text[: max(12, limit - 1)].rstrip() + "…"
+
+        def _clean_headline(text: str, limit: int = 52) -> str:
+            text = str(text or "").strip()
+            text = re.sub(r"\[[^\]]+\]\s*", "", text)
+            text = re.sub(r"#[\w가-힣_]+", "", text)
+            text = re.sub(r"\|\s*[^|]+$", "", text).strip()
+            return _clip(text, limit=limit)
+
+        def _pretty_sector(value: str) -> str:
+            sector_map = {
+                "nuclear_smr": "원전/SMR",
+                "space_defense": "우주/방산",
+                "blockchain_stablecoin": "블록체인/스테이블코인",
+                "optical_ai_infra": "광통신/AI 인프라",
+                "robotics": "로봇",
+                "quantum": "양자",
+            }
+            key = str(value or "").strip()
+            return sector_map.get(key, key.replace("_", " / ").strip())
+
+        def _format_holdings_section(lines_in: list[str]) -> list[str]:
+            if not lines_in:
+                return ["• 보유 종목 정보 없음"]
+
+            out: list[str] = []
+            summary = _trim_prefix(lines_in[0])
+            if summary:
+                out.append(f"• {summary}")
+
+            idx = 1
+            while idx < len(lines_in):
+                head = _trim_prefix(lines_in[idx])
+                detail = ""
+                if idx + 1 < len(lines_in) and str(lines_in[idx + 1]).startswith("  "):
+                    detail = str(lines_in[idx + 1]).strip()
+                    idx += 1
+                if head:
+                    head = head.replace(" | 📌 자동 | ", " | ")
+                    out.append("")
+                    out.append(f"• {_clip(head, 54)}")
+                if detail:
+                    detail = detail.replace(" · ", " | ")
+                    out.append(f"  └ {_clip(detail, 68)}")
+                idx += 1
+            return out
+
+        def _format_tenbagger_section(lines_in: list[str]) -> list[str]:
+            if not lines_in:
+                return ["• 텐베거 감시 종목 없음"]
+
+            out: list[str] = []
+            idx = 0
+            while idx < len(lines_in):
+                head = _trim_prefix(lines_in[idx])
+                detail = ""
+                if idx + 1 < len(lines_in) and str(lines_in[idx + 1]).startswith("  "):
+                    detail = str(lines_in[idx + 1]).strip()
+                    idx += 1
+                if head:
+                    out.append(f"• {_clip(head, 48)}")
+                if detail:
+                    detail = detail.replace(" · ", " | ")
+                    out.append(f"  └ {_clip(detail, 72)}")
+                if idx + 1 < len(lines_in):
+                    out.append("")
+                idx += 1
+            if out and out[-1] == "":
+                out.pop()
+            return out
+
+        def _format_strategy_watch_section(raw_text: str) -> list[str]:
+            if not raw_text:
+                return ["• 전략 감시 데이터 없음"]
+
+            raw_lines = [
+                line.strip()
+                for line in raw_text.splitlines()
+                if line.strip() and line.strip() not in {"[전략 감시]", "[보유주 연결]", "[텐베거 감시]"}
+            ]
+            issue_lines: list[str] = []
+            outlook_blocks: list[tuple[str, str]] = []
+            idx = 0
+            while idx < len(raw_lines):
+                line = raw_lines[idx]
+                if line.startswith(("🌍", "🇺🇸", "🇰🇷", "📰")):
+                    issue_lines.append(line)
+                elif "시황:" in line or line.startswith(("🟢", "🟡", "🔴", "⚪", "📺")):
+                    summary = ""
+                    if idx + 1 < len(raw_lines) and raw_lines[idx + 1].startswith("→"):
+                        summary = raw_lines[idx + 1]
+                        idx += 1
+                    outlook_blocks.append((line, summary))
+                idx += 1
+
+            out: list[str] = []
+            if issue_lines:
+                out.append("• 핵심 이슈")
+                for line in issue_lines[:3]:
+                    cleaned = _trim_prefix(line)
+                    if ":" in cleaned:
+                        prefix, title = cleaned.split(":", 1)
+                        cleaned = f"{prefix}: {_clean_headline(title)}"
+                    else:
+                        cleaned = _clean_headline(cleaned)
+                    out.append(f"  {cleaned}")
+            if outlook_blocks:
+                if out:
+                    out.append("")
+                out.append("• 시황 해석")
+                for title, summary in outlook_blocks[:3]:
+                    cleaned_title = _trim_prefix(title)
+                    if ":" in cleaned_title:
+                        prefix, body = cleaned_title.split(":", 1)
+                        cleaned_title = f"{prefix}: {_clean_headline(body, limit=46)}"
+                    else:
+                        cleaned_title = _clean_headline(cleaned_title, limit=46)
+                    out.append(f"  {cleaned_title}")
+                    if summary:
+                        out.append(f"    {_clip(summary.lstrip('→ ').strip(), 86)}")
+                    out.append("")
+                if out and out[-1] == "":
+                    out.pop()
+            return out or ["• 전략 감시 데이터 없음"]
+
+        def _format_learning_section(lines_in: list[str]) -> list[str]:
+            if not lines_in:
+                return ["• 학습 변화 없음"]
+
+            out: list[str] = []
+            for idx, line in enumerate(lines_in):
+                cleaned = _trim_prefix(line)
+                if not cleaned:
+                    continue
+                out.append(f"• {_clip(cleaned, 88)}")
+            return out
+
+        def _format_action_section(lines_in: list[str]) -> list[str]:
+            out: list[str] = []
+            for raw in lines_in[:6]:
+                cleaned = _trim_prefix(raw)
+                if not cleaned:
+                    continue
+                if (
+                    "최근 180일" in cleaned
+                    or "적중률" in cleaned
+                    or "리버모어" in cleaned
+                    or "오닐" in cleaned
+                    or "린치" in cleaned
+                    or "버핏" in cleaned
+                ):
+                    continue
+                out.append(f"• {_clip(cleaned, 78)}")
+                if len(out) >= 5:
+                    break
+            return out or ["• 신규 추격보다 보유 종목과 손절 기준을 먼저 확인하세요."]
+
         header_meta = []
         if macro is not None:
             header_meta.append(f"VIX {float(getattr(macro, 'vix', 0) or 0):.1f}")
@@ -2834,48 +3003,59 @@ class SchedulerMixin:
         lines.extend([
             "",
             market_heading,
-            *impact_lines[:5],
+            *[f"• {_clip(_trim_prefix(line), 78)}" for line in impact_lines[:5]],
             "",
             action_heading,
-            *action_lines[:5],
+            *_format_action_section(action_lines),
         ])
 
         if operator_lines:
             lines.extend([
                 "",
                 "👤 주호님 투자 DNA",
-                *operator_lines,
+                *[f"• {_clip(_trim_prefix(line), 54)}" for line in operator_lines],
             ])
 
         lines.extend([
             "",
             "💼 내 보유 종목",
-            *holding_lines[:10],
+            *_format_holdings_section(holding_lines[:10]),
         ])
 
         if tenbagger_lines:
             lines.extend([
                 "",
                 "🔟 텐베거 감시",
-                *tenbagger_lines[:10],
+                *_format_tenbagger_section([
+                    line.replace("  nuclear_smr", f"  섹터 {_pretty_sector('nuclear_smr')}")
+                    if line.startswith("  nuclear_smr")
+                    else line.replace("  space_defense", f"  섹터 {_pretty_sector('space_defense')}")
+                    if line.startswith("  space_defense")
+                    else line.replace("  blockchain_stablecoin", f"  섹터 {_pretty_sector('blockchain_stablecoin')}")
+                    if line.startswith("  blockchain_stablecoin")
+                    else line.replace("  optical_ai_infra", f"  섹터 {_pretty_sector('optical_ai_infra')}")
+                    if line.startswith("  optical_ai_infra")
+                    else line.replace("  robotics", f"  섹터 {_pretty_sector('robotics')}")
+                    if line.startswith("  robotics")
+                    else line.replace("  quantum", f"  섹터 {_pretty_sector('quantum')}")
+                    if line.startswith("  quantum")
+                    else line
+                    for line in tenbagger_lines[:10]
+                ]),
             ])
 
         if strategy_watch:
-            strategy_lines = [
-                line
-                for line in strategy_watch.splitlines()
-                if line.strip() and line.strip() not in {"[전략 감시]", "[보유주 연결]", "[텐베거 감시]"}
-            ]
             lines.extend([
                 "",
                 "🛰 전략 감시",
-                *strategy_lines,
+                *_format_strategy_watch_section(strategy_watch),
             ])
 
         if learning_lines:
             lines.extend([
                 "",
-                *learning_lines,
+                "🎯 학습으로 바뀐 것",
+                *_format_learning_section(learning_lines[1:] if learning_lines and "학습으로 바뀐 것" in learning_lines[0] else learning_lines),
             ])
 
         lines.extend([
