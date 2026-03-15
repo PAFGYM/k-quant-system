@@ -149,6 +149,7 @@ class MenusKisMixin:
     ) -> None:
         """증권사 리포트 서브 메뉴."""
         buttons = [
+            [InlineKeyboardButton("전략 보고서", callback_data="rpt:strategy")],
             [InlineKeyboardButton("내 보유종목 리포트", callback_data="rpt:my_holdings")],
             [InlineKeyboardButton("추천종목 리포트", callback_data="rpt:recommended")],
             [InlineKeyboardButton("목표가 상향 종목", callback_data="rpt:upgrade")],
@@ -201,6 +202,26 @@ class MenusKisMixin:
 
     async def _action_report_submenu(self, query, context, payload: str) -> None:
         """Handle report submenu callback."""
+        if payload == "strategy":
+            await safe_edit_or_reply(query, "📄 전략 보고서 생성 중... 잠시만 기다려주세요.")
+            try:
+                report_text = await self._generate_strategy_report()
+                dismiss_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0")],
+                ])
+                await send_long_message(
+                    query.message,
+                    report_text,
+                    reply_markup=dismiss_kb,
+                )
+            except Exception as e:
+                logger.error("Strategy report generation failed: %s", e, exc_info=True)
+                await query.message.reply_text(
+                    "⚠️ 전략 보고서 생성 실패. 잠시 후 다시 시도해주세요.",
+                    reply_markup=get_reply_markup(context),
+                )
+            return
+
         if payload == "my_holdings":
             # Get portfolio tickers
             portfolio = self.db.get_portfolio()

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from kstock.store.sqlite import SQLiteStore
 
@@ -73,7 +75,7 @@ def store_with_reports(store):
 # ---------------------------------------------------------------------------
 
 class TestReportSubmenuOptions:
-    """Verify 6 submenu options exist in the bot."""
+    """Verify report submenu options exist in the bot."""
 
     def test_bot_has_report_submenu_method(self):
         from kstock.bot.bot import KQuantBot
@@ -82,6 +84,10 @@ class TestReportSubmenuOptions:
     def test_bot_has_sector_report_method(self):
         from kstock.bot.bot import KQuantBot
         assert hasattr(KQuantBot, "_action_sector_report")
+
+    def test_bot_has_strategy_report_method(self):
+        from kstock.bot.bot import KQuantBot
+        assert hasattr(KQuantBot, "_generate_strategy_report")
 
     def test_sector_keywords_defined(self):
         from kstock.bot.bot import KQuantBot
@@ -221,3 +227,37 @@ class TestSectorSubmenu:
         for sector, keywords in KQuantBot.SECTOR_KEYWORDS.items():
             assert isinstance(keywords, list)
             assert len(keywords) >= 2, f"{sector} should have at least 2 keywords"
+
+
+class TestStrategyReportMenu:
+    @pytest.mark.asyncio
+    async def test_report_menu_includes_strategy_button(self):
+        from kstock.bot.bot import KQuantBot
+
+        bot = KQuantBot.__new__(KQuantBot)
+        update = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+
+        await bot._menu_reports(update, MagicMock())
+
+        markup = update.message.reply_text.await_args.kwargs["reply_markup"]
+        labels = [button.text for row in markup.inline_keyboard for button in row]
+        assert "전략 보고서" in labels
+
+    @pytest.mark.asyncio
+    async def test_strategy_report_submenu_uses_long_message(self):
+        from kstock.bot.bot import KQuantBot
+
+        bot = KQuantBot.__new__(KQuantBot)
+        bot._generate_strategy_report = AsyncMock(
+            return_value="📄 전략 보고서\n시장\n보유\n텐베거\n학습"
+        )
+        query = SimpleNamespace(message=SimpleNamespace(reply_text=AsyncMock()))
+
+        with patch("kstock.bot.mixins.menus_kis.safe_edit_or_reply", AsyncMock()) as mock_edit, \
+             patch("kstock.bot.mixins.menus_kis.send_long_message", AsyncMock()) as mock_send:
+            await bot._action_report_submenu(query, MagicMock(), "strategy")
+
+        mock_edit.assert_awaited()
+        bot._generate_strategy_report.assert_awaited_once()
+        mock_send.assert_awaited_once()
+        assert "전략 보고서" in mock_send.await_args.args[1]

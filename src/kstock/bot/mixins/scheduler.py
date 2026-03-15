@@ -2713,6 +2713,179 @@ class SchedulerMixin:
         ])
         return "\n".join(lines)
 
+    async def _generate_strategy_report(self) -> str:
+        """아침 브리핑 + 보유주 + 텐베거 + 학습 변화를 묶은 전략 보고서."""
+        try:
+            from kstock.bot.learning_engine import format_learning_impact_snapshot
+        except Exception:
+            format_learning_impact_snapshot = None
+
+        now = datetime.now(KST)
+        weekday_labels = ["월", "화", "수", "목", "금", "토", "일"]
+        is_weekend = now.weekday() >= 5
+        day_label = weekday_labels[now.weekday()]
+        report_title = "📄 주말 전략 보고서" if is_weekend else "📄 아침 전략 보고서"
+        market_heading = "🌍 휴장 점검" if is_weekend else "🌍 시장 환경"
+        action_heading = "🧭 다음 개장 준비" if is_weekend else "🧭 오늘 행동"
+
+        macro = None
+        signal_emoji, signal_label = "⚪", "데이터 확인 필요"
+        regime_label = ""
+        playbook = None
+        try:
+            macro = await self.macro_client.get_snapshot()
+            signal_emoji, signal_label = self._market_signal(macro)
+            regime = detect_regime(macro)
+            regime_label = str(getattr(regime, "label", "") or getattr(macro, "regime", "") or "").strip()
+            playbook = self._build_downside_playbook(macro)
+        except Exception:
+            logger.debug("generate_strategy_report macro failed", exc_info=True)
+
+        impact_lines = self._build_morning_market_impact_lines(macro, playbook) if macro else [
+            "- 매크로 스냅샷을 불러오지 못했습니다. 보유주와 텐베거 우선 점검이 필요합니다."
+        ]
+        action_lines = self._build_morning_action_lines(macro, {"label": regime_label}, playbook) if macro else [
+            "- 시장 데이터 복구 전까지는 신규 추격보다 보유주 손절/교체 기준을 먼저 확인하세요."
+        ]
+        holding_lines = await self._build_morning_holdings_lines()
+        operator_lines = self._build_personal_operator_lines(limit=4)
+        strategy_watch = self._build_strategy_watch_brief(
+            holdings_limit=0,
+            tenbagger_limit=0,
+            global_limit=4,
+            youtube_limit=3,
+        )
+
+        tenbagger_lines: list[str] = []
+        try:
+            universe = self.db.get_tenbagger_universe(status="active") or []
+            if universe:
+                for row in universe[:5]:
+                    ticker = str(row.get("ticker", "") or "").strip()
+                    name = str(row.get("name", ticker) or ticker)
+                    score = float(row.get("tenbagger_score", 0) or 0)
+                    sector = str(row.get("sector", "") or "").strip()
+                    current_return = float(row.get("current_return", 0) or 0)
+                    trend = self.db.get_tenbagger_score_trend(ticker, weeks=4) or []
+                    delta = 0.0
+                    if len(trend) >= 2:
+                        latest = float(trend[0].get("tenbagger_score", 0) or 0)
+                        prev = float(trend[1].get("tenbagger_score", 0) or 0)
+                        delta = latest - prev
+                    catalysts = self.db.get_tenbagger_catalysts(ticker=ticker, status="pending") or []
+                    catalyst_text = ""
+                    if catalysts:
+                        top = catalysts[0]
+                        catalyst_text = str(
+                            top.get("title")
+                            or top.get("description")
+                            or top.get("catalyst_type")
+                            or ""
+                        ).strip()
+
+                    direction = "유지"
+                    if delta >= 2:
+                        direction = "상향"
+                    elif delta <= -2:
+                        direction = "하향"
+
+                    detail_parts = []
+                    if sector:
+                        detail_parts.append(sector)
+                    if abs(current_return) >= 0.1:
+                        detail_parts.append(f"수익률 {current_return:+.1f}%")
+                    if catalyst_text:
+                        detail_parts.append(f"촉매 {catalyst_text[:34]}")
+
+                    tenbagger_lines.append(
+                        f"- {name} {score:.0f}점 ({delta:+.0f}) | {direction}"
+                    )
+                    if detail_parts:
+                        tenbagger_lines.append(f"  {' · '.join(detail_parts[:3])}")
+        except Exception:
+            logger.debug("generate_strategy_report tenbagger failed", exc_info=True)
+
+        learning_lines: list[str] = []
+        if callable(format_learning_impact_snapshot):
+            try:
+                learning_text = format_learning_impact_snapshot(self.db)
+                learning_lines = [line for line in learning_text.splitlines() if line.strip()]
+            except Exception:
+                logger.debug("generate_strategy_report learning impact failed", exc_info=True)
+
+        header_meta = []
+        if macro is not None:
+            header_meta.append(f"VIX {float(getattr(macro, 'vix', 0) or 0):.1f}")
+            header_meta.append(f"원달러 {float(getattr(macro, 'usdkrw', 0) or 0):,.0f}원")
+            header_meta.append(f"EWY {float(getattr(macro, 'ewy_change_pct', 0) or 0):+.1f}%")
+            if getattr(macro, "wti_price", 0):
+                header_meta.append(f"WTI {float(getattr(macro, 'wti_change_pct', 0) or 0):+.1f}%")
+
+        lines = [
+            report_title,
+            "━" * 24,
+            f"{now.strftime('%Y-%m-%d')} ({day_label}) | {signal_emoji} {signal_label}",
+        ]
+        if regime_label:
+            lines.append(f"레짐: {regime_label}")
+        if header_meta:
+            lines.append(" | ".join(header_meta))
+
+        lines.extend([
+            "",
+            market_heading,
+            *impact_lines[:5],
+            "",
+            action_heading,
+            *action_lines[:5],
+        ])
+
+        if operator_lines:
+            lines.extend([
+                "",
+                "👤 주호님 투자 DNA",
+                *operator_lines,
+            ])
+
+        lines.extend([
+            "",
+            "💼 내 보유 종목",
+            *holding_lines[:10],
+        ])
+
+        if tenbagger_lines:
+            lines.extend([
+                "",
+                "🔟 텐베거 감시",
+                *tenbagger_lines[:10],
+            ])
+
+        if strategy_watch:
+            strategy_lines = [
+                line
+                for line in strategy_watch.splitlines()
+                if line.strip() and line.strip() not in {"[전략 감시]", "[보유주 연결]", "[텐베거 감시]"}
+            ]
+            lines.extend([
+                "",
+                "🛰 전략 감시",
+                *strategy_lines,
+            ])
+
+        if learning_lines:
+            lines.extend([
+                "",
+                *learning_lines,
+            ])
+
+        lines.extend([
+            "",
+            "━" * 24,
+            f"🕘 {now.strftime('%Y-%m-%d %H:%M KST')}",
+            "🤖 K-Quant v13.0 | 전략 보고서",
+        ])
+        return "\n".join(lines)
+
     async def _send_manager_watchlist_scan(self, context, macro) -> None:
         """매니저별 관심종목 매수 스캔 — 기술적 데이터 보강 후 AI 분석."""
         today_str = _today()
@@ -11041,7 +11214,7 @@ class SchedulerMixin:
                     break
 
         holdings = list(self.db.get_active_holdings() or [])[:holdings_limit]
-        if holdings:
+        if holdings_limit > 0 and holdings:
             lines.append("[보유주 연결]")
             for h in holdings:
                 name = str(h.get("name", h.get("ticker", "")) or "").strip()
@@ -11059,7 +11232,7 @@ class SchedulerMixin:
             tb_rows = self.db.get_tenbagger_universe(status="active") or []
         except Exception:
             tb_rows = []
-        if tb_rows:
+        if tenbagger_limit > 0 and tb_rows:
             lines.append("[텐베거 감시]")
             for row in tb_rows[:tenbagger_limit]:
                 ticker = str(row.get("ticker", "") or "")
