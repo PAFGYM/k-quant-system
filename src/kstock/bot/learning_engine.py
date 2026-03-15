@@ -230,6 +230,115 @@ def format_operator_profile(profile: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_learning_impact_snapshot(db, days: int = 7) -> str:
+    """학습 결과가 실제 추천/코칭을 어떻게 바꾸는지 요약."""
+    lines = ["🎯 학습으로 바뀐 것"]
+
+    profile = get_user_operator_profile(db)
+    if profile:
+        focus = " · ".join(profile.get("primary_focus", [])[:3]) or "시장 · 매수 · 보유"
+        lines.append(
+            f"  개인화: {focus} 중심, {_infer_style_label(profile)} 레인 우선"
+        )
+        strengths = list(profile.get("strengths") or [])
+        risks = list(profile.get("risks") or [])
+        if strengths or risks:
+            pieces: list[str] = []
+            if strengths:
+                pieces.append(f"강점 {strengths[0]}")
+            if risks:
+                pieces.append(f"주의 {risks[0]}")
+            lines.append(f"  투자 DNA: {' | '.join(pieces)}")
+
+    latest_cards: dict[str, dict[str, Any]] = {}
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.manager_key, m.evaluated_recs, m.hit_rate, m.avg_return_5d, m.weight_adj
+                FROM manager_scorecard m
+                JOIN (
+                    SELECT manager_key, MAX(calculated_at) AS latest_ts
+                    FROM manager_scorecard
+                    GROUP BY manager_key
+                ) latest
+                  ON latest.manager_key = m.manager_key
+                 AND latest.latest_ts = m.calculated_at
+                """
+            ).fetchall()
+        latest_cards = {str(row["manager_key"]): dict(row) for row in rows}
+    except Exception:
+        latest_cards = {}
+
+    if latest_cards:
+        boosted: list[str] = []
+        reduced: list[str] = []
+        for key, card in latest_cards.items():
+            label = _MANAGER_LABELS.get(key, key)
+            weight = float(card.get("weight_adj", 1.0) or 1.0)
+            evaluated = int(card.get("evaluated_recs", 0) or 0)
+            suffix = f"({evaluated}건)"
+            if weight >= 1.05:
+                boosted.append(f"{label} {weight:.2f}x {suffix}")
+            elif weight <= 0.95:
+                reduced.append(f"{label} {weight:.2f}x {suffix}")
+        if boosted:
+            lines.append(f"  강화: {', '.join(boosted[:2])}")
+        if reduced:
+            lines.append(f"  보수화: {', '.join(reduced[:3])}")
+
+        swing_card = latest_cards.get("swing")
+        long_term_card = latest_cards.get("long_term")
+        scalp_card = latest_cards.get("scalp")
+        action_lines: list[str] = []
+        if swing_card and float(swing_card.get("weight_adj", 1.0) or 1.0) <= 0.9:
+            action_lines.append("스윙 후보는 더 까다롭게 선별")
+        if long_term_card and float(long_term_card.get("hit_rate", 0) or 0.0) >= 60:
+            action_lines.append("장기 레인은 보유/우선순위 유지")
+        if scalp_card and int(scalp_card.get("evaluated_recs", 0) or 0) < 5:
+            action_lines.append("단타 강화는 표본이 적어 과신 금지")
+        if action_lines:
+            lines.append(f"  추천 변화: {' | '.join(action_lines[:3])}")
+
+    events: list[dict[str, Any]] = []
+    try:
+        if hasattr(db, "get_learning_history"):
+            events = list(db.get_learning_history(days=days) or [])
+        else:
+            with db._connect() as conn:
+                cutoff = (datetime.now(KST) - timedelta(days=days)).strftime("%Y-%m-%d")
+                rows = conn.execute(
+                    """
+                    SELECT date, event_type, description, impact_summary, data_json
+                    FROM learning_history
+                    WHERE date >= ?
+                    ORDER BY date DESC
+                    LIMIT 30
+                    """,
+                    (cutoff,),
+                ).fetchall()
+            events = [dict(row) for row in rows]
+    except Exception:
+        events = []
+
+    if events:
+        event_map = {str(ev.get("event_type") or ""): ev for ev in events}
+        evidence: list[str] = []
+        regime = event_map.get("market_regime")
+        if regime and regime.get("description"):
+            evidence.append(str(regime["description"]))
+        cross = event_map.get("cross_market_analysis")
+        if cross and cross.get("description"):
+            evidence.append(str(cross["description"]))
+        history = event_map.get("historical_trade_debrief")
+        if history and history.get("impact_summary"):
+            evidence.append(str(history["impact_summary"]))
+        if evidence:
+            lines.append(f"  최근 근거: {' | '.join(evidence[:3])}")
+
+    return "\n".join(lines)
+
+
 # ── 매니저 성적표 계산 ─────────────────────────────────────────
 
 

@@ -333,3 +333,47 @@ def test_shadow_portfolio_summary_uses_recommendation_results(tmp_path) -> None:
     text = format_shadow_portfolio_summary(summary)
     assert "그림자 포트폴리오" in text
     assert "누적:" in text
+
+
+def test_format_learning_impact_snapshot_shows_actual_behavior_change(tmp_path) -> None:
+    from kstock.bot.learning_engine import (
+        analyze_user_trade_patterns,
+        calculate_manager_scorecard,
+        format_learning_impact_snapshot,
+    )
+
+    db = _setup_db(str(tmp_path / "impact.db"))
+    analyze_user_trade_patterns(db)
+    calculate_manager_scorecard(db, days=30)
+
+    with db._connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE learning_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                data_json TEXT DEFAULT '{}',
+                impact_summary TEXT DEFAULT '',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO learning_history
+            (date, event_type, description, impact_summary, created_at)
+            VALUES
+            ('2026-03-14', 'market_regime', '시장 레짐: bear (점수 -23, 신뢰도 65%)', '', '2026-03-14T09:00:00'),
+            ('2026-03-14', 'historical_trade_debrief', '과거 매매 교훈 재학습', '수익 구간에서 분할 매도 전략 유지', '2026-03-14T09:05:00')
+            """
+        )
+
+    text = format_learning_impact_snapshot(db)
+
+    assert "학습으로 바뀐 것" in text
+    assert "개인화:" in text
+    assert ("강화:" in text) or ("보수화:" in text)
+    assert "추천 변화:" in text
+    assert "최근 근거:" in text

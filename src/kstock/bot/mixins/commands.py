@@ -3972,6 +3972,16 @@ class CommandsMixin:
             except Exception:
                 pass
 
+            # ── 0-d. 학습이 실제로 바꾼 것 ──
+            try:
+                from kstock.bot.learning_engine import format_learning_impact_snapshot
+
+                learning_impact_text = format_learning_impact_snapshot(self.db)
+                if learning_impact_text:
+                    sections.append(learning_impact_text)
+            except Exception:
+                pass
+
             # ── 1. ML 모델 현황 ──
             ml_perf = self.db.get_ml_performance(limit=3)
             ml_accuracy = self.db.get_prediction_accuracy(days=7) or {}
