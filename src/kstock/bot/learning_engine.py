@@ -339,6 +339,122 @@ def format_learning_impact_snapshot(db, days: int = 7) -> str:
     return "\n".join(lines)
 
 
+def get_ml_progress_snapshot(db) -> dict[str, Any]:
+    """ML 예측이 현재 어느 평가 단계까지 도달했는지 요약."""
+    snapshot: dict[str, Any] = {
+        "total_predictions": 0,
+        "evaluated_predictions": 0,
+        "prediction_days": 0,
+        "first_pred_date": None,
+        "last_pred_date": None,
+        "d1_ready": 0,
+        "d3_ready": 0,
+        "d5_ready": 0,
+        "pending_5d": 0,
+        "high_conf_total": 0,
+        "high_conf_d1": 0,
+        "high_conf_d3": 0,
+        "high_conf_d5": 0,
+    }
+    try:
+        with db._connect() as conn:
+            total = int(conn.execute("SELECT COUNT(*) FROM ml_predictions").fetchone()[0] or 0)
+            evaluated = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM ml_predictions WHERE actual_return IS NOT NULL"
+                ).fetchone()[0] or 0
+            )
+            rows = conn.execute(
+                """
+                SELECT pred_date, COUNT(*) AS cnt
+                FROM ml_predictions
+                GROUP BY pred_date
+                ORDER BY pred_date ASC
+                """
+            ).fetchall()
+            high_conf_rows = conn.execute(
+                """
+                SELECT pred_date, COUNT(*) AS cnt
+                FROM ml_predictions
+                WHERE probability >= 0.65
+                GROUP BY pred_date
+                ORDER BY pred_date ASC
+                """
+            ).fetchall()
+    except Exception as e:
+        logger.debug("get_ml_progress_snapshot failed: %s", e)
+        return snapshot
+
+    date_counts = [(str(r["pred_date"]), int(r["cnt"] or 0)) for r in rows if r["pred_date"]]
+    high_conf_counts = {str(r["pred_date"]): int(r["cnt"] or 0) for r in high_conf_rows if r["pred_date"]}
+
+    snapshot["total_predictions"] = total
+    snapshot["evaluated_predictions"] = evaluated
+    snapshot["prediction_days"] = len(date_counts)
+    if date_counts:
+        snapshot["first_pred_date"] = date_counts[0][0]
+        snapshot["last_pred_date"] = date_counts[-1][0]
+
+    d1_ready = d3_ready = d5_ready = 0
+    high_conf_total = sum(high_conf_counts.values())
+    high_conf_d1 = high_conf_d3 = high_conf_d5 = 0
+
+    for idx, (pred_date, count) in enumerate(date_counts):
+        later_days = len(date_counts) - idx - 1
+        if later_days >= 1:
+            d1_ready += count
+            high_conf_d1 += high_conf_counts.get(pred_date, 0)
+        if later_days >= 3:
+            d3_ready += count
+            high_conf_d3 += high_conf_counts.get(pred_date, 0)
+        if later_days >= 5:
+            d5_ready += count
+            high_conf_d5 += high_conf_counts.get(pred_date, 0)
+
+    snapshot["d1_ready"] = d1_ready
+    snapshot["d3_ready"] = d3_ready
+    snapshot["d5_ready"] = d5_ready
+    snapshot["pending_5d"] = max(0, total - d5_ready)
+    snapshot["high_conf_total"] = high_conf_total
+    snapshot["high_conf_d1"] = high_conf_d1
+    snapshot["high_conf_d3"] = high_conf_d3
+    snapshot["high_conf_d5"] = high_conf_d5
+    return snapshot
+
+
+def format_ml_progress_snapshot(db) -> str:
+    """사용자에게 보이는 ML 진행 성적표."""
+    data = get_ml_progress_snapshot(db)
+    total = int(data.get("total_predictions", 0) or 0)
+    if total <= 0:
+        return "🧪 ML 진행 성적표\n  아직 예측 데이터가 없습니다."
+
+    first_pred = str(data.get("first_pred_date") or "-")
+    last_pred = str(data.get("last_pred_date") or "-")
+    d1_ready = int(data.get("d1_ready", 0) or 0)
+    d3_ready = int(data.get("d3_ready", 0) or 0)
+    d5_ready = int(data.get("d5_ready", 0) or 0)
+    evaluated = int(data.get("evaluated_predictions", 0) or 0)
+    pending_5d = int(data.get("pending_5d", 0) or 0)
+    high_conf_total = int(data.get("high_conf_total", 0) or 0)
+    high_conf_d3 = int(data.get("high_conf_d3", 0) or 0)
+    high_conf_d5 = int(data.get("high_conf_d5", 0) or 0)
+
+    lines = ["🧪 ML 진행 성적표"]
+    lines.append(f"  예측 구간: {first_pred} ~ {last_pred}")
+    lines.append(f"  누적 예측: {total:,}건 | 실제 D+5 평가 완료 {evaluated:,}건")
+    lines.append(f"  중간 도달: D+1 {d1_ready:,}건 | D+3 {d3_ready:,}건 | D+5 {d5_ready:,}건")
+    if pending_5d > 0:
+        lines.append(f"  대기 중: 5거래일 채점 전 {pending_5d:,}건")
+    if high_conf_total > 0:
+        lines.append(
+            f"  고확률(65%+) 추적: 전체 {high_conf_total:,}건 | D+3 {high_conf_d3:,}건 | D+5 {high_conf_d5:,}건"
+        )
+    if d5_ready == 0:
+        lines.append("  해석: 최근 예측은 아직 5거래일 채점 전이라 중간 진행도 위주로 봐야 합니다.")
+    return "\n".join(lines)
+
+
 # ── 매니저 성적표 계산 ─────────────────────────────────────────
 
 

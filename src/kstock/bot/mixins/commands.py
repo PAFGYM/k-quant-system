@@ -3982,6 +3982,16 @@ class CommandsMixin:
             except Exception:
                 pass
 
+            # ── 0-e. ML 진행 성적표 ──
+            try:
+                from kstock.bot.learning_engine import format_ml_progress_snapshot
+
+                ml_progress_text = format_ml_progress_snapshot(self.db)
+                if ml_progress_text:
+                    sections.append(ml_progress_text)
+            except Exception:
+                pass
+
             # ── 1. ML 모델 현황 ──
             ml_perf = self.db.get_ml_performance(limit=3)
             ml_accuracy = self.db.get_prediction_accuracy(days=7) or {}

@@ -189,6 +189,14 @@ def _setup_db(path: str) -> _DummyDB:
                 weight_adj REAL DEFAULT 1.0,
                 calculated_at TEXT NOT NULL
             );
+            CREATE TABLE ml_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                pred_date TEXT NOT NULL,
+                probability REAL DEFAULT 0,
+                actual_return REAL,
+                correct INTEGER DEFAULT 0
+            );
             CREATE TABLE tenbagger_universe (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ticker TEXT,
@@ -240,6 +248,17 @@ def _setup_db(path: str) -> _DummyDB:
             """
             INSERT INTO tenbagger_universe (ticker, name, status, tenbagger_score, current_return, updated_at)
             VALUES ('083650', '비에이치아이', 'active', 88.5, 0.0, '2026-03-10T08:00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO ml_predictions (ticker, pred_date, probability, actual_return, correct)
+            VALUES
+            ('005930', '2026-03-10', 0.72, NULL, 0),
+            ('000660', '2026-03-10', 0.68, NULL, 0),
+            ('005930', '2026-03-11', 0.58, NULL, 0),
+            ('000660', '2026-03-12', 0.44, NULL, 0),
+            ('005930', '2026-03-13', 0.66, NULL, 0)
             """
         )
     return db
@@ -377,3 +396,21 @@ def test_format_learning_impact_snapshot_shows_actual_behavior_change(tmp_path) 
     assert ("강화:" in text) or ("보수화:" in text)
     assert "추천 변화:" in text
     assert "최근 근거:" in text
+
+
+def test_format_ml_progress_snapshot_shows_stage_progress(tmp_path) -> None:
+    from kstock.bot.learning_engine import format_ml_progress_snapshot, get_ml_progress_snapshot
+
+    db = _setup_db(str(tmp_path / "ml_progress.db"))
+
+    snapshot = get_ml_progress_snapshot(db)
+    assert snapshot["total_predictions"] == 5
+    assert snapshot["d1_ready"] == 4
+    assert snapshot["d3_ready"] == 2
+    assert snapshot["d5_ready"] == 0
+
+    text = format_ml_progress_snapshot(db)
+    assert "ML 진행 성적표" in text
+    assert "중간 도달" in text
+    assert "D+1 4건" in text
+    assert "D+3 2건" in text
