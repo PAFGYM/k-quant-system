@@ -1657,6 +1657,8 @@ def format_daily_actions(
     actions: list[dict],
     alert_mode: str = "normal",
     coach_lines: list[str] | None = None,
+    market_open: bool = True,
+    current_dt: datetime | None = None,
 ) -> str:
     """오늘의 할 일 포맷."""
     mode_label = {
@@ -1664,14 +1666,26 @@ def format_daily_actions(
         "elevated": "\U0001f7e1 경계",
         "wartime": "\U0001f534 전시",
     }.get(alert_mode, "")
+    now_kst = current_dt or datetime.now(KST)
+    weekday_labels = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    weekday_label = weekday_labels[now_kst.weekday()]
+    title = f"\U0001f4cb {USER_NAME}, 오늘의 할 일"
+    market_status_line = f"경계 모드: {mode_label}"
+    if not market_open:
+        title = f"\U0001f4cb {USER_NAME}, {weekday_label} 점검"
+        market_status_line = f"시장 상태: 휴장일 | 경계 모드: {mode_label}"
 
     if not actions:
         return (
-            f"\U0001f4cb {USER_NAME}, 오늘의 할 일\n"
+            f"{title}\n"
             f"{'━' * 22}\n"
-            f"경계 모드: {mode_label}\n\n"
-            "오늘은 특별한 조치가 필요 없습니다.\n"
-            "시장 상황을 지켜보세요! \U0001f440"
+            f"{market_status_line}\n\n"
+            + (
+                "오늘은 시장 휴장일입니다.\n"
+                "실행보다 복기, 교체 계획, 다음 개장 준비가 우선입니다. \U0001f440"
+                if not market_open
+                else "오늘은 특별한 조치가 필요 없습니다.\n시장 상황을 지켜보세요! \U0001f440"
+            )
         )
 
     priority_labels = {
@@ -1682,9 +1696,9 @@ def format_daily_actions(
     }
 
     lines = [
-        f"\U0001f4cb {USER_NAME}, 오늘의 할 일",
+        title,
         "━" * 22,
-        f"경계 모드: {mode_label}",
+        market_status_line,
         "",
     ]
 

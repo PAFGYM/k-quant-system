@@ -4012,7 +4012,11 @@ class SchedulerMixin:
         if not actions:
             return actions
 
-        phase_key, phase_label = self._current_intraday_phase(now=now)
+        now = now or datetime.now(KST)
+        if is_kr_market_open(now.date()):
+            phase_key, phase_label = self._current_intraday_phase(now=now)
+        else:
+            phase_key, phase_label = "weekend", "휴장일"
         opportunity_map = {
             "preopen": "장전 계획만 세우고 09:05 이후 첫 분할",
             "opening": "시초 20분은 추격 말고 강도 확인 후 1차",
@@ -4021,6 +4025,7 @@ class SchedulerMixin:
             "afternoon": "오후 강도 유지면 1차, 아니면 종가 확인",
             "closing": "종가 회복 확인 시만 소량 진입",
             "offhours": "다음 장 시작 전 계획만 확정",
+            "weekend": "다음 개장 첫 20분은 관찰, 계획한 1차만 실행",
         }
         reduce_map = {
             "preopen": "장전에는 계획만, 시초 반등 실패 시 1차 집행",
@@ -4030,6 +4035,7 @@ class SchedulerMixin:
             "afternoon": "오후에도 회복 없으면 축소/교체 우선",
             "closing": "종가 약세 전환이면 오늘 바로 실행",
             "offhours": "다음 장 우선순위만 확정",
+            "weekend": "다음 개장 시초 반등 실패 시 1차 축소 계획",
         }
         risk_map = {
             "preopen": "장전에는 손절 계획만, 시초 약세 확인 즉시 대응",
@@ -4039,6 +4045,7 @@ class SchedulerMixin:
             "afternoon": "오후에도 저점 회복 없으면 교체 우선",
             "closing": "종가 회복 없으면 오늘 정리 확정",
             "offhours": "다음 장 손절/교체 우선순위만 확정",
+            "weekend": "다음 개장 약세 확인 시 손절/교체를 최우선 집행",
         }
         ranking_map = {
             "preopen": "장전엔 순서만 정하고 시초 20분 후 상단부터 실행",
@@ -4048,6 +4055,7 @@ class SchedulerMixin:
             "afternoon": "오후엔 랭킹 상단부터 정리 후 추가 판단",
             "closing": "종가엔 회복 못한 상단 종목 우선 정리",
             "offhours": "다음 장 시작 전 랭킹 상단부터 계획",
+            "weekend": "개장 전 교체/축소/추가 순서를 확정",
         }
 
         for action in actions:
@@ -4282,8 +4290,15 @@ class SchedulerMixin:
 
         return actions
 
-    def _build_daily_action_coach_lines(self, actions: list[dict], macro) -> list[str]:
+    def _build_daily_action_coach_lines(
+        self,
+        actions: list[dict],
+        macro,
+        market_open: bool | None = None,
+    ) -> list[str]:
         """액션콘솔 상단에 노출할 자동 코치 한눈 요약."""
+        if market_open is None:
+            market_open = is_kr_market_open(datetime.now(KST).date())
         playbook = self._build_downside_playbook(macro) if macro else None
         regime_mode = {}
         if macro:
@@ -4307,9 +4322,11 @@ class SchedulerMixin:
                 regime_mode=regime_mode,
             )
             if memory.headline:
-                lines.append(f"기본 태세: {memory.headline}")
+                headline_label = "기본 태세" if market_open else "휴장일 태세"
+                lines.append(f"{headline_label}: {memory.headline}")
             if memory.attack_points:
-                lines.append(f"오늘 공략: {', '.join(memory.attack_points[:2])}")
+                attack_label = "오늘 공략" if market_open else "다음 개장 공략"
+                lines.append(f"{attack_label}: {', '.join(memory.attack_points[:2])}")
             if memory.avoid_points:
                 lines.append(f"회피: {', '.join(memory.avoid_points[:2])}")
         except Exception:
@@ -4327,7 +4344,8 @@ class SchedulerMixin:
             None,
         )
         if top_management:
-            lines.append(f"최우선 관리: {top_management.get('name', '')} → {top_management.get('action', '')}")
+            manage_label = "최우선 관리" if market_open else "휴장일 최우선 점검"
+            lines.append(f"{manage_label}: {top_management.get('name', '')} → {top_management.get('action', '')}")
 
         top_opportunity = next(
             (
@@ -4338,7 +4356,8 @@ class SchedulerMixin:
         )
         if top_opportunity:
             manager_label = str(top_opportunity.get("manager_label", "") or "").strip()
-            buy_line = f"신규 후보: {top_opportunity.get('name', '')} → {top_opportunity.get('action', '')}"
+            buy_label = "신규 후보" if market_open else "다음 개장 후보"
+            buy_line = f"{buy_label}: {top_opportunity.get('name', '')} → {top_opportunity.get('action', '')}"
             if manager_label:
                 buy_line += f" ({manager_label})"
             lines.append(buy_line)
@@ -4358,7 +4377,8 @@ class SchedulerMixin:
             if str(action.get("rotation_source", "") or "").strip():
                 rotation_count += 1
         if trim_count or add_count or rotation_count:
-            lines.append(f"오늘 관리: 축소 {trim_count} · 추가 {add_count} · 교체 {rotation_count}")
+            manage_bucket_label = "오늘 관리" if market_open else "휴장일 점검"
+            lines.append(f"{manage_bucket_label}: 축소 {trim_count} · 추가 {add_count} · 교체 {rotation_count}")
 
         for line in self._build_personal_operator_lines(limit=1):
             clean = str(line or "").strip()
@@ -4398,6 +4418,12 @@ class SchedulerMixin:
             lines.append(
                 f"현금: {current_cash_pct:.1f}% | 목표 {cash_floor_pct:.0f}% ({cash_status})"
             )
+        if not market_open:
+            try:
+                next_open = next_market_day(datetime.now(KST).date())
+                lines.append(f"다음 개장: {next_open.strftime('%m-%d')} 준비 우선")
+            except Exception:
+                logger.debug("daily action coach next market day failed", exc_info=True)
         rotation_pairs = []
         for action in actions:
             source = str(action.get("rotation_source", "") or "").strip()
@@ -4447,9 +4473,15 @@ class SchedulerMixin:
 
             actions = await self._generate_daily_actions(macro)
             alert_mode = getattr(self, '_alert_mode', 'normal')
-            coach_lines = self._build_daily_action_coach_lines(actions, macro)
+            now_kst = datetime.now(KST)
+            market_open = is_kr_market_open(now_kst.date())
+            coach_lines = self._build_daily_action_coach_lines(actions, macro, market_open=market_open)
             text = format_daily_actions(
-                actions, alert_mode=alert_mode, coach_lines=coach_lines,
+                actions,
+                alert_mode=alert_mode,
+                coach_lines=coach_lines,
+                market_open=market_open,
+                current_dt=now_kst,
             )
 
             buttons = make_shortcut_rows(build_daily_action_shortcuts(actions))
@@ -11499,11 +11531,29 @@ class SchedulerMixin:
             # 리스코어링
             alerts = []
             rescored = 0
+            score_changes: list[dict] = []
+            up_count = 0
+            down_count = 0
+            flat_count = 0
+            total_diff = 0.0
+            comparison_dates: set[str] = set()
 
             for stock in universe:
                 ticker = stock.get("ticker", "")
                 name = stock.get("name", "")
-                old_score = stock.get("tenbagger_score", 0)
+                old_score = float(stock.get("tenbagger_score", 0) or 0)
+                baseline_score = old_score
+                baseline_date = ""
+                try:
+                    trend = self.db.get_tenbagger_score_trend(ticker, weeks=8) or []
+                    for row in trend:
+                        score_date = str(row.get("score_date", "") or "").strip()
+                        if score_date and score_date < today_str:
+                            baseline_score = float(row.get("tenbagger_score", baseline_score) or baseline_score)
+                            baseline_date = score_date
+                            break
+                except Exception:
+                    logger.debug("tenbagger_rescore baseline load failed for %s", ticker, exc_info=True)
 
                 # 수급 데이터 가져오기 (한국 종목만)
                 foreign_days = 0
@@ -11576,12 +11626,29 @@ class SchedulerMixin:
 
                 rescored += 1
 
+                # 점수 변동 기록
+                diff = float(score.tenbagger_score) - baseline_score
+                total_diff += diff
+                if baseline_date:
+                    comparison_dates.add(baseline_date)
+                if diff >= 0.5:
+                    up_count += 1
+                elif diff <= -0.5:
+                    down_count += 1
+                else:
+                    flat_count += 1
+                score_changes.append({
+                    "name": name,
+                    "old_score": baseline_score,
+                    "new_score": float(score.tenbagger_score),
+                    "diff": diff,
+                })
+
                 # 점수 급변 알림 (+-10점)
-                diff = score.tenbagger_score - old_score
                 if abs(diff) >= 10:
                     direction = "⬆️" if diff > 0 else "⬇️"
                     alerts.append(
-                        f"{direction} {name}: {old_score:.0f} → {score.tenbagger_score:.0f} "
+                        f"{direction} {name}: {baseline_score:.0f} → {score.tenbagger_score:.0f} "
                         f"({diff:+.0f}점)"
                     )
 
@@ -11607,6 +11674,32 @@ class SchedulerMixin:
                     f"{'━' * 24}\n"
                     f"리스코어: {rescored}종목\n"
                 )
+                if rescored:
+                    avg_diff = total_diff / max(rescored, 1)
+                    compare_label = ""
+                    if len(comparison_dates) == 1:
+                        compare_label = f" | 비교 {next(iter(comparison_dates))}"
+                    msg += (
+                        f"상향 {up_count} · 하향 {down_count} · 유지 {flat_count}"
+                        f" | 평균 변화 {avg_diff:+.1f}점{compare_label}\n"
+                    )
+                ranked_changes = sorted(
+                    score_changes,
+                    key=lambda item: (abs(float(item.get("diff", 0) or 0)), float(item.get("new_score", 0) or 0)),
+                    reverse=True,
+                )
+                notable_changes = [item for item in ranked_changes if abs(float(item.get("diff", 0) or 0)) >= 0.5]
+                display_changes = notable_changes[:6] if notable_changes else ranked_changes[:3]
+                if display_changes:
+                    msg += "\n📊 지난 리스코어 대비 핵심 변동:\n"
+                    for item in display_changes:
+                        diff = float(item.get("diff", 0) or 0)
+                        direction = "⬆️" if diff > 0 else "⬇️" if diff < 0 else "➡️"
+                        msg += (
+                            f"{direction} {item.get('name', '')}: "
+                            f"{float(item.get('old_score', 0) or 0):.0f} → {float(item.get('new_score', 0) or 0):.0f} "
+                            f"({diff:+.1f}점)\n"
+                        )
                 if alerts:
                     msg += "\n📊 점수 변동:\n" + "\n".join(alerts[:10]) + "\n"
                 if summary:

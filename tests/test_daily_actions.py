@@ -127,7 +127,7 @@ def test_build_daily_action_coach_lines_summarizes_market_and_top_actions():
 
     with patch("kstock.bot.mixins.scheduler.detect_regime", return_value=MagicMock(mode="defense", label="방어")), \
          patch("kstock.signal.krx_operator_memory.build_krx_operator_memory", return_value=dummy_memory):
-        lines = mixin._build_daily_action_coach_lines(actions, _make_macro())
+        lines = mixin._build_daily_action_coach_lines(actions, _make_macro(), market_open=True)
 
     assert any("기본 태세:" in line for line in lines)
     assert any("1순위: 씨에스윈드" in line for line in lines)
@@ -633,3 +633,26 @@ def test_apply_intraday_execution_timing_adds_phase_guidance():
     assert "오후 강도 유지" in by_action["추매 후보"]["execution_window"]
     assert "교체 우선" in by_action["교체매도 후보"]["execution_window"]
     assert "랭킹 상단부터" in by_action["유지/추가/축소 순서"]["execution_window"]
+
+
+def test_apply_intraday_execution_timing_uses_holiday_guidance_when_market_closed():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+    from kstock.core.tz import KST
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    actions = [
+        {"priority": "opportunity", "name": "SK텔레콤", "action": "추매 후보"},
+        {"priority": "caution", "name": "씨에스윈드", "action": "교체매도 후보"},
+        {"priority": "check", "name": "보유 랭킹", "action": "유지/추가/축소 순서"},
+    ]
+
+    timed = mixin._apply_intraday_execution_timing(
+        actions,
+        now=datetime(2026, 3, 15, 11, 9, tzinfo=KST),
+    )
+
+    by_action = {item["action"]: item for item in timed}
+    assert by_action["추매 후보"]["execution_window"].startswith("휴장일:")
+    assert "다음 개장" in by_action["추매 후보"]["execution_window"]
+    assert "손절/교체" in by_action["교체매도 후보"]["execution_window"]
+    assert "개장 전" in by_action["유지/추가/축소 순서"]["execution_window"]

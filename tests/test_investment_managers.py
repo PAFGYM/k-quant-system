@@ -1,5 +1,7 @@
 """Tests for manager discovery differentiation and action digest."""
 
+from datetime import datetime
+
 from kstock.bot.bot_imports import ScanResult
 from kstock.bot.investment_managers import (
     build_daily_action_shortcuts,
@@ -374,3 +376,21 @@ def test_format_daily_actions_renders_allocation_lines():
 
     assert "권장 비중 5.0%" in text
     assert "분할: 씨앗 2.5%" in text
+
+
+def test_format_daily_actions_uses_holiday_title_when_market_closed():
+    text = format_daily_actions(
+        [
+            {
+                "priority": "check",
+                "name": "포트폴리오",
+                "action": "비중 점검",
+                "reason": "주말 복기",
+            },
+        ],
+        market_open=False,
+        current_dt=datetime(2026, 3, 15, 11, 0),
+    )
+
+    assert "일요일 점검" in text
+    assert "시장 상태: 휴장일" in text

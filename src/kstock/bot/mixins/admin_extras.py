@@ -3140,11 +3140,15 @@ class AdminExtrasMixin:
             except Exception:
                 pass
             actions = await self._generate_daily_actions(macro)
-            coach_lines = self._build_daily_action_coach_lines(actions, macro)
+            now_kst = datetime.now(KST)
+            market_open = is_kr_market_open(now_kst.date())
+            coach_lines = self._build_daily_action_coach_lines(actions, macro, market_open=market_open)
             text = format_daily_actions(
                 actions,
                 alert_mode=getattr(self, "_alert_mode", "normal"),
                 coach_lines=coach_lines,
+                market_open=market_open,
+                current_dt=now_kst,
             )
             buttons = make_shortcut_rows(build_daily_action_shortcuts(actions, max_buttons=5))
             manager_shortcuts = []
