@@ -324,6 +324,42 @@ def test_generate_daily_actions_trims_profit_earlier_when_cash_is_tight():
     assert "현금 16.0%" in trim_action["reason"]
 
 
+def test_generate_daily_actions_rotates_weak_swing_holding_earlier_when_cash_is_tight():
+    from kstock.bot.mixins.scheduler import SchedulerMixin
+
+    mixin = SchedulerMixin.__new__(SchedulerMixin)
+    mixin.db = MagicMock()
+    mixin.db.get_active_holdings.return_value = [
+        {
+            "ticker": "112610",
+            "name": "씨에스윈드",
+            "buy_price": 56_000,
+            "current_price": 55_100,
+            "eval_amount": 55_000_000,
+            "quantity": 1000,
+            "holding_type": "swing",
+        },
+    ]
+    mixin.db.get_portfolio_snapshots.return_value = [
+        {"total_value": 120_000_000, "cash": 14_000_000},
+    ]
+    mixin._get_price = MagicMock(side_effect=lambda ticker, base_price=0: {"112610": 55_100}.get(ticker, base_price))
+    mixin._build_downside_playbook = MagicMock(return_value=None)
+    mixin._load_recent_manager_scorecards = MagicMock(
+        return_value={
+            "swing": {"weight_adj": 0.93, "avg_return_5d": -0.4},
+        }
+    )
+    mixin._build_daily_candidate_actions = MagicMock(return_value=[])
+
+    with patch("kstock.bot.mixins.scheduler.detect_regime", return_value=MagicMock(mode="defense", label="방어", emoji="🔴")):
+        actions = asyncio.run(mixin._generate_daily_actions(_make_macro()))
+
+    rotate_action = next(a for a in actions if a["ticker"] == "112610" and a["action"] == "교체매도 후보")
+    assert "스윙 우선 정리" in rotate_action["reason"]
+    assert "현금 11.7%" in rotate_action["reason"]
+
+
 def test_build_daily_candidate_actions_applies_personal_lane_bias():
     from kstock.bot.mixins.scheduler import SchedulerMixin
 

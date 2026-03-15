@@ -28,11 +28,11 @@ def _make_tech(
     ema_50=0, ema_200=0, golden_cross=False, dead_cross=False,
     weekly_trend="neutral", mtf_aligned=False,
     high_52w=0, high_20d=0, volume_ratio=1.0,
-    bb_squeeze=False, return_3m_pct=0, ma20=0,
+    bb_squeeze=False, return_3m_pct=0, ma20=0, macd_hist=100,
 ):
     return TechnicalIndicators(
         rsi=rsi, bb_pctb=bb_pctb, bb_bandwidth=0.1,
-        macd_signal_cross=macd_cross, macd_histogram=100,
+        macd_signal_cross=macd_cross, macd_histogram=macd_hist,
         atr=atr, atr_pct=atr_pct,
         ema_50=ema_50, ema_200=ema_200,
         golden_cross=golden_cross, dead_cross=dead_cross,
@@ -237,7 +237,7 @@ class TestStrategyJ:
             ema_200=98000,
             weekly_trend="up",
             mtf_aligned=True,
-            volume_ratio=2.1,
+            volume_ratio=2.3,
             bb_squeeze=True,
             return_3m_pct=9.5,
             ma20=101500,
@@ -245,6 +245,23 @@ class TestStrategyJ:
         result = evaluate_strategy_j("005930", "삼성전자", tech, _make_macro(regime="neutral"))
         assert result is not None
         assert result.strategy == "J"
+
+    def test_mean_reversion_breakout_rejects_non_positive_macd_histogram(self):
+        tech = _make_tech(
+            rsi=50,
+            macd_cross=1,
+            ema_50=103000,
+            ema_200=98000,
+            weekly_trend="up",
+            mtf_aligned=True,
+            volume_ratio=2.4,
+            bb_squeeze=True,
+            return_3m_pct=10.0,
+            ma20=101500,
+            macd_hist=-5,
+        )
+        result = evaluate_strategy_j("005930", "삼성전자", tech, _make_macro(regime="neutral"))
+        assert result is None
 
     def test_mean_reversion_breakout_rejects_weak_volume_or_below_ma20(self):
         tech = _make_tech(

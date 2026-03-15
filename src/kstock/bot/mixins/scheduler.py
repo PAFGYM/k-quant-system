@@ -4082,12 +4082,25 @@ class SchedulerMixin:
             manager_tab = f"mgr_tab:{holding_type}" if holding_type in MANAGERS else ""
 
             cash_tight = current_cash_pct <= cash_floor_pct + 4.0
+            swing_lane = holding_type == "swing"
+            weak_lane = manager_weight <= (0.96 if swing_lane else 0.92)
+            lane_drag = avg_return_5d <= (-0.2 if swing_lane else -0.8)
 
-            if pnl >= thresholds["take_profit_1"] * (0.6 if cash_tight else 0.8) and (
+            trim_trigger = thresholds["take_profit_1"] * (0.45 if swing_lane and cash_tight else 0.65 if swing_lane else 0.6 if cash_tight else 0.8)
+            rotation_floor = (
+                -1.0 if swing_lane and cash_tight else
+                -1.8 if swing_lane else
+                -1.5 if cash_tight and holding_type == "position" else
+                -1.8 if cash_tight else
+                -3.0
+            )
+
+            if pnl >= trim_trigger and (
                 cash_tight
                 or weight_pct >= lane_cap_pct * 1.15
                 or sector_pct >= 38.0
-                or manager_weight <= 0.92
+                or weak_lane
+                or lane_drag
             ):
                 key = (ticker, "분할익절 우선")
                 if key not in existing_keys:
@@ -4096,8 +4109,12 @@ class SchedulerMixin:
                         reasons.append(f"현금 {current_cash_pct:.1f}%")
                     if sector and sector_pct >= 30.0:
                         reasons.append(f"{sector} {sector_pct:.1f}% 편중")
-                    if manager_weight <= 0.92:
+                    if weak_lane:
                         reasons.append(f"레인 {manager_weight:.2f}x")
+                    if lane_drag:
+                        reasons.append("최근 레인 성적 둔화")
+                    if swing_lane:
+                        reasons.append("스윙은 이익 보호 우선")
                     base_actions.append({
                         "priority": "caution",
                         "ticker": ticker,
@@ -4109,7 +4126,7 @@ class SchedulerMixin:
                         "callback_data": f"detail:{ticker}",
                         "secondary_callback": manager_tab,
                         "button_label": f"{manager.get('emoji', '📌')} {name} 익절",
-                        "next_step": "1/3 먼저 잠그고 현금 바닥을 회복한 뒤 나머지 추세 유지력 확인",
+                        "next_step": "1/3 먼저 잠그고, 남은 물량은 종가 유지력과 수급 재확인 후만 들고가기",
                     })
                     existing_keys.add(key)
 
@@ -4144,8 +4161,10 @@ class SchedulerMixin:
                     })
                     existing_keys.add(key)
 
-            if pnl <= (-1.8 if cash_tight else -3.0) and manager_weight <= (0.94 if cash_tight else 0.90) and (
-                cash_tight or sector_pct >= 35.0 or weight_pct >= lane_cap_pct * 1.1
+            if pnl <= rotation_floor and (
+                weak_lane or lane_drag
+            ) and (
+                cash_tight or sector_pct >= 35.0 or weight_pct >= lane_cap_pct * 1.1 or swing_lane
             ):
                 key = (ticker, "교체매도 후보")
                 if key not in existing_keys:
@@ -4154,6 +4173,10 @@ class SchedulerMixin:
                         reasons.append(f"현금 {current_cash_pct:.1f}%")
                     if sector and sector_pct >= 30.0:
                         reasons.append(f"{sector} {sector_pct:.1f}% 집중")
+                    if lane_drag:
+                        reasons.append("최근 레인 성적 둔화")
+                    if swing_lane:
+                        reasons.append("스윙 우선 정리")
                     base_actions.append({
                         "priority": "caution",
                         "ticker": ticker,
@@ -4165,7 +4188,7 @@ class SchedulerMixin:
                         "callback_data": f"detail:{ticker}",
                         "secondary_callback": manager_tab,
                         "button_label": f"{manager.get('emoji', '📌')} {name} 교체",
-                        "next_step": "현금 바닥 회복 우선 · 약한 레인 축소 후 강한 신규 후보로 교체 검토",
+                        "next_step": "현금 바닥 회복 우선 · 약한 레인부터 정리하고 강한 신규 후보로 교체 검토",
                     })
                     existing_keys.add(key)
 

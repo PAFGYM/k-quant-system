@@ -812,6 +812,12 @@ def evaluate_strategy_j(
         return None
     if not (tech.mtf_aligned or tech.weekly_trend == "up"):
         return None
+    if tech.ema_50 <= tech.ema_200 * 1.005:
+        return None
+    if tech.macd_histogram <= 0:
+        return None
+    if not (46 <= tech.rsi <= 56):
+        return None
 
     reasons = []
     conditions_met = 0
@@ -821,13 +827,13 @@ def evaluate_strategy_j(
         conditions_met += 1
         reasons.append("BB 스퀴즈 감지 (밴드 압축)")
 
-    # Condition 2: Volume ratio > 2.0
-    if tech.volume_ratio >= 2.0:
+    # Condition 2: Volume ratio > 2.2
+    if tech.volume_ratio >= 2.2:
         conditions_met += 1
         reasons.append(f"거래량 증가 (평균 {tech.volume_ratio:.1f}배)")
 
-    # Condition 3: RSI between 45-58 (narrower setup zone)
-    if 45 <= tech.rsi <= 58:
+    # Condition 3: RSI between 46-56 (narrower setup zone)
+    if 46 <= tech.rsi <= 56:
         conditions_met += 1
         reasons.append(f"RSI {tech.rsi:.1f} (중립 구간, 방향 대기)")
 
