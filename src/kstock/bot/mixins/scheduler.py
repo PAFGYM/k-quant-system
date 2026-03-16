@@ -4341,6 +4341,19 @@ class SchedulerMixin:
         }
 
         from kstock.bot.investment_managers import MANAGERS, MANAGER_THRESHOLDS
+        from kstock.signal.timing_windows import analyze_timing_windows
+
+        recent_rotation: dict[str, object] | None = None
+        try:
+            rotation_events = list(
+                self.db.get_learning_history(days=14, event_type="market_rotation_pattern") or []
+            )
+            if rotation_events:
+                recent_rotation = _safe_json_load_dict(
+                    str(rotation_events[0].get("event_data_json") or "")
+                )
+        except Exception:
+            logger.debug("personalized holding actions recent rotation load failed", exc_info=True)
 
         for holding in holdings:
             ticker = str(holding.get("ticker", "") or "").strip()
@@ -4381,6 +4394,38 @@ class SchedulerMixin:
                 ).strip()
             sector_pct = float(sector_exposure_map.get(sector, 0.0) or 0.0)
 
+            timing_phase = ""
+            timing_label = ""
+            timing_summary = ""
+            timing_action = ""
+            try:
+                ohlcv_cache = getattr(self, "_ohlcv_cache", None) or {}
+                ohlcv = ohlcv_cache.get(ticker) if isinstance(ohlcv_cache, dict) else None
+                yf_client = getattr(self, "yf_client", None)
+                if (ohlcv is None or getattr(ohlcv, "empty", True)) and yf_client is not None:
+                    ohlcv = yf_client.get_ohlcv(ticker, period="6mo")
+                if ohlcv is not None and not getattr(ohlcv, "empty", True):
+                    close = ohlcv["close"].astype(float).dropna()
+                    timing_assessment = analyze_timing_windows(close)
+                    timing_phase = str(timing_assessment.overall_phase or "")
+                    timing_label = {
+                        "end": "변곡 끝자락",
+                        "mid": "반등 확인 중",
+                        "late": "추격 구간",
+                        "early": "변곡 시작 전",
+                    }.get(timing_phase, "")
+                    timing_summary = str(timing_assessment.coach_line or "").strip()
+                    timing_action = str(getattr(timing_assessment, "entry_window", "") or "").strip()
+            except Exception:
+                logger.debug("personalized holding timing check failed for %s", ticker, exc_info=True)
+
+            rotation_bonus, rotation_note = _rotation_rank_adjustment(
+                recent_rotation,
+                candidate_sector=sector,
+                listing_market=str(holding.get("listing_market", holding.get("market", "")) or ""),
+                mgr_key=holding_type,
+            )
+
             thresholds = MANAGER_THRESHOLDS.get(holding_type, MANAGER_THRESHOLDS["swing"])
             manager = MANAGERS.get(holding_type, {})
             manager_label = f"{manager.get('emoji', '📌')} {manager.get('title', '자동')}"
@@ -4399,6 +4444,15 @@ class SchedulerMixin:
                 -1.8 if cash_tight else
                 -3.0
             )
+            if timing_phase == "late":
+                trim_trigger *= 0.85
+                rotation_floor += 0.8
+            elif timing_phase == "end":
+                rotation_floor -= 0.5
+            if rotation_bonus < 0:
+                rotation_floor += 0.8
+            elif rotation_bonus > 0:
+                rotation_floor -= 0.4
 
             if pnl >= trim_trigger and (
                 cash_tight
@@ -4420,6 +4474,10 @@ class SchedulerMixin:
                         reasons.append("최근 레인 성적 둔화")
                     if swing_lane:
                         reasons.append("스윙은 이익 보호 우선")
+                    if timing_label:
+                        reasons.append(timing_label)
+                    if rotation_note:
+                        reasons.append(rotation_note)
                     base_actions.append({
                         "priority": "caution",
                         "ticker": ticker,
@@ -4431,7 +4489,10 @@ class SchedulerMixin:
                         "callback_data": f"detail:{ticker}",
                         "secondary_callback": manager_tab,
                         "button_label": f"{manager.get('emoji', '📌')} {name} 익절",
-                        "next_step": "1/3 먼저 잠그고, 남은 물량은 종가 유지력과 수급 재확인 후만 들고가기",
+                        "next_step": (
+                            "1/3 먼저 잠그고, 남은 물량은 종가 유지력과 수급 재확인 후만 들고가기"
+                            + (f" · {timing_summary}" if timing_summary else "")
+                        ),
                     })
                     existing_keys.add(key)
 
@@ -4442,6 +4503,8 @@ class SchedulerMixin:
                 and -1.5 <= pnl <= max(4.0, thresholds["take_profit_1"] * 0.4)
                 and weight_pct <= lane_cap_pct * 0.85
                 and sector_pct < 32.0
+                and timing_phase != "late"
+                and rotation_bonus >= -1.0
             ):
                 key = (ticker, "추매 후보")
                 if key not in existing_keys:
@@ -4455,14 +4518,25 @@ class SchedulerMixin:
                         "ticker": ticker,
                         "name": name,
                         "action": "추매 후보",
-                        "reason": f"{pnl:+.1f}% · 강한 레인 {manager_weight:.2f}x · 종가 유지력 확인",
+                        "reason": " · ".join(
+                            bit for bit in [
+                                f"{pnl:+.1f}%",
+                                f"강한 레인 {manager_weight:.2f}x",
+                                "종가 유지력 확인",
+                                timing_label,
+                                rotation_note if rotation_bonus > 0 else "",
+                            ] if bit
+                        ),
                         "manager_key": holding_type,
                         "manager_label": manager_label,
                         "callback_data": f"detail:{ticker}",
                         "secondary_callback": manager_tab,
                         "button_label": f"{manager.get('emoji', '📌')} {name} 추매",
                         "allocation_summary": summary,
-                        "next_step": "양봉 마감/수급 유지 시 1차만 추가",
+                        "next_step": (
+                            "양봉 마감/수급 유지 시 1차만 추가"
+                            + (f" · {timing_summary}" if timing_summary else "")
+                        ),
                     })
                     existing_keys.add(key)
 
@@ -4482,6 +4556,10 @@ class SchedulerMixin:
                         reasons.append("최근 레인 성적 둔화")
                     if swing_lane:
                         reasons.append("스윙 우선 정리")
+                    if timing_label:
+                        reasons.append(timing_label)
+                    if rotation_note:
+                        reasons.append(rotation_note)
                     base_actions.append({
                         "priority": "caution",
                         "ticker": ticker,
@@ -4493,7 +4571,10 @@ class SchedulerMixin:
                         "callback_data": f"detail:{ticker}",
                         "secondary_callback": manager_tab,
                         "button_label": f"{manager.get('emoji', '📌')} {name} 교체",
-                        "next_step": "현금 바닥 회복 우선 · 약한 레인부터 정리하고 강한 신규 후보로 교체 검토",
+                        "next_step": (
+                            "현금 바닥 회복 우선 · 약한 레인부터 정리하고 강한 신규 후보로 교체 검토"
+                            + (f" · {timing_summary}" if timing_summary else "")
+                        ),
                     })
                     existing_keys.add(key)
 
