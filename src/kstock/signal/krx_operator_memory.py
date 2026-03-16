@@ -114,9 +114,14 @@ def _current_headline(
     wti = _safe_float(getattr(macro, "wti_change_pct", 0))
     usd = _safe_float(getattr(macro, "usdkrw_change_pct", 0))
     koru = _safe_float(getattr(macro, "koru_change_pct", 0))
+    ewy = _safe_float(getattr(macro, "ewy_change_pct", 0))
 
     if wti >= 4.0 and usd >= 0.5:
         return "유가+환율 쇼크 구간, 수급과 방어 업종 우선"
+    if ewy <= -1.0 and koru <= -4.0:
+        return "MSCI Korea/EWY 약세 구간, 외인 리스크오프와 대형주 약세 경계"
+    if ewy >= 1.0 and koru >= 2.0:
+        return "MSCI Korea/EWY 견조 구간, 한국 대형주와 외인 수급 우호"
     if vix >= 28 or koru <= -8.0:
         return "변동성 경보 구간, 시초 추격보다 생존과 반격 준비"
     if regime_key in {"bear", "crash"}:
@@ -456,6 +461,10 @@ def build_krx_operator_memory(
 
     if _safe_float(getattr(macro, "vix", 0)) >= 24:
         action_bias.append("시초 30분은 추격매수보다 변동성 소화와 강한 종목 선별이 우선")
+    if _safe_float(getattr(macro, "ewy_change_pct", 0)) <= -1.0:
+        action_bias.append("EWY 약세일 땐 코스닥보다 대형주/외인 수급 먼저 확인")
+    elif _safe_float(getattr(macro, "ewy_change_pct", 0)) >= 1.0:
+        action_bias.append("EWY 강세일 땐 삼성전자·하이닉스 주도 여부를 먼저 체크")
     if _safe_float(getattr(macro, "koru_change_pct", 0)) <= -8.0:
         action_bias.append("지수 레버리지 복원보다 개별 강세주와 인버스 방어가 우선")
     if playbook and getattr(playbook, "summary", ""):

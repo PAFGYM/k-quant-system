@@ -669,6 +669,8 @@ def format_market_status(
     lines.extend([
         "\u2500" * 25,
         "",
+        f"{_trend_arrow(getattr(macro, 'kospi_change_pct', 0))} 코스피: {getattr(macro, 'kospi', 0):,.0f} ({getattr(macro, 'kospi_change_pct', 0):+.2f}%)",
+        f"{_trend_arrow(getattr(macro, 'kosdaq_change_pct', 0))} 코스닥: {getattr(macro, 'kosdaq', 0):,.0f} ({getattr(macro, 'kosdaq_change_pct', 0):+.2f}%)",
         f"{spx_arrow} S&P500: {macro.spx_change_pct:+.2f}%",
         f"{ndx_arrow} 나스닥: {macro.nasdaq_change_pct:+.2f}%",
     ])
@@ -682,6 +684,22 @@ def format_market_status(
     if nq > 0:
         nq_chg = getattr(macro, "nq_futures_change_pct", 0)
         lines.append(f"{_trend_arrow(nq_chg)} NQ선물: {nq:,.0f} ({nq_chg:+.2f}%)")
+
+    ewy_chg = getattr(macro, "ewy_change_pct", 0)
+    koru_px = getattr(macro, "koru_price", 0)
+    koru_chg = getattr(macro, "koru_change_pct", 0)
+    if abs(ewy_chg) > 0 or koru_px > 0:
+        passive_line = f"{_trend_arrow(ewy_chg)} EWY(MSCI Korea): {ewy_chg:+.1f}%"
+        if koru_px > 0:
+            implied = koru_chg / 3.0
+            passive_line += f" | {_trend_arrow(koru_chg)} KORU: {koru_chg:+.1f}% (내재 코스피 {implied:+.1f}%)"
+        lines.append(passive_line)
+        if getattr(macro, "kospi_change_pct", 0) >= 0.5 and getattr(macro, "kosdaq_change_pct", 0) <= -0.5:
+            lines.append("  → 한국 대형주 우위, 코스닥 디커플링 가능성")
+        elif ewy_chg <= -1.0 and koru_chg <= -4.0:
+            lines.append("  → MSCI/EWY 패시브 약세, 외인 리스크오프 경계")
+        elif ewy_chg >= 1.0 and koru_chg >= 2.0:
+            lines.append("  → MSCI/EWY 견조, 한국 대형주 수급 우호")
 
     lines.append(
         f"{vix_arrow} VIX: {macro.vix:.1f} ({macro.vix_change_pct:+.1f}%) {vix_status}",

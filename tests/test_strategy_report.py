@@ -16,6 +16,9 @@ async def test_generate_strategy_report_includes_market_holdings_tenbagger_and_l
             vix=27.2,
             usdkrw=1494.4,
             ewy_change_pct=0.53,
+            koru_change_pct=3.6,
+            kospi_change_pct=1.14,
+            kosdaq_change_pct=-1.27,
             wti_price=71.0,
             wti_change_pct=3.1,
             regime="risk_off",
@@ -74,3 +77,5 @@ async def test_generate_strategy_report_includes_market_holdings_tenbagger_and_l
     assert "우진 92점 (+4)" in text
     assert "오늘 장 학습" in text
     assert "코스피-코스닥 디커플링" in text
+    assert "EWY +0.5%" in text
+    assert "KORU +3.6%" in text

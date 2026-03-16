@@ -2568,6 +2568,65 @@ class SchedulerMixin:
 
         return lines or ["- 해외 변수보다 국내 수급과 환율 반응을 먼저 확인하세요."]
 
+    def _build_korea_passive_index_lines(self, macro, playbook=None) -> list[str]:
+        """한국장 패시브/지수 축(EWY/KORU/KOSPI/KOSDAQ)을 읽기 쉬운 줄로 정리."""
+        if macro is None:
+            return []
+
+        kospi_change = float(getattr(macro, "kospi_change_pct", 0.0) or 0.0)
+        kosdaq_change = float(getattr(macro, "kosdaq_change_pct", 0.0) or 0.0)
+        ewy_change = float(getattr(macro, "ewy_change_pct", 0.0) or 0.0)
+        koru_change = float(getattr(macro, "koru_change_pct", 0.0) or 0.0)
+        implied_kospi = koru_change / 3.0 if abs(koru_change) > 1e-9 else 0.0
+
+        lines = [
+            (
+                f"- 한국 지수축: 코스피 {kospi_change:+.2f}% / "
+                f"코스닥 {kosdaq_change:+.2f}% / EWY {ewy_change:+.1f}% / "
+                f"KORU {koru_change:+.1f}%"
+            ),
+        ]
+
+        if kospi_change >= 0.5 and kosdaq_change <= -0.5:
+            lines.append("- 패턴: 대형주 우위, 코스닥 디커플링 구간")
+        elif kospi_change <= -0.5 and kosdaq_change >= 0.3:
+            lines.append("- 패턴: 대형주 부담, 코스닥/개별주 순환매 구간")
+
+        if ewy_change <= -1.0 and koru_change <= -4.0:
+            lines.append(
+                f"- 패시브 해석: MSCI Korea/EWY 약세 + KORU {koru_change:+.1f}% "
+                f"(내재 코스피 {implied_kospi:+.1f}%) → 외인 리스크오프 우세"
+            )
+        elif ewy_change >= 1.0 and koru_change >= 2.0:
+            lines.append(
+                f"- 패시브 해석: EWY 견조 + KORU {koru_change:+.1f}% "
+                f"(내재 코스피 {implied_kospi:+.1f}%) → 한국 대형주 수급 우호"
+            )
+        elif abs(ewy_change) >= 0.8 or abs(koru_change) >= 2.5:
+            lines.append(
+                f"- 패시브 해석: EWY {ewy_change:+.1f}% / KORU {koru_change:+.1f}% "
+                f"(내재 코스피 {implied_kospi:+.1f}%) → 개장 전 한국장 방향성 참고"
+            )
+
+        now = datetime.now(KST)
+        if now.month in {2, 5, 8, 11} and now.day >= 20:
+            lines.append("- MSCI 리밸런싱 윈도우: 패시브 자금 리밸런싱 변동성 경계")
+
+        if playbook and getattr(playbook, "flow_lines", None):
+            for flow in list(getattr(playbook, "flow_lines", []) or []):
+                if "MSCI" in flow or "EWY" in flow or "KORU" in flow:
+                    lines.append(f"- {flow}")
+                    break
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for line in lines:
+            key = "".join(ch.lower() for ch in str(line) if ch.isalnum())
+            if key and key not in seen:
+                seen.add(key)
+                deduped.append(line)
+        return deduped[:4]
+
     async def _build_market_rotation_learning_snapshot(self, macro=None) -> dict[str, object] | None:
         """시장 내부 로테이션 패턴을 학습 가능한 구조로 요약."""
         try:
@@ -2671,12 +2730,19 @@ class SchedulerMixin:
             "보유 원전주는 섹터 전체 흐름과 거래대금 회복 전까지 비중 축소·교체 우선으로 대응합니다."
         )
 
+        if ewy_change >= 1.0 and kospi_change >= 0.5:
+            tags.append("MSCI/EWY 대형주 선호")
+        elif ewy_change <= -1.0 and koru_change <= -4.0:
+            tags.append("MSCI/EWY 패시브 약세")
+
         return {
             "date": datetime.now(KST).strftime("%Y-%m-%d"),
             "tags": tags,
             "kospi_change_pct": kospi_change,
             "kosdaq_change_pct": kosdaq_change,
             "ewy_change_pct": ewy_change,
+            "koru_change_pct": float(getattr(macro, "koru_change_pct", 0.0) or 0.0),
+            "koru_implied_kospi_pct": round(koru_change / 3.0, 2),
             "semi_moves": semi_moves,
             "nuclear_moves": nuclear_moves,
             "semi_avg": semi_avg,
@@ -2705,6 +2771,8 @@ class SchedulerMixin:
             weak_nuclear = snapshot.get("weakest_nuclear") or {}
             summary = (
                 f"{headline} | "
+                f"EWY {float(snapshot.get('ewy_change_pct') or 0):+.1f}% / "
+                f"KORU {float(snapshot.get('koru_change_pct') or 0):+.1f}% / "
                 f"반도체 {str(top_semi.get('name') or '')} {float(top_semi.get('change_pct') or 0):+.1f}% / "
                 f"원전 {str(weak_nuclear.get('name') or '')} {float(weak_nuclear.get('change_pct') or 0):+.1f}%"
             )
@@ -2729,11 +2797,19 @@ class SchedulerMixin:
         holdings = list(snapshot.get("affected_holdings") or [])
         top_semi = snapshot.get("top_semi") or {}
         weak_nuclear = snapshot.get("weakest_nuclear") or {}
+        ewy_change = float(snapshot.get("ewy_change_pct") or 0.0)
+        koru_change = float(snapshot.get("koru_change_pct") or 0.0)
+        koru_implied = float(snapshot.get("koru_implied_kospi_pct") or 0.0)
 
         lines = [
             f"• 패턴: {', '.join(tags[:3])}",
             f"• 해석: {_clip_local(str(snapshot.get('explanation') or ''), 86)}",
         ]
+        if abs(ewy_change) >= 0.5 or abs(koru_change) >= 1.5:
+            lines.append(
+                f"• 패시브 축: EWY {ewy_change:+.1f}% / KORU {koru_change:+.1f}% "
+                f"(내재 코스피 {koru_implied:+.1f}%)"
+            )
         if holdings:
             lines.append(f"• 내 보유 연결: {', '.join(holdings[:3])} 같은 코스닥/원전 축은 테마 전체 약세 여부 우선 확인")
         if top_semi or weak_nuclear:
@@ -3315,6 +3391,7 @@ class SchedulerMixin:
         lines.extend([
             "",
             market_heading,
+            *[f"• {_clip(_trim_prefix(line), 84)}" for line in self._build_korea_passive_index_lines(macro, playbook)[:4]],
             *[f"• {_clip(_trim_prefix(line), 78)}" for line in impact_lines[:5]],
             "",
             action_heading,
