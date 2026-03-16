@@ -835,10 +835,10 @@ class PositionSizer:
                     sell_pct=1.0,
                     urgency="critical",
                     message=(
-                        f"🔴 {name} 손절 도달\n"
+                        f"🔴 {name} 손절 구간 진입\n"
                         f"   매수가 {buy_price:,.0f}원 → 현재 {current_price:,.0f}원\n"
                         f"   수익률 {pnl_pct*100:+.1f}% (한도 {stop_limit*100:.0f}%)\n"
-                        f"   ➡️ 전량 매도 권장"
+                        f"   ➡️ 종가 회복 여부 확인 후 축소/정리 판단"
                     ),
                 )
 
@@ -861,7 +861,7 @@ class PositionSizer:
                         f"현재 {current_price:,.0f}원\n"
                         f"   고점 대비 -{trail_state.trail_pct*100:.0f}% 하락\n"
                         f"   수익률 {pnl_pct*100:+.1f}%\n"
-                        f"   ➡️ 잔여 {sell_shares}주 매도 권장"
+                        f"   ➡️ 잔여 물량 부분 정리/익절 보호 판단"
                     ),
                 )
 

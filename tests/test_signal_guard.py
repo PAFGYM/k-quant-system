@@ -530,7 +530,7 @@ class TestSmartAlertsWithGuard:
         )
         # 스윙은 기존 로직에 의해 -7% 이하이므로 손절 알림
         assert msg is not None
-        assert "손절 검토" in msg
+        assert "손절선 점검" in msg
 
     def test_opportunity_alert_with_reliability(self):
         """매수 기회 알림에 신뢰도 배지."""

@@ -45,6 +45,67 @@ _INTRADAY_SCAN_CACHE_TTL = 180
 _INTRADAY_SCAN_MAX_TICKERS = 18
 
 
+def _is_kr_live_session(now: _dt | None = None) -> bool:
+    """한국 시장 실시간 장중 세션인지 판별."""
+    now_kst = now or datetime.now(KST)
+    if not is_kr_market_open(now_kst.date()):
+        return False
+    market_open = now_kst.replace(hour=9, minute=0, second=0, microsecond=0)
+    market_close = now_kst.replace(hour=15, minute=35, second=0, microsecond=0)
+    return market_open <= now_kst <= market_close
+
+
+def _profit_alert_state_key(ticker: str, alert_type: str) -> str:
+    return f"profit_alert_state:{ticker}:{alert_type}"
+
+
+def _should_send_profit_alert(
+    db,
+    *,
+    ticker: str,
+    alert_type: str,
+    pnl_pct: float,
+    now: _dt | None = None,
+    cooldown_hours: int = 24,
+    min_pnl_delta: float = 1.5,
+) -> bool:
+    """같은 손절/트레일링 알림의 반복 발송을 억제한다."""
+    raw = db.get_meta(_profit_alert_state_key(ticker, alert_type))
+    if not raw:
+        return True
+    try:
+        payload = json.loads(raw)
+        sent_at = payload.get("sent_at", "")
+        prev_pnl = float(payload.get("pnl_pct", 0.0))
+        sent_dt = datetime.fromisoformat(sent_at) if sent_at else None
+    except Exception:
+        return True
+
+    current = now or datetime.now(KST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=KST)
+    if sent_dt is None:
+        return True
+    if sent_dt.tzinfo is None:
+        sent_dt = sent_dt.replace(tzinfo=KST)
+    elapsed_hours = max(0.0, (current - sent_dt).total_seconds() / 3600.0)
+    worsened = pnl_pct <= (prev_pnl - min_pnl_delta)
+    if elapsed_hours < cooldown_hours and not worsened:
+        return False
+    return True
+
+
+def _remember_profit_alert(db, *, ticker: str, alert_type: str, pnl_pct: float, now: _dt | None = None) -> None:
+    current = now or datetime.now(KST)
+    payload = {
+        "ticker": ticker,
+        "alert_type": alert_type,
+        "pnl_pct": round(float(pnl_pct), 2),
+        "sent_at": current.isoformat(),
+    }
+    db.set_meta(_profit_alert_state_key(ticker, alert_type), json.dumps(payload, ensure_ascii=False))
+
+
 def _normalize_stock_news_title(title: str) -> str:
     """보유/관심 뉴스 중복 제거용 제목 정규화."""
     text = str(title or "").strip().lower()
@@ -9539,6 +9600,7 @@ class SchedulerMixin:
             return
         try:
             from kstock.core.position_sizer import PositionSizer
+            now_kst = datetime.now(KST)
 
             holdings = self.db.get_active_holdings()
             if not holdings or len(holdings) < 1:
@@ -9574,6 +9636,7 @@ class SchedulerMixin:
                     )
 
             # === 긴급 알림만 즉시 발송: 손절 + 트레일링 스탑 발동 ===
+            market_live = _is_kr_live_session(now_kst)
             for h in holdings:
                 ticker = h.get("ticker", "")
                 name = h.get("name", ticker)
@@ -9604,13 +9667,37 @@ class SchedulerMixin:
                 # 손절/트레일링 스탑만 즉시 발송
                 # v6.6: 워타임 시 쿨다운 4시간, 평상시 24시간
                 if alert and alert.alert_type in ("stop_loss", "trailing_stop"):
-                    _sl_cooldown_hours = 4 if getattr(self, '_alert_mode', 'normal') == 'wartime' else 24
-                    if not self.db.has_recent_alert(
-                        ticker, f"profit_{alert.alert_type}", hours=_sl_cooldown_hours,
+                    if not market_live:
+                        logger.debug(
+                            "Skip urgent %s alert for %s outside live session",
+                            alert.alert_type, ticker,
+                        )
+                        continue
+                    _sl_cooldown_hours = 24 if alert.alert_type == "stop_loss" else 12
+                    if (
+                        _should_send_profit_alert(
+                            self.db,
+                            ticker=ticker,
+                            alert_type=alert.alert_type,
+                            pnl_pct=alert.pnl_pct,
+                            now=now_kst,
+                            cooldown_hours=_sl_cooldown_hours,
+                            min_pnl_delta=1.5,
+                        )
+                        and not self.db.has_recent_alert(
+                            ticker, f"profit_{alert.alert_type}", hours=_sl_cooldown_hours,
+                        )
                     ):
                         self.db.insert_alert(
                             ticker, f"profit_{alert.alert_type}",
                             alert.message[:200],
+                        )
+                        _remember_profit_alert(
+                            self.db,
+                            ticker=ticker,
+                            alert_type=alert.alert_type,
+                            pnl_pct=alert.pnl_pct,
+                            now=now_kst,
                         )
 
                         # v6.2: 스마트 알림 (이유+액션 포함)
@@ -9665,11 +9752,11 @@ class SchedulerMixin:
                             buttons = [
                                 [
                                     InlineKeyboardButton(
-                                        "🔴 매도" if alert.alert_type == "stop_loss" else "⚠️ 매도",
+                                        "📝 정리 검토" if alert.alert_type == "stop_loss" else "📝 부분 정리",
                                         callback_data=f"pt:sell:{alert.ticker}:{alert.sell_shares}",
                                     ),
                                     InlineKeyboardButton(
-                                        "💎 홀드",
+                                        "💎 계속 관찰",
                                         callback_data=f"pt:ignore:{alert.ticker}",
                                     ),
                                 ],

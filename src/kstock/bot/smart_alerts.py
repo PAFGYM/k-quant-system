@@ -95,9 +95,10 @@ def build_holding_alert(
 
     lines: list[str] = []
 
-    # === 손절 알림 ===
-    if pnl_pct <= -7 and holding_type not in ("long_term", "position"):
-        lines.append(f"🚨 손절 검토: {name}")
+    # === 손절/손절선 근접 알림 ===
+    if pnl_pct <= -4.5 and holding_type not in ("long_term", "position"):
+        is_hard_stop = pnl_pct <= -7
+        lines.append(f"{'🚨' if is_hard_stop else '⚠️'} 손절선 점검: {name}")
         lines.append(f"{'━' * 20}")
         lines.append(f"현재: {current_price:,.0f}원 ({pnl_pct:+.1f}%)")
         lines.append(f"매수가: {buy_price:,.0f}원 | {horizon_kr}")
@@ -105,7 +106,10 @@ def build_holding_alert(
 
         # 이유
         reasons = []
-        reasons.append(f"손실 {abs(pnl_pct):.1f}% — {horizon_kr} 기준 손절 라인 근접")
+        if is_hard_stop:
+            reasons.append(f"손실 {abs(pnl_pct):.1f}% — {horizon_kr} 기준 손절선 이탈")
+        else:
+            reasons.append(f"손실 {abs(pnl_pct):.1f}% — {horizon_kr} 기준 손절선 근접")
         if holding_type == "scalp" and hold_days > 3:
             reasons.append(f"초단타 보유 {hold_days}일 — 계획 초과")
         if holding_type == "swing" and hold_days > 15:
@@ -121,11 +125,14 @@ def build_holding_alert(
         # 액션
         lines.append("🎯 추천 액션:")
         if pnl_pct <= -10:
-            lines.append("  1. 전량 손절 (추가 손실 방지)")
-            lines.append("  2. 50% 손절 + 나머지 관찰")
+            lines.append("  1. 비중부터 즉시 줄이고 뉴스/수급 재확인")
+            lines.append("  2. 반등 실패 시 남은 물량 정리")
+        elif is_hard_stop:
+            lines.append("  1. 종가 기준 회복 여부 확인 전 30~50% 축소 검토")
+            lines.append("  2. 수급 약화 지속 시 남은 물량 정리")
         else:
-            lines.append("  1. 50% 손절 (리스크 축소)")
-            lines.append("  2. 기존 손절가 유지하며 관찰")
+            lines.append("  1. 성급한 일괄 정리보다 종가 회복 여부 먼저 확인")
+            lines.append("  2. 약한 레인이면 30% 내외 축소로 리스크 축소")
 
         if stop_price and stop_price > 0:
             lines.append(f"  📌 설정 손절가: {stop_price:,.0f}원")
