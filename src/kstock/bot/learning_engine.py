@@ -458,6 +458,128 @@ def format_ml_progress_snapshot(db) -> str:
     return "\n".join(lines)
 
 
+def get_ml_operating_snapshot(db) -> dict[str, Any]:
+    """ML이 현재 어떤 영역에 개입하고 있는지 요약."""
+    snapshot: dict[str, Any] = {
+        "last_train_date": None,
+        "val_auc": 0.0,
+        "train_auc": 0.0,
+        "weights": {"lgb": 0.0, "xgb": 0.0, "lstm": 0.0},
+        "overfitting": False,
+        "high_conf_total": 0,
+        "ultra_conf_total": 0,
+        "boosted": [],
+        "reduced": [],
+    }
+
+    try:
+        from pathlib import Path as _Path
+
+        train_hist_path = _Path("models/train_history.json")
+        if train_hist_path.exists():
+            raw = json.loads(train_hist_path.read_text())
+            history = raw.get("history") if isinstance(raw, dict) else raw
+            if isinstance(history, list) and history:
+                latest = history[-1]
+                snapshot["last_train_date"] = str(latest.get("train_date") or "")
+                snapshot["val_auc"] = float(latest.get("val_auc", 0.0) or 0.0)
+                snapshot["train_auc"] = float(latest.get("train_auc", 0.0) or 0.0)
+                snapshot["weights"] = {
+                    "lgb": float(latest.get("lgb_weight", 0.0) or 0.0),
+                    "xgb": float(latest.get("xgb_weight", 0.0) or 0.0),
+                    "lstm": float(latest.get("lstm_weight", 0.0) or 0.0),
+                }
+                snapshot["overfitting"] = bool(latest.get("overfitting", False))
+    except Exception as e:
+        logger.debug("get_ml_operating_snapshot train history failed: %s", e)
+
+    try:
+        with db._connect() as conn:
+            snapshot["high_conf_total"] = int(
+                conn.execute("SELECT COUNT(*) FROM ml_predictions WHERE probability >= 0.65").fetchone()[0] or 0
+            )
+            snapshot["ultra_conf_total"] = int(
+                conn.execute("SELECT COUNT(*) FROM ml_predictions WHERE probability >= 0.80").fetchone()[0] or 0
+            )
+            rows = conn.execute(
+                """
+                SELECT manager_key, weight_adj, evaluated_recs, hit_rate
+                FROM manager_scorecard
+                WHERE calculated_at = (
+                    SELECT MAX(m2.calculated_at)
+                    FROM manager_scorecard m2
+                    WHERE m2.manager_key = manager_scorecard.manager_key
+                )
+                """
+            ).fetchall()
+    except Exception as e:
+        logger.debug("get_ml_operating_snapshot scorecards failed: %s", e)
+        rows = []
+
+    boosted: list[str] = []
+    reduced: list[str] = []
+    for row in rows:
+        key = str(row["manager_key"] or "")
+        label = _MANAGER_LABELS.get(key, key)
+        weight = float(row["weight_adj"] or 1.0)
+        evaluated = int(row["evaluated_recs"] or 0)
+        hit_rate = float(row["hit_rate"] or 0.0)
+        detail = f"{label} {weight:.2f}x"
+        if evaluated > 0:
+            detail += f" ({evaluated}건/{hit_rate:.0f}%)"
+        if weight >= 1.05:
+            boosted.append(detail)
+        elif weight <= 0.95:
+            reduced.append(detail)
+    snapshot["boosted"] = boosted
+    snapshot["reduced"] = reduced
+    return snapshot
+
+
+def format_ml_operating_snapshot(db) -> str:
+    """ML이 지금 실제로 무엇을 바꾸고 있는지 사용자에게 설명."""
+    data = get_ml_operating_snapshot(db)
+    lines = ["🤖 ML이 지금 바꾸는 것"]
+
+    train_date = str(data.get("last_train_date") or "").strip()
+    val_auc = float(data.get("val_auc", 0.0) or 0.0)
+    train_auc = float(data.get("train_auc", 0.0) or 0.0)
+    weights = dict(data.get("weights") or {})
+    if train_date:
+        status = "과적합 주의" if data.get("overfitting") else "정상"
+        lines.append(
+            "  최근 학습: "
+            f"{train_date} | Val AUC {val_auc:.3f} | "
+            f"LGB {float(weights.get('lgb', 0.0) or 0.0):.0%} / "
+            f"XGB {float(weights.get('xgb', 0.0) or 0.0):.0%} / "
+            f"LSTM {float(weights.get('lstm', 0.0) or 0.0):.0%} | {status}"
+        )
+
+    lines.append("  현재 개입: 종목 후보 정렬 · 매니저 가중치 · 보유주 교체/축소 코칭")
+
+    boosted = list(data.get("boosted") or [])
+    reduced = list(data.get("reduced") or [])
+    if boosted:
+        lines.append(f"  더 믿는 레인: {', '.join(boosted[:2])}")
+    if reduced:
+        lines.append(f"  더 보수적인 레인: {', '.join(reduced[:3])}")
+
+    high_conf_total = int(data.get("high_conf_total", 0) or 0)
+    ultra_conf_total = int(data.get("ultra_conf_total", 0) or 0)
+    if high_conf_total > 0:
+        lines.append(
+            f"  고확률 후보: 65%+ {high_conf_total:,}건 | 80%+ {ultra_conf_total:,}건"
+        )
+
+    progress = get_ml_progress_snapshot(db)
+    if int(progress.get("evaluated_predictions", 0) or 0) <= 0:
+        lines.append("  해석: 최종 D+5 채점은 아직 적지만, 지금은 레인 가중치와 후보 순위에 먼저 반영 중")
+    else:
+        lines.append("  해석: 최종 채점이 쌓일수록 고확률 후보와 약한 레인을 더 선명하게 구분합니다")
+
+    return "\n".join(lines)
+
+
 # ── 매니저 성적표 계산 ─────────────────────────────────────────
 
 

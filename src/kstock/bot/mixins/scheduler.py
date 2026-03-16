@@ -3010,9 +3010,13 @@ class SchedulerMixin:
     async def _generate_strategy_report(self) -> str:
         """아침 브리핑 + 보유주 + 텐베거 + 학습 변화를 묶은 전략 보고서."""
         try:
-            from kstock.bot.learning_engine import format_learning_impact_snapshot
+            from kstock.bot.learning_engine import (
+                format_learning_impact_snapshot,
+                format_ml_operating_snapshot,
+            )
         except Exception:
             format_learning_impact_snapshot = None
+            format_ml_operating_snapshot = None
 
         now = datetime.now(KST)
         weekday_labels = ["월", "화", "수", "목", "금", "토", "일"]
@@ -3110,6 +3114,14 @@ class SchedulerMixin:
                 learning_lines = [line for line in learning_text.splitlines() if line.strip()]
             except Exception:
                 logger.debug("generate_strategy_report learning impact failed", exc_info=True)
+
+        ml_operating_lines: list[str] = []
+        if callable(format_ml_operating_snapshot):
+            try:
+                ml_text = format_ml_operating_snapshot(self.db)
+                ml_operating_lines = [line for line in ml_text.splitlines() if line.strip()]
+            except Exception:
+                logger.debug("generate_strategy_report ml operating failed", exc_info=True)
 
         def _trim_prefix(line: str) -> str:
             line = str(line or "").strip()
@@ -3361,6 +3373,13 @@ class SchedulerMixin:
                 "",
                 "🎯 학습으로 바뀐 것",
                 *_format_learning_section(learning_lines[1:] if learning_lines and "학습으로 바뀐 것" in learning_lines[0] else learning_lines),
+            ])
+
+        if ml_operating_lines:
+            lines.extend([
+                "",
+                "🤖 ML이 지금 바꾸는 것",
+                *_format_learning_section(ml_operating_lines[1:] if ml_operating_lines and "ML이 지금 바꾸는 것" in ml_operating_lines[0] else ml_operating_lines),
             ])
 
         lines.extend([

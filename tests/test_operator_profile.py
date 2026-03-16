@@ -416,3 +416,17 @@ def test_format_ml_progress_snapshot_shows_stage_progress(tmp_path) -> None:
     assert "중간 도달" in text
     assert "D+1 4건" in text
     assert "D+3 2건" in text
+
+
+def test_format_ml_operating_snapshot_shows_where_ml_is_applied(tmp_path) -> None:
+    from kstock.bot.learning_engine import calculate_manager_scorecard, format_ml_operating_snapshot
+
+    db = _setup_db(str(tmp_path / "ml_operating.db"))
+    calculate_manager_scorecard(db, days=30)
+
+    text = format_ml_operating_snapshot(db)
+
+    assert "ML이 지금 바꾸는 것" in text
+    assert "현재 개입: 종목 후보 정렬" in text
+    assert "고확률 후보:" in text
+    assert ("더 믿는 레인:" in text) or ("더 보수적인 레인:" in text)
