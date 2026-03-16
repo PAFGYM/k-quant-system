@@ -106,6 +106,61 @@ def _remember_profit_alert(db, *, ticker: str, alert_type: str, pnl_pct: float, 
     db.set_meta(_profit_alert_state_key(ticker, alert_type), json.dumps(payload, ensure_ascii=False))
 
 
+def _timing_rank_adjustment(phase: str) -> tuple[float, str, str]:
+    phase_key = str(phase or "").strip().lower()
+    if phase_key == "end":
+        return 7.5, "변곡 끝자락", "씨앗 또는 1차 분할"
+    if phase_key == "mid":
+        return 3.0, "반등 확인 중", "눌림 확인 후 분할"
+    if phase_key == "late":
+        return -9.0, "추격 구간", "지금 추격보다 눌림 대기"
+    if phase_key == "early":
+        return -5.0, "변곡 시작 전", "서두르지 말고 하루 더 확인"
+    return 0.0, "", ""
+
+
+def _rotation_rank_adjustment(
+    rotation_snapshot: dict[str, object] | None,
+    *,
+    candidate_sector: str,
+    listing_market: str,
+    mgr_key: str,
+) -> tuple[float, str]:
+    if not rotation_snapshot:
+        return 0.0, ""
+    tags = {str(tag or "").strip() for tag in list(rotation_snapshot.get("tags") or [])}
+    sector = str(candidate_sector or "").strip()
+    market = str(listing_market or "").strip().upper()
+    bonus = 0.0
+    note = ""
+
+    if "코스피-코스닥 디커플링" in tags and market == "KOSDAQ" and mgr_key in {"scalp", "swing"}:
+        bonus -= 4.0
+        note = "코스닥 약세일 땐 추격보다 대기"
+    if "대형 반도체 쏠림" in tags:
+        if sector == "반도체":
+            bonus += 5.0
+            note = "반도체 쏠림 수급 수혜"
+        elif sector in {"원전/전력", "2차전지", "바이오"} and mgr_key in {"scalp", "swing", "tenbagger"}:
+            bonus -= 4.0
+            note = "대형 반도체 쏠림 구간"
+    if "원전/전력 차익실현" in tags and sector == "원전/전력":
+        bonus -= 5.0
+        note = "원전·전력 차익실현 구간"
+    return bonus, note
+
+
+def _safe_json_load_dict(raw: str | None) -> dict[str, object]:
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _normalize_stock_news_title(title: str) -> str:
     """보유/관심 뉴스 중복 제거용 제목 정규화."""
     text = str(title or "").strip().lower()
@@ -4716,6 +4771,7 @@ class SchedulerMixin:
                 MANAGERS,
                 filter_discovery_candidates,
             )
+            from kstock.signal.timing_windows import analyze_timing_windows
         except Exception:
             logger.debug("daily candidate actions import failed", exc_info=True)
             return []
@@ -4749,6 +4805,17 @@ class SchedulerMixin:
             macro,
             playbook=playbook,
         )
+        recent_rotation = None
+        try:
+            rotation_events = list(
+                self.db.get_learning_history(days=14, event_type="market_rotation_pattern") or []
+            )
+            if rotation_events:
+                recent_rotation = _safe_json_load_dict(
+                    str(rotation_events[0].get("event_data_json") or "")
+                )
+        except Exception:
+            logger.debug("daily candidate actions recent rotation load failed", exc_info=True)
 
         strong_tickers = {
             getattr(item, "ticker", "")
@@ -4822,6 +4889,34 @@ class SchedulerMixin:
                 sector_note = str(top_pick.get("allocation_note", "") or "").strip()
                 if "편중" in sector_note or "비중 높음" in sector_note:
                     rank_score -= 4.0
+            try:
+                timing_assessment = None
+                ohlcv = self._ohlcv_cache.get(ticker)
+                if ohlcv is None or getattr(ohlcv, "empty", True):
+                    ohlcv = self.yf_client.get_ohlcv(ticker, period="6mo")
+                if ohlcv is not None and not getattr(ohlcv, "empty", True):
+                    close = ohlcv["close"].astype(float).dropna()
+                    timing_assessment = analyze_timing_windows(close)
+                if timing_assessment is not None:
+                    timing_score, timing_label, timing_action = _timing_rank_adjustment(
+                        str(timing_assessment.overall_phase or "")
+                    )
+                    rank_score += timing_score
+                    top_pick["timing_phase"] = str(timing_assessment.overall_phase or "")
+                    top_pick["timing_label"] = timing_label
+                    top_pick["timing_action"] = timing_action
+                    top_pick["timing_summary"] = str(timing_assessment.coach_line or "").strip()
+            except Exception:
+                logger.debug("daily candidate actions timing check failed for %s", ticker, exc_info=True)
+            rotation_bonus, rotation_note = _rotation_rank_adjustment(
+                recent_rotation,
+                candidate_sector=str(top_pick.get("candidate_sector", "") or "").strip(),
+                listing_market=str(top_pick.get("listing_market", top_pick.get("market", "")) or "").strip(),
+                mgr_key=mgr_key,
+            )
+            rank_score += rotation_bonus
+            if rotation_note:
+                top_pick["rotation_note"] = rotation_note
             ranked.append((rank_score, mgr_key, top_pick))
 
         ranked.sort(key=lambda row: row[0], reverse=True)
@@ -4842,9 +4937,15 @@ class SchedulerMixin:
             personal_reason = str(pick.get("personal_reason", "") or "").strip()
             if personal_reason:
                 reason_bits.insert(0, personal_reason)
+            timing_label = str(pick.get("timing_label", "") or "").strip()
+            if timing_label:
+                reason_bits.insert(0, timing_label)
             flow_signal = str(pick.get("flow_signal", "") or "").strip()
             if flow_signal:
                 reason_bits.append(flow_signal)
+            rotation_note = str(pick.get("rotation_note", "") or "").strip()
+            if rotation_note:
+                reason_bits.append(rotation_note)
             event_tags = list(pick.get("event_tags") or [])
             if event_tags:
                 reason_bits.append(f"이벤트 {'/'.join(event_tags[:2])}")
@@ -4874,6 +4975,12 @@ class SchedulerMixin:
                 next_step = "하루에 몰지 말고 2~3회 장기 분할"
             else:
                 next_step = "시초 변동성 소화 후 분할 접근"
+            timing_action = str(pick.get("timing_action", "") or "").strip()
+            timing_summary = str(pick.get("timing_summary", "") or "").strip()
+            if timing_action:
+                action = timing_action if priority == "opportunity" else action
+            if timing_summary:
+                next_step = f"{next_step} · {timing_summary}" if next_step else timing_summary
 
             allocation_summary = str(pick.get("allocation_summary", "") or "").strip()
             allocation_split = str(pick.get("allocation_split", "") or "").strip()
