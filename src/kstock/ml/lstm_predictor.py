@@ -39,7 +39,7 @@ if _HAS_TORCH:
         """
         def __init__(
             self,
-            input_size: int = 50,  # v10.1.1: 48→50 features (short_cover + foreign_flow)
+            input_size: int = 62,  # v12.2: 현재 ML 파이프라인 기본 피처 수
             hidden_size: int = 64,
             num_layers: int = 2,
             dropout: float = 0.2,

@@ -1,7 +1,10 @@
-"""K-Quant v10.1.1 LightGBM + XGBoost ensemble predictor.
+"""K-Quant LightGBM + XGBoost + LSTM ensemble predictor.
 
 Binary classification: will the stock's 5-business-day return exceed +3%?
-Uses 50 features (30 core + 16 Korea + 4 anomaly/flow) from the K-Quant data pipeline.
+Uses 62 features from the K-Quant data pipeline, including:
+- technical, momentum, macro, and fundamentals
+- Korea flow, sentiment, and risk features
+- advanced flow, anomaly, cross-market, and market-regime features
 
 The module degrades gracefully -- if lightgbm, xgboost, shap, or optuna are
 not installed, predictions fall back to a neutral 50% probability.

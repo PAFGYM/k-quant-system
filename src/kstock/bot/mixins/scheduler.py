@@ -3233,7 +3233,7 @@ class SchedulerMixin:
             out: list[str] = []
             if issue_lines:
                 out.append("• 핵심 이슈")
-                for line in issue_lines[:3]:
+                for line in issue_lines[:2]:
                     cleaned = _trim_prefix(line)
                     if ":" in cleaned:
                         prefix, title = cleaned.split(":", 1)
@@ -3245,7 +3245,7 @@ class SchedulerMixin:
                 if out:
                     out.append("")
                 out.append("• 시황 해석")
-                for title, summary in outlook_blocks[:3]:
+                for title, summary in outlook_blocks[:2]:
                     cleaned_title = _trim_prefix(title)
                     if ":" in cleaned_title:
                         prefix, body = cleaned_title.split(":", 1)
@@ -3270,6 +3270,8 @@ class SchedulerMixin:
                 if not cleaned:
                     continue
                 out.append(f"• {_clip(cleaned, 88)}")
+                if len(out) >= 4:
+                    break
             return out
 
         def _format_action_section(lines_in: list[str]) -> list[str]:
@@ -3288,7 +3290,7 @@ class SchedulerMixin:
                 ):
                     continue
                 out.append(f"• {_clip(cleaned, 78)}")
-                if len(out) >= 5:
+                if len(out) >= 4:
                     break
             return out or ["• 신규 추격보다 보유 종목과 손절 기준을 먼저 확인하세요."]
 
@@ -9672,6 +9674,11 @@ class SchedulerMixin:
             # v10.4: 학습 이력 기록
             if result.success:
                 import json as _json_lr
+                try:
+                    from kstock.ml.predictor import FEATURE_NAMES as _FEATURE_NAMES
+                    feature_count = len(_FEATURE_NAMES)
+                except Exception:
+                    feature_count = 62
                 self.db.save_learning_event(
                     event_type="ml_full_retrain",
                     description=f"ML 전체 재학습: {result.samples}샘플, "
@@ -9681,9 +9688,9 @@ class SchedulerMixin:
                         "samples": result.samples,
                         "train_auc": result.train_auc,
                         "val_auc": result.val_auc,
-                        "features": 58,
+                        "features": feature_count,
                     }),
-                    impact_summary=f"모델 업데이트 → 58개 피처 기반 예측 활성화",
+                    impact_summary=f"모델 업데이트 → {feature_count}개 피처 기반 예측 활성화",
                 )
 
             # 3. 결과 알림

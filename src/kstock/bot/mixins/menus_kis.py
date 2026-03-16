@@ -7,6 +7,13 @@ from kstock.bot.bot_imports import *  # noqa: F403
 
 class MenusKisMixin:
     async def _menu_usage_guide(self, update: Update, context) -> None:
+        feature_count = 62
+        try:
+            from kstock.ml.predictor import FEATURE_NAMES
+
+            feature_count = len(FEATURE_NAMES)
+        except Exception:
+            pass
         msg = (
             f"📖 주호님, {APP_NAME} 사용법\n\n"
 
@@ -43,7 +50,7 @@ class MenusKisMixin:
             "━━ ML 앙상블 예측 ━━\n\n"
 
             "🧠 LightGBM + XGBoost + LSTM\n"
-            "  58개 피처 (기술+매크로+수급+크로스마켓)\n"
+            f"  {feature_count}개 피처 (기술+매크로+수급+크로스마켓)\n"
             "  5일내 +3% 상승 확률 예측\n"
             "  평일 22:00 점진학습 / 일 03:00 전체 재학습\n"
             "/ml → ML 상태 확인\n\n"

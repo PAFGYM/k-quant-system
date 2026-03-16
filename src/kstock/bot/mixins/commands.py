@@ -4009,11 +4009,22 @@ class CommandsMixin:
             train_hist: list[dict] = []
             if train_hist_path.exists():
                 try:
-                    train_hist = _json.loads(train_hist_path.read_text())
-                    if isinstance(train_hist, dict):
-                        train_hist = [train_hist]
+                    raw_train_hist = _json.loads(train_hist_path.read_text())
+                    if isinstance(raw_train_hist, dict):
+                        history = raw_train_hist.get("history")
+                        train_hist = history if isinstance(history, list) else []
+                    elif isinstance(raw_train_hist, list):
+                        train_hist = raw_train_hist
                 except Exception:
                     pass
+
+            feature_count = 62
+            try:
+                from kstock.ml.predictor import FEATURE_NAMES
+
+                feature_count = len(FEATURE_NAMES)
+            except Exception:
+                pass
 
             ml_lines = ["🧠 ML 모델 현황"]
             if train_hist:
@@ -4029,7 +4040,7 @@ class CommandsMixin:
                 ml_lines.append(f"  마지막 학습: {t_date}")
                 ml_lines.append(f"  정확도: Train {t_auc:.3f} / Val {v_auc:.3f} {overfit}")
                 ml_lines.append(f"  앙상블: LGB {lgb_w:.0%} / XGB {xgb_w:.0%} / LSTM {lstm_w:.0%}")
-                ml_lines.append(f"  학습 샘플: {samples}개 | 피처: 58개")
+                ml_lines.append(f"  학습 샘플: {samples}개 | 피처: {feature_count}개")
             elif ml_perf:
                 p = ml_perf[0]
                 ml_lines.append(f"  최근: {p.get('date', '?')} | Val AUC {p.get('val_score', 0):.3f}")
