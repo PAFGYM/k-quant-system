@@ -37,6 +37,7 @@ USER_NAME = "주호님"
 class SentimentResult:
     """Sentiment analysis result for a single stock."""
 
+    name: str = ""              # Korean stock name if available
     positive_pct: float = 0.0   # 0 ~ 100
     negative_pct: float = 0.0   # 0 ~ 100
     neutral_pct: float = 0.0    # 0 ~ 100
@@ -181,6 +182,7 @@ def _build_sentiment_prompt(stock_headlines: dict[str, list[str]]) -> str:
 def analyze_sentiment_batch(
     stock_headlines: dict[str, list[str]],
     anthropic_key: str,
+    ticker_names: dict[str, str] | None = None,
 ) -> dict[str, SentimentResult]:
     """Send all stocks in one Claude API call and return parsed results.
 
@@ -198,6 +200,7 @@ def analyze_sentiment_batch(
     # Prepare neutral fallback
     def _neutral(ticker: str, count: int) -> SentimentResult:
         return SentimentResult(
+            name=str((ticker_names or {}).get(ticker, "")).strip(),
             positive_pct=0.0,
             negative_pct=0.0,
             neutral_pct=100.0,
@@ -304,6 +307,7 @@ def analyze_sentiment_batch(
             neu = neu / total * 100
 
         results[ticker] = SentimentResult(
+            name=str((ticker_names or {}).get(ticker, "")).strip(),
             positive_pct=round(pos, 1),
             negative_pct=round(neg, 1),
             neutral_pct=round(neu, 1),
@@ -400,8 +404,10 @@ def format_sentiment_summary(results: dict[str, SentimentResult]) -> str:
         if r.positive_pct < 40 or r.headline_count < 1:
             continue
         emoji = "\U0001f525" if r.positive_pct >= 70 else "\U0001f7e2"
+        display_name = str(r.name or "").strip()
+        label = f"{display_name} ({ticker})" if display_name and display_name != ticker else ticker
         lines.append(
-            f"  {emoji} {ticker}: 긍정 {r.positive_pct:.0f}% "
+            f"  {emoji} {label}: 긍정 {r.positive_pct:.0f}% "
             f"({r.headline_count}건)"
         )
         if r.summary:
@@ -420,8 +426,10 @@ def format_sentiment_summary(results: dict[str, SentimentResult]) -> str:
         if r.negative_pct < 30 or r.headline_count < 1:
             continue
         emoji = "\u26a0\ufe0f" if r.negative_pct >= 50 else "\U0001f534"
+        display_name = str(r.name or "").strip()
+        label = f"{display_name} ({ticker})" if display_name and display_name != ticker else ticker
         lines.append(
-            f"  {emoji} {ticker}: 부정 {r.negative_pct:.0f}% "
+            f"  {emoji} {label}: 부정 {r.negative_pct:.0f}% "
             f"({r.headline_count}건)"
         )
         if r.summary:
@@ -469,6 +477,7 @@ def run_daily_sentiment(
 
     # Step 1: Fetch news for each stock (with rate limiting)
     all_headlines: dict[str, list[str]] = {}
+    ticker_names: dict[str, str] = {}
     for stock in universe:
         ticker = stock.get("ticker", "")
         name = stock.get("name", "")
@@ -476,6 +485,7 @@ def run_daily_sentiment(
             logger.warning("Skipping stock with missing ticker/name: %s", stock)
             continue
 
+        ticker_names[str(ticker)] = str(name).strip()
         logger.info("Fetching news for %s (%s)", name, ticker)
         headlines = fetch_news(name)
         all_headlines[ticker] = headlines
@@ -501,7 +511,12 @@ def run_daily_sentiment(
             batch_label += f" ... ({len(batch_tickers)}종목)"
         logger.info("Analyzing sentiment batch: %s", batch_label)
 
-        batch_results = analyze_sentiment_batch(batch_headlines, anthropic_key)
+        batch_name_map = {t: ticker_names.get(t, "") for t in batch_tickers}
+        batch_results = analyze_sentiment_batch(
+            batch_headlines,
+            anthropic_key,
+            ticker_names=batch_name_map,
+        )
         combined_results.update(batch_results)
 
         # Small delay between API batches

@@ -158,6 +158,7 @@ class TestFormatSentimentSummary:
         """Stocks with high positive_pct should appear in the positive section."""
         results = {
             "005930": SentimentResult(
+                name="삼성전자",
                 positive_pct=80.0,
                 negative_pct=10.0,
                 neutral_pct=10.0,
@@ -166,7 +167,7 @@ class TestFormatSentimentSummary:
             ),
         }
         output = format_sentiment_summary(results)
-        assert "005930" in output
+        assert "삼성전자 (005930)" in output
         assert "80%" in output
         assert "실적 호조" in output
 
@@ -174,6 +175,7 @@ class TestFormatSentimentSummary:
         """Stocks with high negative_pct should appear in the negative section."""
         results = {
             "000660": SentimentResult(
+                name="SK하이닉스",
                 positive_pct=10.0,
                 negative_pct=60.0,
                 neutral_pct=30.0,
@@ -182,7 +184,7 @@ class TestFormatSentimentSummary:
             ),
         }
         output = format_sentiment_summary(results)
-        assert "000660" in output
+        assert "SK하이닉스 (000660)" in output
         assert "60%" in output
         assert "실적 부진 우려" in output
 
@@ -190,6 +192,7 @@ class TestFormatSentimentSummary:
         """Mixed positive and negative stocks should both appear."""
         results = {
             "005930": SentimentResult(
+                name="삼성전자",
                 positive_pct=75.0,
                 negative_pct=10.0,
                 neutral_pct=15.0,
@@ -197,6 +200,7 @@ class TestFormatSentimentSummary:
                 headline_count=5,
             ),
             "000660": SentimentResult(
+                name="SK하이닉스",
                 positive_pct=10.0,
                 negative_pct=55.0,
                 neutral_pct=35.0,
@@ -205,8 +209,8 @@ class TestFormatSentimentSummary:
             ),
         }
         output = format_sentiment_summary(results)
-        assert "005930" in output
-        assert "000660" in output
+        assert "삼성전자 (005930)" in output
+        assert "SK하이닉스 (000660)" in output
         assert "긍정적" in output
         assert "부정적" in output
 
@@ -238,6 +242,7 @@ class TestFormatSentimentSummary:
         """A stock with low positive and low negative shows (해당 없음)."""
         results = {
             "005930": SentimentResult(
+                name="삼성전자",
                 positive_pct=20.0,
                 negative_pct=10.0,
                 neutral_pct=70.0,
@@ -248,6 +253,20 @@ class TestFormatSentimentSummary:
         output = format_sentiment_summary(results)
         # Both positive (<40%) and negative (<30%) thresholds not met
         assert "해당 없음" in output
+
+    def test_falls_back_to_ticker_when_name_missing(self) -> None:
+        """If name is missing, formatter should still show just the ticker."""
+        results = {
+            "329180": SentimentResult(
+                positive_pct=90.0,
+                negative_pct=5.0,
+                neutral_pct=5.0,
+                summary="대형 수주 기대",
+                headline_count=4,
+            ),
+        }
+        output = format_sentiment_summary(results)
+        assert "329180" in output
 
 
 # ---------------------------------------------------------------------------
