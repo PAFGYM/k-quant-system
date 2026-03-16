@@ -77,6 +77,98 @@ _STRATEGY_SHORT_LABELS = {
 }
 
 
+def infer_manager_key_from_strategy(
+    strategy_type: str,
+    *,
+    default: str = "position",
+) -> str:
+    """전략 코드를 매니저 레인으로 매핑."""
+    strat = str(strategy_type or "").strip().upper()
+    for manager_key, cluster in _MANAGER_STRATEGY_CLUSTERS.items():
+        if strat in cluster:
+            return manager_key
+    return default
+
+
+def backfill_recommendation_managers(db, days: int = 3650) -> int:
+    """기존 recommendation의 비어 있는 manager 컬럼을 전략 코드로 복구."""
+    cutoff = (datetime.now(KST) - timedelta(days=days)).strftime("%Y-%m-%d")
+    updated = 0
+    try:
+        with db._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, strategy_type
+                FROM recommendations
+                WHERE created_at >= ?
+                  AND COALESCE(manager, '') = ''
+                """,
+                (cutoff,),
+            ).fetchall()
+            for row in rows:
+                manager_key = infer_manager_key_from_strategy(
+                    str(row["strategy_type"] or ""),
+                    default="position",
+                )
+                conn.execute(
+                    "UPDATE recommendations SET manager=? WHERE id=?",
+                    (manager_key, int(row["id"])),
+                )
+                updated += 1
+    except Exception as e:
+        logger.debug("backfill_recommendation_managers failed: %s", e)
+    return updated
+
+
+def save_daily_manager_operating_stances(
+    db,
+    scorecards: dict[str, dict],
+    operator_profile: dict[str, Any] | None = None,
+) -> int:
+    """최근 성적표 기준으로 매일 읽을 수 있는 매니저 운영 stance 저장."""
+    saved = 0
+    operator_profile = operator_profile or {}
+    focus = " · ".join(operator_profile.get("primary_focus", [])[:2]) or "시장 · 매수"
+    for manager_key, label in _MANAGER_LABELS.items():
+        card = scorecards.get(manager_key) or {}
+        total = int(card.get("total", 0) or 0)
+        evaluated = int(card.get("evaluated", 0) or 0)
+        weight = float(card.get("weight_adj", 1.0) or 1.0)
+        hit_rate = float(card.get("hit_rate", 0.0) or 0.0)
+        avg_ret = float(card.get("avg_return_5d", 0.0) or 0.0)
+
+        if manager_key == "tenbagger":
+            avg_score = float(card.get("avg_score", 0.0) or 0.0)
+            stance = (
+                f"{label}: 텐베거 감시 {total}종목 · 평균 {avg_score:.0f}점. "
+                f"주호님 관심축 {focus}. 큰 촉매 전 씨앗/선점 중심으로 관리"
+            )
+        elif evaluated <= 0:
+            stance = (
+                f"{label}: 최근 추천 {total}건이나 평가 표본이 아직 부족. "
+                f"주호님 관심축 {focus}. 성과 누적 전까진 보수 운용"
+            )
+        else:
+            mode = "비중 우대"
+            if weight <= 0.85:
+                mode = "엄격 운용"
+            elif weight <= 0.95:
+                mode = "보수 운용"
+            strict_reason = str(card.get("strict_reason") or "").strip()
+            stance = (
+                f"{label}: 최근 5일평균 {avg_ret:+.1f}% · 적중률 {hit_rate:.0f}% · "
+                f"가중치 {weight:.2f}x · {mode}. 주호님 관심축 {focus}"
+            )
+            if strict_reason:
+                stance += f" ({strict_reason})"
+        try:
+            db.save_manager_stance(manager_key, stance[:220])
+            saved += 1
+        except Exception:
+            logger.debug("save_daily_manager_operating_stances failed for %s", manager_key, exc_info=True)
+    return saved
+
+
 def _safe_json_loads(raw: str) -> dict[str, Any]:
     try:
         value = json.loads(raw)
@@ -299,6 +391,8 @@ def format_learning_impact_snapshot(db, days: int = 7) -> str:
             action_lines.append("단타 강화는 표본이 적어 과신 금지")
         if action_lines:
             lines.append(f"  추천 변화: {' | '.join(action_lines[:3])}")
+        if swing_card and bool(swing_card.get("strict_mode")):
+            lines.append(f"  스윙 상태: {swing_card.get('strict_reason', '엄격 모드')}")
 
     events: list[dict[str, Any]] = []
     try:
@@ -595,6 +689,8 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
     cutoff = (datetime.now(KST) - timedelta(days=days)).strftime("%Y-%m-%d")
     now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
+    backfill_recommendation_managers(db, days=max(days, 365))
+
     scorecards = {}
     managers = ["scalp", "swing", "position", "long_term", "tenbagger"]
 
@@ -727,13 +823,18 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
             if hit_rate >= 70:
                 weight = 1.2
             elif hit_rate >= 60:
-                weight = 1.1
+                weight = 1.08
             elif hit_rate >= 50:
-                weight = 1.0
+                weight = 0.98
             elif hit_rate >= 40:
-                weight = 0.9
+                weight = 0.88
             else:
-                weight = 0.8
+                weight = 0.76
+
+            strict_mode = False
+            strict_reason = ""
+            if evaluated < 5:
+                weight = min(weight, 0.95)
 
             if mgr == "swing":
                 momentum_stats = strategy_breakdown.get("F", {})
@@ -745,6 +846,19 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
                         weight *= 0.88
                     if reversion_stats.get("hit_rate", 0.0) < 35:
                         weight *= 0.92
+                if evaluated >= 8 and (
+                    hit_rate < 35
+                    or reversion_stats.get("avg_return_5d", 0.0) < 0
+                    or (
+                        reversion_stats.get("evaluated", 0) >= 3
+                        and reversion_stats.get("hit_rate", 0.0) < 35
+                    )
+                ):
+                    strict_mode = True
+                    strict_reason = "스윙 strict mode: 평균회귀/J 신호 억제"
+                    weight = min(weight, 0.62)
+                weight = max(0.55, min(1.25, weight))
+            else:
                 weight = max(0.75, min(1.25, weight))
 
             card = {
@@ -759,6 +873,8 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
                 "worst_trade": worst_text,
                 "weight_adj": weight,
                 "strategy_breakdown": strategy_breakdown,
+                "strict_mode": strict_mode,
+                "strict_reason": strict_reason,
             }
             scorecards[mgr] = card
 
@@ -803,7 +919,8 @@ def calculate_manager_scorecard(db, days: int = 30) -> dict[str, dict]:
                         multiplier = 0.84
                     elif avg_return < 0:
                         multiplier = 0.92
-                    new_weight = round(max(0.75, min(1.25, float(card.get("weight_adj", 1.0)) * multiplier)), 2)
+                    floor = 0.55 if bool(card.get("strict_mode")) else 0.75
+                    new_weight = round(max(floor, min(1.25, float(card.get("weight_adj", 1.0)) * multiplier)), 2)
                     card["weight_adj"] = new_weight
                     card["shadow_avg_return_5d"] = round(float(avg_return), 2)
                     conn.execute(
@@ -869,6 +986,8 @@ def format_manager_scorecard(scorecards: dict) -> str:
                 lines.append(f"  세부: {' / '.join(sub_parts)}")
         if card.get("shadow_avg_return_5d") is not None:
             lines.append(f"  그림자 검증: {float(card.get('shadow_avg_return_5d', 0.0)):+.1f}%")
+        if card.get("strict_mode"):
+            lines.append(f"  상태: {card.get('strict_reason', '엄격 모드')}")
         if card.get("best_trade"):
             lines.append(f"  최고: {card['best_trade']}")
         lines.append(f"  가중치: {weight:.2f}x")

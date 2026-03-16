@@ -741,11 +741,14 @@ class CommandsMixin:
     async def _check_and_send_alerts(
         self, bot, result: ScanResult, macro: MacroSnapshot
     ) -> None:
+        from kstock.bot.learning_engine import infer_manager_key_from_strategy
+
         ticker = result.ticker
         name = result.name
         score = result.score
         tech = result.tech
         strat_type = result.strategy_type
+        manager_key = infer_manager_key_from_strategy(strat_type, default="position")
 
         # Momentum alert (Strategy F)
         if result.strategy_signals:
@@ -764,6 +767,7 @@ class CommandsMixin:
                                 rec_price=result.info.current_price,
                                 rec_score=score.composite,
                                 strategy_type="F",
+                                manager=infer_manager_key_from_strategy("F", default="swing"),
                                 target_pct=STRATEGY_META["F"]["target"],
                                 stop_pct=STRATEGY_META["F"]["stop"],
                             )
@@ -779,6 +783,7 @@ class CommandsMixin:
                                 rec_price=result.info.current_price,
                                 rec_score=score.composite,
                                 strategy_type="G",
+                                manager=infer_manager_key_from_strategy("G", default="scalp"),
                                 target_pct=STRATEGY_META["G"]["target"],
                                 stop_pct=STRATEGY_META["G"]["stop"],
                             )
@@ -822,6 +827,7 @@ class CommandsMixin:
                         rec_price=result.info.current_price,
                         rec_score=score.composite, status="active",
                         strategy_type=strat_type,
+                        manager=manager_key,
                         target_pct=meta.get("target", 3.0),
                         stop_pct=meta.get("stop", -5.0),
                     )
@@ -849,6 +855,7 @@ class CommandsMixin:
                         ticker=ticker, name=name,
                         rec_price=target_entry, rec_score=score.composite,
                         status="watch", strategy_type=strat_type,
+                        manager=manager_key,
                     )
 
     async def _check_holdings(self, bot) -> None:

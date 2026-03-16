@@ -6663,6 +6663,8 @@ class SchedulerMixin:
                 await self._update_recommendations(context.bot)
 
                 # 전략별 Top 추천 종목 DB 저장 (전략별 보기 활성화)
+                from kstock.bot.learning_engine import infer_manager_key_from_strategy
+
                 for r in results[:20]:
                     strat = r.strategy_type or "A"
                     if not self.db.has_active_recommendation(r.ticker):
@@ -6673,6 +6675,7 @@ class SchedulerMixin:
                             rec_price=r.info.current_price,
                             rec_score=r.score.composite,
                             strategy_type=strat,
+                            manager=infer_manager_key_from_strategy(strat, default="position"),
                             target_pct=meta["target"],
                             stop_pct=meta["stop"],
                             status="active" if r.score.signal == "BUY" else "watch",
@@ -11383,9 +11386,15 @@ class SchedulerMixin:
                     calculate_manager_scorecard,
                     analyze_user_trade_patterns,
                     format_manager_scorecard,
+                    save_daily_manager_operating_stances,
                 )
                 scorecards = calculate_manager_scorecard(self.db, days=30)
                 profile = analyze_user_trade_patterns(self.db)
+                save_daily_manager_operating_stances(
+                    self.db,
+                    scorecards,
+                    profile.get("operator_profile", {}) if isinstance(profile, dict) else {},
+                )
                 mgr_msg = f", managers={len(scorecards)}"
 
                 # 주간 성적표 전송 (일요일만)
@@ -11546,6 +11555,24 @@ class SchedulerMixin:
                 name = w.get("name", "") or ticker
                 if ticker and ticker not in [t[0] for t in targets]:
                     targets.append((ticker, name))
+
+            try:
+                active_recs = list(self.db.get_active_recommendations() or [])
+            except Exception:
+                active_recs = []
+            if active_recs:
+                active_recs.sort(
+                    key=lambda item: (
+                        float(item.get("rec_score", 0.0) or 0.0),
+                        str(item.get("created_at") or ""),
+                    ),
+                    reverse=True,
+                )
+                for rec in active_recs[:6]:
+                    ticker = str(rec.get("ticker") or "").strip()
+                    name = str(rec.get("name") or "").strip() or ticker
+                    if ticker and ticker not in [t[0] for t in targets]:
+                        targets.append((ticker, name))
 
             targets = targets[:10]  # 비용 제한
 

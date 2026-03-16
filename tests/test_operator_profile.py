@@ -430,3 +430,42 @@ def test_format_ml_operating_snapshot_shows_where_ml_is_applied(tmp_path) -> Non
     assert "현재 개입: 종목 후보 정렬" in text
     assert "고확률 후보:" in text
     assert ("더 믿는 레인:" in text) or ("더 보수적인 레인:" in text)
+
+
+def test_calculate_manager_scorecard_backfills_blank_manager_and_sets_swing_strict_mode(tmp_path) -> None:
+    from kstock.bot.learning_engine import calculate_manager_scorecard
+
+    db = _setup_db(str(tmp_path / "swing_strict.db"))
+    with db._connect() as conn:
+        conn.execute("DELETE FROM recommendations")
+        conn.execute("DELETE FROM recommendation_results")
+        for idx in range(8):
+            rec_id = idx + 1
+            conn.execute(
+                """
+                INSERT INTO recommendations
+                (id, ticker, name, rec_date, rec_price, rec_score, strategy_type, created_at, updated_at, manager)
+                VALUES (?, ?, ?, '2026-03-10', 10000, 70, 'J', '2026-03-10T08:00:00', '2026-03-10T08:00:00', '')
+                """,
+                (rec_id, f"1{idx:05d}", f"스윙{idx}"),
+            )
+            conn.execute(
+                """
+                INSERT INTO recommendation_results
+                (recommendation_id, ticker, rec_price, strategy_type, day5_return, correct)
+                VALUES (?, ?, 10000, 'J', ?, ?)
+                """,
+                (rec_id, f"1{idx:05d}", -2.0 if idx < 6 else 1.0, 0 if idx < 6 else 1),
+            )
+
+    scorecards = calculate_manager_scorecard(db, days=30)
+
+    swing = scorecards["swing"]
+    assert swing["strict_mode"] is True
+    assert swing["weight_adj"] <= 0.62
+
+    with db._connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM recommendations WHERE manager='swing'"
+        ).fetchone()[0]
+    assert count == 8

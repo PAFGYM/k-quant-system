@@ -221,6 +221,7 @@ class TradingMixin:
         strategy_type: str = "A",
         target_pct: float = 3.0,
         stop_pct: float = -5.0,
+        manager: str = "",
     ) -> int:
         now = datetime.utcnow().isoformat()
         target_1 = round(rec_price * (1 + target_pct / 100), 0)
@@ -232,12 +233,12 @@ class TradingMixin:
                 INSERT INTO recommendations
                     (ticker, name, rec_date, rec_price, rec_score, strategy_type,
                      sell_reason, current_price, pnl_pct, status,
-                     target_1, target_2, stop_price, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                     target_1, target_2, stop_price, created_at, updated_at, manager)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (ticker, name, now[:10], rec_price, rec_score, strategy_type,
                  sell_reason, rec_price, status, target_1, target_2, stop_price,
-                 now, now),
+                 now, now, manager),
             )
             return cursor.lastrowid
 

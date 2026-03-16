@@ -153,6 +153,14 @@ class TestRecommendations:
         assert recs[0]["target_1"] == 15525  # 15000 * 1.035
         assert recs[0]["stop_price"] == 14550  # 15000 * 0.97
 
+    def test_add_recommendation_persists_manager(self, store):
+        store.add_recommendation(
+            "005930", "삼성전자", 58000, 85.0,
+            strategy_type="F", manager="swing",
+        )
+        recs = store.get_active_recommendations()
+        assert recs[0]["manager"] == "swing"
+
     def test_add_watch_recommendation(self, store):
         rid = store.add_recommendation("005930", "삼성전자", 56000, 62.0, status="watch")
         recs = store.get_watch_recommendations()
