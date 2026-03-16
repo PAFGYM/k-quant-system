@@ -385,6 +385,7 @@ def test_format_learning_impact_snapshot_shows_actual_behavior_change(tmp_path) 
             (date, event_type, description, impact_summary, created_at)
             VALUES
             ('2026-03-14', 'market_regime', '시장 레짐: bear (점수 -23, 신뢰도 65%)', '', '2026-03-14T09:00:00'),
+            ('2026-03-14', 'market_rotation_pattern', '시장 내부 로테이션 재학습', '코스피-코스닥 디커플링 | 반도체 SK하이닉스 +7.0% / 원전 우진 -6.2%', '2026-03-14T09:03:00'),
             ('2026-03-14', 'historical_trade_debrief', '과거 매매 교훈 재학습', '수익 구간에서 분할 매도 전략 유지', '2026-03-14T09:05:00')
             """
         )
@@ -396,6 +397,7 @@ def test_format_learning_impact_snapshot_shows_actual_behavior_change(tmp_path) 
     assert ("강화:" in text) or ("보수화:" in text)
     assert "추천 변화:" in text
     assert "최근 근거:" in text
+    assert "코스피-코스닥 디커플링" in text
 
 
 def test_format_ml_progress_snapshot_shows_stage_progress(tmp_path) -> None:

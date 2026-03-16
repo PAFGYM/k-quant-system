@@ -330,6 +330,9 @@ def format_learning_impact_snapshot(db, days: int = 7) -> str:
         cross = event_map.get("cross_market_analysis")
         if cross and cross.get("description"):
             evidence.append(str(cross["description"]))
+        rotation = event_map.get("market_rotation_pattern")
+        if rotation and rotation.get("impact_summary"):
+            evidence.append(str(rotation["impact_summary"]))
         history = event_map.get("historical_trade_debrief")
         if history and history.get("impact_summary"):
             evidence.append(str(history["impact_summary"]))

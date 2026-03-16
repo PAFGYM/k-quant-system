@@ -29,6 +29,17 @@ async def test_generate_strategy_report_includes_market_holdings_tenbagger_and_l
     mixin._build_morning_holdings_lines = AsyncMock(
         return_value=["- 보유 3종목 | 건강점수 72/100 | 평균 +0.6%", "- 우진 +1.1% | 보유 유지"]
     )
+    mixin._build_market_rotation_learning_snapshot = AsyncMock(
+        return_value={
+            "tags": ["코스피-코스닥 디커플링", "대형 반도체 쏠림", "원전/전력 차익실현"],
+            "explanation": "코스피는 대형 반도체 강세로 올랐지만 코스닥과 원전주는 차익실현이 우세했다.",
+            "action": "원전주는 개별 악재보다 테마 전체 약세 여부를 먼저 확인한다.",
+            "affected_holdings": ["우진", "비에이치아이"],
+            "top_semi": {"name": "SK하이닉스", "change_pct": 7.0},
+            "weakest_nuclear": {"name": "우진", "change_pct": -6.2},
+        }
+    )
+    mixin._save_market_rotation_learning_snapshot = lambda snapshot: None
     mixin._build_strategy_watch_brief = lambda **kwargs: "[전략 감시]\n🌍 글로벌: 유가/환율 경계"
     mixin.db = MagicMock()
     mixin.db.get_tenbagger_universe.return_value = [
@@ -61,3 +72,5 @@ async def test_generate_strategy_report_includes_market_holdings_tenbagger_and_l
     assert "텐베거 감시" in text
     assert "학습으로 바뀐 것" in text
     assert "우진 92점 (+4)" in text
+    assert "오늘 장 학습" in text
+    assert "코스피-코스닥 디커플링" in text

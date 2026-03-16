@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time as _time
 from datetime import datetime as _dt
@@ -2451,6 +2452,183 @@ class SchedulerMixin:
 
         return lines or ["- 해외 변수보다 국내 수급과 환율 반응을 먼저 확인하세요."]
 
+    async def _build_market_rotation_learning_snapshot(self, macro=None) -> dict[str, object] | None:
+        """시장 내부 로테이션 패턴을 학습 가능한 구조로 요약."""
+        try:
+            if macro is None:
+                macro = await self.macro_client.get_snapshot()
+        except Exception:
+            logger.debug("build_market_rotation_learning_snapshot macro failed", exc_info=True)
+            return None
+
+        if macro is None:
+            return None
+
+        try:
+            from kstock.ingest.naver_finance import NaverFinanceClient
+        except Exception:
+            logger.debug("build_market_rotation_learning_snapshot import failed", exc_info=True)
+            return None
+
+        async def _daily_change_pct(client, ticker: str, name: str) -> float:
+            try:
+                df = await client.get_ohlcv(ticker, period_days=5)
+                if df is None or len(df) < 2:
+                    return 0.0
+                prev = float(df.iloc[-2]["close"] or 0.0)
+                cur = float(df.iloc[-1]["close"] or 0.0)
+                if abs(prev) < 1e-9:
+                    return 0.0
+                return round((cur - prev) / prev * 100.0, 2)
+            except Exception:
+                logger.debug("rotation learning daily change failed for %s %s", ticker, name, exc_info=True)
+                return 0.0
+
+        client = NaverFinanceClient()
+        semi_peers = [("005930", "삼성전자"), ("000660", "SK하이닉스")]
+        nuclear_peers = [
+            ("105840", "우진"),
+            ("083650", "비에이치아이"),
+            ("034020", "두산에너빌리티"),
+            ("052690", "한전기술"),
+            ("000720", "현대건설"),
+            ("010120", "LS ELECTRIC"),
+            ("015760", "한국전력"),
+        ]
+
+        semi_moves = []
+        for ticker, name in semi_peers:
+            semi_moves.append((name, await _daily_change_pct(client, ticker, name)))
+
+        nuclear_moves = []
+        for ticker, name in nuclear_peers:
+            nuclear_moves.append((name, await _daily_change_pct(client, ticker, name)))
+
+        if not semi_moves and not nuclear_moves:
+            return None
+
+        kospi_change = float(getattr(macro, "kospi_change_pct", 0.0) or 0.0)
+        kosdaq_change = float(getattr(macro, "kosdaq_change_pct", 0.0) or 0.0)
+        ewy_change = float(getattr(macro, "ewy_change_pct", 0.0) or 0.0)
+
+        semi_avg = round(sum(chg for _, chg in semi_moves) / max(len(semi_moves), 1), 2)
+        nuclear_avg = round(sum(chg for _, chg in nuclear_moves) / max(len(nuclear_moves), 1), 2)
+
+        top_semi = max(semi_moves, key=lambda item: item[1]) if semi_moves else ("", 0.0)
+        weakest_nuclear = min(nuclear_moves, key=lambda item: item[1]) if nuclear_moves else ("", 0.0)
+
+        tags: list[str] = []
+        if kospi_change >= 0.5 and kosdaq_change <= -0.5:
+            tags.append("코스피-코스닥 디커플링")
+        if semi_avg >= 2.0:
+            tags.append("대형 반도체 쏠림")
+        if nuclear_avg <= -1.0:
+            tags.append("원전/전력 차익실현")
+        if ewy_change >= 0.5:
+            tags.append("EWY 대형주 선호")
+
+        if len(tags) < 2:
+            return None
+
+        holdings = []
+        try:
+            for item in list(self.db.get_active_holdings() or []):
+                name = str(item.get("name", "") or "").strip()
+                ticker = str(item.get("ticker", "") or "").strip()
+                if ticker in {"105840", "083650", "112610", "052690", "034020", "000720", "010120"}:
+                    holdings.append(name or ticker)
+        except Exception:
+            holdings = []
+
+        explanation = (
+            f"코스피 {kospi_change:+.2f}% 대비 코스닥 {kosdaq_change:+.2f}%로 디커플링이 발생했고, "
+            f"삼성전자/하이닉스 평균 {semi_avg:+.2f}%로 대형 반도체에 수급이 몰린 반면 "
+            f"원전·전력 대표주 평균은 {nuclear_avg:+.2f}%로 약세였습니다."
+        )
+        implication = (
+            "다음 유사 장세에서는 코스닥·원전 중소형주를 개별 악재로 보기보다 "
+            "대형 반도체 쏠림과 테마 차익실현으로 먼저 해석하고, "
+            "보유주는 성급한 손절보다 테마 전체 약세인지부터 확인합니다."
+        )
+        action = (
+            "반도체 대형주 강세일 땐 코스닥/원전 신규 추격을 줄이고, "
+            "보유 원전주는 섹터 전체 흐름과 거래대금 회복 전까지 비중 축소·교체 우선으로 대응합니다."
+        )
+
+        return {
+            "date": datetime.now(KST).strftime("%Y-%m-%d"),
+            "tags": tags,
+            "kospi_change_pct": kospi_change,
+            "kosdaq_change_pct": kosdaq_change,
+            "ewy_change_pct": ewy_change,
+            "semi_moves": semi_moves,
+            "nuclear_moves": nuclear_moves,
+            "semi_avg": semi_avg,
+            "nuclear_avg": nuclear_avg,
+            "top_semi": {"name": top_semi[0], "change_pct": top_semi[1]},
+            "weakest_nuclear": {"name": weakest_nuclear[0], "change_pct": weakest_nuclear[1]},
+            "affected_holdings": holdings,
+            "explanation": explanation,
+            "implication": implication,
+            "action": action,
+        }
+
+    def _save_market_rotation_learning_snapshot(self, snapshot: dict[str, object]) -> None:
+        """시장 로테이션 패턴을 학습 이력에 기록한다."""
+        if not snapshot:
+            return
+        try:
+            today = datetime.now(KST).strftime("%Y-%m-%d")
+            existing = list(self.db.get_learning_history(days=3, event_type="market_rotation_pattern") or [])
+            for event in existing:
+                if str(event.get("date") or "") == today:
+                    return
+            tags = list(snapshot.get("tags") or [])
+            headline = ", ".join(tags[:3]) if tags else "시장 내부 로테이션"
+            top_semi = snapshot.get("top_semi") or {}
+            weak_nuclear = snapshot.get("weakest_nuclear") or {}
+            summary = (
+                f"{headline} | "
+                f"반도체 {str(top_semi.get('name') or '')} {float(top_semi.get('change_pct') or 0):+.1f}% / "
+                f"원전 {str(weak_nuclear.get('name') or '')} {float(weak_nuclear.get('change_pct') or 0):+.1f}%"
+            )
+            self.db.save_learning_event(
+                "market_rotation_pattern",
+                "시장 내부 로테이션 재학습",
+                json.dumps(snapshot, ensure_ascii=False),
+                summary,
+            )
+        except Exception:
+            logger.debug("save_market_rotation_learning_snapshot failed", exc_info=True)
+
+    def _format_market_rotation_learning_lines(self, snapshot: dict[str, object] | None) -> list[str]:
+        if not snapshot:
+            return []
+        def _clip_local(text: str, limit: int = 86) -> str:
+            text = re.sub(r"\s+", " ", str(text or "").strip())
+            if len(text) <= limit:
+                return text
+            return text[: max(12, limit - 1)].rstrip() + "…"
+        tags = list(snapshot.get("tags") or [])
+        holdings = list(snapshot.get("affected_holdings") or [])
+        top_semi = snapshot.get("top_semi") or {}
+        weak_nuclear = snapshot.get("weakest_nuclear") or {}
+
+        lines = [
+            f"• 패턴: {', '.join(tags[:3])}",
+            f"• 해석: {_clip_local(str(snapshot.get('explanation') or ''), 86)}",
+        ]
+        if holdings:
+            lines.append(f"• 내 보유 연결: {', '.join(holdings[:3])} 같은 코스닥/원전 축은 테마 전체 약세 여부 우선 확인")
+        if top_semi or weak_nuclear:
+            lines.append(
+                "• 방향: "
+                f"반도체 {str(top_semi.get('name') or '')} {float(top_semi.get('change_pct') or 0):+.1f}% 강세, "
+                f"원전 {str(weak_nuclear.get('name') or '')} {float(weak_nuclear.get('change_pct') or 0):+.1f}% 약세"
+            )
+        lines.append(f"• 액션: {_clip_local(str(snapshot.get('action') or ''), 86)}")
+        return lines
+
     def _build_morning_action_lines(self, macro, regime_mode: dict, playbook) -> list[str]:
         """오늘 바로 실행할 행동 지침을 짧게 정리한다."""
         lines: list[str] = []
@@ -2732,12 +2910,16 @@ class SchedulerMixin:
         signal_emoji, signal_label = "⚪", "데이터 확인 필요"
         regime_label = ""
         playbook = None
+        rotation_snapshot: dict[str, object] | None = None
         try:
             macro = await self.macro_client.get_snapshot()
             signal_emoji, signal_label = self._market_signal(macro)
             regime = detect_regime(macro)
             regime_label = str(getattr(regime, "label", "") or getattr(macro, "regime", "") or "").strip()
             playbook = self._build_downside_playbook(macro)
+            rotation_snapshot = await self._build_market_rotation_learning_snapshot(macro)
+            if rotation_snapshot:
+                self._save_market_rotation_learning_snapshot(rotation_snapshot)
         except Exception:
             logger.debug("generate_strategy_report macro failed", exc_info=True)
 
@@ -3049,6 +3231,13 @@ class SchedulerMixin:
                 "",
                 "🛰 전략 감시",
                 *_format_strategy_watch_section(strategy_watch),
+            ])
+
+        if rotation_snapshot:
+            lines.extend([
+                "",
+                "🧠 오늘 장 학습",
+                *self._format_market_rotation_learning_lines(rotation_snapshot),
             ])
 
         if learning_lines:
@@ -11724,6 +11913,14 @@ class SchedulerMixin:
                 db=self.db,
                 ai_router=getattr(self, "ai_router", None) or getattr(self, "ai", None),
             )
+
+            try:
+                macro = await self.macro_client.get_snapshot()
+                rotation_snapshot = await self._build_market_rotation_learning_snapshot(macro)
+                if rotation_snapshot:
+                    self._save_market_rotation_learning_snapshot(rotation_snapshot)
+            except Exception:
+                logger.debug("job_daily_synthesis rotation learning failed", exc_info=True)
 
             synthesis = result.get("synthesis", "")
             total = result.get("total_items", 0)
