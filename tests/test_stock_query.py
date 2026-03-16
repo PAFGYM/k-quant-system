@@ -31,6 +31,20 @@ def test_find_stock_candidates_returns_similar_matches():
     assert candidates[0]["code"] == "340450"
 
 
+def test_stock_lookup_cache_reuses_holdings_snapshot():
+    mixin = _make_mixin()
+    mixin.db.get_active_holdings.return_value = [
+        {"ticker": "340450", "name": "GC지놈"},
+    ]
+
+    detected = mixin._detect_stock_query("지씨지놈")
+    candidates = mixin._find_stock_candidates("지씨지놈")
+
+    assert detected is not None
+    assert candidates
+    assert mixin.db.get_active_holdings.call_count == 1
+
+
 def test_build_stock_action_keyboard_exposes_full_flow():
     mixin = _make_mixin()
     markup = mixin._build_stock_action_keyboard("340450", existing=False)

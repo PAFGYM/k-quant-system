@@ -79,6 +79,16 @@ class CoreHandlersMixin:
         self._recent_callbacks: dict[tuple[int, int, str], float] = {}
         self._callback_expiry_sec = 12 * 60 * 60
         self._callback_dedupe_sec = 1.5
+        self._active_holdings_cache: dict[str, object] = {"ts": 0.0, "items": []}
+        self._stock_lookup_cache: dict[str, object] = {
+            "ts": 0.0,
+            "signature": None,
+            "code_map": {},
+            "name_pairs": [],
+            "normalized_pairs": [],
+            "raw_candidates": [],
+        }
+        self._stock_preview_cache: dict[tuple[str, str], dict[str, object]] = {}
 
     def build_app(self) -> Application:
         from telegram.request import HTTPXRequest
@@ -1594,6 +1604,10 @@ class CoreHandlersMixin:
         clean = text.strip()
         clean_lower = clean.lower()
         normalized_clean = self._normalize_stock_lookup_text(clean)
+        lookup = self._get_stock_lookup_index()
+        code_map = dict(lookup.get("code_map", {}) or {})
+        candidates = list(lookup.get("name_pairs", []) or [])
+        normalized_pairs = list(lookup.get("normalized_pairs", []) or [])
 
         # 0. 영문 티커 매칭 (GRT, HLB 등)
         for eng_key, (code, name, market) in self._ENGLISH_TICKER_MAP.items():
@@ -1604,41 +1618,19 @@ class CoreHandlersMixin:
         code_match = re.search(r'(\d{6})', clean)
         if code_match:
             code = code_match.group(1)
-            for item in self.all_tickers:
-                if item["code"] == code:
-                    return item
-            holdings = self.db.get_active_holdings()
-            for h in holdings:
-                if h.get("ticker") == code:
-                    return {"code": code, "name": h.get("name", code), "market": "KOSPI"}
+            if code in code_map:
+                return dict(code_map[code])
             # v9.3.1: 유니버스 밖 종목도 코드 기반으로 시도
             return {"code": code, "name": code, "market": "KOSPI"}
 
         # 2. 한글 종목명 매칭 (긴 이름 우선: "삼성전자우" > "삼성전자")
-        # 유니버스 + 보유종목을 이름 길이 내림차순으로 정렬 후 매칭
-        candidates = []
-        for item in self.all_tickers:
-            candidates.append((item["name"], item))
-        holdings = self.db.get_active_holdings()
-        for h in holdings:
-            name = h.get("name", "")
-            if name:
-                candidates.append((name, {
-                    "code": h.get("ticker", ""),
-                    "name": name,
-                    "market": "KOSPI",
-                }))
-        # 긴 이름 우선 정렬
-        candidates.sort(key=lambda x: len(x[0]), reverse=True)
-
         for cand_name, cand_data in candidates:
             if cand_name and cand_name in clean:
                 return cand_data
 
         # 2-1. 발음/로마자 혼용 대응 ("지씨지놈" → "GC지놈")
         if normalized_clean:
-            for cand_name, cand_data in candidates:
-                norm_name = self._normalize_stock_lookup_text(cand_name)
+            for norm_name, _cand_name, cand_data in normalized_pairs:
                 if not norm_name:
                     continue
                 if normalized_clean == norm_name:
@@ -1699,6 +1691,111 @@ class CoreHandlersMixin:
         normalized = re.sub(r"[^0-9a-z가-힣]+", "", normalized)
         return normalized
 
+    def _get_active_holdings_cached(self, ttl_sec: float = 12.0) -> list[dict]:
+        """짧은 TTL로 보유종목 스냅샷을 재사용한다."""
+        import time
+
+        cache = getattr(self, "_active_holdings_cache", None)
+        now = time.monotonic()
+        if isinstance(cache, dict):
+            age = now - float(cache.get("ts", 0.0) or 0.0)
+            if age <= ttl_sec:
+                items = cache.get("items", [])
+                if isinstance(items, list):
+                    return items
+
+        try:
+            items = list(self.db.get_active_holdings() or [])
+        except Exception:
+            logger.debug("_get_active_holdings_cached failed", exc_info=True)
+            items = []
+
+        self._active_holdings_cache = {"ts": now, "items": items}
+        return items
+
+    def _get_stock_lookup_index(self, ttl_sec: float = 15.0) -> dict[str, object]:
+        """종목 검색용 인덱스를 캐시해 매번 전체 유니버스를 다시 스캔하지 않는다."""
+        import time
+
+        holdings = self._get_active_holdings_cached()
+        all_tickers = list(getattr(self, "all_tickers", []) or [])
+        holdings_signature = tuple(
+            sorted(
+                (
+                    str(h.get("ticker", "") or "").strip(),
+                    str(h.get("name", "") or "").strip(),
+                )
+                for h in holdings
+                if str(h.get("ticker", "") or "").strip()
+            )
+        )
+        signature = (len(all_tickers), holdings_signature)
+
+        cache = getattr(self, "_stock_lookup_cache", None)
+        now = time.monotonic()
+        if isinstance(cache, dict):
+            age = now - float(cache.get("ts", 0.0) or 0.0)
+            if age <= ttl_sec and cache.get("signature") == signature:
+                return cache
+
+        code_map: dict[str, dict] = {}
+        raw_candidates: list[dict] = []
+        seen: set[str] = set()
+
+        for item in all_tickers:
+            code = str(item.get("code", "") or "").strip()
+            if not code or code in seen:
+                continue
+            normalized_item = {
+                "code": code,
+                "name": str(item.get("name", code) or code).strip(),
+                "market": str(item.get("market", "KOSPI") or "KOSPI").strip(),
+            }
+            code_map[code] = normalized_item
+            raw_candidates.append(normalized_item)
+            seen.add(code)
+
+        for holding in holdings:
+            code = str(holding.get("ticker", "") or "").strip()
+            if not code:
+                continue
+            normalized_holding = {
+                "code": code,
+                "name": str(holding.get("name", code) or code).strip(),
+                "market": str(holding.get("market", "KOSPI") or "KOSPI").strip(),
+            }
+            if code not in code_map:
+                code_map[code] = normalized_holding
+            if code in seen:
+                continue
+            raw_candidates.append(normalized_holding)
+            seen.add(code)
+
+        name_pairs = sorted(
+            [
+                (str(item.get("name", "")).strip(), item)
+                for item in raw_candidates
+                if str(item.get("name", "")).strip()
+            ],
+            key=lambda pair: len(pair[0]),
+            reverse=True,
+        )
+        normalized_pairs = [
+            (self._normalize_stock_lookup_text(name), name, item)
+            for name, item in name_pairs
+        ]
+
+        built = {
+            "ts": now,
+            "signature": signature,
+            "code_map": code_map,
+            "name_pairs": name_pairs,
+            "normalized_pairs": normalized_pairs,
+            "raw_candidates": raw_candidates,
+        }
+        self._stock_lookup_cache = built
+        return built
+
     def _find_stock_candidates(self, text: str, limit: int = 4) -> list[dict]:
         """입력 텍스트와 유사한 종목 후보를 반환한다."""
         import difflib
@@ -1707,27 +1804,7 @@ class CoreHandlersMixin:
         if not normalized_clean:
             return []
 
-        raw_candidates: list[dict] = []
-        seen: set[str] = set()
-        for item in self.all_tickers:
-            code = str(item.get("code", "")).strip()
-            if not code or code in seen:
-                continue
-            seen.add(code)
-            raw_candidates.append(item)
-        try:
-            for h in self.db.get_active_holdings():
-                code = str(h.get("ticker", "")).strip()
-                if not code or code in seen:
-                    continue
-                seen.add(code)
-                raw_candidates.append({
-                    "code": code,
-                    "name": h.get("name", code),
-                    "market": "KOSPI",
-                })
-        except Exception:
-            logger.debug("_find_stock_candidates holdings failed", exc_info=True)
+        raw_candidates = list(self._get_stock_lookup_index().get("raw_candidates", []) or [])
 
         scored: list[tuple[float, dict]] = []
         for item in raw_candidates:
@@ -2007,30 +2084,7 @@ class CoreHandlersMixin:
         name = stock.get("name", code)
         market = stock.get("market", "KOSPI")
 
-        # 현재가 자동 조회
-        price = 0.0
-        price_str = "현재가: 조회 중"
-        timing_line = ""
-        try:
-            price = await self._get_price(code)
-            if price > 0:
-                price_str = f"현재가: {price:,.0f}원"
-        except Exception:
-            logger.debug("_detect_stock_query get_price failed for %s", code, exc_info=True)
-            price_str = "현재가: 조회 실패"
-        try:
-            if hasattr(self, "yf_client"):
-                ohlcv = await self.yf_client.get_ohlcv(code, market)
-                if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
-                    from kstock.signal.timing_windows import analyze_timing_windows
-
-                    close = ohlcv["close"].astype(float)
-                    timing = analyze_timing_windows(close)
-                    timing_lines = self._format_timing_lines(timing)
-                    if timing_lines:
-                        timing_line = timing_lines[0]
-        except Exception:
-            logger.debug("_show_stock_actions timing fetch failed for %s", code, exc_info=True)
+        price, price_str, timing_line = await self._get_stock_preview(code, market)
 
         # user_data에 저장 (콜백에서 사용)
         context.user_data["pending_stock_action"] = {
@@ -2048,6 +2102,67 @@ class CoreHandlersMixin:
             "\n".join(lines),
             reply_markup=self._build_stock_action_keyboard(code, existing=bool(existing)),
         )
+
+    async def _get_stock_preview(self, code: str, market: str) -> tuple[float, str, str]:
+        """종목 액션 카드의 현재가와 타이밍 한 줄을 짧게 캐시한다."""
+        import time
+
+        cache_key = (str(code or "").strip(), str(market or "KOSPI").strip())
+        cache = getattr(self, "_stock_preview_cache", None)
+        now = time.monotonic()
+        if isinstance(cache, dict):
+            cached = cache.get(cache_key)
+            if isinstance(cached, dict):
+                age = now - float(cached.get("ts", 0.0) or 0.0)
+                if age <= 20.0:
+                    return (
+                        float(cached.get("price", 0.0) or 0.0),
+                        str(cached.get("price_str", "현재가: 조회 중") or "현재가: 조회 중"),
+                        str(cached.get("timing_line", "") or ""),
+                    )
+
+        price = 0.0
+        price_str = "현재가: 조회 중"
+        timing_line = ""
+        try:
+            price = await self._get_price(code)
+            if price > 0:
+                price_str = f"현재가: {price:,.0f}원"
+        except Exception:
+            logger.debug("_get_stock_preview get_price failed for %s", code, exc_info=True)
+            price_str = "현재가: 조회 실패"
+        try:
+            if hasattr(self, "yf_client"):
+                ohlcv = self._ohlcv_cache.get(code)
+                if ohlcv is None or getattr(ohlcv, "empty", True):
+                    ohlcv = await self.yf_client.get_ohlcv(code, market)
+                if ohlcv is not None and not ohlcv.empty and "close" in ohlcv.columns:
+                    from kstock.signal.timing_windows import analyze_timing_windows
+
+                    close = ohlcv["close"].astype(float)
+                    timing = analyze_timing_windows(close)
+                    timing_lines = self._format_timing_lines(timing)
+                    if timing_lines:
+                        timing_line = timing_lines[0]
+        except Exception:
+            logger.debug("_get_stock_preview timing fetch failed for %s", code, exc_info=True)
+
+        if not isinstance(cache, dict):
+            self._stock_preview_cache = {}
+            cache = self._stock_preview_cache
+        cache[cache_key] = {
+            "ts": now,
+            "price": price,
+            "price_str": price_str,
+            "timing_line": timing_line,
+        }
+        if len(cache) > 128:
+            oldest_key = min(
+                cache.keys(),
+                key=lambda item: float(cache[item].get("ts", 0.0) or 0.0),
+            )
+            cache.pop(oldest_key, None)
+        return price, price_str, timing_line
 
     async def _handle_stock_analysis(
         self, update: Update, context, stock: dict, original_text: str

@@ -3732,6 +3732,8 @@ class SchedulerMixin:
                 macro=macro,
                 playbook=playbook,
                 alert_mode=alert_mode,
+                allocation_context=allocation_context,
+                scorecards=scorecards,
             ),
         )
         actions = self._link_rotation_actions(
@@ -4866,6 +4868,8 @@ class SchedulerMixin:
         macro,
         playbook,
         alert_mode: str,
+        allocation_context: dict | None = None,
+        scorecards: dict[str, dict] | None = None,
     ) -> list[dict]:
         """캐시된 스캔 결과에서 지금 볼 신규 후보를 행동 항목으로 만든다."""
         try:
@@ -4928,12 +4932,14 @@ class SchedulerMixin:
             for item in list(getattr(playbook, "short_squeeze_watch", []) or [])
         }
         lane_bias, _ = self._build_personalized_lane_bias(holdings=holdings)
-        scorecards = self._load_recent_manager_scorecards()
-        allocation_context = self._load_daily_allocation_context(
-            holdings=holdings,
-            macro=macro,
-            alert_mode=alert_mode,
-        )
+        if scorecards is None:
+            scorecards = self._load_recent_manager_scorecards()
+        if allocation_context is None:
+            allocation_context = self._load_daily_allocation_context(
+                holdings=holdings,
+                macro=macro,
+                alert_mode=alert_mode,
+            )
         risk_window = allocation_context.get("risk_window")
         lane_bias["scalp"] *= 0.92 if alert_mode == "wartime" else 1.00
         lane_bias["swing"] *= 0.96 if alert_mode == "wartime" else 1.02
