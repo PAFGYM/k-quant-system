@@ -1263,38 +1263,14 @@ class MenusKisMixin:
             return
 
         if action == "scan":
-            await safe_edit_or_reply(query,"📈 매수 시그널 스캔 중...")
-            # 기존 스윙 기회 스캔 기능 재활용
             try:
-                from kstock.signal.swing_scanner import scan_swing_opportunities
-                results = await scan_swing_opportunities(
-                    self.db, self.kis, top_n=5,
+                await safe_edit_or_reply(
+                    query,
+                    "📈 매수 시그널 스캔 중...\n"
+                    "스윙 기회 화면으로 바로 연결합니다.",
                 )
-                if results:
-                    lines = ["📈 매수 시그널 발견!\n"]
-                    buttons = []
-                    for r in results[:5]:
-                        ticker = r.get("ticker", "")
-                        name = r.get("name", ticker)
-                        score = r.get("score", 0)
-                        reason = r.get("reason", "")[:30]
-                        lines.append(
-                            f"🎯 {name}: 스코어 {score}점\n"
-                            f"   → {reason}"
-                        )
-                        buttons.append([InlineKeyboardButton(
-                            f"📊 {name} 분석",
-                            callback_data=f"stock_act:analyze:{ticker}",
-                        )])
-                    await query.message.reply_text(
-                        "\n".join(lines),
-                        reply_markup=InlineKeyboardMarkup(buttons),
-                    )
-                else:
-                    await query.message.reply_text(
-                        "📈 현재 강한 매수 시그널 없음.\n"
-                        "5분마다 자동 스캔 중입니다."
-                    )
+                synthetic_update = type("SyntheticUpdate", (), {"message": query.message})()
+                await self._menu_swing(synthetic_update, context)
             except Exception as e:
                 logger.warning("Scan failed: %s", e)
                 await query.message.reply_text(

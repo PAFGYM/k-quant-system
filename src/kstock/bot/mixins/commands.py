@@ -11,9 +11,60 @@ _OHLCV_CACHE_TTL = 600  # v9.3.3: 스캔 OHLCV 캐시 10분
 _INTRADAY_SCAN_CACHE_TTL = 120
 _INTRADAY_SCAN_MAX_TICKERS = 24
 _SECTOR_STRENGTH_CACHE_TTL = 900
+_SCAN_ANALYZE_CONCURRENCY = 4
+_SWING_SCAN_MAX_CANDIDATES = 36
+_SWING_SCAN_BATCH_SIZE = 12
 
 
 class CommandsMixin:
+    def _swing_signal_from_scan_result(self, result: ScanResult) -> dict | None:
+        """최근 스캔 결과에서 스윙 후보를 빠르게 추출한다."""
+        try:
+            tech = getattr(result, "tech", None)
+            info = getattr(result, "info", None)
+            if not tech or not info:
+                return None
+
+            score = 0
+            if tech.rsi <= 35:
+                score += 30
+            elif tech.rsi <= 45:
+                score += 15
+            if tech.bb_pctb <= 0.2:
+                score += 25
+            elif tech.bb_pctb <= 0.35:
+                score += 10
+            if tech.macd_signal_cross > 0:
+                score += 20
+            if tech.volume_ratio >= 1.5:
+                score += 15
+            elif tech.volume_ratio >= 1.2:
+                score += 5
+            if tech.ma20 > 0 and info.current_price > tech.ma20:
+                score += 10
+            if tech.return_3m_pct > 0:
+                score += min(15, tech.return_3m_pct / 3)
+
+            if score < 25:
+                return None
+
+            return {
+                "ticker": result.ticker,
+                "name": result.name[:8],
+                "price": float(info.current_price),
+                "dc": 0.0,
+                "score": int(round(score)),
+                "rsi": float(tech.rsi),
+                "bb": float(tech.bb_pctb),
+                "macd_x": int(tech.macd_signal_cross),
+                "vr": float(tech.volume_ratio),
+                "herd": "",
+                "source": "cache",
+            }
+        except Exception:
+            logger.debug("_swing_signal_from_scan_result failed", exc_info=True)
+            return None
+
     def _build_scan_universe(self, max_tickers: int | None = None) -> list[dict]:
         """우선순위 유니버스를 구성해 장중 과부하를 줄인다."""
         priority_codes: list[str] = []
@@ -77,6 +128,7 @@ class CommandsMixin:
         import time as _t
         import asyncio
 
+        started_at = _t.perf_counter()
         backoff_until = getattr(self, "_scan_backoff_until", None)
         if (
             backoff_until
@@ -180,29 +232,46 @@ class CommandsMixin:
             except Exception:
                 logger.debug("ML market cache collection failed", exc_info=True)
 
-            # Second pass: full analysis with RS rank
+            # Second pass: full analysis with bounded concurrency
             results = []
-            for stock, ret_3m in pre_results:
-                try:
-                    rs_rank, _ = compute_relative_strength_rank(ret_3m, all_returns)
-                    r = await self._analyze_stock(
-                        stock["code"], stock["name"], macro,
-                        market=stock.get("market", "KOSPI"),
-                        sector=stock.get("sector", ""),
-                        category=stock.get("category", ""),
-                        rs_rank=rs_rank,
-                        rs_total=len(all_returns),
-                        ml_market_cache=_ml_market_cache,
-                    )
-                    if r:
+            semaphore = asyncio.Semaphore(_SCAN_ANALYZE_CONCURRENCY)
+
+            async def _scan_one(stock: dict, ret_3m: float):
+                async with semaphore:
+                    try:
+                        rs_rank, _ = compute_relative_strength_rank(ret_3m, all_returns)
+                        return await self._analyze_stock(
+                            stock["code"], stock["name"], macro,
+                            market=stock.get("market", "KOSPI"),
+                            sector=stock.get("sector", ""),
+                            category=stock.get("category", ""),
+                            rs_rank=rs_rank,
+                            rs_total=len(all_returns),
+                            ml_market_cache=_ml_market_cache,
+                        )
+                    except Exception as e:
+                        logger.error("Scan error %s: %s", stock.get("code"), e)
+                        return None
+
+            for i in range(0, len(pre_results), _SCAN_ANALYZE_CONCURRENCY):
+                batch = pre_results[i:i + _SCAN_ANALYZE_CONCURRENCY]
+                batch_results = await asyncio.gather(
+                    *[_scan_one(stock, ret_3m) for stock, ret_3m in batch],
+                    return_exceptions=True,
+                )
+                for r in batch_results:
+                    if isinstance(r, ScanResult):
                         results.append(r)
-                except Exception as e:
-                    logger.error("Scan error %s: %s", stock.get("code"), e)
             results.sort(key=lambda r: r.score.composite, reverse=True)
             self._last_scan_results = results
             self._scan_cache_time = datetime.now(KST)
             self._scan_backoff_until = None
-            logger.info("Scan complete: %d/%d tickers", len(results), len(scan_universe))
+            logger.info(
+                "Scan complete: %d/%d tickers in %.2fs",
+                len(results),
+                len(scan_universe),
+                _t.perf_counter() - started_at,
+            )
             return results
 
     async def _analyze_stock(
@@ -1264,45 +1333,122 @@ class CommandsMixin:
     ) -> None:
         """스윙 트레이딩 기회 조회 — 관심종목 + 유니버스 기술적 스캔 + 세력 필터."""
         import asyncio as _aio
+        import time as _t
 
+        started_at = _t.perf_counter()
         placeholder = await update.message.reply_text(
-            "\u26a1 스윙 기회 스캔 중... (약 20초)"
+            "\u26a1 스윙 기회 스캔 중... (약 8~12초)"
         )
         try:
             # 관심종목 + 유니버스 상위 종목 결합 (최대 50개)
             watchlist = self.db.get_watchlist()
             holdings = self.db.get_active_holdings()
             held = {h["ticker"] for h in holdings}
+            fresh_scan = (
+                getattr(self, "_last_scan_results", None)
+                and self._is_scan_cache_fresh(_OHLCV_CACHE_TTL)
+            )
+
+            if fresh_scan:
+                cached_results = []
+                for result in list(getattr(self, "_last_scan_results", []) or []):
+                    if result.ticker in held:
+                        continue
+                    swing_pick = self._swing_signal_from_scan_result(result)
+                    if swing_pick:
+                        cached_results.append(swing_pick)
+                cached_results.sort(key=lambda x: x["score"], reverse=True)
+                top = cached_results[:10]
+                if top:
+                    logger.info(
+                        "Swing scan reused cached results: %d picks in %.2fs",
+                        len(top),
+                        _t.perf_counter() - started_at,
+                    )
+                    lines = [f"\u26a1 스윙 기회 ({len(cached_results)}종목 감지)\n"]
+                    for i, r in enumerate(top, 1):
+                        sig = "🟢" if r["score"] >= 50 else "🟡"
+                        mc = "↑" if r["macd_x"] > 0 else ("↓" if r["macd_x"] < 0 else "-")
+                        lines.append(
+                            f"{i}. {sig} {r['name']} ({r['score']}점)\n"
+                            f"   {r['price']:,.0f}원 RSI:{r['rsi']:.0f} BB:{r['bb']:.2f} "
+                            f"MACD:{mc} 거래량:{r['vr']:.1f}배"
+                        )
+
+                    buttons = []
+                    btn_row = []
+                    for r in top[:6]:
+                        cb = f"stock_act:analyze:{r['ticker']}"
+                        if len(cb) <= 64:
+                            btn_row.append(InlineKeyboardButton(f"📊 {r['name']}", callback_data=cb))
+                        if len(btn_row) == 3:
+                            buttons.append(btn_row)
+                            btn_row = []
+                    if btn_row:
+                        buttons.append(btn_row)
+                    buttons.append([
+                        InlineKeyboardButton("🧠 AI 토론", callback_data="menu:debate"),
+                        InlineKeyboardButton("⭐ 즐겨찾기", callback_data="fav:refresh"),
+                        InlineKeyboardButton("❌ 닫기", callback_data="dismiss:0"),
+                    ])
+                    try:
+                        await placeholder.edit_text(
+                            "\n".join(lines),
+                            reply_markup=InlineKeyboardMarkup(buttons),
+                        )
+                    except Exception:
+                        await update.message.reply_text(
+                            "\n".join(lines),
+                            reply_markup=InlineKeyboardMarkup(buttons),
+                        )
+                    return
+
             candidates = [
                 w for w in watchlist
                 if w["ticker"] not in held
                 and w.get("horizon") in ("swing", "scalp", "")
-            ][:30]
+            ][:24]
 
             if not candidates:
-                candidates = [w for w in watchlist if w["ticker"] not in held][:20]
+                candidates = [w for w in watchlist if w["ticker"] not in held][:18]
 
             # 유니버스에서 추가 (관심종목에 없는 것)
             seen = {w["ticker"] for w in candidates}
             for item in self.all_tickers:
-                if len(candidates) >= 50:
+                if len(candidates) >= _SWING_SCAN_MAX_CANDIDATES:
                     break
                 if item["code"] not in seen and item["code"] not in held:
-                    candidates.append({"ticker": item["code"], "name": item["name"]})
+                    candidates.append({
+                        "ticker": item["code"],
+                        "name": item["name"],
+                        "market": item.get("market", "KOSPI"),
+                    })
                     seen.add(item["code"])
 
             from kstock.features.technical import compute_indicators
             from kstock.signal.herd_detector import detect_herd_pattern
 
+            batched_ohlcv = {}
+            try:
+                batch_items = [
+                    {
+                        "code": w["ticker"],
+                        "name": w.get("name", w["ticker"]),
+                        "market": w.get("market", "KOSPI"),
+                    }
+                    for w in candidates
+                ]
+                batched_ohlcv = await self.yf_client.batch_download(batch_items, period="3mo")
+            except Exception:
+                logger.debug("_menu_swing batch_download failed", exc_info=True)
+
             async def _scan(w):
                 try:
                     ticker = w["ticker"]
-                    market = "KOSPI"
-                    for s in self.all_tickers:
-                        if s["code"] == ticker:
-                            market = s.get("market", "KOSPI")
-                            break
-                    ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
+                    market = w.get("market", "KOSPI")
+                    ohlcv = batched_ohlcv.get(ticker)
+                    if ohlcv is None or ohlcv.empty:
+                        ohlcv = await self.yf_client.get_ohlcv(ticker, market, period="3mo")
                     if ohlcv is None or ohlcv.empty or len(ohlcv) < 20:
                         return None
                     tech = compute_indicators(ohlcv)
@@ -1364,8 +1510,8 @@ class CommandsMixin:
                 return None
 
             results = []
-            for i in range(0, len(candidates), 15):
-                batch = candidates[i:i + 15]
+            for i in range(0, len(candidates), _SWING_SCAN_BATCH_SIZE):
+                batch = candidates[i:i + _SWING_SCAN_BATCH_SIZE]
                 batch_r = await _aio.gather(*[_scan(w) for w in batch], return_exceptions=True)
                 for r in batch_r:
                     if isinstance(r, dict):
@@ -1373,6 +1519,12 @@ class CommandsMixin:
 
             results.sort(key=lambda x: x["score"], reverse=True)
             top = results[:10]
+            logger.info(
+                "Swing scan complete: %d/%d candidates in %.2fs",
+                len(results),
+                len(candidates),
+                _t.perf_counter() - started_at,
+            )
 
             if not top:
                 try:
