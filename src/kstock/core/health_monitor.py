@@ -532,7 +532,8 @@ _MANAGER_PIPELINE_SPECS: dict[str, dict[str, float | str]] = {
     "manager_briefings": {"label": "매니저 브리핑", "max_age_hours": 48.0},
     "manager_watchlist_scan": {"label": "매니저 워치리스트 스캔", "max_age_hours": 48.0},
     "manager_discovery": {"label": "매니저 발굴 스캔", "max_age_hours": 48.0},
-    "manager_reflection": {"label": "매니저 회고", "max_age_hours": 24.0 * 9},
+    # 주간 회고는 주말/재시작/휴장일 영향을 크게 받으므로 2주 기준으로 본다.
+    "manager_reflection": {"label": "매니저 회고", "max_age_hours": 24.0 * 14},
 }
 _HEALTHY_JOB_STATUSES = {"success", "skip"}
 
@@ -798,6 +799,12 @@ def attempt_recovery(failed_check: HealthCheck) -> bool:
             # 메모리 문제는 직접 복구 불가
             logger.info(
                 "메모리 사용량 문제는 프로세스 재시작이 필요할 수 있습니다."
+            )
+            return False
+
+        if failed_check.name == "manager_pipeline":
+            logger.info(
+                "매니저 파이프라인은 주간/휴장 스케줄 영향이 있어 자동 복구를 수행하지 않습니다."
             )
             return False
 

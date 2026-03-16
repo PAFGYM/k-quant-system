@@ -283,6 +283,42 @@ class TestCheckManagerPipeline:
         assert result.status == "ok"
         assert "대기" in result.message
 
+    def test_weekly_manager_reflection_is_not_warning_on_monday_night(self, tmp_path, monkeypatch):
+        db_file = tmp_path / "manager_monday_ok.db"
+        conn = self._make_job_runs_table(db_file)
+        base = datetime(2026, 3, 16, 23, 7)
+        fresh = (base - timedelta(hours=20)).isoformat()
+        reflection = (base - timedelta(days=9, hours=13)).isoformat()
+        rows = [
+            ("manager_briefings", fresh),
+            ("manager_watchlist_scan", fresh),
+            ("manager_discovery", fresh),
+            ("manager_reflection", reflection),
+        ]
+        for job_name, ended_at in rows:
+            run_date = ended_at[:10]
+            conn.execute(
+                "INSERT INTO job_runs (job_name, run_date, status, started_at, ended_at, message) "
+                "VALUES (?, ?, 'success', ?, ?, '')",
+                (job_name, run_date, ended_at, ended_at),
+            )
+        conn.commit()
+        conn.close()
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is not None:
+                    return base.replace(tzinfo=tz)
+                return base
+
+        monkeypatch.setattr(health_monitor, "datetime", FrozenDateTime)
+        monkeypatch.setattr(health_monitor, "_manager_jobs_expected_now", lambda: True)
+
+        result = check_manager_pipeline(db_file)
+        assert result.status == "ok"
+        assert "정상" in result.message
+
 
 # =========================================================================
 # TestCheckMemoryUsage
