@@ -358,12 +358,12 @@ def format_sell_alert_profit(
 
     return (
         f"\u2550" * 22 + "\n"
-        f"{USER_NAME}, 지금 {name} 파세요 \U0001f4c8\n"
+        f"{USER_NAME}, {name} 부분 정리 검토 \U0001f4c8\n"
         f"\u2550" * 22 + "\n\n"
         f"현재 {pnl_pct:+.1f}% 수익 중\n"
         f"{_won(buy_price)} -> {_won(current_price)}\n"
         f"1차 익절 구간 도달\n\n"
-        f"절반(50%) 매도하세요\n"
+        f"절반(50%) 정리를 우선 검토하세요\n"
         f"나머지는 트레일링 스탑 작동 중{badge_line}"
     )
 
@@ -398,11 +398,11 @@ def format_sell_alert_stop(
 
     return (
         f"\u2550" * 22 + "\n"
-        f"{USER_NAME}, {name} 손절하세요 \U0001f6d1\n"
+        f"{USER_NAME}, {name} 정리 검토 \U0001f6d1\n"
         f"\u2550" * 22 + "\n\n"
         f"{pnl_pct:+.1f}% 도달 ({_won(buy_price)} -> {_won(current_price)})\n"
         f"더 빠질 수 있습니다\n"
-        f"지금 전량 매도하세요{badge_line}"
+        f"종가 회복 여부 확인 후 정리 비중을 판단하세요{badge_line}"
     )
 
 

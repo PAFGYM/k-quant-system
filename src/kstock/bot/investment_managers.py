@@ -2029,15 +2029,47 @@ async def scan_manager_domain(
     if not api_key:
         return ""
 
+    def _scan_sort_key(w: dict) -> tuple:
+        fit_score = float(w.get("fit_score", 0) or 0)
+        composite = float(w.get("composite", 0) or 0)
+        rsi = float(w.get("rsi", 50) or 50)
+        vol_ratio = float(w.get("vol_ratio", 0) or 0)
+        recovery_score = float(w.get("recovery_score", 0) or 0)
+        target_upside = float(w.get("target_upside", 0) or 0)
+        foreign_days = int(w.get("foreign_days", 0) or 0)
+        inst_days = int(w.get("inst_days", 0) or 0)
+        flow_strength = max(0, foreign_days) + max(0, inst_days)
+        swing_rsi_distance = abs(rsi - 55.0) if rsi > 0 else 99.0
+        # 스윙은 과매도 반등보다 주도주 눌림/추세 지속을 먼저 보게 정렬.
+        if manager_key == "swing":
+            return (
+                -fit_score,
+                -composite,
+                -flow_strength,
+                -target_upside,
+                swing_rsi_distance,
+                -vol_ratio,
+                -recovery_score,
+            )
+        if alert_mode in ("wartime", "elevated"):
+            return (
+                rsi,
+                -vol_ratio,
+                -recovery_score,
+                -fit_score,
+                -composite,
+            )
+        return (
+            -fit_score,
+            -composite,
+            -flow_strength,
+            swing_rsi_distance,
+        )
+
     # 종목 데이터 정리 — 기술적 지표 포함
     stocks_text = ""
-    # 전시모드: 회복 탄력성 순으로 정렬 (RSI 낮고 거래량 높은 종목 우선)
     sorted_stocks = list(watchlist_stocks[:20])
-    if alert_mode in ("wartime", "elevated"):
-        sorted_stocks.sort(key=lambda w: (
-            w.get("rsi", 50),  # RSI 낮은 순 (과매도)
-            -(w.get("vol_ratio", 0) or 0),  # 거래량 높은 순
-        ))
+    sorted_stocks.sort(key=_scan_sort_key)
 
     for w in sorted_stocks[:15]:
         price = w.get("price", 0)
@@ -2114,11 +2146,11 @@ async def scan_manager_domain(
             "\n[🔴 전시 모드 — 하락장 기회 탐색]\n"
             "국내 증시가 크게 하락한 상황이다.\n"
             "핵심 분석 포인트:\n"
-            "1. 회복 탄력성: RSI 30↓ + 거래량 급증 = 과매도 반등 후보\n"
-            "2. 바닥 신호: BB 하단(0.2↓) + MACD 골든크로스 = 반전 신호\n"
-            "3. 방어력: 고점 대비 하락폭이 시장보다 작은 종목 = 강한 종목\n"
+            "1. 주도주 눌림: RSI 45~68 + 적합도/종합점수 상위 = 스윙 우선 후보\n"
+            "2. 회복 탄력성: RSI 30↓ + 거래량 급증 = 과매도 반등 보조 후보\n"
+            "3. 바닥 신호: BB 하단(0.2↓) + MACD 골든크로스 = 반전 신호\n"
             "4. 수급 전환: 외인/기관 매도 → 매수 전환 포착\n\n"
-            "추천 기준: 확신 80%↑, 분할매수 필수, 방어섹터 우선.\n"
+            "추천 기준: 확신 80%↑, 분할매수 필수, 주도 섹터와 수급 우위 종목 우선.\n"
             "추천 시 '단타 적합' 또는 '스윙 적합' 명시.\n"
             "추천 없으면 '현재 관망 — 바닥 확인 후 진입'으로.\n"
         )
@@ -2126,7 +2158,15 @@ async def scan_manager_domain(
         situation = (
             "\n[🟠 경계 모드]\n"
             "분할 매수만 권장. 한번에 풀 매수 금지.\n"
-            "RSI 과매도 + 거래량 증가 종목 우선 검토.\n"
+            "주도주 눌림과 수급 우위 종목을 먼저 검토하고, 과매도 반등은 보조로만 본다.\n"
+        )
+
+    if manager_key == "swing":
+        situation += (
+            "\n[🔥 스윙 특화 규칙]\n"
+            "스윙은 단순 과매도 반등보다 주도주 눌림과 추세 지속을 우선한다.\n"
+            "RSI 45~68, 적합도/종합점수 상위, 수급 우위, 이벤트/섹터 모멘텀이 붙은 종목을 먼저 본다.\n"
+            "과매도 반등 후보를 추천하더라도 반드시 위험을 크게 적고 비중을 낮게 제안한다.\n"
         )
 
     system_prompt = (
@@ -2143,6 +2183,7 @@ async def scan_manager_domain(
         f"관심종목 중에서 지금 매수 타이밍인 종목을 골라 추천.\n"
         f"추천 종목이 없으면 '현재 매수 타이밍 종목 없음'이라고 답해.\n"
         f"추천 시 최대 2개만 제시.\n"
+        f"'매수 계획 있다'고 판단했다면 반드시 최우선 종목 1개를 먼저 제시해.\n"
         f"추천 시 형식:\n"
         f"1. 종목명(티커)\n"
         f"- 역할 적합성: 왜 이 매니저 레인에 맞는지\n"
@@ -2157,13 +2198,22 @@ async def scan_manager_domain(
         f"[{manager['emoji']} 관심 종목 — 기술적 데이터 포함]\n{stocks_text}\n"
     )
     if alert_mode == "wartime":
-        user_prompt += (
-            "위 종목 중:\n"
-            "1. 회복 탄력성이 좋은 종목 (과매도 반등 후보)\n"
-            "2. 단타/스윙으로 적합한 종목\n"
-            "3. 매수하면 안 되는 종목 (추가 하락 위험)\n"
-            "을 구분해서 분석해줘."
-        )
+        if manager_key == "swing":
+            user_prompt += (
+                "위 종목 중:\n"
+                "1. 스윙 최우선: 주도주 눌림/추세 지속 후보\n"
+                "2. 보조 후보: 과매도 반등 후보\n"
+                "3. 매수하면 안 되는 종목 (추가 하락 위험)\n"
+                "을 구분해서 분석해줘. 최우선 종목이 없으면 없다고 답해."
+            )
+        else:
+            user_prompt += (
+                "위 종목 중:\n"
+                "1. 회복 탄력성이 좋은 종목 (과매도 반등 후보)\n"
+                "2. 단타/스윙으로 적합한 종목\n"
+                "3. 매수하면 안 되는 종목 (추가 하락 위험)\n"
+                "을 구분해서 분석해줘."
+            )
     else:
         user_prompt += "위 종목 중 매수 추천 종목이 있으면 1~3개 선정하고 이유를 설명해줘."
 

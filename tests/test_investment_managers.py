@@ -10,6 +10,7 @@ from kstock.bot.investment_managers import (
     enrich_watchlist_candidate,
     filter_discovery_candidates,
     format_manager_action_digest,
+    scan_manager_domain,
 )
 from kstock.bot.messages import format_daily_actions
 from kstock.features.technical import TechnicalIndicators
@@ -394,3 +395,55 @@ def test_format_daily_actions_uses_holiday_title_when_market_closed():
 
     assert "일요일 점검" in text
     assert "시장 상태: 휴장일" in text
+
+
+def test_scan_manager_domain_prompt_prefers_momentum_for_swing_wartime(monkeypatch):
+    captured = {}
+
+    class _Response:
+        status_code = 200
+
+        def json(self):
+            return {"content": [{"text": "현재 매수 타이밍 종목 없음"}]}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            captured["system"] = json.get("system", "")
+            captured["user"] = json.get("messages", [{}])[0].get("content", "")
+            return _Response()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    import sys
+
+    class _HttpxModule:
+        @staticmethod
+        def AsyncClient(timeout=20):
+            return _Client()
+
+    monkeypatch.setitem(sys.modules, "httpx", _HttpxModule())
+
+    stocks = [
+        {
+            "ticker": "000660",
+            "name": "SK하이닉스",
+            "price": 910000,
+            "rsi": 56,
+            "vol_ratio": 210,
+            "fit_score": 88,
+            "composite": 81,
+            "target_upside": 12.5,
+            "foreign_days": 3,
+            "inst_days": 2,
+        }
+    ]
+    import asyncio
+    text = asyncio.run(scan_manager_domain("swing", stocks, "VIX=18.0", alert_mode="wartime"))
+    assert "윌리엄 오닐 매수 스캔" in text
+    assert "주도주 눌림/추세 지속 후보" in captured["user"]
+    assert "스윙은 단순 과매도 반등보다 주도주 눌림과 추세 지속을 우선한다" in captured["system"]
